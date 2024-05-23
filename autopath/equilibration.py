@@ -1,0 +1,292 @@
+
+from utils import add_reporters, select_platform, load_system, save_system, save_pdb, save_simulation
+from openmm.app.amberprmtopfile import AmberPrmtopFile
+import openmm.unit as openmmunit
+from openmm import *
+from openmm.app import *
+
+import logging
+from sys import stdout
+import time
+import os
+import numpy as np
+import math
+import cvpack
+
+
+def add_protein_restraints(system, positions, topology, 
+                            force_name:str='k_prot',
+                            restraint_force:int=5):
+    """
+    Function to add backbone position restraints
+    """
+    LIPIDS = set(('POP', ))
+    WATERS = set(('HOH','WAT'))
+
+    atoms = topology.atoms()
+
+    force = CustomExternalForce(f"{force_name}*periodicdistance(x, y, z, x0, y0, z0)^2")
+    force_amount = restraint_force * openmmunit.kilocalories_per_mole/openmmunit.angstroms**2
+    force.addGlobalParameter(force_name, force_amount)
+    force.addPerParticleParameter("x0")
+    force.addPerParticleParameter("y0")
+    force.addPerParticleParameter("z0")
+    
+    # Restraint heavy atoms only: C, O, N, S, and P and MG
+    elements = set((element.carbon, element.oxygen, element.magnesium,
+                        element.nitrogen, element.sulfur, element.phosphorus))
+    
+    ATOMSET = WATERS | LIPIDS
+    counter=0
+    for i, (atom_crd, atom) in enumerate(zip(positions, atoms)):
+        if atom.residue.name not in ATOMSET and atom.element in elements:
+            force.addParticle(i, atom_crd.value_in_unit(openmmunit.nanometers))
+            counter += 1
+    logging.info(f'{counter} protein heavy atoms will be restrained')
+    
+    force.setForceGroup(12)
+
+    system.addForce(force)
+
+    return
+
+def get_ligand_ha(topology, lig_name:str='UNK'):
+    """get names for all non-hydrogen ligand atoms"""
+
+    residues = topology.residues()
+    lig_ha_idx = []
+    lig_ha_names = []
+    for r in residues:
+        if r.name == lig_name:
+            lig_ha_names = [a.name for a in r.atoms() if not a.name.startswith('H')]
+            lig_ha_idx = [a.index for a in r.atoms() if not a.name.startswith('H')]
+
+    return lig_ha_idx, lig_ha_names
+
+def get_pocket_ha(topology, pocket_resid:list[int]=None):
+    """get names for all non-hydrogen ligand atoms"""
+
+    residues = topology.residues()
+    pocket_ha_idx = []
+
+    for r in residues:
+        if r.index in pocket_resid:
+            print(f'match for {r.index} {r.name} {r.id}')
+            res_ha_idx = [a.index for a in r.atoms() if not a.name.startswith('H')]
+            pocket_ha_idx.extend(res_ha_idx)
+
+    return pocket_ha_idx
+
+
+# Function to add backbone position restraints
+def add_ligand_restraints(system, positions, topology,
+                            lig_name:str='UNK',
+                            force_name:str='k_lig',
+                            restraint_force:int=5):
+
+    force = CustomExternalForce(f"{force_name}*periodicdistance(x, y, z, x0, y0, z0)^2")
+    force_amount = restraint_force * openmmunit.kilocalories_per_mole/openmmunit.angstroms**2
+    force.addGlobalParameter(force_name, force_amount)
+    force.addPerParticleParameter("x0")
+    force.addPerParticleParameter("y0")
+    force.addPerParticleParameter("z0")
+
+    # get atom names for ligand
+    lig_ha_idx, lig_ha_names = get_ligand_ha(topology, lig_name) 
+
+    logging.info(f"The following ligand heavy atoms will be restrained: {', '.join(lig_ha_names)}")
+
+    atoms = topology.atoms()
+    for i, (atom_crd, atom) in enumerate(zip(positions, atoms)):
+        if atom.name in lig_ha_idx:
+            force.addParticle(i, atom_crd.value_in_unit(openmmunit.nanometers))
+
+    force.setForceGroup(13)
+    system.addForce(force)
+
+    return
+
+def warm_up_system(simulation, integrator,
+                   Tstart: int=5, Tend: int=300, Tstep: int=5,
+                   timestep: float=0.001,
+                   warming_steps: int=100000):
+
+    """
+    Run simulated annealing equilibration. 
+    WarmUp with in NVT ensemble, slowly increasing the temperature
+    """
+
+    integrator.setStepSize(timestep * openmmunit.picoseconds)
+    logging.debug(f'Stepsize set to {integrator.getStepSize()}')
+    simulation.context.reinitialize(preserveState=True)
+
+    # Calculate the number of temperature steps
+    nT = int((Tend - Tstart) / Tstep)
+
+    # Set initial velocities and temperature
+    simulation.context.setVelocitiesToTemperature(Tstart)
+    
+    # Warm up the system gradually
+    for i in range(nT):
+        temperature = Tstart + i * Tstep
+        integrator.setTemperature(temperature)
+        logging.debug(f"Temperature set to {temperature} K.")
+        simulation.step(int(warming_steps / nT))
+
+    return
+
+def equilibrate_restrained_system(simulation, system, integrator, temp) -> None:
+    """ Do restrained equilibration, releasing constraints 
+    on protein and ligands and increasing timestep
+    """
+
+    equil_scheme={    
+    'step1': {'k_prot': 5.0, 'k_lig': 5.0, 'npt_flag': False, 'nsteps': 50000, 'stepsize': 0.002},
+    'step2': {'k_prot': 4.5, 'k_lig': 5.0, 'npt_flag': True, 'nsteps': 25000, 'stepsize': 0.004},
+    'step3': {'k_prot': 4.0, 'k_lig': 5.0, 'npt_flag': True, 'nsteps': 25000, 'stepsize': 0.004},
+    'step4': {'k_prot': 3.5, 'k_lig': 5.0, 'npt_flag': True, 'nsteps': 25000, 'stepsize': 0.004},
+    'step5': {'k_prot': 3.0, 'k_lig': 4.5, 'npt_flag': True, 'nsteps': 25000, 'stepsize': 0.004},
+    'step6': {'k_prot': 2.5, 'k_lig': 4.0, 'npt_flag': True, 'nsteps': 25000, 'stepsize': 0.004},
+    'step7': {'k_prot': 2.0, 'k_lig': 3.5, 'npt_flag': True, 'nsteps': 25000, 'stepsize': 0.004},
+    'step8': {'k_prot': 1.5, 'k_lig': 3.0, 'npt_flag': True, 'nsteps': 25000, 'stepsize': 0.004},
+    'step9': {'k_prot': 1.0, 'k_lig': 2.5, 'npt_flag': True, 'nsteps': 25000, 'stepsize': 0.004},
+    'step10': {'k_prot': 0.5, 'k_lig': 2.0, 'npt_flag': True, 'nsteps': 25000, 'stepsize': 0.004},
+    'step11': {'k_prot': 0.0, 'k_lig': 1.5, 'npt_flag': True, 'nsteps': 25000, 'stepsize': 0.004},
+    'step12': {'k_prot': 0.0, 'k_lig': 1.0, 'npt_flag': True, 'nsteps': 50000, 'stepsize': 0.004},
+    'step13': {'k_prot': 0.0, 'k_lig': 0.75, 'npt_flag': True, 'nsteps': 50000, 'stepsize': 0.004},
+    'step14': {'k_prot': 0.0, 'k_lig': 0.5, 'npt_flag': True, 'nsteps': 50000, 'stepsize': 0.004},
+    'step15': {'k_prot': 0.0, 'k_lig': 0.0, 'npt_flag': True, 'nsteps': 50000, 'stepsize': 0.004},
+    }
+    
+    # Initialize variables as None
+    k_lig_prev, k_prot_prev, npt_prev, stepsize_prev = None, None, None, None
+
+    for step_name, params in equil_scheme.items():
+        k_lig = params['k_lig']
+        k_prot = params['k_prot']
+        npt_flag = params['npt_flag']
+        nsteps = params['nsteps']
+        stepsize = params['stepsize']
+
+        logging.info(f"Equilibration {step_name} with K_prot={k_prot} - K_lig={k_lig}")
+
+        # Adjust force constant for the ligand if it has changed
+        if k_lig_prev is None or k_lig != k_lig_prev: 
+            simulation.context.setParameter('k_lig', (k_lig * openmmunit.kilocalories_per_mole / openmmunit.angstroms**2))
+
+        # Adjust force constant for the protein if it has changed
+        if k_prot_prev is None or k_prot != k_prot_prev: 
+            simulation.context.setParameter('k_prot', (k_prot * openmmunit.kilocalories_per_mole / openmmunit.angstroms**2))
+
+        # Enable NPT if needed
+        # if npt_prev is None or npt_flag != npt_prev and npt_flag:
+        if npt_flag != npt_prev and npt_flag:
+            logging.info(f'Adding a Montecarlo Barostat to the system')
+            system.addForce(MonteCarloBarostat(1 * openmmunit.atmosphere, temp))
+            simulation.context.reinitialize(preserveState=True)
+
+        # Adjust the timestep if it has changed
+        if stepsize_prev is None or stepsize != stepsize_prev:
+            integrator.setStepSize(stepsize)
+            simulation.context.reinitialize(preserveState=True)
+            logging.info(f'Stepsize set to {integrator.getStepSize()}')
+
+        # Run the simulation for the specified number of steps
+        simulation.step(nsteps)
+
+        # Update previous values
+        k_lig_prev = k_lig
+        k_prot_prev = k_prot
+        npt_prev = npt_flag
+        stepsize_prev = stepsize
+
+    return
+
+def get_COM_dist(simulation, groupA, groupB, units:str='ansgtroms'):
+    if units == 'nanometers':
+        unit = openmmunit.nanometers
+    elif units == 'angstroms':
+        unit = openmmunit.angstroms
+    else:
+        raise ValueError('Distance units should be nanometers or angstroms')
+
+    # Get COM distance between two groups of atoms
+    positions = simulation.context.getState(getPositions=True).getPositions()
+    g1_positions = [positions[index]/unit for index in groupA]
+    g2_positions = [positions[index]/unit for index in groupB]
+    dist = np.linalg.norm(np.mean(np.asarray(g1_positions), axis=0) - np.mean(np.asarray(g2_positions), axis=0))
+    
+    return dist
+            
+class Equilibration:
+    def __init__(self,
+                 system_file:str = 'system.xml',
+                 prmtop_file:str = 'system.prmtop',
+                 sys_name:str='test',
+                 temperature: float=300,
+                 timestep:float = 0.004,
+                 ) -> None:
+
+        self.system = load_system(system_file)
+        prmtop = AmberPrmtopFile(prmtop_file)
+        self.topology = prmtop.topology
+        self.sys_name = sys_name
+
+        self.temperature = temperature * openmmunit.kelvin
+        self.timestep = timestep * openmmunit.picoseconds
+ 
+        logging.info('Selecting MD platform..')
+        self.platform = select_platform('fastest')
+
+        return
+
+    def run(self, pdb_file):
+        
+        start_time = time.monotonic()
+
+        logging.info('Setting up the integrator..')
+        integrator = LangevinMiddleIntegrator(self.temperature, 1/openmmunit.picoseconds, self.timestep)
+        # integrator.setRandomNumberSeed(seed)
+        integrator.setConstraintTolerance(0.00001)
+
+        logging.info(f'Creating the simulation for {self.sys_name}..')
+        simulation = Simulation(self.topology, self.system, integrator, self.platform)
+
+        initial_positions = PDBFile(pdb_file).positions
+
+        simulation.context.setPositions(initial_positions)
+
+        logging.info(f'Setting up reporters for {self.sys_name}..')
+        add_reporters(simulation, self.sys_name, 'RestEq', total_steps=600000)
+
+        logging.info('Adding harmonic restraints to the protein..')
+        add_protein_restraints(self.system, initial_positions, self.topology,
+                                                    force_name= 'k_prot', restraint_force= 5)
+
+        logging.info('Adding harmonic restraints to the ligand..')
+        add_ligand_restraints(self.system, initial_positions, self.topology,
+                                                    force_name= 'k_lig', restraint_force= 5)
+
+        logging.info('Minimizing..')
+        simulation.minimizeEnergy()
+
+        logging.info('Warming up the system..')
+        warm_up_system(simulation, integrator, warming_steps=100000)
+        
+        logging.info('Running restrained equilibration protocol..')
+        equilibrate_restrained_system(simulation, self.system, integrator, self.temperature)
+
+        # Remove both protein and ligand force restraints
+        simulation.context.getSystem().removeForce(simulation.context.getSystem().getNumForces()-1)
+        simulation.context.getSystem().removeForce(simulation.context.getSystem().getNumForces()-1)
+            
+        final_positions = simulation.context.getState(getPositions=True).getPositions()
+
+        save_system(self.system, f'{self.sys_name}/system_equilibrated.xml')
+        save_simulation(simulation, f'{self.sys_name}/equilibration_checkpoint')
+        save_pdb(self.topology, final_positions, f'{self.sys_name}/system_equilibrated.pdb')
+        
+        simulation_time = time.monotonic() - start_time
+        logging.info(f'Restrained equilibration completed in {simulation_time/60:.2f} min.')
+
+        return None
