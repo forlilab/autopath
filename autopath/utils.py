@@ -411,7 +411,7 @@ def write_centroids_pdb(closest_points_df, prmtop_file, sys_name):
         milestone = row['milestone']
         frame = row['index']
 
-        traj_file = f'{sys_name}/trajectory_steered_{replica}.dcd'
+        traj_file = f'{sys_name}/sMD/trajectory_sMD_{replica}.dcd'
         u = mda.Universe(prmtop_file, traj_file, in_memory=True)
 
         # Get the frame and write a pdb

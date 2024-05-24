@@ -108,7 +108,7 @@ class MetadynamicsMD:
             simulation.loadCheckpoint(checkpoint_file)
 
         # fb_eq = f'sqrt((distance(g1,g2))^2)-{initial_COM_dist}' # Offset for initial COM dist
-        fb_eq = f"sqrt(distance(g1,g2)^2)"  # Offset for initial COM dist
+        fb_eq = f"sqrt(distance(g1,g2)^2)"
         COM = cvpack.CentroidFunction(fb_eq, openmmunit.nanometers, groups, weighByMass=False, pbc=True)
 
         com_cv = BiasVariable(

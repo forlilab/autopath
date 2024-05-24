@@ -59,7 +59,6 @@ class SteeredMD:
         self.ligand_ha_idx, self.lig_ha_names  = get_ligand_ha(self.topology, lig_name)
         self.pocket_atoms = pocket_atoms
 
-        logging.info('Selecting MD platform..')
         self.platform = select_platform('fastest')
 
     def run(self, 
@@ -107,7 +106,7 @@ class SteeredMD:
         
         logging.info(f'Running {sMD_time} ns in {sMD_moves} moves of {steps_per_move} steps each..')
 
-        for rep_idx in range(replicas):
+        for rep_idx in range(1, replicas+1):
             
             logging.info(f'Replica {rep_idx}/{replicas}')
 
@@ -165,7 +164,7 @@ class SteeredMD:
 
             # Save state in PDB file
             final_positions = simulation.context.getState(getPositions=True).getPositions()
-            save_pdb(self.topology, final_positions, f'{self.sys_name}/steeredMD_{rep_idx}.pdb')
+            save_pdb(self.topology, final_positions, f'{self.sys_name}/sMD/steeredMD_{rep_idx}.pdb')
 
         # Get statistics related to the pooling and plot them
         files = glob(f'{self.sys_name}/sMD/*.dat')
