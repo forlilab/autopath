@@ -231,7 +231,6 @@ class Equilibration:
         self.temperature = temperature * openmmunit.kelvin
         self.timestep = timestep * openmmunit.picoseconds
  
-        logging.info('Selecting MD platform..')
         self.platform = select_platform('fastest')
 
         return
@@ -253,7 +252,7 @@ class Equilibration:
         simulation.context.setPositions(initial_positions)
 
         logging.info(f'Setting up reporters for {self.sys_name}..')
-        add_reporters(simulation, self.sys_name, 'RestEq', total_steps=600000)
+        add_reporters(simulation, self.sys_name, 'equilibration', total_steps=600000)
 
         logging.info('Adding harmonic restraints to the protein..')
         add_protein_restraints(self.system, initial_positions, self.topology,
