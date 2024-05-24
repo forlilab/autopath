@@ -59,7 +59,6 @@ class MetadynamicsMD:
         self.ligand_ha_idx, self.lig_ha_names = get_ligand_ha(self.topology, lig_name)
         self.pocket_atoms = pocket_atoms
         
-        logging.info("Selecting MD platform..")
         self.platform = select_platform("fastest")
 
     def run(self,
@@ -95,7 +94,7 @@ class MetadynamicsMD:
 
         groups = [self.pocket_atoms] + [self.ligand_ha_idx]
 
-        logging.info('Setting up the integrator..')
+        # logging.info('Setting up the integrator..')
         integrator = LangevinMiddleIntegrator(self.temperature, 1/openmmunit.picoseconds, self.timestep)
         # integrator.setRandomNumberSeed(int(rep_idx))
 
@@ -104,14 +103,9 @@ class MetadynamicsMD:
         logging.info(f'Creating the simulation for {run_id}..')
         simulation = Simulation(self.topology, system, integrator, self.platform)
 
-        initial_positions = PDBFile(pdb_file).positions
-        # simulation.context.setPositions(initial_positions)
-
         if checkpoint_file is not None:
             logging.info('Loading simulation checkpoint..')
             simulation.loadCheckpoint(checkpoint_file)
-
-        # simulation.context.reinitialize(preserveState=True)
 
         # fb_eq = f'sqrt((distance(g1,g2))^2)-{initial_COM_dist}' # Offset for initial COM dist
         fb_eq = f"sqrt(distance(g1,g2)^2)"  # Offset for initial COM dist
