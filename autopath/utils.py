@@ -171,7 +171,8 @@ def select_platform(platform_name: str=None):
     return platform
 
 
-def add_reporters(simulation, sys_name:str='test', 
+def add_reporters(simulation,
+                  out_dir:str='test', 
                   suffix:str='RestEq', 
                   total_steps:int=250000,
                   logperiod:int=1000,
@@ -186,13 +187,13 @@ def add_reporters(simulation, sys_name:str='test',
                                                 temperature=True, progress=True, volume=True, density=True,
                                                 remainingTime=True, speed=True, totalSteps=total_steps, separator='\t'))
 
-    simulation.reporters.append(StateDataReporter(f'{sys_name}/statistics_{suffix}.csv', 
+    simulation.reporters.append(StateDataReporter(f'{out_dir}/statistics_{suffix}.csv', 
                                                 logperiod, step=True,time=True, potentialEnergy=True, kineticEnergy=True, totalEnergy=True,
                                                 temperature=True, progress=True, volume=True, density=True,
                                                 remainingTime=True, speed=True, totalSteps=total_steps))
 
     # Save coordinates every N logperiods
-    simulation.reporters.append(DCDReporter(f"{sys_name}/trajectory_{suffix}.dcd",
+    simulation.reporters.append(DCDReporter(f"{out_dir}/trajectory_{suffix}.dcd",
                                             reportInterval=logperiod, enforcePeriodicBox=None))
     return 
 
@@ -315,7 +316,8 @@ def find_inflexion_points(X, Y):
 def extract_sMD_statistics(files):
     data=[]
     for f in files:
-        run_n = f.split('/')[1].split('_')[2].split('.')[0]
+        run_n = os.path.splitext(os.path.basename(f))[0].split('_')[2]
+
         df = pd.read_csv(f,  names=['r0', 'COMDist', 'force', 'work'])#[:500]
         df['replica'] = f'rep_{run_n}'
         df.reset_index(inplace=True, drop=False)
@@ -357,20 +359,20 @@ def cluster_data(data, var_names, n_clust):
     
     return data, closest_points_df
 
-def cluster_pulling_MD(traj_files, equilibrated_system, prmtop_file, lig_resname, n_clusters):
+def cluster_pulling_MD(traj_files, equilibrated_system, prmtop_file, pocket_selection, n_clusters):
     distances = []
     for traj in traj_files:
 
         u_ref = mda.Universe(equilibrated_system)
-
-        run_n = traj.split('/')[1].split('_')[2].split('.')[0]
+        
+        run_n = os.path.splitext(os.path.basename(traj))[0].split('_')[2]
 
         universe = mda.Universe(prmtop_file, traj, in_memory=True)
 
         reference = u_ref.select_atoms('protein and name CA')
         aligner = align.AlignTraj(universe, reference=reference, select="protein and name CA", in_memory=True).run()
 
-        pocket_select = u_ref.select_atoms(f'protein and (around 3 resname {lig_resname}) and (not name H*)')
+        pocket_select = u_ref.select_atoms(pocket_selection)
 
         cog_d = calculate_cog_distance(universe, 'UNK', pocket_select)
         rmsd = get_ligand_rmsd(universe, lig_resname='UNK', alig_select='ligand')
@@ -388,9 +390,21 @@ def cluster_pulling_MD(traj_files, equilibrated_system, prmtop_file, lig_resname
     
     return df_clustered, closest_points
 
+def cluster_milestones_pdbs(files, lig_resname, pocket_select, n_clust):
+    distances = []
+    for f in files:
+        u = mda.Universe(f, in_memory=True)
+        cog_dist = calculate_cog_distance(u, lig_resname, pocket_select)
+        cog_dist['fname'] = f
+        distances.append(cog_dist)
+    df_dist = pd.concat(distances, axis=0)
+    clustered_data, milestones = cluster_data(df_dist, ['cog_d'], n_clust)
+    return clustered_data, milestones
+
 def write_centroids_pdb(closest_points_df, prmtop_file, sys_name):
 
-    os.makedirs(f"{sys_name}/milestones")
+    os.makedirs(f"{sys_name}/milestones", exist_ok=True)
+
     for idx, row in closest_points_df.iterrows():
         
         replica = row['replica'].split('_')[1]
