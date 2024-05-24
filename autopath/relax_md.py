@@ -52,7 +52,7 @@ class RelaxMD:
         ):
         
         start_time = time.monotonic()
-
+        
         # logging.info('Setting up the integrator..')
         integrator = LangevinMiddleIntegrator(self.temperature, 1/openmmunit.picoseconds, self.timestep)
         # integrator.setRandomNumberSeed(int(rep_idx))
@@ -82,9 +82,9 @@ class RelaxMD:
         
         #save stuff
         final_positions = simulation.context.getState(getPositions=True).getPositions()
-        save_simulation(simulation, f'{self.sys_name}/{run_id}_relax_checkpoint')
-        save_system(system, f'{self.sys_name}/{run_id}_relax_system.xml')
-        save_pdb(self.topology, final_positions, f'{self.sys_name}/{run_id}_relax.pdb')
+        save_simulation(simulation, f'{self.sys_name}/milestones/{run_id}_relax_checkpoint')
+        save_system(system, f'{self.sys_name}/milestones/{run_id}_relax_system.xml')
+        save_pdb(self.topology, final_positions, f'{self.sys_name}/milestones/{run_id}_relax.pdb')
 
         # Get COM distance
         current_dist = get_COG_dist(simulation, self.ligand_ha_idx, self.pocket_atoms)
