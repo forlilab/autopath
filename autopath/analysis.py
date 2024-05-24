@@ -12,11 +12,12 @@ def plot_rmsd(rmsd_df, sys_name, prefix):
     sns.lineplot(data=rmsd_df, y='rmsd', x=rmsd_df.index)
     plt.ylabel('RMSD (A)'); plt.xlabel('Frame #')
     plt.tight_layout()
-    plt.savefig(f'{sys_name}/{prefix}_rmsd.png')
+    plt.savefig(f'{sys_name}/plots/{prefix}_rmsd.png')
     plt.close()
     return
 
 def plot_colvar(dir_path, colvar_name):
+    sys_name = dir_path.split('/')[0]
     files = glob(f'{dir_path}/COLVAR_*')
     data=[]
     for f in files:
@@ -33,12 +34,12 @@ def plot_colvar(dir_path, colvar_name):
     plt.legend(bbox_to_anchor=(1.1, 1.05))
     plt.ylabel('COM distance (nm)');    plt.xlabel('Frame #')
     plt.tight_layout()
-    plt.savefig(f'{dir_path}/COLVAR.png')
+    plt.savefig(f'{sys_name}/plots/{sys_name}_COLVAR.png')
     plt.show()
     plt.close()
 
 def plot_bias(dir_path, x_min, x_max, grid_points):
-    
+    sys_name = dir_path.split('/')[0]
     axis_values = np.linspace(x_min,x_max,grid_points)
     axis_values = [round(i,2) for i in axis_values]
 
@@ -61,12 +62,12 @@ def plot_bias(dir_path, x_min, x_max, grid_points):
     plt.ylabel('Bias (Kcal/mol)');    plt.xlabel('COM distance (nm)')
     plt.legend(bbox_to_anchor=(1.1, 1.05))
     plt.tight_layout()
-    plt.savefig(f'{dir_path}/BIAS.png')
-    plt.show()
+    plt.savefig(f'{sys_name}/plots/{sys_name}_BIAS.png')
     plt.close()
 
 def plot_FE(dir_path, x_min, x_max, grid_points):
 
+    sys_name = dir_path.split('/')[0]
     axis_values = np.linspace(x_min,x_max,grid_points)
     axis_values = [round(i,2) for i in axis_values]
 
@@ -88,8 +89,7 @@ def plot_FE(dir_path, x_min, x_max, grid_points):
     plt.ylabel('FE (Kcal/mol)');  plt.xlabel('COM distance (nm)')
     plt.legend(bbox_to_anchor=(1.1, 1.05))
     plt.tight_layout()
-    plt.savefig(f'{dir_path}/FE.png')
-    plt.show()
+    plt.savefig(f'{sys_name}/plots/{sys_name}_FE.png')
     plt.close()
 
 def plot_sMD_statistics(data, sys_name):
@@ -97,36 +97,41 @@ def plot_sMD_statistics(data, sys_name):
     plt.figure(figsize=(6,5))
     sns.lineplot(data, x='r0', y='work', hue='replica')
     plt.xlabel('r0 dist (nm)'); plt.ylabel('Work (KJ/mol)')
+    plt.title(sys_name)
     plt.tight_layout()
-    plt.savefig(f'{sys_name}/r0_vs_work.png')
+    plt.savefig(f'{sys_name}/plots/{sys_name}-r0_vs_work.png')
     plt.close()
 
     plt.figure(figsize=(6,5))
     sns.lineplot(data, x='COMDist', y='work', hue='replica')
     plt.xlabel('COM dist (nm)'); plt.ylabel('Work (KJ/mol)')
+    plt.title(sys_name)
     plt.tight_layout()
-    plt.savefig(f'{sys_name}/com_vs_work.png')
+    plt.savefig(f'{sys_name}/plots/{sys_name}-com_vs_work.png')
     plt.close()
 
     plt.figure(figsize=(6,5))
     sns.lineplot(data, x='r0', y='force')#, hue='replica')
     plt.xlabel('r0 dist (nm)'); plt.ylabel('Force (KJ/mol)')
+    plt.title(sys_name)
     plt.tight_layout()
-    plt.savefig(f'{sys_name}/r0_vs_force.png')
+    plt.savefig(f'{sys_name}/plots/{sys_name}-r0_vs_force.png')
     plt.close()
 
     plt.figure(figsize=(6,5))
     sns.lineplot(data, x=data['time'], y='work', hue='replica')
     plt.xlabel('time (ns)'); plt.ylabel('Work (KJ/mol)')
+    plt.title(sys_name)
     plt.tight_layout()
-    plt.savefig(f'{sys_name}/work_vs_time.png')
+    plt.savefig(f'{sys_name}/plots/{sys_name}-time_vs_work.png')
     plt.close()
 
     plt.figure(figsize=(6,5))
     sns.lineplot(data, x=data['time'], y='COMDist', hue='replica')
     plt.xlabel('time (ns)'); plt.ylabel('COM dist (nm)')
+    plt.title(sys_name)
     plt.tight_layout()
-    plt.savefig(f'{sys_name}/COM_vs_time.png')
+    plt.savefig(f'{sys_name}/plots/{sys_name}-time_vs_com.png')
     plt.close()
 
     # plt.figure(figsize=(6,5))
@@ -140,7 +145,7 @@ def plot_sMD_statistics(data, sys_name):
     # plt.ylabel('fraction'); plt.xlabel('Force (KJ/mol)')
     # plt.tight_layout()
     # plt.savefig(f'{sys_name}/force_dist.png')
-    plt.close()
+
     return None
 
 def plot_clusters(df_clustered, closest_points, sys_name):
@@ -151,6 +156,7 @@ def plot_clusters(df_clustered, closest_points, sys_name):
         plt.scatter(row['rmsd'], row['cog_d'], marker='x',c='black', alpha=1, zorder=3)
 
     plt.xlabel('RMSD (A)'); plt.ylabel('COG dist(nm)')
+    plt.title(f'{sys_name} sMD centroids')
     plt.tight_layout()
-    plt.savefig(f'{sys_name}/first_clustering_sMD.png')
+    plt.savefig(f'{sys_name}/plots/sMD_cluster_centroids.png')
     plt.close()
