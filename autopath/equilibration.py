@@ -197,29 +197,13 @@ def equilibrate_restrained_system(simulation, system, integrator, temp) -> None:
         stepsize_prev = stepsize
 
     return
-
-def get_COM_dist(simulation, groupA, groupB, units:str='ansgtroms'):
-    if units == 'nanometers':
-        unit = openmmunit.nanometers
-    elif units == 'angstroms':
-        unit = openmmunit.angstroms
-    else:
-        raise ValueError('Distance units should be nanometers or angstroms')
-
-    # Get COM distance between two groups of atoms
-    positions = simulation.context.getState(getPositions=True).getPositions()
-    g1_positions = [positions[index]/unit for index in groupA]
-    g2_positions = [positions[index]/unit for index in groupB]
-    dist = np.linalg.norm(np.mean(np.asarray(g1_positions), axis=0) - np.mean(np.asarray(g2_positions), axis=0))
-    
-    return dist
-            
+           
 class Equilibration:
     def __init__(self,
                  system_file:str = 'system.xml',
                  prmtop_file:str = 'system.prmtop',
-                 sys_name:str='test',
-                 temperature: float=300,
+                 sys_name:str = None,
+                 temperature: float = 300,
                  timestep:float = 0.004,
                  ) -> None:
 
