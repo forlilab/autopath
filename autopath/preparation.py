@@ -24,7 +24,6 @@ from autopath.utils import fix_pdb, save_pdb, save_system, save_amber_topology
 class SystemPreparation:
     def __init__(self,
                  forcefield:list = ['amber14/protein.ff14SB.xml', 'amber14/tip3pfb.xml', 'amber/tip3p_HFE_multivalent.xml'],
-                 fix_pdb:bool = True,
                  lig_ff:str = 'espaloma',
                  allow_undefined_stereo:bool = True,
                  hydrogenMass:float=3,
@@ -40,7 +39,6 @@ class SystemPreparation:
             exit(0)
 
         self.forcefield = ForceField(*forcefield)
-        self.fix_pdb = fix_pdb
         self.allow_undefined_stereo = allow_undefined_stereo
 
         self.hydrogenMass = hydrogenMass * openmmunit.amu # Use HMR 
@@ -100,13 +98,8 @@ class SystemPreparation:
         ligand_topology, ligand_positions = self._parametrize_ligand(lig)
 
         # process protein
-        if self.fix_pdb:
-            logging.info(f'Running PDBFix on {rec_name}..')
-            protein_pdb = fix_pdb(pdbfile=prot_path, keep_heterogens=True, pH=7.4)
-            save_pdb(protein_pdb.topology, protein_pdb.positions, f'{lig_name}/{rec_name}_fixed.pdb')
-        else:
-            logging.info(f'Loading {rec_name} PDB..')
-            protein_pdb = PDBFile(prot_path)
+        logging.info(f'Loading {rec_name} PDB..')
+        protein_pdb = PDBFile(prot_path)
 
         # make an OpenMM Modeller object with the protein
         modeller = Modeller(protein_pdb.topology, protein_pdb.positions)
