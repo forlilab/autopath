@@ -1,6 +1,7 @@
-import pandas as pd
 import numpy as np
+import pandas as pd
 from glob import glob
+
 import seaborn as sns
 import matplotlib.pyplot as plt
 import matplotlib.style as style

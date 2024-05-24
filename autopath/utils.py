@@ -389,6 +389,8 @@ def cluster_pulling_MD(traj_files, equilibrated_system, prmtop_file, lig_resname
     return df_clustered, closest_points
 
 def write_centroids_pdb(closest_points_df, prmtop_file, sys_name):
+
+    os.makedirs(f"{sys_name}/milestones")
     for idx, row in closest_points_df.iterrows():
         
         replica = row['replica'].split('_')[1]
@@ -400,9 +402,9 @@ def write_centroids_pdb(closest_points_df, prmtop_file, sys_name):
 
         # Get the frame and write a pdb
         u.trajectory[frame]
-        u.atoms.write(f'{sys_name}/milestone_{milestone}.pdb')
+        u.atoms.write(f'{sys_name}/milestones/milestone_{milestone}.pdb')
 
     # Include the equilibrated initial pose as milestone 0
-    shutil.copyfile(f'{sys_name}/system_equilibrated.pdb', f'{sys_name}/milestone_0.pdb')
+    shutil.copyfile(f'{sys_name}/system_equilibrated.pdb', f'{sys_name}/milestones/milestone_0.pdb')
 
     return 

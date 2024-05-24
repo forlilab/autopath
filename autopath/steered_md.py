@@ -2,19 +2,16 @@
 import os
 import time
 import math
-import numpy as np
 import logging
-from sys import stdout
 from glob import glob
 
-from utils import select_platform, add_reporters, load_system, save_pdb, print_current_forces
-from utils import get_ligand_ha, get_COG_dist
-from analysis import extract_sMD_statistics, plot_sMD_statistics
+from autopath.utils import *
+from autopath.analysis import plot_sMD_statistics
 
-from openmm.app.amberprmtopfile import AmberPrmtopFile
-import openmm.unit as openmmunit
 from openmm import *
 from openmm.app import *
+import openmm.unit as openmmunit
+from openmm.app.amberprmtopfile import AmberPrmtopFile
 
       
 def add_COM_force(system, group_A, group_B, fc_pull, r0):     

@@ -1,15 +1,13 @@
-# %%
 # general imports
 import os
+import time
 import logging
 import numpy as np
-import time
+
 # OpenMM imports
 from openmm import *
 from openmm.app import *
 import openmm.unit as openmmunit
-
-from openmmtools.utils import get_fastest_platform
 
 # OpenFF-toolkit imports
 from openff.toolkit import Molecule
@@ -20,7 +18,8 @@ from openmmforcefields.generators import EspalomaTemplateGenerator, SMIRNOFFTemp
 # RDKit imports
 from rdkit.Chem import SDMolSupplier
 
-from utils import fix_pdb, save_pdb, save_system, save_amber_topology
+# AutoPath imports
+from autopath.utils import fix_pdb, save_pdb, save_system, save_amber_topology
 
 class SystemPreparation:
     def __init__(self,

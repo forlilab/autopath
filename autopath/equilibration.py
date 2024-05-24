@@ -1,18 +1,14 @@
+import time
+import logging
+import numpy as np
+from sys import stdout
 
-from utils import add_reporters, select_platform, load_system, save_system, save_pdb, save_simulation
-from openmm.app.amberprmtopfile import AmberPrmtopFile
-import openmm.unit as openmmunit
 from openmm import *
 from openmm.app import *
+import openmm.unit as openmmunit
+from openmm.app.amberprmtopfile import AmberPrmtopFile
 
-import logging
-from sys import stdout
-import time
-import os
-import numpy as np
-import math
-import cvpack
-
+from autopath.utils import add_reporters, select_platform, load_system, save_system, save_pdb, save_simulation
 
 def add_protein_restraints(system, positions, topology, 
                             force_name:str='k_prot',

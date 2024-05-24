@@ -1,27 +1,17 @@
-from utils import (
-    select_platform,
-    add_reporters,
-    load_system,
-    save_system,
-    save_pdb,
-    save_simulation,
-    get_ligand_ha,
-    get_COG_dist
-)
-from analysis import plot_bias, plot_colvar, plot_FE
-from equilibration import warm_up_system
+import os
+import time
+import numpy as np
+import logging
 
-from openmm.app.amberprmtopfile import AmberPrmtopFile
-import openmm.unit as openmmunit
+import cvpack
+
 from openmm import *
 from openmm.app import *
+import openmm.unit as openmmunit
+from openmm.app.amberprmtopfile import AmberPrmtopFile
 
-import logging
-from sys import stdout
-import time
-import os
-import numpy as np
-import cvpack
+from autopath.utils import *
+from autopath.analysis import plot_bias, plot_colvar, plot_FE
 
 class MetadynamicsMD:
 
