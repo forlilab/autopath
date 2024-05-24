@@ -47,6 +47,8 @@ class SteeredMD:
         self.topology = prmtop.topology
         self.sys_name = sys_name
 
+        os.makedirs(f'{sys_name}/sMD', exist_ok=True)
+
         if HMR:
             self.timestep = 0.004
         else:
@@ -62,7 +64,6 @@ class SteeredMD:
 
     def run(self, 
             sMD_time:float = 1,       #5ns
-            # displacement_factor:float = 5,
             displacement: float = 0.5, #nm
             steps_per_move:int = 250, #1ps
             pulling_force:int = 1000,
@@ -117,12 +118,12 @@ class SteeredMD:
             simulation.context.setTime(0) # reset simulation time
             simulation.context.reinitialize(preserveState=True)
 
-            add_reporters(simulation, self.sys_name, f'steered_{rep_idx}', sMD_steps, steps_per_move)
+            add_reporters(simulation, f'{self.sys_name}/sMD', f'sMD_{rep_idx}', sMD_steps, steps_per_move)
 
             # Initializing work
             work_val_old = openmmunit.Quantity(value=0, unit=openmmunit.kilojoules_per_mole)
 
-            f = open(f'{self.sys_name}/steered_log_{rep_idx}.dat', "a")
+            f = open(f'{self.sys_name}/sMD/sMD_log_{rep_idx}.dat', "a")
             for i in range(sMD_moves):
 
                 # Get COM distance
@@ -167,7 +168,7 @@ class SteeredMD:
             save_pdb(self.topology, final_positions, f'{self.sys_name}/steeredMD_{rep_idx}.pdb')
 
         # Get statistics related to the pooling and plot them
-        files = glob(f'{self.sys_name}/*.dat')
+        files = glob(f'{self.sys_name}/sMD/*.dat')
         data = extract_sMD_statistics(files)
         plot_sMD_statistics(data, self.sys_name)
 
