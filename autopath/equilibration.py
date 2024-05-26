@@ -8,7 +8,7 @@ from openmm.app import *
 import openmm.unit as openmmunit
 from openmm.app.amberprmtopfile import AmberPrmtopFile
 
-from autopath.utils import add_reporters, select_platform, load_system, save_system, save_pdb, save_simulation
+from autopath.utils import print_current_forces, add_reporters, select_platform, load_system, save_system, save_pdb, save_simulation
 
 def add_protein_restraints(system, positions, topology, 
                             force_name:str='k_prot',
@@ -28,11 +28,11 @@ def add_protein_restraints(system, positions, topology,
     force.addPerParticleParameter("y0")
     force.addPerParticleParameter("z0")
     
-    # Restraint heavy atoms only: C, O, N, S, and P and MG
-    elements = set((element.carbon, element.oxygen, element.magnesium,
+    # Restraint heavy atoms only: C, O, N, S, P, CA and MG
+    elements = set((element.carbon, element.oxygen, element.magnesium, element.calcium,
                         element.nitrogen, element.sulfur, element.phosphorus))
     
-    ATOMSET = WATERS | LIPIDS
+    ATOMSET = WATERS # | LIPIDS
     counter=0
     for i, (atom_crd, atom) in enumerate(zip(positions, atoms)):
         if atom.residue.name not in ATOMSET and atom.element in elements:
@@ -145,11 +145,11 @@ def equilibrate_restrained_system(simulation, system, integrator, temp) -> None:
     'step6': {'k_prot': 2.5, 'k_lig': 4.0, 'npt_flag': True, 'nsteps': 25000, 'stepsize': 0.004},
     'step7': {'k_prot': 2.0, 'k_lig': 3.5, 'npt_flag': True, 'nsteps': 25000, 'stepsize': 0.004},
     'step8': {'k_prot': 1.5, 'k_lig': 3.0, 'npt_flag': True, 'nsteps': 25000, 'stepsize': 0.004},
-    'step9': {'k_prot': 1.0, 'k_lig': 2.5, 'npt_flag': True, 'nsteps': 25000, 'stepsize': 0.004},
-    'step10': {'k_prot': 0.5, 'k_lig': 2.0, 'npt_flag': True, 'nsteps': 25000, 'stepsize': 0.004},
-    'step11': {'k_prot': 0.0, 'k_lig': 1.5, 'npt_flag': True, 'nsteps': 25000, 'stepsize': 0.004},
-    'step12': {'k_prot': 0.0, 'k_lig': 1.0, 'npt_flag': True, 'nsteps': 50000, 'stepsize': 0.004},
-    'step13': {'k_prot': 0.0, 'k_lig': 0.75, 'npt_flag': True, 'nsteps': 50000, 'stepsize': 0.004},
+    'step9': {'k_prot': 1.0, 'k_lig': 3.0, 'npt_flag': True, 'nsteps': 25000, 'stepsize': 0.004},
+    'step10': {'k_prot': 0.5, 'k_lig': 2.5, 'npt_flag': True, 'nsteps': 25000, 'stepsize': 0.004},
+    'step11': {'k_prot': 0.0, 'k_lig': 2.0, 'npt_flag': True, 'nsteps': 25000, 'stepsize': 0.004},
+    'step12': {'k_prot': 0.0, 'k_lig': 1.5, 'npt_flag': True, 'nsteps': 50000, 'stepsize': 0.004},
+    'step13': {'k_prot': 0.0, 'k_lig': 1.0, 'npt_flag': True, 'nsteps': 50000, 'stepsize': 0.004},
     'step14': {'k_prot': 0.0, 'k_lig': 0.5, 'npt_flag': True, 'nsteps': 50000, 'stepsize': 0.004},
     'step15': {'k_prot': 0.0, 'k_lig': 0.0, 'npt_flag': True, 'nsteps': 50000, 'stepsize': 0.004},
     }
@@ -236,7 +236,7 @@ class Equilibration:
         simulation.context.setPositions(initial_positions)
 
         logging.info(f'Setting up reporters for {self.sys_name}..')
-        add_reporters(simulation, self.sys_name, 'equilibration', total_steps=600000)
+        add_reporters(simulation, self.sys_name, 'equilibration', logperiod=2000, total_steps=600000)
 
         logging.info('Adding harmonic restraints to the protein..')
         add_protein_restraints(self.system, initial_positions, self.topology,
@@ -255,10 +255,14 @@ class Equilibration:
         logging.info('Running restrained equilibration protocol..')
         equilibrate_restrained_system(simulation, self.system, integrator, self.temperature)
 
+        print_current_forces(self.system)
+
         # Remove both protein and ligand force restraints
         simulation.context.getSystem().removeForce(simulation.context.getSystem().getNumForces()-1)
         simulation.context.getSystem().removeForce(simulation.context.getSystem().getNumForces()-1)
-            
+        
+        print_current_forces(self.system)
+
         final_positions = simulation.context.getState(getPositions=True).getPositions()
 
         save_system(self.system, f'{self.sys_name}/system_equilibrated.xml')
