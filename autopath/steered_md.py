@@ -117,7 +117,7 @@ class SteeredMD:
             simulation.context.setTime(0) # reset simulation time
             simulation.context.reinitialize(preserveState=True)
 
-            add_reporters(simulation, f'{self.sys_name}/sMD', f'sMD_{rep_idx}', sMD_steps, steps_per_move)
+            add_reporters(simulation, f'{self.sys_name}/sMD', f'sMD_{rep_idx}', sMD_steps, steps_per_move * 2) # dont save too often
 
             # Initializing work
             work_val_old = openmmunit.Quantity(value=0, unit=openmmunit.kilojoules_per_mole)
