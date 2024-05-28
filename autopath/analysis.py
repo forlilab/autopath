@@ -11,7 +11,7 @@ def plot_rmsd(rmsd_df, sys_name, prefix):
     plt.figure(figsize=(6,4))
     sns.lineplot(data=rmsd_df, y='rmsd', x=rmsd_df.index)
     plt.ylabel('RMSD (A)'); plt.xlabel('Frame #')
-    plt.title(f'RMSD {prefix}')
+    plt.title(f'RMSD {prefix} - {sys_name}')
     plt.tight_layout()
     plt.savefig(f'{sys_name}/plots/{prefix}_rmsd.png')
     plt.close()
@@ -35,8 +35,7 @@ def plot_colvar(dir_path, colvar_name):
     plt.legend(bbox_to_anchor=(1.1, 1.05), fontsize="12")
     plt.ylabel('COM distance (nm)');    plt.xlabel('Frame #')
     plt.tight_layout()
-    plt.savefig(f'{sys_name}/plots/{sys_name}_COLVAR.png')
-    plt.show()
+    plt.savefig(f'{sys_name}/metadynamics/{sys_name}_COLVAR.png')
     plt.close()
 
 def plot_bias(dir_path, x_min, x_max, grid_points):
@@ -63,7 +62,7 @@ def plot_bias(dir_path, x_min, x_max, grid_points):
     plt.ylabel('Bias (Kcal/mol)');    plt.xlabel('COM distance (nm)')
     plt.legend(bbox_to_anchor=(1.1, 1.05), fontsize="12")
     plt.tight_layout()
-    plt.savefig(f'{sys_name}/plots/{sys_name}_BIAS.png')
+    plt.savefig(f'{sys_name}/metadynamics/{sys_name}_BIAS.png')
     plt.close()
 
 def plot_FE(dir_path, x_min, x_max, grid_points):
@@ -90,7 +89,7 @@ def plot_FE(dir_path, x_min, x_max, grid_points):
     plt.ylabel('FE (Kcal/mol)');  plt.xlabel('COM distance (nm)')
     plt.legend(bbox_to_anchor=(1.1, 1.05), fontsize="12")
     plt.tight_layout()
-    plt.savefig(f'{sys_name}/plots/{sys_name}_FE.png')
+    plt.savefig(f'{sys_name}/metadynamics/{sys_name}_FE.png')
     plt.close()
 
 def plot_sMD_statistics(data, sys_name):
@@ -156,7 +155,7 @@ def plot_clusters(df_clustered, closest_points, sys_name):
     for idx, row in closest_points.iterrows():
         plt.scatter(row['rmsd'], row['cog_d'], marker='x',c='black', alpha=1, zorder=3)
 
-    plt.xlabel('RMSD (A)'); plt.ylabel('COG dist(nm)')
+    plt.xlabel('RMSD (nm)'); plt.ylabel('COG dist (nm)')
     plt.title(f'{sys_name} sMD centroids')
     plt.tight_layout()
     plt.savefig(f'{sys_name}/plots/sMD_cluster_centroids.png')
