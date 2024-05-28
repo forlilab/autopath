@@ -255,13 +255,10 @@ class Equilibration:
         logging.info('Running restrained equilibration protocol..')
         equilibrate_restrained_system(simulation, self.system, integrator, self.temperature)
 
-        print_current_forces(self.system)
-
         # Remove both protein and ligand force restraints
-        simulation.context.getSystem().removeForce(simulation.context.getSystem().getNumForces()-1)
-        simulation.context.getSystem().removeForce(simulation.context.getSystem().getNumForces()-1)
-        
-        print_current_forces(self.system)
+        simulation.context.getSystem().removeForce(simulation.context.getSystem().getNumForces()-3)
+        simulation.context.getSystem().removeForce(simulation.context.getSystem().getNumForces()-2)
+        # print_current_forces(self.system)
 
         final_positions = simulation.context.getState(getPositions=True).getPositions()
 
