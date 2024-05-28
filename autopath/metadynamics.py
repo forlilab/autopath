@@ -23,18 +23,9 @@ class MetadynamicsMD:
         pocket_atoms: list[int] = None,
         HMR: bool = True,
         temp: float = 300,
+        NPT: bool = True,
         verbose: bool = True,
         ) -> None:
-
-
-        logging.basicConfig(
-            level="INFO",
-            format="%(asctime)s [%(levelname)s] %(message)s",
-            handlers=[
-                logging.FileHandler(f"metadynamics.log", mode="w"),
-                logging.StreamHandler(),
-            ],
-        )
 
         if HMR:
             self.timestep = 0.004
@@ -43,6 +34,7 @@ class MetadynamicsMD:
 
         self.warming_steps = 25000 # for temp annealing
         self.temperature = temp * openmmunit.kelvin
+        self.NPT = NPT
 
         # These are for debugging purposes if one wants to check the CVs over the time of the simulation
         self.verbose = verbose
@@ -61,6 +53,8 @@ class MetadynamicsMD:
         
         self.platform = select_platform("fastest")
 
+        return
+
     def run(self,
             pdb_file: str = None,
             system_file:str = None,
@@ -73,7 +67,7 @@ class MetadynamicsMD:
             grid_dimensions: tuple = (0.0, 1.0),
             bias_frequency: int = 2,
             saveFrequency: int = 50,
-        ):
+        ) -> None:
 
         start_time = time.monotonic()
 
@@ -94,22 +88,38 @@ class MetadynamicsMD:
 
         groups = [self.pocket_atoms] + [self.ligand_ha_idx]
 
-        # logging.info('Setting up the integrator..')
+        logging.debug('Setting up the integrator')
         integrator = LangevinMiddleIntegrator(self.temperature, 1/openmmunit.picoseconds, self.timestep)
         # integrator.setRandomNumberSeed(int(rep_idx))
 
+        logging.debug(f'Loading a simulation file')
         system = load_system(system_file)
+        
+        if self.NPT:
+            logging.debug(f'Adding a Montecarlo Barostat to the system')
+            system.addForce(MonteCarloBarostat(1 * openmmunit.atmosphere, self.temperature))
 
-        logging.info(f'Creating the simulation for {run_id}..')
+        logging.info(f'Creating the simulation for {run_id}')
         simulation = Simulation(self.topology, system, integrator, self.platform)
 
+        if pdb_file is not None:
+            logging.debug('Setting positions from PDB filet')
+            initial_positions = PDBFile(pdb_file).positions
+            simulation.context.setPositions(initial_positions)
+
         if checkpoint_file is not None:
-            logging.info('Loading simulation checkpoint..')
+            logging.debug('Loading simulation checkpoint')
             simulation.loadCheckpoint(checkpoint_file)
+
+        # print_current_forces(system)
 
         # fb_eq = f'sqrt((distance(g1,g2))^2)-{initial_COM_dist}' # Offset for initial COM dist
         fb_eq = f"sqrt(distance(g1,g2)^2)"
-        COM = cvpack.CentroidFunction(fb_eq, openmmunit.nanometers, groups, weighByMass=False, pbc=True)
+        COM = cvpack.CentroidFunction(fb_eq, 
+                                      openmmunit.nanometers, 
+                                      groups, 
+                                      weighByMass=False, 
+                                      pbc=True)
 
         com_cv = BiasVariable(
             COM,
@@ -133,7 +143,7 @@ class MetadynamicsMD:
 
         simulation.context.reinitialize(preserveState=True)
 
-        logging.info(f"Setting up reporters for {run_id}..")
+        logging.debug(f"Setting up reporters for {run_id}..")
         add_reporters(simulation,self.write_dir, f'metadynamics_{run_id}', total_steps, bias_frequency)
 
         if not self.verbose:
@@ -165,3 +175,5 @@ class MetadynamicsMD:
 
         simulation_time = time.monotonic() - start_time
         logging.info(f'Finished {run_id} metadynamics in {simulation_time/60:.2f} min.')
+
+        return
