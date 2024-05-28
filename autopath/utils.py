@@ -13,18 +13,23 @@ import numpy as np
 import pandas as pd
 import shutil
 import logging
+from typing import Union
 
 import MDAnalysis as mda
 from MDAnalysis.analysis.rms import RMSD, RMSF
 from MDAnalysis.analysis import align
-
 import pytraj as pt
 
-def align_trajectory(prmtop_file, traj_file, overwrite:bool=False, strip_mask:str=':HOH,NA,CL,K,POP'):
-    basename = traj_file.split('.')[0]
-    traj_name = f"{basename}_aligned.dcd"
-    if overwrite:
-        traj_name = traj_file
+from sklearn.cluster import KMeans
+
+
+def align_trajectory(prmtop_file:str = None, 
+                     traj_file:Union[str,list] = None,
+                     out_fname:str = None,
+                     strip_mask:str = None #':HOH,NA,CL,K,POP'
+                     ):
+    
+    traj_fname = f"{out_fname}_aligned.dcd"
 
     ptraj = pt.iterload(traj_file, prmtop_file)
     ptraj = ptraj.autoimage()
@@ -33,8 +38,8 @@ def align_trajectory(prmtop_file, traj_file, overwrite:bool=False, strip_mask:st
     
     if strip_mask is not None:
         ptraj = ptraj.strip(strip_mask)
-        pt.save(f'{basename}_dry.prmtop', ptraj.top, overwrite=True)
-    ptraj.save(traj_name)
+        pt.save(f'{out_fname}_dry.prmtop', ptraj.top, overwrite=True)
+    ptraj.save(traj_fname)
 
     return
 
@@ -197,7 +202,7 @@ def add_reporters(simulation,
                                             reportInterval=logperiod, enforcePeriodicBox=None))
     return 
 
-def print_current_forces(system):
+def print_current_forces(system:System = None):
     for index, fc in enumerate(system.getForces()):
         print(f'Force Index:{index} | Name: {fc.getName()} | Group: {fc.getForceGroup()}')
     return None
@@ -251,14 +256,12 @@ def calculate_com_distance(u, lig_name, pocket_atoms):
 
     return pd.DataFrame(com_distance, columns=['com_d'], index=range(len(com_distance)))
 
-def calculate_cog_distance(u, lig_name, pocket_atoms):
-
-    ligand_atoms = u.select_atoms(f'resname {lig_name} and (not name H*)')
+def calculate_cog_distance(u, ligand_atoms, pocket_atoms):
 
     cog_distance = []
     for ts in u.trajectory:
-        lig_cog = ligand_atoms.center_of_geometry(pbc=True)
-        prot_cog = pocket_atoms.center_of_geometry(pbc=True)
+        lig_cog = ligand_atoms.center_of_geometry(wrap=True)
+        prot_cog = pocket_atoms.center_of_geometry(wrap=True)
         dist = np.linalg.norm(prot_cog-lig_cog) / 10 #to nm
         cog_distance.append(dist)
 
@@ -290,28 +293,11 @@ def get_ligand_rmsd(u, lig_resname, alig_select):
             groupselections=[f'resname {lig_resname} and not name H*'],
             ref_frame=0).run()
     # Get the PoseScores as np.array
-    rmsds = r.rmsd[1:, -1]
+    rmsds = r.results.rmsd[1:, -1]
+
+    rmsds = rmsds/10 #angstroms to nm
 
     return pd.DataFrame(rmsds, columns=['rmsd'], index=range(len(rmsds)))
-
-import numpy as np
-from scipy.optimize import fsolve
-from scipy.interpolate import CubicSpline
-
-def find_inflexion_points(X, Y):
-
-        # Fit a cubic spline to the data
-        cs = CubicSpline(X, Y)
-
-        # Define the second derivative of the spline
-        def second_derivative(x):
-            return cs(x, 2)  # 2 indicates the second derivative
-
-        # Find potential inflection points by solving second_derivative(x) = 0
-        initial_guesses = np.linspace(X.min(), X.max(), num=3)
-        inflexion_points = fsolve(second_derivative, initial_guesses)
-
-        return inflexion_points
 
 def extract_sMD_statistics(files):
     data=[]
@@ -324,12 +310,10 @@ def extract_sMD_statistics(files):
         data.append(df)
 
     data = pd.concat(data, axis=0)
-    data['time'] = data['index'] / 1000
+    data['time'] = data['index'] / 1000 #ps to ns
     data.reset_index(inplace=True, drop=True)
 
     return data
-
-from sklearn.cluster import KMeans
 
 # Find the closest points to the centroids
 def find_closest_points(X, centroids):
@@ -340,7 +324,9 @@ def find_closest_points(X, centroids):
         closest_points.append(closest_point_index)
     return closest_points
 
-def cluster_data(data, var_names, n_clust):
+def cluster_data(data:pd.DataFrame = None,
+                 var_names:list = None,
+                 n_clust:int = 10):
 
     X = data[var_names].values
     kmeans = KMeans(n_clusters=n_clust, random_state=42, n_init="auto").fit(X)
@@ -350,32 +336,39 @@ def cluster_data(data, var_names, n_clust):
     # This is to order cluster centroids or milestones by distance
     cluster_means = data.groupby('cluster')[var_names].mean().reset_index()
     sorted_clusters = cluster_means.sort_values(by='cog_d').reset_index(drop=True)
-    sorted_clusters['new_cluster'] = range(1, len(sorted_clusters) + 1)
+    sorted_clusters['new_cluster'] = range(len(sorted_clusters))
     cluster_mapping = sorted_clusters.set_index('cluster')['new_cluster'].to_dict()
-    data['milestone'] = data['cluster'].map(cluster_mapping)
+    data['cluster'] = data['cluster'].map(cluster_mapping)
 
     closest_points_indices = find_closest_points(X, centroids)
     closest_points_df = data.iloc[closest_points_indices]
     
     return data, closest_points_df
 
-def cluster_pulling_MD(traj_files, equilibrated_system, prmtop_file, pocket_selection, n_clusters):
+def cluster_pulling_MD(traj_files:list=None, 
+                       equilibrated_pdb:str=None,
+                       prmtop_file:str=None,
+                       lig_resname:str='UNK',
+                       pocket_selection:str=None,
+                       n_clusters:int=10):
     distances = []
-    for traj in traj_files:
 
-        u_ref = mda.Universe(equilibrated_system)
+    u_ref = mda.Universe(equilibrated_pdb)
+    reference = u_ref.select_atoms('protein and name CA')
+
+    for traj in traj_files:
         
         run_n = os.path.splitext(os.path.basename(traj))[0].split('_')[2]
 
-        universe = mda.Universe(prmtop_file, traj, in_memory=True)
+        u = mda.Universe(prmtop_file, traj, in_memory=True)
+        ligand_atoms = u.select_atoms(f'resname {lig_resname} and (not name H*)')
 
-        reference = u_ref.select_atoms('protein and name CA')
-        aligner = align.AlignTraj(universe, reference=reference, select="protein and name CA", in_memory=True).run()
+        aligner = align.AlignTraj(u, reference=reference, select="protein and name CA", in_memory=True).run()
 
-        pocket_select = u_ref.select_atoms(pocket_selection)
+        pocket_atoms = u.select_atoms(pocket_selection)
 
-        cog_d = calculate_cog_distance(universe, 'UNK', pocket_select)
-        rmsd = get_ligand_rmsd(universe, lig_resname='UNK', alig_select='ligand')
+        cog_d = calculate_cog_distance(u, ligand_atoms, pocket_atoms)
+        rmsd = get_ligand_rmsd(u, lig_resname, alig_select='ligand')
                 
         dat = pd.concat([cog_d, rmsd], axis=1)
         # dat['sysname'] = sys_name
@@ -386,29 +379,72 @@ def cluster_pulling_MD(traj_files, equilibrated_system, prmtop_file, pocket_sele
     df.reset_index(inplace=True, drop=False)
     df.dropna(inplace=True)
 
+    df = df[df['cog_d'] <= 1.0]
+
     df_clustered, closest_points = cluster_data(df, ['rmsd','cog_d'], n_clusters)
     
     return df_clustered, closest_points
 
-def cluster_milestones_pdbs(files, lig_resname, pocket_select, n_clust):
+def cluster_milestone_pdbs(files:list=None, 
+                            lig_resname:str='UNK',
+                            pocket_selection:str=None, 
+                            n_clust:int=10):
     distances = []
     for f in files:
         u = mda.Universe(f, in_memory=True)
-        cog_dist = calculate_cog_distance(u, lig_resname, pocket_select)
+        pocket_atoms = u.select_atoms(pocket_selection)
+        ligand_atoms = u.select_atoms(f'resname {lig_resname} and (not name H*)')
+        cog_dist = calculate_cog_distance(u, ligand_atoms, pocket_atoms)
+        # rmsd = get_ligand_rmsd(u, lig_resname, alig_select='ligand')
+        # data = pd.concat([cog_dist, rmsd], axis=1)
         cog_dist['fname'] = f
         distances.append(cog_dist)
+
     df_dist = pd.concat(distances, axis=0)
     clustered_data, milestones = cluster_data(df_dist, ['cog_d'], n_clust)
+    milestones.sort_values(by='cog_d', ascending=False, inplace=True)
+    print(milestones)
     return clustered_data, milestones
 
-def write_centroids_pdb(closest_points_df, prmtop_file, sys_name):
+def get_most_diverse_points(centroids_df:pd.DataFrame,
+                            var:str='final_dist',
+                            n_points:int=5):
+
+    points = centroids_df[var]
+
+    # Ensure n is less than the total number of points
+    assert n_points < len(centroids_df), "n must be less than the total number of points"
+    
+    selected_indices = []
+    
+    # Randomly select the first point and add it to the list
+    selected_indices.append(np.random.choice(len(points)))
+    
+    # Loop until we have selected n points
+    while len(selected_indices) < n_points:
+        # Calculate the distances between each point and the set of selected points
+        distances = np.array([min([np.linalg.norm(points[i] - points[j]) for j in selected_indices])
+                              for i in range(len(points))])
+        
+        # Exclude already selected points by setting their distances to -1
+        distances[selected_indices] = -1
+        
+        # Select the point with the maximum distance to the selected points
+        next_point_index = np.argmax(distances)
+        selected_indices.append(next_point_index)
+    
+    return centroids_df.iloc[selected_indices]
+
+def write_centroids_pdb(closest_points_df:pd.DataFrame = None,
+                        prmtop_file:str = None,
+                        sys_name: str = None):
 
     os.makedirs(f"{sys_name}/milestones", exist_ok=True)
 
     for idx, row in closest_points_df.iterrows():
         
         replica = row['replica'].split('_')[1]
-        milestone = row['milestone']
+        milestone = row['cluster']
         frame = row['index']
 
         traj_file = f'{sys_name}/sMD/trajectory_sMD_{replica}.dcd'
@@ -422,3 +458,21 @@ def write_centroids_pdb(closest_points_df, prmtop_file, sys_name):
     shutil.copyfile(f'{sys_name}/system_equilibrated.pdb', f'{sys_name}/milestones/milestone_0.pdb')
 
     return 
+
+# from scipy.optimize import fsolve
+# from scipy.interpolate import CubicSpline
+
+# def find_inflexion_points(X, Y):
+
+#         # Fit a cubic spline to the data
+#         cs = CubicSpline(X, Y)
+
+#         # Define the second derivative of the spline
+#         def second_derivative(x):
+#             return cs(x, 2)  # 2 indicates the second derivative
+
+#         # Find potential inflection points by solving second_derivative(x) = 0
+#         initial_guesses = np.linspace(X.min(), X.max(), num=3)
+#         inflexion_points = fsolve(second_derivative, initial_guesses)
+
+#         return inflexion_points

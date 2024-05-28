@@ -53,7 +53,7 @@ class RelaxMD:
         
         start_time = time.monotonic()
         
-        # logging.info('Setting up the integrator..')
+        logging.debug('Setting up the integrator..')
         integrator = LangevinMiddleIntegrator(self.temperature, 1/openmmunit.picoseconds, self.timestep)
         # integrator.setRandomNumberSeed(int(rep_idx))
 
@@ -63,21 +63,18 @@ class RelaxMD:
         simulation = Simulation(self.topology, system, integrator, self.platform)
 
         if checkpoint_file is not None:
-            logging.info('Loading simulation checkpoint..')
+            logging.debug('Loading simulation checkpoint..')
             simulation.loadCheckpoint(checkpoint_file)
         else:
             initial_positions = PDBFile(pdb_file).positions
             simulation.context.setPositions(initial_positions)
 
         startdist = get_COG_dist(simulation, self.ligand_ha_idx, self.pocket_atoms)
-        logging.info(f'Initial COG distance is {startdist:.2f} nm')
-        
-        # logging.info(f'Running {vMD_time} ns..')
-        
-        logging.info('Minimizing..')
+                
+        logging.debug('Minimizing..')
         simulation.minimizeEnergy()
 
-        logging.info('Warming up the system..')
+        logging.debug('Warming up the system..')
         warm_up_system(simulation, integrator, warming_steps=md_steps, timestep=self.timestep)
         
         #save stuff
@@ -87,10 +84,11 @@ class RelaxMD:
         save_pdb(self.topology, final_positions, f'{self.sys_name}/milestones/{run_id}_relax.pdb')
 
         # Get COM distance
-        current_dist = get_COG_dist(simulation, self.ligand_ha_idx, self.pocket_atoms)
-        logging.info(f'Current COG distance is {current_dist:.2f} nm')
+        finaldist = get_COG_dist(simulation, self.ligand_ha_idx, self.pocket_atoms)
         
-        simulation_time = time.monotonic() - start_time
-        logging.info(f'Finished pose relaxation in {simulation_time/60:.2f} min.')
+        logging.info(f'{run_id} - Initial:{startdist:.3f} nm - Final:{finaldist:.3f} nm')
 
-        return
+        simulation_time = time.monotonic() - start_time
+        logging.info(f'Finished {run_id} relaxation in {simulation_time/60:.2f} min.')
+
+        return startdist, finaldist
