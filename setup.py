@@ -29,13 +29,13 @@ setup(
     long_description=open(os.path.join(base_dir, 'README.md')).read(),
     long_description_content_type="text/markdown",
     packages=find_packages(),
-    scripts=[
+    scripts=['cli/run_AutoPath.py'
             ],
     zip_safe=False,
     install_requires=['openmm'],
     python_requires='>=3.5',
     license="LGPL-2.1",
-    keywords=["drug design"],
+    keywords=["drug design", "molecular dynamics", "free energy", "medicinal chemistry"],
     classifiers=[
         'Environment :: Console',
         'Environment :: Other Environment',
