@@ -10,6 +10,31 @@ from openmm.app import *
 import openmm.unit as openmmunit
 from openmm.app.amberprmtopfile import AmberPrmtopFile
 
+
+def add_flatbottom_restraint(system,
+                             groupA, groupB, 
+                             r0:float=None,
+                             upper_wall:int=0.1, 
+                             K_flat:float=200):
+
+    fb_eq = '(k_flat/2)*max(distance(g1,g2) - upper_wall, r0)^2'
+    upper_wall_rest = CustomCentroidBondForce(2, fb_eq)
+    upper_wall_rest.addGroup(groupA)
+    upper_wall_rest.addGroup(groupB)
+    upper_wall_rest.addBond([0, 1])
+    upper_wall_rest.addGlobalParameter('k_flat', K_flat*openmmunit.kilojoules_per_mole)
+    upper_wall_rest.addGlobalParameter('upper_wall', upper_wall*openmmunit.nanometer)
+    upper_wall_rest.addGlobalParameter('r0', r0*openmmunit.nanometer)
+
+    upper_wall_rest.setUsesPeriodicBoundaryConditions(True)
+    
+    upper_wall_rest.setForceGroup(30)
+
+    system.addForce(upper_wall_rest)
+
+    return None
+
+
 class RelaxMD:
     def __init__(self,
                     checkpoint_file:str=None,
@@ -18,6 +43,7 @@ class RelaxMD:
                     sys_name:str= 'test',
                     lig_name:str = 'UNK',
                     pocket_atoms:list[int]=None,
+                    use_flat_bottom_rest:bool=False,
                     HMR:bool= True,
                     temp:float= 300,
                     ):
@@ -38,6 +64,7 @@ class RelaxMD:
 
         self.ligand_ha_idx, self.lig_ha_names  = get_ligand_ha(self.topology, lig_name)
         self.pocket_atoms = pocket_atoms
+        self.use_flat_bottom_rest = use_flat_bottom_rest
 
         # Select MD platform
         self.platform = select_platform('fastest')
@@ -70,6 +97,9 @@ class RelaxMD:
             simulation.context.setPositions(initial_positions)
 
         startdist = get_COG_dist(simulation, self.ligand_ha_idx, self.pocket_atoms)
+        
+        if self.use_flat_bottom_rest:
+            add_flatbottom_restraint(system, self.ligand_ha_idx, self.pocket_atoms, startdist)
                 
         logging.debug('Minimizing..')
         simulation.minimizeEnergy()
@@ -77,6 +107,13 @@ class RelaxMD:
         logging.debug('Warming up the system..')
         warm_up_system(simulation, integrator, warming_steps=md_steps, timestep=self.timestep)
         
+        logging.debug('Minimizing..')
+        simulation.minimizeEnergy()
+        
+        if self.use_flat_bottom_rest:
+            # Remove the force before saving
+            simulation.context.getSystem().removeForce(simulation.context.getSystem().getNumForces()-1)
+
         #save stuff
         final_positions = simulation.context.getState(getPositions=True).getPositions()
         save_simulation(simulation, f'{self.sys_name}/milestones/{run_id}_relax_checkpoint')
