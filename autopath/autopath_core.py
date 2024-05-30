@@ -28,11 +28,11 @@ class AutoPath:
                 forcefield: list = None,
                 lig_ff: str = 'espaloma',
                 boxShape: str = 'dodecahedron',
-                padding: float = 1.0,
+                padding: float = 1.5,
                 ionicStrength: float = 0.0,
                 run_equilibration: bool = True,
                 run_sMDpulling: bool = True,
-                sMD_pulling_dist: float = 0.5, # nm
+                sMD_pulling_dist: float = 1.0, # nm
                 sMD_time: int = 1, # ns
                 sMD_steps_per_move: int = 250, # 1 ps
                 sMD_pulling_force: float = 20000, # KJ/mol/nm2
@@ -43,10 +43,11 @@ class AutoPath:
                 run_relax: bool = True,
                 relax_steps: int = 25000,
                 run_metadynamics: bool = True,
-                mMD_walkers: int = 10,
-                mMD_bias_factor: int = 10,
-                mMD_hill_height: float = 0.3, # Kcal/mol
-                mMD_time: int = 1, # ns 
+                mMD_CV: str = 'nc',
+                mMD_walkers: int = 5,
+                mMD_bias_factor: int = 5,
+                mMD_hill_height: float = 0.3, # Kcal/mol approx 0.5KT
+                mMD_time: int = 2, # ns 
     ):
         # General
         self.pocket_selection = pocket_selection
@@ -76,6 +77,7 @@ class AutoPath:
         self.relax_steps = relax_steps
         # Metadynamics
         self.run_metadynamics = run_metadynamics
+        self.mMD_CV = mMD_CV
         self.mMD_walkers = mMD_walkers
         self.mMD_bias_factor = mMD_bias_factor
         self.mMD_hill_height = mMD_hill_height
@@ -89,6 +91,8 @@ class AutoPath:
             self.pulling_checkpoint = True
 
         # Process the input PDB
+        assert pdb_path is not None, 'Please provide a valid protein PDB file'
+
         if do_fix_pdb:
             protein_pdb = fix_pdb(pdbfile=pdb_path, keep_heterogens=True, pH=7.4)
             pdb_name = os.path.splitext(os.path.basename(pdb_path))[0]
@@ -256,13 +260,24 @@ class AutoPath:
                 checkpoint_file = f'{sys_name}/milestones/{basename}_relax_checkpoint.chk'
                 
                 logging.info(f'Running metadynamics for {basename}/{len(walkers_df)}')
+
                 metadynamics_MD.run(system_file=system_file,
                                     checkpoint_file=checkpoint_file,
                                     run_id=basename,
                                     bias_factor=self.mMD_bias_factor,
                                     hill_height=self.mMD_hill_height,
                                     mMD_time=self.mMD_time,
-                                    grid_dimensions=(min_cog, max_cog))
+                                    mMD_CV='nc',
+                                    hill_width=1,
+                                    grid_dimensions=(0, 100))
+                
+                # metadynamics_MD.run2D(system_file=system_file,
+                #                     checkpoint_file=checkpoint_file,
+                #                     run_id=basename,
+                #                     bias_factor=self.mMD_bias_factor,
+                #                     hill_height=self.mMD_hill_height,
+                #                     mMD_time=self.mMD_time,
+                #                     grid_dimensions=(min_cog, max_cog))
                 
             # Wrap, align and save the clean trajectory
             mMD_trajs = glob(f'{sys_name}/metadynamics/*.dcd')
