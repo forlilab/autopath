@@ -1,5 +1,5 @@
 import os
-import sys
+import logging
 import argparse
 from glob import glob
 from autopath.config import Config
@@ -40,6 +40,7 @@ def main():
     autopath_simulation = AutoPath(        
         # General
         VS_mode = config.VS_mode,
+        pdb_path = config.pdb_path,
         do_fix_pdb = config.do_fix_pdb,
         pocket_selection = config.pocket_selection,
         temperature = config.temperature,
@@ -75,8 +76,20 @@ def main():
         )
     
     for lig in ligands:
+      
+      # sys_name = os.path.splitext(os.path.basename(lig))[0]
+      # os.makedirs(sys_name, exist_ok=True)
+
+      # logging.basicConfig(
+      #     level="INFO",
+      #     format="%(asctime)s [%(levelname)s] %(message)s",
+      #     handlers=[
+      #         logging.FileHandler(f"{sys_name}/{sys_name}.log", mode="a"),
+      #         logging.StreamHandler(),
+      #     ],
+      # )
 
       autopath_simulation.run(lig)
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

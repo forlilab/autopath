@@ -31,15 +31,15 @@ def add_COM_force(system, group_A, group_B, fc_pull, r0):
     
 class SteeredMD:
     def __init__(self,
-                    checkpoint_file:str,
-                    system_file:str,
-                    prmtop_file:str,
-                    sys_name:str= 'test',
-                    lig_name:str = 'UNK',
-                    pocket_atoms:list[int]=None,
-                    HMR:bool= True,
-                    temp:float= 300,
-                    ):
+                checkpoint_file:str = None,
+                system_file:str = None,
+                prmtop_file:str = None,
+                sys_name:str = None,
+                lig_name:str = 'UNK',
+                pocket_atoms:list[int] = None,
+                HMR:bool = True,
+                temp:float = 300,
+                ):
 
         self.checkpoint_file = checkpoint_file
         self.system_file = system_file
@@ -129,6 +129,9 @@ class SteeredMD:
                 current_dist = get_COG_dist(simulation, self.ligand_ha_idx, self.pocket_atoms)
                 current_dist = current_dist * openmmunit.nanometers
                 # logging.info(f'Current distance is {current_dist}')
+
+                # _,_,distance = system.getConstraintParameters(6)
+                # forces = simulation.context.getState(getVelocities=False, getForces=True).getForces()[0]
 
                 # Get radius of starting point and end point
                 r_current = initial_r0 + float(i + 1) * dx_per_move
