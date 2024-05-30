@@ -1,14 +1,14 @@
 {
     "general": {
         "VS_mode": false,
-        "pdb_path":"input/protein.pdb",
-        "do_fix_pdb": false,
+        "pdb_path": null,
+        "do_fix_pdb": true,
         "pocket_selection":"protein and (byres around 3 resname UNK) and backbone",
         "temperature": 300,
         "random_state": 42
 },
     "preparation": {
-        "run_preparation": false,
+        "run_preparation": true,
         "forcefield": ["amber14/protein.ff14SB.xml", "amber14/tip3pfb.xml", "amber/tip3p_HFE_multivalent.xml"],
         "lig_ff": "espaloma",
         "boxShape": "dodecahedron",
@@ -17,12 +17,12 @@
     },
 
     "equilibration": {
-        "run_equilibration": false
+        "run_equilibration": true
     },
 
     "sMD": {
-        "run_sMDpulling": false,
-        "sMD_pulling_dist": 0.5,
+        "run_sMDpulling": true,
+        "sMD_pulling_dist": 1.0,
         "sMD_time": 1,
         "sMD_replicas": 5,
         "sMD_steps_per_move": 250,
@@ -34,9 +34,9 @@
     },
     "metadynamics": {
         "run_metadynamics": true,
-        "mMD_walkers": 10,
-        "mMD_time": 1,
-        "mMD_bias_factor": 10,
+        "mMD_walkers": 5,
+        "mMD_time": 2,
+        "mMD_bias_factor": 5,
         "mMD_hill_height": 0.3
     }
 }
