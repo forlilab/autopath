@@ -326,10 +326,16 @@ def find_closest_points(X, centroids):
 
 def cluster_data(data:pd.DataFrame = None,
                  var_names:list = None,
-                 n_clust:int = 10):
+                 n_clust:int = 10,
+                 weight_by_dist:bool = False):
+
+    if weight_by_dist:
+        kmeans_weights = data['cog_d'].values
+    else:
+        kmeans_weights = None
 
     X = data[var_names].values
-    kmeans = KMeans(n_clusters=n_clust, random_state=42, n_init="auto").fit(X)
+    kmeans = KMeans(n_clusters=n_clust, random_state=42, n_init="auto").fit(X, sample_weight=kmeans_weights)
     data['cluster'] = kmeans.labels_
     centroids = kmeans.cluster_centers_
 
@@ -379,7 +385,7 @@ def cluster_pulling_MD(traj_files:list=None,
     df.reset_index(inplace=True, drop=False)
     df.dropna(inplace=True)
 
-    df = df[df['cog_d'] <= 1.0]
+    # df = df[df['cog_d'] <= 1.0]
 
     df_clustered, closest_points = cluster_data(df, ['rmsd','cog_d'], n_clusters)
     
