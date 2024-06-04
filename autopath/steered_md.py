@@ -13,22 +13,6 @@ from openmm.app import *
 import openmm.unit as openmmunit
 from openmm.app.amberprmtopfile import AmberPrmtopFile
 
-      
-def add_COM_force(system, group_A, group_B, fc_pull, r0):     
-
-    force = CustomCentroidBondForce(2, '0.5 * fc_pull * (distance(g1,g2)-r0)^2')
-    force.addGlobalParameter('r0', r0)
-    # force.addGlobalParameter('fc_pull', fc_pull)
-    force.addPerBondParameter('fc_pull')
-    force.addGroup(group_A)
-    force.addGroup(group_B)
-    # force.addBond([0, 1], [])
-    force.addBond([0, 1], [fc_pull])
-    force.setUsesPeriodicBoundaryConditions(True)
-    system.addForce(force)
-
-    return
-    
 class SteeredMD:
     def __init__(self,
                 checkpoint_file:str = None,
@@ -37,6 +21,7 @@ class SteeredMD:
                 sys_name:str = None,
                 lig_name:str = 'UNK',
                 pocket_atoms:list[int] = None,
+                atom_list:list[int] = None,
                 HMR:bool = True,
                 temp:float = 300,
                 ):
@@ -46,6 +31,7 @@ class SteeredMD:
         prmtop = AmberPrmtopFile(prmtop_file)
         self.topology = prmtop.topology
         self.sys_name = sys_name
+        self.atom_list = atom_list
 
         os.makedirs(f'{sys_name}/sMD', exist_ok=True)
 
@@ -88,6 +74,10 @@ class SteeredMD:
         if self.checkpoint_file is not None:
             logging.info('Loading simulation checkpoint..')
             simulation.loadCheckpoint(self.checkpoint_file)
+
+        # Add harmonic positional restraints to protein CA
+        input_positions = simulation.context.getState(getPositions=True).getPositions()
+        add_harmonic_restraints(system, input_positions, self.topology, self.atom_list, 10, 'k_CA', 14)
 
         startdist = get_COG_dist(simulation, self.ligand_ha_idx, self.pocket_atoms)
         logging.info(f'Initial COM distance is {startdist:.2f} nm')
@@ -161,18 +151,19 @@ class SteeredMD:
                 f.write(f'{i},{r_current / openmmunit.nanometers},{current_dist / openmmunit.nanometers},{force_val / openmmunit.kilojoules_per_mole * openmmunit.nanometer},{work_val / openmmunit.kilojoules_per_mole}\n')
             f.close()
             
-            # Remove COM force
+            # Remove COM forces
+            simulation.context.getSystem().removeForce(simulation.context.getSystem().getNumForces()-2)
             simulation.context.getSystem().removeForce(simulation.context.getSystem().getNumForces()-1)
-            # print_current_forces(system)
+            print_current_forces(system)
 
             # Save state in PDB file
             final_positions = simulation.context.getState(getPositions=True).getPositions()
             save_pdb(self.topology, final_positions, f'{self.sys_name}/sMD/steeredMD_{rep_idx}.pdb')
 
-        # Get statistics related to the pooling and plot them
-        files = glob(f'{self.sys_name}/sMD/*.dat')
-        data = extract_sMD_statistics(files)
-        plot_sMD_statistics(data, self.sys_name)
+            # Get statistics related to the pooling and plot them
+            files = glob(f'{self.sys_name}/sMD/*.dat')
+            data = extract_sMD_statistics(files)
+            plot_sMD_statistics(data, self.sys_name)
 
         simulation_time = time.monotonic() - start_time
         logging.info(f'Finished {replicas} replicas of sMD in {simulation_time/60:.2f} min.')
