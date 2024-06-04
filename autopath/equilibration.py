@@ -8,99 +8,7 @@ from openmm.app import *
 import openmm.unit as openmmunit
 from openmm.app.amberprmtopfile import AmberPrmtopFile
 
-from autopath.utils import print_current_forces, add_reporters, select_platform, load_system, save_system, save_pdb, save_simulation
-
-def add_protein_restraints(system, positions, topology, 
-                            force_name:str='k_prot',
-                            restraint_force:int=5):
-    """
-    Function to add backbone position restraints
-    """
-    LIPIDS = set(('POP', ))
-    WATERS = set(('HOH','WAT'))
-
-    atoms = topology.atoms()
-
-    force = CustomExternalForce(f"{force_name}*periodicdistance(x, y, z, x0, y0, z0)^2")
-    force_amount = restraint_force * openmmunit.kilocalories_per_mole/openmmunit.angstroms**2
-    force.addGlobalParameter(force_name, force_amount)
-    force.addPerParticleParameter("x0")
-    force.addPerParticleParameter("y0")
-    force.addPerParticleParameter("z0")
-    
-    # Restraint heavy atoms only: C, O, N, S, P, CA and MG
-    elements = set((element.carbon, element.oxygen, element.magnesium, element.calcium,
-                        element.nitrogen, element.sulfur, element.phosphorus))
-    
-    ATOMSET = WATERS # | LIPIDS
-    counter=0
-    for i, (atom_crd, atom) in enumerate(zip(positions, atoms)):
-        if atom.residue.name not in ATOMSET and atom.element in elements:
-            force.addParticle(i, atom_crd.value_in_unit(openmmunit.nanometers))
-            counter += 1
-    logging.info(f'{counter} protein heavy atoms will be restrained')
-    
-    force.setForceGroup(12)
-
-    system.addForce(force)
-
-    return
-
-def get_ligand_ha(topology, lig_name:str='UNK'):
-    """get names for all non-hydrogen ligand atoms"""
-
-    residues = topology.residues()
-    lig_ha_idx = []
-    lig_ha_names = []
-    for r in residues:
-        if r.name == lig_name:
-            lig_ha_names = [a.name for a in r.atoms() if not a.name.startswith('H')]
-            lig_ha_idx = [a.index for a in r.atoms() if not a.name.startswith('H')]
-
-    return lig_ha_idx, lig_ha_names
-
-def get_pocket_ha(topology, pocket_resid:list[int]=None):
-    """get names for all non-hydrogen ligand atoms"""
-
-    residues = topology.residues()
-    pocket_ha_idx = []
-
-    for r in residues:
-        if r.index in pocket_resid:
-            print(f'match for {r.index} {r.name} {r.id}')
-            res_ha_idx = [a.index for a in r.atoms() if not a.name.startswith('H')]
-            pocket_ha_idx.extend(res_ha_idx)
-
-    return pocket_ha_idx
-
-
-# Function to add backbone position restraints
-def add_ligand_restraints(system, positions, topology,
-                            lig_name:str='UNK',
-                            force_name:str='k_lig',
-                            restraint_force:int=5):
-
-    force = CustomExternalForce(f"{force_name}*periodicdistance(x, y, z, x0, y0, z0)^2")
-    force_amount = restraint_force * openmmunit.kilocalories_per_mole/openmmunit.angstroms**2
-    force.addGlobalParameter(force_name, force_amount)
-    force.addPerParticleParameter("x0")
-    force.addPerParticleParameter("y0")
-    force.addPerParticleParameter("z0")
-
-    # get atom names for ligand
-    lig_ha_idx, lig_ha_names = get_ligand_ha(topology, lig_name) 
-
-    logging.info(f"The following ligand heavy atoms will be restrained: {', '.join(lig_ha_names)}")
-
-    atoms = topology.atoms()
-    for i, (atom_crd, atom) in enumerate(zip(positions, atoms)):
-        if atom.name in lig_ha_idx:
-            force.addParticle(i, atom_crd.value_in_unit(openmmunit.nanometers))
-
-    force.setForceGroup(13)
-    system.addForce(force)
-
-    return
+from autopath.utils import *
 
 def warm_up_system(simulation, integrator,
                    Tstart: int=5, Tend: int=300, Tstep: int=5,
@@ -203,6 +111,7 @@ class Equilibration:
                  system_file:str = 'system.xml',
                  prmtop_file:str = 'system.prmtop',
                  sys_name:str = None,
+                 lig_name:str = 'UNK',
                  temperature: float = 300,
                  timestep:float = 0.004,
                  ) -> None:
@@ -211,6 +120,7 @@ class Equilibration:
         prmtop = AmberPrmtopFile(prmtop_file)
         self.topology = prmtop.topology
         self.sys_name = sys_name
+        self.lig_name = lig_name
 
         self.temperature = temperature * openmmunit.kelvin
         self.timestep = timestep * openmmunit.picoseconds
@@ -239,12 +149,18 @@ class Equilibration:
         add_reporters(simulation, self.sys_name, 'equilibration', logperiod=2000, total_steps=600000)
 
         logging.info('Adding harmonic restraints to the protein..')
-        add_protein_restraints(self.system, initial_positions, self.topology,
-                                                    force_name= 'k_prot', restraint_force= 5)
-
+        prot_ha_idx, prot_ha_names = get_protein_ha(self.topology, self.lig_name)
+        logging.debug(f"The following protein heavy atoms will be restrained: {', '.join(prot_ha_names)}")
+        add_harmonic_restraints(self.system, initial_positions,
+                                self.topology, prot_ha_idx, restraint_force=5,
+                                force_name='k_prot', force_group=12)
+        
         logging.info('Adding harmonic restraints to the ligand..')
-        add_ligand_restraints(self.system, initial_positions, self.topology,
-                                                    force_name= 'k_lig', restraint_force= 5)
+        lig_ha_idx, lig_ha_names = get_ligand_ha(self.topology, self.lig_name)
+        logging.debug(f"The following ligand heavy atoms will be restrained: {', '.join(lig_ha_names)}")
+        add_harmonic_restraints(self.system, initial_positions,
+                                self.topology, lig_ha_idx, restraint_force=5,
+                                force_name='k_lig', force_group=13)
 
         logging.info('Minimizing..')
         simulation.minimizeEnergy()
@@ -258,7 +174,7 @@ class Equilibration:
         # Remove both protein and ligand force restraints
         simulation.context.getSystem().removeForce(simulation.context.getSystem().getNumForces()-3)
         simulation.context.getSystem().removeForce(simulation.context.getSystem().getNumForces()-2)
-        # print_current_forces(self.system)
+        print_current_forces(self.system)
 
         final_positions = simulation.context.getState(getPositions=True).getPositions()
 

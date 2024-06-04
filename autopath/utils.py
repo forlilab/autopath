@@ -154,7 +154,8 @@ def save_amber_topology(topology: app.Topology, positions: list, system: System,
 
     return
 
-def select_platform(platform_name: str=None):
+def select_platform(platform_name:str = None, 
+                    device_index:str = '0'):
 
     if platform_name == None or platform_name == 'fastest':
         platform_name = get_fastest_platform().getName()
@@ -165,11 +166,11 @@ def select_platform(platform_name: str=None):
 
         if platform_name in ['OpenCL']:
             platform.setPropertyDefaultValue('Precision', 'mixed')
-            platform.setPropertyDefaultValue('DeviceIndex','0')
+            platform.setPropertyDefaultValue('DeviceIndex',device_index)
         if platform_name in ['CUDA']:
             platform.setPropertyDefaultValue('DeterministicForces', 'false')
             platform.setPropertyDefaultValue('CudaPrecision', 'mixed')
-            platform.setPropertyDefaultValue('CudaDeviceIndex', '0')
+            platform.setPropertyDefaultValue('CudaDeviceIndex',device_index)
     except:
         logging.error(f'Something went wrong trying to get {platform_name} platform.')
 
@@ -204,10 +205,34 @@ def add_reporters(simulation,
 
 def print_current_forces(system:System = None):
     for index, fc in enumerate(system.getForces()):
-        print(f'Force Index:{index} | Name: {fc.getName()} | Group: {fc.getForceGroup()}')
+        logging.debug(f'Force Index:{index} | Name: {fc.getName()} | Group: {fc.getForceGroup()}')
     return None
 
-def get_ligand_ha(topology, lig_name: str = "UNK"):
+def get_protein_ha(topology:app.Topology, lig_name: str = "UNK"):
+    
+    ATOMSET = set(('HOH','WAT','POP', lig_name))
+
+    # # Restraint heavy atoms only: C, O, N, S, P, CA and MG
+    # elements = set((element.carbon, element.oxygen, element.magnesium, element.calcium,
+    #                     element.nitrogen, element.sulfur, element.phosphorus))
+    
+    # protein_ha = []
+    # for atom in topology.atoms():
+    #     if atom.residue.name not in ATOMSET and atom.element in elements:
+    #         protein_ha.append(atom.index)
+    
+    protein_ha_idx = []
+    protein_ha_name = []
+
+    for atom in topology.atoms():
+        if atom.residue.name not in ATOMSET:
+            if not atom.name.startswith("H"):
+                protein_ha_idx.append(atom.index)
+                protein_ha_name.append(atom.name)
+
+    return protein_ha_idx, protein_ha_name
+
+def get_ligand_ha(topology:app.Topology, lig_name: str = "UNK"):
     """get names for all non-hydrogen ligand atoms"""
 
     residues = topology.residues()
@@ -220,19 +245,20 @@ def get_ligand_ha(topology, lig_name: str = "UNK"):
 
     return lig_ha_idx, lig_ha_names
 
-# def get_pocket_ha(topology, pocket_resid:list[int]=None):
-#     """get names for all non-hydrogen ligand atoms"""
+def get_pocket_ha(topology:app.Topology, pocket_resid:list[int]=None):
+    """get names for all non-hydrogen ligand atoms"""
 
-#     residues = topology.residues()
-#     pocket_ha_idx = []
+    residues = topology.residues()
+    pocket_ha_idx = []
 
-#     for r in residues:
-#         if r.index in pocket_resid:
-#             print(f'match for {r.index} {r.name} {r.id}')
-#             res_ha_idx = [a.index for a in r.atoms() if not a.name.startswith('H')]
-#             pocket_ha_idx.extend(res_ha_idx)
+    for r in residues:
+        if r.index in pocket_resid:
+            print(f'match for {r.index} {r.name} {r.id}')
+            res_ha_idx = [a.index for a in r.atoms() if not a.name.startswith('H')]
+            pocket_ha_idx.extend(res_ha_idx)
 
-#     return pocket_ha_idx
+    return pocket_ha_idx
+
 
 def get_COG_dist(simulation, groupA, groupB):
 
@@ -298,6 +324,55 @@ def get_ligand_rmsd(u, lig_resname, alig_select):
     rmsds = rmsds/10 #angstroms to nm
 
     return pd.DataFrame(rmsds, columns=['rmsd'], index=range(len(rmsds)))
+
+def add_COM_force(system, group_A, group_B, fc_pull, r0):     
+
+    force = CustomCentroidBondForce(2, '0.5 * fc_pull * (distance(g1,g2)-r0)^2')
+    force.addGlobalParameter('r0', r0)
+    # force.addGlobalParameter('fc_pull', fc_pull)
+    force.addPerBondParameter('fc_pull')
+    force.addGroup(group_A)
+    force.addGroup(group_B)
+    # force.addBond([0, 1], [])
+    force.addBond([0, 1], [fc_pull])
+    force.setUsesPeriodicBoundaryConditions(True)
+    system.addForce(force)
+
+    return
+
+def add_harmonic_restraints(system: System=None, 
+                            positions:list=None,
+                            topology:app.Topology=None,
+                            atom_list:list=None,
+                            restraint_force:int=5,
+                            force_name:str='k_prot',
+                            force_group:int=12
+                            ):
+    """
+    Function to add positional harmonic restraints to a set of atoms
+    """
+
+    atoms = topology.atoms()
+
+    force = CustomExternalForce(f"{force_name}*periodicdistance(x, y, z, x0, y0, z0)^2")
+    force_amount = restraint_force * openmmunit.kilocalories_per_mole/openmmunit.angstroms**2
+    force.addGlobalParameter(force_name, force_amount)
+    force.addPerParticleParameter("x0")
+    force.addPerParticleParameter("y0")
+    force.addPerParticleParameter("z0")
+
+    counter=0
+    for i, (atom_crd, atom) in enumerate(zip(positions, atoms)):
+        if atom.index in atom_list:
+            force.addParticle(i, atom_crd.value_in_unit(openmmunit.nanometers))
+            counter += 1
+    logging.info(f'{counter} atoms will be restrained')
+
+    force.setForceGroup(force_group)
+    system.addForce(force)
+
+    return
+
 
 def extract_sMD_statistics(files):
     data=[]
