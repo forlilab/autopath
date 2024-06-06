@@ -1,0 +1,107 @@
+{
+ "step1": {
+  "k_prot": 5.0,
+  "k_lig": 5.0,
+  "npt_flag": false,
+  "nsteps": 50000,
+  "stepsize": 0.002
+ },
+ "step2": {
+  "k_prot": 4.5,
+  "k_lig": 5.0,
+  "npt_flag": true,
+  "nsteps": 25000,
+  "stepsize": 0.004
+ },
+ "step3": {
+  "k_prot": 4.0,
+  "k_lig": 5.0,
+  "npt_flag": true,
+  "nsteps": 25000,
+  "stepsize": 0.004
+ },
+ "step4": {
+  "k_prot": 3.5,
+  "k_lig": 5.0,
+  "npt_flag": true,
+  "nsteps": 25000,
+  "stepsize": 0.004
+ },
+ "step5": {
+  "k_prot": 3.0,
+  "k_lig": 4.5,
+  "npt_flag": true,
+  "nsteps": 25000,
+  "stepsize": 0.004
+ },
+ "step6": {
+  "k_prot": 2.5,
+  "k_lig": 4.0,
+  "npt_flag": true,
+  "nsteps": 25000,
+  "stepsize": 0.004
+ },
+ "step7": {
+  "k_prot": 2.0,
+  "k_lig": 3.5,
+  "npt_flag": true,
+  "nsteps": 50000,
+  "stepsize": 0.004
+ },
+ "step8": {
+  "k_prot": 1.5,
+  "k_lig": 3.0,
+  "npt_flag": true,
+  "nsteps": 50000,
+  "stepsize": 0.004
+ },
+ "step9": {
+  "k_prot": 1.0,
+  "k_lig": 3.0,
+  "npt_flag": true,
+  "nsteps": 50000,
+  "stepsize": 0.004
+ },
+ "step10": {
+  "k_prot": 0.5,
+  "k_lig": 2.5,
+  "npt_flag": true,
+  "nsteps": 50000,
+  "stepsize": 0.004
+ },
+ "step11": {
+  "k_prot": 0.0,
+  "k_lig": 2.0,
+  "npt_flag": true,
+  "nsteps": 50000,
+  "stepsize": 0.004
+ },
+ "step12": {
+  "k_prot": 0.0,
+  "k_lig": 1.5,
+  "npt_flag": true,
+  "nsteps": 50000,
+  "stepsize": 0.004
+ },
+ "step13": {
+  "k_prot": 0.0,
+  "k_lig": 1.0,
+  "npt_flag": true,
+  "nsteps": 50000,
+  "stepsize": 0.004
+ },
+ "step14": {
+  "k_prot": 0.0,
+  "k_lig": 0.5,
+  "npt_flag": true,
+  "nsteps": 50000,
+  "stepsize": 0.004
+ },
+ "step15": {
+  "k_prot": 0.0,
+  "k_lig": 0.0,
+  "npt_flag": true,
+  "nsteps": 50000,
+  "stepsize": 0.004
+ }
+}

@@ -1,4 +1,5 @@
 import time
+import json
 import logging
 import numpy as np
 from sys import stdout
@@ -16,8 +17,8 @@ def warm_up_system(simulation, integrator,
                    warming_steps: int=100000):
 
     """
-    Run simulated annealing equilibration. 
-    WarmUp with in NVT ensemble, slowly increasing the temperature
+    Perform simulated annealing, slowly increasing the temperature 
+    to warm-up the system in the NVT ensemble.
     """
 
     integrator.setStepSize(timestep * openmmunit.picoseconds)
@@ -31,7 +32,7 @@ def warm_up_system(simulation, integrator,
     simulation.context.setVelocitiesToTemperature(Tstart)
     
     # Warm up the system gradually
-    for i in range(nT):
+    for i in range(nT+1):
         temperature = Tstart + i * Tstep
         integrator.setTemperature(temperature)
         logging.debug(f"Temperature set to {temperature} K.")
@@ -39,29 +40,14 @@ def warm_up_system(simulation, integrator,
 
     return
 
-def equilibrate_restrained_system(simulation, system, integrator, temp) -> None:
+def equilibrate_restrained_system(simulation, system, integrator, 
+                                  equil_scheme:dict=None,
+                                  temp:int = 300) -> None:
+    
     """ Do restrained equilibration, releasing constraints 
     on protein and ligands and increasing timestep
     """
-
-    equil_scheme={    
-    'step1': {'k_prot': 5.0, 'k_lig': 5.0, 'npt_flag': False, 'nsteps': 50000, 'stepsize': 0.002},
-    'step2': {'k_prot': 4.5, 'k_lig': 5.0, 'npt_flag': True, 'nsteps': 25000, 'stepsize': 0.004},
-    'step3': {'k_prot': 4.0, 'k_lig': 5.0, 'npt_flag': True, 'nsteps': 25000, 'stepsize': 0.004},
-    'step4': {'k_prot': 3.5, 'k_lig': 5.0, 'npt_flag': True, 'nsteps': 25000, 'stepsize': 0.004},
-    'step5': {'k_prot': 3.0, 'k_lig': 4.5, 'npt_flag': True, 'nsteps': 25000, 'stepsize': 0.004},
-    'step6': {'k_prot': 2.5, 'k_lig': 4.0, 'npt_flag': True, 'nsteps': 25000, 'stepsize': 0.004},
-    'step7': {'k_prot': 2.0, 'k_lig': 3.5, 'npt_flag': True, 'nsteps': 25000, 'stepsize': 0.004},
-    'step8': {'k_prot': 1.5, 'k_lig': 3.0, 'npt_flag': True, 'nsteps': 25000, 'stepsize': 0.004},
-    'step9': {'k_prot': 1.0, 'k_lig': 3.0, 'npt_flag': True, 'nsteps': 25000, 'stepsize': 0.004},
-    'step10': {'k_prot': 0.5, 'k_lig': 2.5, 'npt_flag': True, 'nsteps': 25000, 'stepsize': 0.004},
-    'step11': {'k_prot': 0.0, 'k_lig': 2.0, 'npt_flag': True, 'nsteps': 25000, 'stepsize': 0.004},
-    'step12': {'k_prot': 0.0, 'k_lig': 1.5, 'npt_flag': True, 'nsteps': 50000, 'stepsize': 0.004},
-    'step13': {'k_prot': 0.0, 'k_lig': 1.0, 'npt_flag': True, 'nsteps': 50000, 'stepsize': 0.004},
-    'step14': {'k_prot': 0.0, 'k_lig': 0.5, 'npt_flag': True, 'nsteps': 50000, 'stepsize': 0.004},
-    'step15': {'k_prot': 0.0, 'k_lig': 0.0, 'npt_flag': True, 'nsteps': 50000, 'stepsize': 0.004},
-    }
-    
+   
     # Initialize variables as None
     k_lig_prev, k_prot_prev, npt_prev, stepsize_prev = None, None, None, None
 
@@ -72,7 +58,7 @@ def equilibrate_restrained_system(simulation, system, integrator, temp) -> None:
         nsteps = params['nsteps']
         stepsize = params['stepsize']
 
-        logging.info(f"Equilibration {step_name} with K_prot={k_prot} - K_lig={k_lig}")
+        logging.info(f"Equilibration {step_name}: K_prot={k_prot} | K_lig={k_lig} | NPT={npt_flag} | n_steps={nsteps} | stepsize={stepsize}")
 
         # Adjust force constant for the ligand if it has changed
         if k_lig_prev is None or k_lig != k_lig_prev: 
@@ -85,7 +71,7 @@ def equilibrate_restrained_system(simulation, system, integrator, temp) -> None:
         # Enable NPT if needed
         # if npt_prev is None or npt_flag != npt_prev and npt_flag:
         if npt_flag != npt_prev and npt_flag:
-            logging.info(f'Adding a Montecarlo Barostat to the system')
+            logging.debug(f'Adding a Montecarlo Barostat to the system')
             system.addForce(MonteCarloBarostat(1 * openmmunit.atmosphere, temp))
             simulation.context.reinitialize(preserveState=True)
 
@@ -93,7 +79,7 @@ def equilibrate_restrained_system(simulation, system, integrator, temp) -> None:
         if stepsize_prev is None or stepsize != stepsize_prev:
             integrator.setStepSize(stepsize)
             simulation.context.reinitialize(preserveState=True)
-            logging.info(f'Stepsize set to {integrator.getStepSize()}')
+            logging.debug(f'Stepsize set to {integrator.getStepSize()}')
 
         # Run the simulation for the specified number of steps
         simulation.step(nsteps)
@@ -108,11 +94,13 @@ def equilibrate_restrained_system(simulation, system, integrator, temp) -> None:
            
 class Equilibration:
     def __init__(self,
-                 system_file:str = 'system.xml',
-                 prmtop_file:str = 'system.prmtop',
+                 system_file:str = None,
+                 prmtop_file:str = None,
                  sys_name:str = None,
                  lig_name:str = 'UNK',
-                 temperature: float = 300,
+                 equilibration_scheme:str = 'autopath/data/equilibration.json',
+                 warm_up_steps:int = 100000,
+                 temperature:float = 300,
                  timestep:float = 0.004,
                  ) -> None:
 
@@ -124,12 +112,27 @@ class Equilibration:
 
         self.temperature = temperature * openmmunit.kelvin
         self.timestep = timestep * openmmunit.picoseconds
- 
+        self.warm_up_steps = warm_up_steps
+
         self.platform = select_platform('fastest')
 
+        try:
+            logging.info('Loading equilibration protocol from JSON file.')
+            with open(equilibration_scheme) as f:
+                self.equilibration_scheme = json.load(f)
+        except FileNotFoundError:
+            logging.error(f'{equilibration_scheme} not found.')
+            raise
+        except json.JSONDecodeError:
+            logging.error(f'{equilibration_scheme} is not valid JSON.')
+            raise
+
+        equilibration_steps = sum([v['nsteps'] for k,v in self.equilibration_scheme.items()])
+        self.total_steps = warm_up_steps + equilibration_steps
+        
         return
 
-    def run(self, pdb_file):
+    def run(self, pdb_file:str=None) -> None:
         
         start_time = time.monotonic()
 
@@ -142,11 +145,10 @@ class Equilibration:
         simulation = Simulation(self.topology, self.system, integrator, self.platform)
 
         initial_positions = PDBFile(pdb_file).positions
-
         simulation.context.setPositions(initial_positions)
 
         logging.info(f'Setting up reporters for {self.sys_name}..')
-        add_reporters(simulation, self.sys_name, 'equilibration', logperiod=2000, total_steps=600000)
+        add_reporters(simulation, self.sys_name, 'equilibration', logperiod=2000, total_steps=self.total_steps)
 
         logging.info('Adding harmonic restraints to the protein..')
         prot_ha_idx, prot_ha_names = get_protein_ha(self.topology, self.lig_name)
@@ -166,15 +168,15 @@ class Equilibration:
         simulation.minimizeEnergy()
 
         logging.info('Warming up the system..')
-        warm_up_system(simulation, integrator, warming_steps=100000)
+        warm_up_system(simulation, integrator, warming_steps=self.warm_up_steps)
         
         logging.info('Running restrained equilibration protocol..')
-        equilibrate_restrained_system(simulation, self.system, integrator, self.temperature)
+        equilibrate_restrained_system(simulation, self.system, integrator, self.equilibration_scheme, self.temperature)
 
         # Remove both protein and ligand force restraints
         simulation.context.getSystem().removeForce(simulation.context.getSystem().getNumForces()-3)
         simulation.context.getSystem().removeForce(simulation.context.getSystem().getNumForces()-2)
-        print_current_forces(self.system)
+        # print_current_forces(self.system)
 
         final_positions = simulation.context.getState(getPositions=True).getPositions()
 
