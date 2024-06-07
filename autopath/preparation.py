@@ -19,7 +19,7 @@ from openmmforcefields.generators import EspalomaTemplateGenerator, SMIRNOFFTemp
 from rdkit.Chem import SDMolSupplier
 
 # AutoPath imports
-from autopath.utils import fix_pdb, save_pdb, save_system, save_amber_topology
+from autopath.utils import save_pdb, save_system, save_amber_topology
 
 class SystemPreparation:
     def __init__(self,
@@ -51,14 +51,18 @@ class SystemPreparation:
         self.nb_cutoff = 1.0 * openmmunit.nanometers 
         self.switchDistance = 0.9 * openmmunit.nanometers
 
-    def _sdf_to_mol(self, lig_sdf):
+    def _sdf_to_mol(self, lig_sdf:str=None):
 
-        # Load ligand SDF
-        rdkit_mol = SDMolSupplier(lig_sdf)[0]
+        """ Load ligand SDF and transform to OpenMM molecule"""
+        try:
+            rdkit_mol = SDMolSupplier(lig_sdf)[0]
+        except:
+            logging.error(f'Something went wrong loading {lig_sdf}..')
+            raise
 
         # Convert to OpenMM molecule
         ligand = Molecule.from_rdkit(rdkit_mol,
-                                    allow_undefined_stereo = self.allow_undefined_stereo
+                                    self.allow_undefined_stereo
                                     )
         return ligand
 
@@ -85,28 +89,39 @@ class SystemPreparation:
 
         return ligand_omm_topology, ligand_positions
 
-    def run(self, prot_path, lig_path):
+    def run(self,
+            prot_path:str=None,
+            lig_path:str=None
+            ):
 
         start_time = time.monotonic()
 
         rec_name = os.path.splitext(os.path.basename(prot_path))[0]
-        lig_name = os.path.splitext(os.path.basename(lig_path))[0]
+        out_dir = rec_name
 
-        # process ligand
-        logging.info(f'Parametrizing ligand {lig_name}..')
-        lig = self._sdf_to_mol(lig_path)
-        ligand_topology, ligand_positions = self._parametrize_ligand(lig)
-
-        # process protein
-        logging.info(f'Loading {rec_name} PDB..')
-        protein_pdb = PDBFile(prot_path)
+        # process the protein
+        try:
+            protein_pdb = PDBFile(prot_path)
+            logging.info(f'Loaded {rec_name} PDB..')
+        except:
+            logging.error(f'Something went wrong loading {rec_name} PDB..')
+            raise
 
         # make an OpenMM Modeller object with the protein
         modeller = Modeller(protein_pdb.topology, protein_pdb.positions)
 
-        # add the ligand to the Modeller
-        modeller.add(ligand_topology, ligand_positions)
-        
+        if lig_path is not None:
+            lig_name = os.path.splitext(os.path.basename(lig_path))[0]
+            logging.info(f'Parametrizing ligand {lig_name}..')
+
+            lig = self._sdf_to_mol(lig_path)
+            ligand_topology, ligand_positions = self._parametrize_ligand(lig)
+
+            # add the ligand to the Modeller
+            modeller.add(ligand_topology, ligand_positions)
+
+            out_dir = lig_name
+
         logging.info(f'Adding solvent..')
         modeller.addSolvent(self.forcefield, neutralize=True, 
                             ionicStrength=self.ionicStrength,
@@ -118,11 +133,11 @@ class SystemPreparation:
                                 hydrogenMass=self.hydrogenMass, constraints=HBonds)
 
         
-        save_system(system, f'{lig_name}/system.xml')
-        save_pdb(modeller.topology, modeller.positions, f'{lig_name}/system.pdb')
-        save_amber_topology(modeller.topology, modeller.positions, system, self.forcefield, lig_name)
+        save_system(system, f'{out_dir}/system.xml')
+        save_pdb(modeller.topology, modeller.positions, f'{out_dir}/system.pdb')
+        save_amber_topology(modeller.topology, modeller.positions, system, self.forcefield, out_dir)
 
         simulation_time = time.monotonic() - start_time
         logging.info(f'Finished system preparation in {simulation_time:.2f} seconds.')
 
-        return
+        return None
