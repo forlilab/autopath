@@ -19,7 +19,7 @@ from openmmforcefields.generators import EspalomaTemplateGenerator, SMIRNOFFTemp
 from rdkit.Chem import SDMolSupplier
 
 # AutoPath imports
-from autopath.utils import save_pdb, save_system, save_amber_topology
+from autopath.utils import add_variants, save_pdb, save_system, save_amber_topology
 
 class SystemPreparation:
     def __init__(self,
@@ -91,6 +91,7 @@ class SystemPreparation:
 
     def run(self,
             prot_path:str=None,
+            variants:dict=None,
             lig_path:str=None
             ):
 
@@ -109,6 +110,9 @@ class SystemPreparation:
 
         # make an OpenMM Modeller object with the protein
         modeller = Modeller(protein_pdb.topology, protein_pdb.positions)
+
+        if variants is not None:
+            modeller = add_variants(modeller, variants)
 
         if lig_path is not None:
             lig_name = os.path.splitext(os.path.basename(lig_path))[0]

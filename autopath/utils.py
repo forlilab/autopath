@@ -13,7 +13,8 @@ import numpy as np
 import pandas as pd
 import shutil
 import logging
-from typing import Union
+from typing import Union, Tuple
+from collections import defaultdict
 
 import MDAnalysis as mda
 from MDAnalysis.analysis.rms import RMSD, RMSF
@@ -127,6 +128,7 @@ def load_system(system_path: str) -> System:
     """
     with open(system_path) as fi:
         system = XmlSerializer.deserialize(fi.read())
+        
     return system
 
 def save_amber_topology(topology: app.Topology, positions: list, system: System, forcefield: app.ForceField, out_path: str):
@@ -205,12 +207,12 @@ def add_reporters(simulation,
 
 def print_current_forces(system:System = None):
     for index, fc in enumerate(system.getForces()):
-        logging.debug(f'Force Index:{index} | Name: {fc.getName()} | Group: {fc.getForceGroup()}')
+        logging.info(f'Force Index:{index} | Name: {fc.getName()} | Group: {fc.getForceGroup()}')
     return None
 
 def get_protein_ha(topology:app.Topology, lig_name: str = "UNK"):
     
-    ATOMSET = set(('HOH','WAT','POP', lig_name))
+    ATOMSET = set(('HOH','WAT','POP','K','CL','NA', lig_name))
 
     # # Restraint heavy atoms only: C, O, N, S, P, CA and MG
     # elements = set((element.carbon, element.oxygen, element.magnesium, element.calcium,
@@ -276,8 +278,8 @@ def calculate_com_distance(u, lig_name, pocket_atoms):
 
     com_distance = []
     for ts in u.trajectory:
-        lig_com = ligand_atoms.center_of_mass()
-        prot_com = pocket_atoms.center_of_mass()
+        lig_com = ligand_atoms.center_of_mass(pbc=True)
+        prot_com = pocket_atoms.center_of_mass(pbc=True)
         com_distance.append(np.linalg.norm(prot_com-lig_com))
 
     return pd.DataFrame(com_distance, columns=['com_d'], index=range(len(com_distance)))
@@ -286,8 +288,8 @@ def calculate_cog_distance(u, ligand_atoms, pocket_atoms):
 
     cog_distance = []
     for ts in u.trajectory:
-        lig_cog = ligand_atoms.center_of_geometry(wrap=True)
-        prot_cog = pocket_atoms.center_of_geometry(wrap=True)
+        lig_cog = ligand_atoms.center_of_geometry(pbc=True)
+        prot_cog = pocket_atoms.center_of_geometry(pbc=True)
         dist = np.linalg.norm(prot_cog-lig_cog) / 10 #to nm
         cog_distance.append(dist)
 
@@ -325,7 +327,12 @@ def get_ligand_rmsd(u, lig_resname, alig_select):
 
     return pd.DataFrame(rmsds, columns=['rmsd'], index=range(len(rmsds)))
 
-def add_COM_force(system, group_A, group_B, fc_pull, r0):     
+def add_COM_force(system:System=None,
+                  group_A:list=None,
+                  group_B:list=None,
+                  fc_pull=None,
+                  r0=None,
+                  force_group:int=15):     
 
     force = CustomCentroidBondForce(2, '0.5 * fc_pull * (distance(g1,g2)-r0)^2')
     force.addGlobalParameter('r0', r0)
@@ -336,13 +343,14 @@ def add_COM_force(system, group_A, group_B, fc_pull, r0):
     # force.addBond([0, 1], [])
     force.addBond([0, 1], [fc_pull])
     force.setUsesPeriodicBoundaryConditions(True)
+    force.setForceGroup(force_group)
     system.addForce(force)
 
     return
 
 def add_harmonic_restraints(system: System=None, 
                             positions:list=None,
-                            topology:app.Topology=None,
+                            topology:app.Topology=None, 
                             atom_list:list=None,
                             restraint_force:int=5,
                             force_name:str='k_prot',
@@ -372,7 +380,6 @@ def add_harmonic_restraints(system: System=None,
     system.addForce(force)
 
     return
-
 
 def extract_sMD_statistics(files):
     data=[]
@@ -405,7 +412,7 @@ def cluster_data(data:pd.DataFrame = None,
                  weight_by_dist:bool = False):
 
     if weight_by_dist:
-        kmeans_weights = data['cog_d'].values
+        kmeans_weights = 1/np.array(data['cog_d'].values)
     else:
         kmeans_weights = None
 
@@ -452,7 +459,6 @@ def cluster_pulling_MD(traj_files:list=None,
         rmsd = get_ligand_rmsd(u, lig_resname, alig_select='ligand')
                 
         dat = pd.concat([cog_d, rmsd], axis=1)
-        # dat['sysname'] = sys_name
         dat['replica'] = f'rep_{run_n}'
         distances.append(dat)
         
@@ -460,7 +466,7 @@ def cluster_pulling_MD(traj_files:list=None,
     df.reset_index(inplace=True, drop=False)
     df.dropna(inplace=True)
 
-    # df = df[df['cog_d'] <= 1.0]
+    # df = df[df['cog_d'] <= 1.5]
 
     df_clustered, closest_points = cluster_data(df, ['rmsd','cog_d'], n_clusters)
     
@@ -484,7 +490,7 @@ def cluster_milestone_pdbs(files:list=None,
     df_dist = pd.concat(distances, axis=0)
     clustered_data, milestones = cluster_data(df_dist, ['cog_d'], n_clust)
     milestones.sort_values(by='cog_d', ascending=False, inplace=True)
-    print(milestones)
+
     return clustered_data, milestones
 
 def get_most_diverse_points(centroids_df:pd.DataFrame,
@@ -539,6 +545,36 @@ def write_centroids_pdb(closest_points_df:pd.DataFrame = None,
     shutil.copyfile(f'{sys_name}/system_equilibrated.pdb', f'{sys_name}/milestones/milestone_0.pdb')
 
     return 
+
+def add_variants(modeller: Modeller,
+                 variants_dict: dict=None) -> Modeller:
+    """Adds variants for specific protonation states.
+
+    :param modeller: OpenMM Modeller
+    :type Modeller: Modeller
+    :param variants_dict: dict of variants to apply for the protonation states
+    :type variants: dict
+    :return: Modeller object with added protonation states
+    :rtype: Modeller
+    """
+
+    variants = list()
+    residues = list(modeller.residues())
+    mapping = defaultdict(list)
+    for r in residues:
+        mapping[r.chain.id].append(int(r.id))
+
+    for chain in mapping:
+        for res_number in mapping[chain]:
+            key = f"{chain}:{res_number}"
+            if key in variants_dict:
+                variants.append(variants_dict[key])
+            else:
+                variants.append(None)
+
+    modeller.addHydrogens(variants=variants)
+
+    return modeller
 
 # from scipy.optimize import fsolve
 # from scipy.interpolate import CubicSpline
