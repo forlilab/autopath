@@ -12,10 +12,11 @@ from .preparation import SystemPreparation
 from .steered_md import SteeredMD
 from .metadynamics import MetadynamicsMD
 from .relax_md import RelaxMD
+from .vanilla_md import VanillaMD
 
 __all__ = [
         #    'AutoPath',
            'Equilibration', 'SystemPreparation',
            'SteeredMD', 'MetadynamicsMD',
-           'RelaxMD'
+           'RelaxMD','VanillaMD'
             ]
