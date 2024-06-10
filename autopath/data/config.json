@@ -3,7 +3,7 @@
         "VS_mode": false,
         "pdb_path": null,
         "do_fix_pdb": true,
-        "pocket_selection":"protein and (byres around 3 resname UNK) and backbone",
+        "pocket_selection":"protein and (around 5 resname UNK) and name CA",
         "temperature": 300,
         "random_state": 42
 },
