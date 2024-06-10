@@ -1,58 +1,67 @@
-import pdbfixer
-from pdbfixer.pdbfixer import PDBFixer
-import openmm.app as app
-import openmm.unit as openmmunit
-import parmed
-from openmmtools.utils import get_fastest_platform
-
-from openmm import *
-from openmm.app import *
 import os
-from sys import stdout
-import numpy as np
-import pandas as pd
 import shutil
 import logging
+import numpy as np
+import pandas as pd
+from sys import stdout
+
 from typing import Union, Tuple
 from collections import defaultdict
 
+from openmm import *
+from openmm.app import *
+import openmm.app as app
+import openmm.unit as openmmunit
+from pdbfixer.pdbfixer import PDBFixer
+from openmmtools.utils import get_fastest_platform
+
+import parmed
+
 import MDAnalysis as mda
-from MDAnalysis.analysis.rms import RMSD, RMSF
 from MDAnalysis.analysis import align
+from MDAnalysis.transformations import wrap
+from MDAnalysis.core.universe import Universe
+from MDAnalysis.analysis.rms import RMSD, RMSF
+
 import pytraj as pt
 
 from sklearn.cluster import KMeans
 
 
-def align_trajectory(prmtop_file:str = None, 
-                     traj_file:Union[str,list] = None,
-                     out_fname:str = None,
-                     strip_mask:str = None #':HOH,NA,CL,K,POP'
-                     ):
-    
+def align_trajectory(
+    prmtop_file: str = None,
+    traj_file: Union[str, list] = None,
+    out_fname: str = None,
+    strip_mask: str = None,  #':HOH,NA,CL,K,POP'
+):
+
     traj_fname = f"{out_fname}_aligned.dcd"
 
     ptraj = pt.iterload(traj_file, prmtop_file)
     ptraj = ptraj.autoimage()
     ptraj = ptraj.center()
-    ptraj = ptraj.superpose(ref=0, mask='@CA,C,N')
-    
+    ptraj = ptraj.superpose(ref=0, mask="@CA,C,N")
+
     if strip_mask is not None:
         ptraj = ptraj.strip(strip_mask)
-        pt.save(f'{out_fname}_dry.prmtop', ptraj.top, overwrite=True)
+        pt.save(f"{out_fname}_dry.prmtop", ptraj.top, overwrite=True)
     ptraj.save(traj_fname)
 
     return
 
-def fix_pdb(pdbfile: str,keep_heterogens: bool=False, 
-            ignore_terminal_missing_residues:bool=True, 
-            pH: float=7.4) -> PDBFixer:
-    """ Fixes common problems in PDB such as:
+
+def fix_pdb(
+    pdbfile: str,
+    keep_heterogens: bool = False,
+    ignore_terminal_missing_residues: bool = True,
+    pH: float = 7.4,
+) -> PDBFixer:
+    """Fixes common problems in PDB such as:
             - missing atoms
             - missing residues
             - missing hydrogens
             - remove nonstandard residues
-    
+
     Args:
         pdbfile (str): pdb string old format
         pdbxfile (str): pdb string new format
@@ -61,7 +70,7 @@ def fix_pdb(pdbfile: str,keep_heterogens: bool=False,
         pH (float):  pH value used to determine protonation state of residues
     """
 
-    fixer = pdbfixer.PDBFixer(str(pdbfile))
+    fixer = PDBFixer(str(pdbfile))
     fixer.findMissingResidues()
 
     if ignore_terminal_missing_residues:
@@ -76,11 +85,12 @@ def fix_pdb(pdbfile: str,keep_heterogens: bool=False,
     if not keep_heterogens:
         fixer.removeHeterogens(keepWater=True)
 
-    fixer.findMissingAtoms() 
+    fixer.findMissingAtoms()
     fixer.addMissingAtoms()
     fixer.addMissingHydrogens(pH)
 
     return fixer
+
 
 def save_pdb(topology: app.Topology, positions: list, file_path: str):
     """Saves the specified topology and position to the out_path file.
@@ -90,13 +100,9 @@ def save_pdb(topology: app.Topology, positions: list, file_path: str):
         positions (list): list of 3D coords
         out_path (str): path to where to save the file
     """
-    app.PDBFile.writeFile(
-        topology,
-        positions,
-        file_path,
-        keepIds=True
-    )
+    app.PDBFile.writeFile(topology, positions, file_path, keepIds=True)
     return
+
 
 def save_system(system: System, out_file: str):
     """Saves the openmm system to the desired out path.
@@ -110,12 +116,14 @@ def save_system(system: System, out_file: str):
         fo.write(XmlSerializer.serialize(system))
     return
 
+
 def save_simulation(simulation, out_file: str):
 
     simulation.saveCheckpoint(f"{out_file}.chk")
     simulation.saveState(f"{out_file}.xml")
 
     return
+
 
 def load_system(system_path: str) -> System:
     """Loads the desired system.
@@ -128,101 +136,150 @@ def load_system(system_path: str) -> System:
     """
     with open(system_path) as fi:
         system = XmlSerializer.deserialize(fi.read())
-        
+
     return system
 
-def save_amber_topology(topology: app.Topology, positions: list, system: System, forcefield: app.ForceField, out_path: str):
+
+def save_amber_topology(
+    topology: app.Topology = None,
+    positions: list = None,
+    system: System = None,
+    forcefield: app.ForceField = None,
+    out_path: str = None,
+):
     """Save the topology files necessary for MD simulations according to the simulation engine specified.
 
     Args:
-        topology (app.Topology): openmm topology 
+        topology (app.Topology): openmm topology
         positions (list): list of 3D coordinates of the topology
         system (System): openmm system
         forcefield (app.Forcefield): openmm forcefield
         out_path (str): output path to where to save the topology files
     """
     os.makedirs(out_path, exist_ok=True)
-    new_system = forcefield.createSystem(topology,
-                                            nonbondedMethod=app.PME,
-                                            nonbondedCutoff=10*openmmunit.angstrom,
-                                            removeCMMotion=False,
-                                            rigidWater=False,
-                                            hydrogenMass=3.0*openmmunit.amu)
-    
-    parmed_structure = parmed.openmm.topsystem.load_topology(topology, new_system, positions)   
-    
-    parmed_structure.save(f'{out_path}/system.prmtop', overwrite=True, format="amber")
-    parmed_structure.save(f'{out_path}/system.rst7', overwrite=True, format="rst7")
+    new_system = forcefield.createSystem(
+        topology,
+        nonbondedMethod=app.PME,
+        nonbondedCutoff=10 * openmmunit.angstrom,
+        removeCMMotion=False,
+        rigidWater=False,
+        hydrogenMass=3.0 * openmmunit.amu,
+    )
+
+    parmed_structure = parmed.openmm.topsystem.load_topology(
+        topology, new_system, positions
+    )
+
+    parmed_structure.save(f"{out_path}/system.prmtop", overwrite=True, format="amber")
+    parmed_structure.save(f"{out_path}/system.rst7", overwrite=True, format="rst7")
 
     return
 
-def select_platform(platform_name:str = None, 
-                    device_index:str = '0'):
 
-    if platform_name == None or platform_name == 'fastest':
+def select_platform(platform_name: str = None, device_index: str = "0"):
+
+    if platform_name == None or platform_name == "fastest":
         platform_name = get_fastest_platform().getName()
 
     try:
         platform = Platform.getPlatformByName(platform_name)
-        logging.info(f'Using {platform_name} platform.')
+        logging.info(f"Using {platform_name} platform.")
 
-        if platform_name in ['OpenCL']:
-            platform.setPropertyDefaultValue('Precision', 'mixed')
-            platform.setPropertyDefaultValue('DeviceIndex',device_index)
-        if platform_name in ['CUDA']:
-            platform.setPropertyDefaultValue('DeterministicForces', 'false')
-            platform.setPropertyDefaultValue('CudaPrecision', 'mixed')
-            platform.setPropertyDefaultValue('CudaDeviceIndex',device_index)
+        if platform_name in ["OpenCL"]:
+            platform.setPropertyDefaultValue("Precision", "mixed")
+            platform.setPropertyDefaultValue("DeviceIndex", device_index)
+        if platform_name in ["CUDA"]:
+            platform.setPropertyDefaultValue("DeterministicForces", "false")
+            platform.setPropertyDefaultValue("CudaPrecision", "mixed")
+            platform.setPropertyDefaultValue("CudaDeviceIndex", device_index)
     except:
-        logging.error(f'Something went wrong trying to get {platform_name} platform.')
+        logging.error(f"Something went wrong trying to get {platform_name} platform.")
 
     return platform
 
 
-def add_reporters(simulation,
-                  out_dir:str='test', 
-                  suffix:str='RestEq', 
-                  total_steps:int=250000,
-                  logperiod:int=1000,
-                  ):
-    
-    """ Set up the reporters """
-    
+def add_reporters(
+    simulation,
+    out_dir: str = None,
+    suffix: str = None,
+    total_steps: int = 250000,
+    logperiod: int = 2500,
+):
+    """Set up the reporters"""
+
     simulation.reporters = []  # Delete all current reporters
 
-    simulation.reporters.append(StateDataReporter(stdout, logperiod, step=True,
-                                                time=True, potentialEnergy=True, kineticEnergy=True, totalEnergy=True,
-                                                temperature=True, progress=True, volume=True, density=True,
-                                                remainingTime=True, speed=True, totalSteps=total_steps, separator='\t'))
+    simulation.reporters.append(
+        StateDataReporter(
+            stdout,
+            logperiod,
+            step=True,
+            time=True,
+            potentialEnergy=True,
+            kineticEnergy=True,
+            totalEnergy=True,
+            temperature=True,
+            progress=True,
+            volume=True,
+            density=True,
+            remainingTime=True,
+            speed=True,
+            totalSteps=total_steps,
+            separator="\t",
+        )
+    )
 
-    simulation.reporters.append(StateDataReporter(f'{out_dir}/statistics_{suffix}.csv', 
-                                                logperiod, step=True,time=True, potentialEnergy=True, kineticEnergy=True, totalEnergy=True,
-                                                temperature=True, progress=True, volume=True, density=True,
-                                                remainingTime=True, speed=True, totalSteps=total_steps))
+    simulation.reporters.append(
+        StateDataReporter(
+            f"{out_dir}/statistics_{suffix}.csv",
+            logperiod,
+            step=True,
+            time=True,
+            potentialEnergy=True,
+            kineticEnergy=True,
+            totalEnergy=True,
+            temperature=True,
+            progress=True,
+            volume=True,
+            density=True,
+            remainingTime=True,
+            speed=True,
+            totalSteps=total_steps,
+        )
+    )
 
     # Save coordinates every N logperiods
-    simulation.reporters.append(DCDReporter(f"{out_dir}/trajectory_{suffix}.dcd",
-                                            reportInterval=logperiod, enforcePeriodicBox=None))
-    return 
+    simulation.reporters.append(
+        DCDReporter(
+            f"{out_dir}/trajectory_{suffix}.dcd",
+            reportInterval=logperiod,
+            enforcePeriodicBox=None,
+        )
+    )
+    return
 
-def print_current_forces(system:System = None):
+
+def print_current_forces(system: System = None):
     for index, fc in enumerate(system.getForces()):
-        logging.info(f'Force Index:{index} | Name: {fc.getName()} | Group: {fc.getForceGroup()}')
+        logging.info(
+            f"Force Index:{index} | Name: {fc.getName()} | Group: {fc.getForceGroup()}"
+        )
     return None
 
-def get_protein_ha(topology:app.Topology, lig_name: str = "UNK"):
-    
-    ATOMSET = set(('HOH','WAT','POP','K','CL','NA', lig_name))
+
+def get_protein_ha(topology: app.Topology, lig_name: str = "UNK"):
+
+    ATOMSET = set(("HOH", "WAT", "POP", "K", "CL", "NA", lig_name))
 
     # # Restraint heavy atoms only: C, O, N, S, P, CA and MG
     # elements = set((element.carbon, element.oxygen, element.magnesium, element.calcium,
     #                     element.nitrogen, element.sulfur, element.phosphorus))
-    
+
     # protein_ha = []
     # for atom in topology.atoms():
     #     if atom.residue.name not in ATOMSET and atom.element in elements:
     #         protein_ha.append(atom.index)
-    
+
     protein_ha_idx = []
     protein_ha_name = []
 
@@ -234,7 +291,8 @@ def get_protein_ha(topology:app.Topology, lig_name: str = "UNK"):
 
     return protein_ha_idx, protein_ha_name
 
-def get_ligand_ha(topology:app.Topology, lig_name: str = "UNK"):
+
+def get_ligand_ha(topology: app.Topology, lig_name: str = "UNK"):
     """get names for all non-hydrogen ligand atoms"""
 
     residues = topology.residues()
@@ -245,9 +303,15 @@ def get_ligand_ha(topology:app.Topology, lig_name: str = "UNK"):
             lig_ha_names = [a.name for a in r.atoms() if not a.name.startswith("H")]
             lig_ha_idx = [a.index for a in r.atoms() if not a.name.startswith("H")]
 
+    mg_names = [a.name for a in topology.atoms() if a.name == "MG"]
+    mg_idx = [a.index for a in topology.atoms() if a.name == "MG"]
+    lig_ha_idx.extend(mg_idx)
+    lig_ha_names.extend(mg_names)
+
     return lig_ha_idx, lig_ha_names
 
-def get_pocket_ha(topology:app.Topology, pocket_resid:list[int]=None):
+
+def get_pocket_ha(topology: app.Topology, pocket_resid: list[int] = None):
     """get names for all non-hydrogen ligand atoms"""
 
     residues = topology.residues()
@@ -255,8 +319,8 @@ def get_pocket_ha(topology:app.Topology, pocket_resid:list[int]=None):
 
     for r in residues:
         if r.index in pocket_resid:
-            print(f'match for {r.index} {r.name} {r.id}')
-            res_ha_idx = [a.index for a in r.atoms() if not a.name.startswith('H')]
+            print(f"match for {r.index} {r.name} {r.id}")
+            res_ha_idx = [a.index for a in r.atoms() if not a.name.startswith("H")]
             pocket_ha_idx.extend(res_ha_idx)
 
     return pocket_ha_idx
@@ -266,23 +330,28 @@ def get_COG_dist(simulation, groupA, groupB):
 
     # Get COM distance between two groups of atoms
     positions = simulation.context.getState(getPositions=True).getPositions()
-    g1_positions = [positions[index]/openmmunit.nanometers for index in groupA]
-    g2_positions = [positions[index]/openmmunit.nanometers for index in groupB]
-    dist = np.linalg.norm(np.mean(np.asarray(g1_positions), axis=0) - np.mean(np.asarray(g2_positions), axis=0))
-    
-    return dist # This is unitless but its nm because of OpenMM
+    g1_positions = [positions[index] / openmmunit.nanometers for index in groupA]
+    g2_positions = [positions[index] / openmmunit.nanometers for index in groupB]
+    dist = np.linalg.norm(
+        np.mean(np.asarray(g1_positions), axis=0)
+        - np.mean(np.asarray(g2_positions), axis=0)
+    )
+
+    return dist  # This is unitless but its nm because of OpenMM
+
 
 def calculate_com_distance(u, lig_name, pocket_atoms):
 
-    ligand_atoms = u.select_atoms(f'resname {lig_name} and (not name H*)')
+    ligand_atoms = u.select_atoms(f"resname {lig_name} and (not name H*)")
 
     com_distance = []
     for ts in u.trajectory:
         lig_com = ligand_atoms.center_of_mass(pbc=True)
         prot_com = pocket_atoms.center_of_mass(pbc=True)
-        com_distance.append(np.linalg.norm(prot_com-lig_com))
+        com_distance.append(np.linalg.norm(prot_com - lig_com))
 
-    return pd.DataFrame(com_distance, columns=['com_d'], index=range(len(com_distance)))
+    return pd.DataFrame(com_distance, columns=["com_d"], index=range(len(com_distance)))
+
 
 def calculate_cog_distance(u, ligand_atoms, pocket_atoms):
 
@@ -290,12 +359,18 @@ def calculate_cog_distance(u, ligand_atoms, pocket_atoms):
     for ts in u.trajectory:
         lig_cog = ligand_atoms.center_of_geometry(pbc=True)
         prot_cog = pocket_atoms.center_of_geometry(pbc=True)
-        dist = np.linalg.norm(prot_cog-lig_cog) / 10 #to nm
+        dist = np.linalg.norm(prot_cog - lig_cog) / 10  # to nm
         cog_distance.append(dist)
 
-    return pd.DataFrame(cog_distance, columns=['cog_d'], index=range(len(cog_distance)))
+    return pd.DataFrame(cog_distance, columns=["cog_d"], index=range(len(cog_distance)))
 
-def get_ligand_rmsd(u, lig_resname, alig_select):
+
+def get_ligand_rmsd(
+    u: Universe = None,
+    u_ref: Universe = None,
+    lig_resname: str = "UNK",
+    alig_select: str = "ligand",
+):
     """A function to calculate the ligand RMSD from a trajectory.
 
     Parameters
@@ -308,36 +383,46 @@ def get_ligand_rmsd(u, lig_resname, alig_select):
         Selection to be considered in the alignment.
     Returns
     -------
-    rmsds : np.array 
+    rmsds : np.array
         ligand rmsd for every frame of the trajectory.
     """
-    if alig_select == 'ligand':
-        alig_select = f'resname {lig_resname} and not name H*'
-        
+    if alig_select == "ligand":
+        alig_select = f"resname {lig_resname} and not name H*"
+
+    # Make sure molecules are whole before rmsd calculation
+    transform = wrap(u.atoms)
+    u.trajectory.add_transformations(transform)
+
     # Align each frame using the backbone as reference
     # Calculate the RMSD of ligand heavy atoms
-    r = RMSD(u, 
-            select=alig_select,
-            groupselections=[f'resname {lig_resname} and not name H*'],
-            ref_frame=0).run()
-    # Get the PoseScores as np.array
+
+    r = RMSD(
+        atomgroup=u,
+        reference=u_ref,
+        select=alig_select,
+        groupselections=[f"resname {lig_resname} and not name H*"],
+        ref_frame=0,
+    ).run()
+
     rmsds = r.results.rmsd[1:, -1]
+    rmsds = rmsds / 10  # angstroms to nm
 
-    rmsds = rmsds/10 #angstroms to nm
+    return pd.DataFrame(rmsds, columns=["rmsd"], index=range(len(rmsds)))
 
-    return pd.DataFrame(rmsds, columns=['rmsd'], index=range(len(rmsds)))
 
-def add_COM_force(system:System=None,
-                  group_A:list=None,
-                  group_B:list=None,
-                  fc_pull=None,
-                  r0=None,
-                  force_group:int=15):     
+def add_COM_force(
+    system: System = None,
+    group_A: list = None,
+    group_B: list = None,
+    fc_pull=None,
+    r0=None,
+    force_group: int = 15,
+):
 
-    force = CustomCentroidBondForce(2, '0.5 * fc_pull * (distance(g1,g2)-r0)^2')
-    force.addGlobalParameter('r0', r0)
+    force = CustomCentroidBondForce(2, "0.5 * fc_pull * (distance(g1,g2)-r0)^2")
+    force.addGlobalParameter("r0", r0)
     # force.addGlobalParameter('fc_pull', fc_pull)
-    force.addPerBondParameter('fc_pull')
+    force.addPerBondParameter("fc_pull")
     force.addGroup(group_A)
     force.addGroup(group_B)
     # force.addBond([0, 1], [])
@@ -348,14 +433,16 @@ def add_COM_force(system:System=None,
 
     return
 
-def add_harmonic_restraints(system: System=None, 
-                            positions:list=None,
-                            topology:app.Topology=None, 
-                            atom_list:list=None,
-                            restraint_force:int=5,
-                            force_name:str='k_prot',
-                            force_group:int=12
-                            ):
+
+def add_harmonic_restraints(
+    system: System = None,
+    positions: list = None,
+    topology: app.Topology = None,
+    atom_list: list = None,
+    restraint_force: int = 5,
+    force_name: str = "k_prot",
+    force_group: int = 12,
+):
     """
     Function to add positional harmonic restraints to a set of atoms
     """
@@ -363,39 +450,73 @@ def add_harmonic_restraints(system: System=None,
     atoms = topology.atoms()
 
     force = CustomExternalForce(f"{force_name}*periodicdistance(x, y, z, x0, y0, z0)^2")
-    force_amount = restraint_force * openmmunit.kilocalories_per_mole/openmmunit.angstroms**2
+    force_amount = (
+        restraint_force * openmmunit.kilocalories_per_mole / openmmunit.angstroms**2
+    )
     force.addGlobalParameter(force_name, force_amount)
     force.addPerParticleParameter("x0")
     force.addPerParticleParameter("y0")
     force.addPerParticleParameter("z0")
 
-    counter=0
+    counter = 0
     for i, (atom_crd, atom) in enumerate(zip(positions, atoms)):
         if atom.index in atom_list:
             force.addParticle(i, atom_crd.value_in_unit(openmmunit.nanometers))
             counter += 1
-    logging.info(f'{counter} atoms will be restrained')
+    logging.info(f"{counter} atoms will be restrained")
 
     force.setForceGroup(force_group)
     system.addForce(force)
 
     return
 
-def extract_sMD_statistics(files):
-    data=[]
-    for f in files:
-        run_n = os.path.splitext(os.path.basename(f))[0].split('_')[2]
 
-        df = pd.read_csv(f,  names=['r0', 'COMDist', 'force', 'work'])#[:500]
-        df['replica'] = f'rep_{run_n}'
+def add_flatbottom_restraints(
+    system: System = None,
+    groupA: list = None,
+    groupB: list = None,
+    r0: float = None,
+    upper_wall: int = 0.1,
+    K_flat: float = 200,
+    force_group: int = 30,
+):
+
+    fb_eq = "(k_flat/2)*max(distance(g1,g2) - upper_wall, r0)^2"
+    upper_wall_rest = CustomCentroidBondForce(2, fb_eq)
+    upper_wall_rest.addGroup(groupA)
+    upper_wall_rest.addGroup(groupB)
+    upper_wall_rest.addBond([0, 1])
+    upper_wall_rest.addGlobalParameter(
+        "k_flat", K_flat * openmmunit.kilojoules_per_mole
+    )
+    upper_wall_rest.addGlobalParameter("upper_wall", upper_wall * openmmunit.nanometer)
+    upper_wall_rest.addGlobalParameter("r0", r0 * openmmunit.nanometer)
+
+    upper_wall_rest.setUsesPeriodicBoundaryConditions(True)
+
+    upper_wall_rest.setForceGroup(force_group)
+
+    system.addForce(upper_wall_rest)
+
+    return None
+
+
+def extract_sMD_statistics(files):
+    data = []
+    for f in files:
+        run_n = os.path.splitext(os.path.basename(f))[0].split("_")[2]
+
+        df = pd.read_csv(f, names=["r0", "COMDist", "force", "work"])  # [:500]
+        df["replica"] = f"rep_{run_n}"
         df.reset_index(inplace=True, drop=False)
         data.append(df)
 
     data = pd.concat(data, axis=0)
-    data['time'] = data['index'] / 1000 #ps to ns
+    data["time"] = data["index"] / 1000  # ps to ns
     data.reset_index(inplace=True, drop=True)
 
     return data
+
 
 # Find the closest points to the centroids
 def find_closest_points(X, centroids):
@@ -406,148 +527,173 @@ def find_closest_points(X, centroids):
         closest_points.append(closest_point_index)
     return closest_points
 
-def cluster_data(data:pd.DataFrame = None,
-                 var_names:list = None,
-                 n_clust:int = 10,
-                 weight_by_dist:bool = False):
+
+def cluster_data(
+    data: pd.DataFrame = None,
+    var_names: list = None,
+    n_clust: int = 10,
+    weight_by_dist: bool = False,
+):
 
     if weight_by_dist:
-        kmeans_weights = 1/np.array(data['cog_d'].values)
+        kmeans_weights = 1 / np.array(data["cog_d"].values)
     else:
         kmeans_weights = None
 
     X = data[var_names].values
-    kmeans = KMeans(n_clusters=n_clust, random_state=42, n_init="auto").fit(X, sample_weight=kmeans_weights)
-    data['cluster'] = kmeans.labels_
+    kmeans = KMeans(n_clusters=n_clust, random_state=42, n_init="auto").fit(
+        X, sample_weight=kmeans_weights
+    )
+    data["cluster"] = kmeans.labels_
     centroids = kmeans.cluster_centers_
 
     # This is to order cluster centroids or milestones by distance
-    cluster_means = data.groupby('cluster')[var_names].mean().reset_index()
-    sorted_clusters = cluster_means.sort_values(by='cog_d').reset_index(drop=True)
-    sorted_clusters['new_cluster'] = range(len(sorted_clusters))
-    cluster_mapping = sorted_clusters.set_index('cluster')['new_cluster'].to_dict()
-    data['cluster'] = data['cluster'].map(cluster_mapping)
+    cluster_means = data.groupby("cluster")[var_names].mean().reset_index()
+    sorted_clusters = cluster_means.sort_values(by="cog_d").reset_index(drop=True)
+    sorted_clusters["new_cluster"] = range(len(sorted_clusters))
+    cluster_mapping = sorted_clusters.set_index("cluster")["new_cluster"].to_dict()
+    data["cluster"] = data["cluster"].map(cluster_mapping)
 
     closest_points_indices = find_closest_points(X, centroids)
     closest_points_df = data.iloc[closest_points_indices]
-    
+
     return data, closest_points_df
 
-def cluster_pulling_MD(traj_files:list=None, 
-                       equilibrated_pdb:str=None,
-                       prmtop_file:str=None,
-                       lig_resname:str='UNK',
-                       pocket_selection:str=None,
-                       n_clusters:int=10):
+
+def cluster_pulling_MD(
+    traj_files: list = None,
+    equilibrated_pdb: str = None,
+    prmtop_file: str = None,
+    lig_resname: str = "UNK",
+    pocket_selection: str = None,
+    n_clusters: int = 10,
+):
     distances = []
 
     u_ref = mda.Universe(equilibrated_pdb)
-    reference = u_ref.select_atoms('protein and name CA')
+    reference = u_ref.select_atoms("protein and name CA")
 
     for traj in traj_files:
-        
-        run_n = os.path.splitext(os.path.basename(traj))[0].split('_')[2]
+
+        run_n = os.path.splitext(os.path.basename(traj))[0].split("_")[2]
 
         u = mda.Universe(prmtop_file, traj, in_memory=True)
-        ligand_atoms = u.select_atoms(f'resname {lig_resname} and (not name H*)')
+        ligand_atoms = u.select_atoms(f"resname {lig_resname} and (not name H*)")
 
-        aligner = align.AlignTraj(u, reference=reference, select="protein and name CA", in_memory=True).run()
+        aligner = align.AlignTraj(
+            u, reference=reference, select="protein and name CA", in_memory=True
+        ).run()
 
         pocket_atoms = u.select_atoms(pocket_selection)
 
         cog_d = calculate_cog_distance(u, ligand_atoms, pocket_atoms)
-        rmsd = get_ligand_rmsd(u, lig_resname, alig_select='ligand')
-                
+        rmsd = get_ligand_rmsd(u, lig_resname, alig_select="ligand")
+
         dat = pd.concat([cog_d, rmsd], axis=1)
-        dat['replica'] = f'rep_{run_n}'
+        dat["replica"] = f"rep_{run_n}"
         distances.append(dat)
-        
+
     df = pd.concat(distances, axis=0)
     df.reset_index(inplace=True, drop=False)
     df.dropna(inplace=True)
 
     # df = df[df['cog_d'] <= 1.5]
 
-    df_clustered, closest_points = cluster_data(df, ['rmsd','cog_d'], n_clusters)
-    
+    df_clustered, closest_points = cluster_data(df, ["rmsd", "cog_d"], n_clusters)
+
     return df_clustered, closest_points
 
-def cluster_milestone_pdbs(files:list=None, 
-                            lig_resname:str='UNK',
-                            pocket_selection:str=None, 
-                            n_clust:int=10):
+
+def cluster_milestone_pdbs(
+    files: list = None,
+    lig_resname: str = "UNK",
+    pocket_selection: str = None,
+    n_clust: int = 10,
+):
     distances = []
     for f in files:
         u = mda.Universe(f, in_memory=True)
         pocket_atoms = u.select_atoms(pocket_selection)
-        ligand_atoms = u.select_atoms(f'resname {lig_resname} and (not name H*)')
+        ligand_atoms = u.select_atoms(f"resname {lig_resname} and (not name H*)")
         cog_dist = calculate_cog_distance(u, ligand_atoms, pocket_atoms)
         # rmsd = get_ligand_rmsd(u, lig_resname, alig_select='ligand')
         # data = pd.concat([cog_dist, rmsd], axis=1)
-        cog_dist['fname'] = f
+        cog_dist["fname"] = f
         distances.append(cog_dist)
 
     df_dist = pd.concat(distances, axis=0)
-    clustered_data, milestones = cluster_data(df_dist, ['cog_d'], n_clust)
-    milestones.sort_values(by='cog_d', ascending=False, inplace=True)
+    clustered_data, milestones = cluster_data(df_dist, ["cog_d"], n_clust)
+    milestones.sort_values(by="cog_d", ascending=False, inplace=True)
 
     return clustered_data, milestones
 
-def get_most_diverse_points(centroids_df:pd.DataFrame,
-                            var:str='final_dist',
-                            n_points:int=5):
+
+def get_most_diverse_points(
+    centroids_df: pd.DataFrame, var: str = "final_dist", n_points: int = 5
+):
 
     points = centroids_df[var]
 
     # Ensure n is less than the total number of points
-    assert n_points < len(centroids_df), "n must be less than the total number of points"
-    
+    assert n_points < len(
+        centroids_df
+    ), "n must be less than the total number of points"
+
     selected_indices = []
-    
+
     # Randomly select the first point and add it to the list
     selected_indices.append(np.random.choice(len(points)))
-    
+
     # Loop until we have selected n points
     while len(selected_indices) < n_points:
         # Calculate the distances between each point and the set of selected points
-        distances = np.array([min([np.linalg.norm(points[i] - points[j]) for j in selected_indices])
-                              for i in range(len(points))])
-        
+        distances = np.array(
+            [
+                min([np.linalg.norm(points[i] - points[j]) for j in selected_indices])
+                for i in range(len(points))
+            ]
+        )
+
         # Exclude already selected points by setting their distances to -1
         distances[selected_indices] = -1
-        
+
         # Select the point with the maximum distance to the selected points
         next_point_index = np.argmax(distances)
         selected_indices.append(next_point_index)
-    
+
     return centroids_df.iloc[selected_indices]
 
-def write_centroids_pdb(closest_points_df:pd.DataFrame = None,
-                        prmtop_file:str = None,
-                        sys_name: str = None):
+
+def write_centroids_pdb(
+    closest_points_df: pd.DataFrame = None,
+    prmtop_file: str = None,
+    sys_name: str = None,
+):
 
     os.makedirs(f"{sys_name}/milestones", exist_ok=True)
 
     for idx, row in closest_points_df.iterrows():
-        
-        replica = row['replica'].split('_')[1]
-        milestone = row['cluster']
-        frame = row['index']
 
-        traj_file = f'{sys_name}/sMD/trajectory_sMD_{replica}.dcd'
+        replica = row["replica"].split("_")[1]
+        milestone = row["cluster"]
+        frame = row["index"]
+
+        traj_file = f"{sys_name}/sMD/trajectory_sMD_{replica}.dcd"
         u = mda.Universe(prmtop_file, traj_file, in_memory=True)
 
         # Get the frame and write a pdb
         u.trajectory[frame]
-        u.atoms.write(f'{sys_name}/milestones/milestone_{milestone}.pdb')
+        u.atoms.write(f"{sys_name}/milestones/milestone_{milestone}.pdb")
 
     # Include the equilibrated initial pose as milestone 0
-    shutil.copyfile(f'{sys_name}/system_equilibrated.pdb', f'{sys_name}/milestones/milestone_0.pdb')
+    shutil.copyfile(
+        f"{sys_name}/system_equilibrated.pdb", f"{sys_name}/milestones/milestone_0.pdb"
+    )
 
-    return 
+    return
 
-def add_variants(modeller: Modeller,
-                 variants_dict: dict=None) -> Modeller:
+
+def add_variants(modeller: Modeller, variants_dict: dict = None) -> Modeller:
     """Adds variants for specific protonation states.
 
     :param modeller: OpenMM Modeller
@@ -559,7 +705,7 @@ def add_variants(modeller: Modeller,
     """
 
     variants = list()
-    residues = list(modeller.residues())
+    residues = list(modeller.topology.residues())
     mapping = defaultdict(list)
     for r in residues:
         mapping[r.chain.id].append(int(r.id))
@@ -575,6 +721,7 @@ def add_variants(modeller: Modeller,
     modeller.addHydrogens(variants=variants)
 
     return modeller
+
 
 # from scipy.optimize import fsolve
 # from scipy.interpolate import CubicSpline
