@@ -70,6 +70,7 @@ def main():
         ionicStrength=config.ionicStrength,
         # Equilibration
         run_equilibration=config.run_equilibration,
+        equilibration_scheme=config.equilibration_scheme,
         # Steered MD
         run_sMDpulling=config.run_sMDpulling,
         sMD_pulling_dist=config.sMD_pulling_dist,

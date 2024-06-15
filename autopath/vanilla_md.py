@@ -15,18 +15,15 @@ class VanillaMD:
         self,
         system_file: str = None,
         prmtop_file: str = None,
-        sys_name: str = None,
         HMR: bool = True,
         temp: float = 300,
-        out_dir: str = None,
+        out_dir: str = 'MD',
     ):
 
         self.system_file = system_file
 
         prmtop = AmberPrmtopFile(prmtop_file)
         self.topology = prmtop.topology
-
-        self.sys_name = sys_name
 
         if HMR:
             self.timestep = 0.004

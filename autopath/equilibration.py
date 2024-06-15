@@ -1,8 +1,6 @@
 import time
 import json
 import logging
-import numpy as np
-from sys import stdout
 
 from openmm import *
 from openmm.app import *
@@ -111,7 +109,7 @@ class Equilibration:
         self,
         system_file: str = None,
         prmtop_file: str = None,
-        sys_name: str = None,
+        out_dir: str = 'equilibration',
         lig_name: str = "UNK",
         equilibration_scheme: str = "autopath/data/equilibration.json",
         warm_up_steps: int = 100000,
@@ -122,7 +120,7 @@ class Equilibration:
         self.system = load_system(system_file)
         prmtop = AmberPrmtopFile(prmtop_file)
         self.topology = prmtop.topology
-        self.sys_name = sys_name
+        self.out_dir = out_dir
         self.lig_name = lig_name
 
         self.temperature = temperature * openmmunit.kelvin
@@ -160,16 +158,14 @@ class Equilibration:
         # integrator.setRandomNumberSeed(seed)
         integrator.setConstraintTolerance(0.00001)
 
-        logging.debug(f"Creating the simulation for {self.sys_name}..")
         simulation = Simulation(self.topology, self.system, integrator, self.platform)
 
         initial_positions = PDBFile(pdb_file).positions
         simulation.context.setPositions(initial_positions)
 
-        logging.debug(f"Setting up reporters for {self.sys_name}..")
         add_reporters(
             simulation,
-            self.sys_name,
+            self.out_dir,
             "equilibration",
             logperiod=2000,
             total_steps=self.total_steps,
@@ -231,10 +227,10 @@ class Equilibration:
 
         final_positions = simulation.context.getState(getPositions=True).getPositions()
 
-        save_system(self.system, f"{self.sys_name}/system_equilibrated.xml")
-        save_simulation(simulation, f"{self.sys_name}/equilibration_checkpoint")
+        save_system(self.system, f"{self.out_dir}/system_equilibrated.xml")
+        save_simulation(simulation, f"{self.out_dir}/equilibration_checkpoint")
         save_pdb(
-            self.topology, final_positions, f"{self.sys_name}/system_equilibrated.pdb"
+            self.topology, final_positions, f"{self.out_dir}/system_equilibrated.pdb"
         )
 
         simulation_time = time.monotonic() - start_time

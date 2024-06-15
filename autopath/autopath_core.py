@@ -142,7 +142,7 @@ class AutoPath:
                 boxShape="dodecahedron",
             )
 
-            prepare_system.run(self.protein_file, ligand_file, self.variants)
+            prepare_system.run(self.protein_file, self.variants, ligand_file)
 
         prmtop_file = f"{sys_name}/system.prmtop"
         system_file = f"{sys_name}/system.xml"
@@ -160,7 +160,7 @@ class AutoPath:
             equilibration = Equilibration(
                 system_file=system_file,
                 prmtop_file=prmtop_file,
-                sys_name=sys_name,
+                out_dir=sys_name,
                 equilibration_scheme=self.equilibration_scheme,
             )
 
@@ -281,7 +281,7 @@ class AutoPath:
                 system_file=system_file,
                 prmtop_file=prmtop_file,
                 lig_name=lig_resname,
-                sys_name=sys_name,
+                out_dir='milestones',
                 pocket_atoms=pocket_atom_indexes,
             )
 
@@ -332,6 +332,7 @@ class AutoPath:
                 prmtop_file,
                 lig_name=lig_resname,
                 pocket_atoms=pocket_atom_indexes,
+                out_dir= f"{sys_name}/metadynamics"
             )
 
             for walker_fname in walkers_df["milestone_fname"]:

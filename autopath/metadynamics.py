@@ -1,27 +1,26 @@
 import os
 import time
-import numpy as np
 import logging
-
-import cvpack
+import numpy as np
 
 from openmm import *
 from openmm.app import *
 import openmm.unit as openmmunit
 from openmm.app.amberprmtopfile import AmberPrmtopFile
 
+import cvpack
+
 from autopath.utils import *
 from autopath.analysis import plot_bias, plot_colvar, plot_FE
-
 
 class MetadynamicsMD:
 
     def __init__(
         self,
-        sys_name: str = None,
         prmtop_file: str = None,
         lig_name: str = "UNK",
         pocket_atoms: list[int] = None,
+        out_dir: str = 'metadynamics',
         HMR: bool = True,
         temp: float = 300,
         NPT: bool = True,
@@ -44,9 +43,8 @@ class MetadynamicsMD:
         )
         self.store_CV = 25000  # log the stored COLVAR every 100ps
 
-        self.sys_name = sys_name
-        self.write_dir = f"{self.sys_name}/metadynamics"
-        os.makedirs(self.write_dir, exist_ok=True)
+        self.out_dir = out_dir
+        os.makedirs(self.out_dir, exist_ok=True)
 
         prmtop = AmberPrmtopFile(prmtop_file)
         self.topology = prmtop.topology
@@ -181,7 +179,7 @@ class MetadynamicsMD:
             hill_height,
             frequency=bias_frequency,
             saveFrequency=saveFrequency,
-            biasDir=self.write_dir,
+            biasDir=self.out_dir,
         )
 
         simulation.context.reinitialize(preserveState=True)
@@ -189,7 +187,7 @@ class MetadynamicsMD:
         logging.debug(f"Setting up reporters for {run_id}..")
         add_reporters(
             simulation,
-            self.write_dir,
+            self.out_dir,
             f"metadynamics_{run_id}",
             total_steps,
             bias_frequency,
@@ -204,7 +202,7 @@ class MetadynamicsMD:
             for i in range(0, int(mMD_steps), self.record_CV):
                 if i % self.store_CV == 0:
                     np.save(
-                        os.path.join(self.write_dir, f"COLVAR_{run_id}.npy"),
+                        os.path.join(self.out_dir, f"COLVAR_{run_id}.npy"),
                         colvar_array,
                     )
 
@@ -212,18 +210,18 @@ class MetadynamicsMD:
                 current_cvs = meta.getCollectiveVariables(simulation)
                 colvar_array = np.append(colvar_array, [current_cvs], axis=0)
 
-        np.save(os.path.join(self.write_dir, f"COLVAR_{run_id}.npy"), colvar_array)
-        np.save(os.path.join(self.write_dir, f"FE_{run_id}.npy"), meta.getFreeEnergy())
+        np.save(os.path.join(self.out_dir, f"COLVAR_{run_id}.npy"), colvar_array)
+        np.save(os.path.join(self.out_dir, f"FE_{run_id}.npy"), meta.getFreeEnergy())
 
         # Create plots for all current runs
-        plot_colvar(self.write_dir, mMD_CV)
-        plot_bias(self.write_dir, grid_min, grid_max, grid)
-        plot_FE(self.write_dir, grid_min, grid_max, grid)
+        plot_colvar(self.out_dir, mMD_CV)
+        plot_bias(self.out_dir, grid_min, grid_max, grid)
+        plot_FE(self.out_dir, grid_min, grid_max, grid)
 
         final_positions = simulation.context.getState(getPositions=True).getPositions()
-        save_system(system, f"{self.write_dir}/system_mMD_{run_id}.xml")
-        save_simulation(simulation, f"{self.write_dir}/mMD_checkpoint_{run_id}")
-        save_pdb(self.topology, final_positions, f"{self.write_dir}/mMD_{run_id}.pdb")
+        save_system(system, f"{self.out_dir}/system_mMD_{run_id}.xml")
+        save_simulation(simulation, f"{self.out_dir}/mMD_checkpoint_{run_id}")
+        save_pdb(self.topology, final_positions, f"{self.out_dir}/mMD_{run_id}.pdb")
 
         simulation_time = time.monotonic() - start_time
         logging.info(f"Finished {run_id} metadynamics in {simulation_time/60:.2f} min.")
@@ -363,7 +361,7 @@ class MetadynamicsMD:
             hill_height,
             frequency=bias_frequency,
             saveFrequency=saveFrequency,
-            biasDir=self.write_dir,
+            biasDir=self.out_dir,
         )
 
         simulation.context.reinitialize(preserveState=True)
@@ -371,7 +369,7 @@ class MetadynamicsMD:
         logging.debug(f"Setting up reporters for {run_id}..")
         add_reporters(
             simulation,
-            self.write_dir,
+            self.out_dir,
             f"metadynamics_{run_id}",
             total_steps,
             bias_frequency,
@@ -386,7 +384,7 @@ class MetadynamicsMD:
             for i in range(0, int(mMD_steps), self.record_CV):
                 if i % self.store_CV == 0:
                     np.save(
-                        os.path.join(self.write_dir, f"COLVAR_{run_id}.npy"),
+                        os.path.join(self.out_dir, f"COLVAR_{run_id}.npy"),
                         colvar_array,
                     )
 
@@ -394,18 +392,18 @@ class MetadynamicsMD:
                 current_cvs = meta.getCollectiveVariables(simulation)
                 colvar_array = np.append(colvar_array, [current_cvs], axis=0)
 
-        np.save(os.path.join(self.write_dir, f"COLVAR_{run_id}.npy"), colvar_array)
-        np.save(os.path.join(self.write_dir, f"FE_{run_id}.npy"), meta.getFreeEnergy())
+        np.save(os.path.join(self.out_dir, f"COLVAR_{run_id}.npy"), colvar_array)
+        np.save(os.path.join(self.out_dir, f"FE_{run_id}.npy"), meta.getFreeEnergy())
 
         # Create plots for all current runs
-        # plot_colvar(self.write_dir, 'COM_dist')
-        # plot_bias(self.write_dir, grid_min, grid_max, grid)
-        # plot_FE(self.write_dir, grid_min, grid_max, grid)
+        # plot_colvar(self.out_dir, 'COM_dist')
+        # plot_bias(self.out_dir, grid_min, grid_max, grid)
+        # plot_FE(self.out_dir, grid_min, grid_max, grid)
 
         final_positions = simulation.context.getState(getPositions=True).getPositions()
-        save_system(system, f"{self.write_dir}/system_mMD_{run_id}.xml")
-        save_simulation(simulation, f"{self.write_dir}/mMD_checkpoint_{run_id}")
-        save_pdb(self.topology, final_positions, f"{self.write_dir}/mMD_{run_id}.pdb")
+        save_system(system, f"{self.out_dir}/system_mMD_{run_id}.xml")
+        save_simulation(simulation, f"{self.out_dir}/mMD_checkpoint_{run_id}")
+        save_pdb(self.topology, final_positions, f"{self.out_dir}/mMD_{run_id}.pdb")
 
         simulation_time = time.monotonic() - start_time
         logging.info(f"Finished {run_id} metadynamics in {simulation_time/60:.2f} min.")

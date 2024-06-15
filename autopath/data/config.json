@@ -17,7 +17,8 @@
     },
 
     "equilibration": {
-        "run_equilibration": true
+        "run_equilibration": true,
+        "equilibration_scheme": "autopath/data/equilibration.json"
     },
 
     "sMD": {

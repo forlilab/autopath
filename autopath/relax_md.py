@@ -1,7 +1,7 @@
 # general imports
+import os
 import time
 import logging
-import numpy as np
 
 # OpenMM imports
 from openmm import *
@@ -13,14 +13,13 @@ from openmm.app.amberprmtopfile import AmberPrmtopFile
 from autopath.utils import *
 from autopath.equilibration import warm_up_system
 
-
 class RelaxMD:
     def __init__(
         self,
         system_file: str = None,
         prmtop_file: str = None,
-        sys_name: str = "test",
         lig_name: str = "UNK",
+        out_dir: str = "relax_md",
         pocket_atoms: list[int] = None,
         use_flat_bottom_rest: bool = False,
         HMR: bool = True,
@@ -32,8 +31,6 @@ class RelaxMD:
         prmtop = AmberPrmtopFile(prmtop_file)
         self.topology = prmtop.topology
 
-        self.sys_name = sys_name
-
         if HMR:
             self.timestep = 0.004
         else:
@@ -44,6 +41,9 @@ class RelaxMD:
         self.ligand_ha_idx, self.lig_ha_names = get_ligand_ha(self.topology, lig_name)
         self.pocket_atoms = pocket_atoms
         self.use_flat_bottom_rest = use_flat_bottom_rest
+
+        os.makedirs(out_dir, exist_ok=True)
+        self.out_dir = out_dir
 
         # Select MD platform
         self.platform = select_platform("fastest")
@@ -104,14 +104,12 @@ class RelaxMD:
 
         # save stuff
         final_positions = simulation.context.getState(getPositions=True).getPositions()
-        save_simulation(
-            simulation, f"{self.sys_name}/milestones/{run_id}_relax_checkpoint"
-        )
-        save_system(system, f"{self.sys_name}/milestones/{run_id}_relax_system.xml")
+        save_simulation(simulation, f"{self.out_dir}/{run_id}_relax_checkpoint")
+        save_system(system, f"{self.out_dir}/{run_id}_relax_system.xml")
         save_pdb(
             self.topology,
             final_positions,
-            f"{self.sys_name}/milestones/{run_id}_relax.pdb",
+            f"{self.out_dir}/{run_id}_relax.pdb",
         )
 
         # Get COM distance
