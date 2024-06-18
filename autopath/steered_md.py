@@ -23,9 +23,9 @@ class SteeredMD:
         checkpoint_file: str = None,
         system_file: str = None,
         prmtop_file: str = None,
-        lig_name: str = "UNK",
+        ligand_atoms: list[int] = None,
         pocket_atoms: list[int] = None,
-        atom_list: list[int] = None,
+        restrained_atoms: list[int] = None,
         NPT: bool = True,
         HMR: bool = True,
         temp: float = 300,
@@ -36,7 +36,6 @@ class SteeredMD:
         self.system_file = system_file
         prmtop = AmberPrmtopFile(prmtop_file)
         self.topology = prmtop.topology
-        self.atom_list = atom_list
 
         self.out_dir = out_dir
         os.makedirs(out_dir, exist_ok=True)
@@ -49,8 +48,9 @@ class SteeredMD:
         self.NPT = NPT
         self.temperature = temp * openmmunit.kelvin
 
-        self.ligand_ha_idx, self.lig_ha_names = get_ligand_ha(self.topology, lig_name)
+        self.ligand_atoms = ligand_atoms
         self.pocket_atoms = pocket_atoms
+        self.restrained_atoms = restrained_atoms
 
         self.platform = select_platform("fastest")
 
@@ -92,15 +92,21 @@ class SteeredMD:
                 if fc.getName() == "MonteCarloBarostat":
                     simulation.context.getSystem().removeForce(index)
                     logging.info(f"Removing existing MonteCarloBarostat")
-                    print_current_forces(system)
+                    _print_current_forces(system)
 
         # Add harmonic positional restraints to protein CA
         input_positions = simulation.context.getState(getPositions=True).getPositions()
         add_harmonic_restraints(
-            system, input_positions, self.topology, self.atom_list, 10, "k_CA", 14
+            system,
+            input_positions,
+            self.topology,
+            self.restrained_atoms,
+            10,
+            "k_CA",
+            14,
         )
 
-        startdist = get_COG_dist(simulation, self.ligand_ha_idx, self.pocket_atoms)
+        startdist = get_COG_dist(simulation, self.ligand_atoms, self.pocket_atoms)
         initial_r0 = startdist * openmmunit.nanometers
         logging.info(f"Initial COM distance is {startdist:.2f} nm")
 
@@ -114,7 +120,7 @@ class SteeredMD:
         )
 
         add_COM_force(
-            system, self.ligand_ha_idx, self.pocket_atoms, self.fc_pull, initial_r0
+            system, self.ligand_atoms, self.pocket_atoms, self.fc_pull, initial_r0
         )
         simulation.context.reinitialize(preserveState=True)
         simulation.context.setTime(0)  # reset simulation time
@@ -147,13 +153,10 @@ class SteeredMD:
 
                 # Get COM distance
                 current_dist = get_COG_dist(
-                    simulation, self.ligand_ha_idx, self.pocket_atoms
+                    simulation, self.ligand_atoms, self.pocket_atoms
                 )
                 current_dist = current_dist * openmmunit.nanometers
                 # logging.info(f'Current distance is {current_dist}')
-
-                # _,_,distance = system.getConstraintParameters(6)
-                # forces = simulation.context.getState(getVelocities=False, getForces=True).getForces()[0]
 
                 # Get radius of starting point and end point
                 r_current = initial_r0 + float(i + 1) * dx_per_move
@@ -163,11 +166,6 @@ class SteeredMD:
 
                 # Calculate force F = -k * x
                 force_val = -self.fc_pull * (current_dist - r_current)
-
-                # # Get the magnitude of the applied force
-                # state = simulation.context.getState(getForces=True)
-                # applied_force = state.getForces()[-1]
-                # print(applied_force)
 
                 simulation.step(steps_per_move)
 
@@ -185,7 +183,7 @@ class SteeredMD:
                 )
             f.close()
 
-            print_current_forces(system)
+            # _print_current_forces(system)
 
             # Save state in PDB file
             final_positions = simulation.context.getState(
