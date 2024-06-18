@@ -259,7 +259,7 @@ def add_reporters(
     return
 
 
-def print_current_forces(system: System = None):
+def _print_current_forces(system: System = None):
     for index, fc in enumerate(system.getForces()):
         logging.info(
             f"Force Index:{index} | Name: {fc.getName()} | Group: {fc.getForceGroup()}"
@@ -409,6 +409,19 @@ def get_ligand_rmsd(
 
     return pd.DataFrame(rmsds, columns=["rmsd"], index=range(len(rmsds)))
 
+def _remove_force(force_name:str=None, system: System = None, simulation=None):
+    """Remove a force from an OpenMM system based on its name."""
+    counter=0
+    for index, fc in enumerate(system.getForces()):
+        if fc.getName() == force_name:
+            simulation.context.getSystem().removeForce(index)
+            logging.info(f"Removing existing {force_name} force")    
+            counter+=1
+    if counter == 0:
+        logging.warning(f"No force was removed, check that {force_name} exist")
+        _print_current_forces(system)
+
+    return
 
 def add_COM_force(
     system: System = None,
@@ -587,7 +600,7 @@ def cluster_pulling_MD(
         pocket_atoms = u.select_atoms(pocket_selection)
 
         cog_d = calculate_cog_distance(u, ligand_atoms, pocket_atoms)
-        rmsd = get_ligand_rmsd(u, lig_resname, alig_select="ligand")
+        rmsd = get_ligand_rmsd(u, None, lig_resname, alig_select="ligand")
 
         dat = pd.concat([cog_d, rmsd], axis=1)
         dat["replica"] = f"rep_{run_n}"
