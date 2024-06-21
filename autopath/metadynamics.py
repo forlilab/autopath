@@ -1,4 +1,5 @@
 import os
+import math
 import time
 import logging
 import numpy as np
@@ -18,7 +19,7 @@ class MetadynamicsMD:
     def __init__(
         self,
         prmtop_file: str = None,
-        lig_name: str = "UNK",
+        ligand_atoms: list[int] = None,
         pocket_atoms: list[int] = None,
         out_dir: str = 'metadynamics',
         HMR: bool = True,
@@ -32,16 +33,8 @@ class MetadynamicsMD:
         else:
             self.timestep = 0.002
 
-        self.warming_steps = 25000  # for temp annealing
         self.temperature = temp * openmmunit.kelvin
         self.NPT = NPT
-
-        # These are for debugging purposes if one wants to check the CVs over the time of the simulation
-        self.verbose = verbose
-        self.record_CV = (
-            2500  # record the CVs every 10 ps this would give 1000 points for 10ns
-        )
-        self.store_CV = 25000  # log the stored COLVAR every 100ps
 
         self.out_dir = out_dir
         os.makedirs(self.out_dir, exist_ok=True)
@@ -49,10 +42,15 @@ class MetadynamicsMD:
         prmtop = AmberPrmtopFile(prmtop_file)
         self.topology = prmtop.topology
 
-        self.ligand_ha_idx, self.lig_ha_names = get_ligand_ha(self.topology, lig_name)
+        self.ligand_atoms = ligand_atoms
         self.pocket_atoms = pocket_atoms
 
         self.platform = select_platform("fastest")
+
+        # These are for debugging purposes if one wants to check the CVs over the time of the simulation
+        self.verbose = verbose
+        self.record_CV = 2500  # record the CVs every 10 ps
+        self.store_CV = 25000  # log the stored COLVAR every 100ps
 
         return
 
@@ -67,8 +65,8 @@ class MetadynamicsMD:
         hill_height: float = 0.3,
         bias_frequency: int = 2,
         saveFrequency: int = 50,
-        mMD_CV: str = "cog",
-        hill_width: float = 0.01,  # also known as sigma
+        mMD_CV: str = None,
+        hill_width: float = 0.01,
         grid_dimensions: tuple = (0.0, 1.0),
     ) -> None:
 
@@ -77,11 +75,13 @@ class MetadynamicsMD:
         assert mMD_CV in [
             "cog",
             "rmsd",
+            "rmsd_states",
             "nc",
-        ], f"The selectec colective variable {mMD_CV} is not implemented"
+        ], f"The selected colective variable {mMD_CV} is not implemented"
 
-        mMD_steps = 250000 * mMD_time  # 250.000 1ns at 4fs
-        total_steps = self.warming_steps + mMD_steps
+        # Calculate the number of steps required
+        mMD_steps = math.ceil(mMD_time / self.timestep * 1000.0)  # 250.000 1ns at 4fs
+        total_steps = 25000 + mMD_steps
         bias_frequency = (
             250 * bias_frequency
         )  # deposit bias every 2 ps (250 is 1ns at 4fs timestep)
@@ -89,10 +89,8 @@ class MetadynamicsMD:
 
         hill_height = hill_height * openmmunit.kilocalories_per_mole
 
-        grid_width = hill_width / 5
-        grid_min, grid_max = (
-            grid_dimensions  # 'grid' here refers to the number of grid points (2500 points)
-        )
+        grid_width = hill_width / 5  # also known as sigma
+        grid_min, grid_max = grid_dimensions
         grid = int(abs(grid_min - grid_max) / grid_width)
 
         logging.info(f"Running metadynamics with Colective Variable {mMD_CV}")
@@ -118,17 +116,26 @@ class MetadynamicsMD:
         simulation = Simulation(self.topology, system, integrator, self.platform)
 
         if pdb_file is not None:
-            logging.debug("Setting positions from PDB filet")
+            logging.debug(f"Setting positions from PDB file {pdb_file}")
             initial_positions = PDBFile(pdb_file).positions
             simulation.context.setPositions(initial_positions)
 
         if checkpoint_file is not None:
-            logging.debug("Loading simulation checkpoint")
+            logging.debug(f"Loading simulation checkpoint {checkpoint_file}")
             simulation.loadCheckpoint(checkpoint_file)
+
+        logging.debug(f"Setting up reporters for {run_id}..")
+        add_reporters(
+            simulation,
+            self.out_dir,
+            f"metadynamics_{run_id}",
+            total_steps,
+            bias_frequency,
+        )
 
         if mMD_CV == "cog":
 
-            groups = [self.pocket_atoms] + [self.ligand_ha_idx]
+            groups = [self.pocket_atoms] + [self.ligand_atoms]
 
             cv = cvpack.CentroidFunction(
                 f"sqrt(distance(g1,g2)^2)",
@@ -144,7 +151,45 @@ class MetadynamicsMD:
                 getPositions=True
             ).getPositions()
             num_atoms = self.topology.getNumAtoms()
-            cv = cvpack.RMSD(input_positions, self.ligand_ha_idx, num_atoms)
+            cv = cvpack.RMSD(input_positions, self.ligand_atoms, num_atoms)
+        
+        elif mMD_CV == "rmsd_states":
+
+            model_pdb = PDBFile(f'2hu4/system.pdb')
+            reference_positions = model_pdb.positions
+            reference_residues = model_pdb.topology.residues()
+            ref_residues = [r for r in reference_residues if r.name == 'UNK']
+            logging.info([f'REFERENCE {r.name}_{r.index}' for r in ref_residues])
+
+            reference_dict = {}
+            for residue in ref_residues:
+                for atom in residue.atoms():
+                    if not atom.name.startswith('H'):
+                        reference_dict[atom.index] = reference_positions[atom.index] / openmmunit.nanometers
+
+            logging.info(f'Matched {len(reference_dict)} heavy atoms from the reference')
+
+            n_atoms = self.topology.getNumAtoms()
+
+            system_residues = [r for r in self.topology.residues() if r.name == 'UNK']
+            logging.info([f'SYSTEM {r.name}_{r.index}' for r in system_residues])
+            
+            system_atoms = []
+            for residue in system_residues:
+                for atom in residue.atoms():
+                    if not atom.name.startswith('H'):
+                         system_atoms.append(atom.index)
+
+            logging.info(f'Matched {len(system_atoms)} heavy atoms from the system')
+
+            # changing keys of reference dictionary to match system's atom names
+            reference_dict = dict(zip(system_atoms, list(reference_dict.values())))
+
+            cv = cvpack.PathInRMSDSpace(metric=cvpack.path.progress,
+                                        milestones=[reference_dict,reference_dict],
+                                        sigma=0.01* openmmunit.nanometers,
+                                        numAtoms=n_atoms)
+
 
         elif mMD_CV == "nc":
 
@@ -152,7 +197,7 @@ class MetadynamicsMD:
 
             cv = cvpack.NumberOfContacts(
                 self.pocket_atoms,
-                self.ligand_ha_idx,
+                self.ligand_atoms,
                 forces["NonbondedForce"],
                 stepFunction="1/(1+x^6)",
                 thresholdDistance=0.35,
@@ -184,15 +229,6 @@ class MetadynamicsMD:
 
         simulation.context.reinitialize(preserveState=True)
 
-        logging.debug(f"Setting up reporters for {run_id}..")
-        add_reporters(
-            simulation,
-            self.out_dir,
-            f"metadynamics_{run_id}",
-            total_steps,
-            bias_frequency,
-        )
-
         if not self.verbose:
             # # Advance all steps at once do not record CVs
             meta.step(simulation, mMD_steps)
@@ -218,6 +254,7 @@ class MetadynamicsMD:
         plot_bias(self.out_dir, grid_min, grid_max, grid)
         plot_FE(self.out_dir, grid_min, grid_max, grid)
 
+        # Save everything
         final_positions = simulation.context.getState(getPositions=True).getPositions()
         save_system(system, f"{self.out_dir}/system_mMD_{run_id}.xml")
         save_simulation(simulation, f"{self.out_dir}/mMD_checkpoint_{run_id}")
@@ -264,7 +301,7 @@ class MetadynamicsMD:
         )
         logging.info(f"Sigma is {hill_width} nm and there are {grid} grid points ")
 
-        groups = [self.pocket_atoms] + [self.ligand_ha_idx]
+        groups = [self.pocket_atoms] + [self.ligand_atoms]
 
         logging.debug("Setting up the integrator")
         integrator = LangevinMiddleIntegrator(
@@ -297,7 +334,7 @@ class MetadynamicsMD:
 
         nc_cv = cvpack.NumberOfContacts(
             self.pocket_atoms,
-            self.ligand_ha_idx,
+            self.ligand_atoms,
             forces["NonbondedForce"],
             stepFunction="1/(1+x^6)",
             thresholdDistance=0.35,
@@ -338,7 +375,7 @@ class MetadynamicsMD:
 
         input_positions = simulation.context.getState(getPositions=True).getPositions()
         num_atoms = self.topology.getNumAtoms()
-        rmsd = cvpack.RMSD(input_positions, self.ligand_ha_idx, num_atoms)
+        rmsd = cvpack.RMSD(input_positions, self.ligand_atoms, num_atoms)
 
         hill_width = 0.01
         grid_width = hill_width / 5
