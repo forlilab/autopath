@@ -199,7 +199,7 @@ class SteeredMD:
             files = glob(f"{self.out_dir}/*.dat")
             data = extract_sMD_statistics(files)
             sys_name = self.out_dir.split("/")[0]
-            plot_sMD_statistics(data, sys_name)
+            plot_sMD_statistics(data, sys_name, self.out_dir)
 
         simulation_time = time.monotonic() - start_time
         logging.info(

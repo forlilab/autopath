@@ -109,7 +109,7 @@ class Equilibration:
         self,
         system_file: str = None,
         prmtop_file: str = None,
-        out_dir: str = 'equilibration',
+        out_dir: str = "equilibration",
         lig_name: str = "UNK",
         equilibration_scheme: str = "autopath/data/equilibration.json",
         warm_up_steps: int = 100000,
@@ -120,8 +120,10 @@ class Equilibration:
         self.system = load_system(system_file)
         prmtop = AmberPrmtopFile(prmtop_file)
         self.topology = prmtop.topology
-        self.out_dir = out_dir
         self.lig_name = lig_name
+
+        self.out_dir = out_dir
+        os.makedirs(out_dir, exist_ok=True)
 
         self.temperature = temperature * openmmunit.kelvin
         self.timestep = timestep * openmmunit.picoseconds
@@ -167,7 +169,7 @@ class Equilibration:
             simulation,
             self.out_dir,
             "equilibration",
-            logperiod=2000,
+            logperiod=1250,
             total_steps=self.total_steps,
         )
 

@@ -10,15 +10,16 @@ import matplotlib.style as style
 style.use("fivethirtyeight")
 
 
-def plot_rmsd(rmsd_df, sys_name, prefix):
+def plot_rmsd(rmsd_df:pd.DataFrame=None,
+              sys_name:str=None,
+              out_dir:str=None) -> None:
     rmsd_df["rmsd"] = rmsd_df["rmsd"] * 10  # nM to A
     plt.figure(figsize=(6, 4))
     sns.lineplot(data=rmsd_df, y="rmsd", x=rmsd_df.index)
-    plt.ylabel("RMSD (A)")
-    plt.xlabel("Frame #")
-    plt.title(f"RMSD {prefix} - {sys_name}")
+    plt.ylabel("RMSD (A)");     plt.xlabel("Frame #")
+    plt.title(f"RMSD {sys_name}", fontsize=10)
     plt.tight_layout()
-    plt.savefig(f"{sys_name}/plots/{prefix}_rmsd.png")
+    plt.savefig(f"{out_dir}/{sys_name}_rmsd.png")
     plt.close()
     return
 
@@ -142,7 +143,7 @@ def plot_FE_2D(
     return
 
 
-def plot_sMD_statistics(data, sys_name):
+def plot_sMD_statistics(data:pd.DataFrame=None, sys_name:str=None, out_dir:str=None) -> None:
 
     plt.figure(figsize=(6, 5))
     sns.lineplot(data, x="r0", y="work", hue="replica")
@@ -150,7 +151,7 @@ def plot_sMD_statistics(data, sys_name):
     plt.ylabel("Work (KJ/mol)")
     plt.title(sys_name)
     plt.tight_layout()
-    plt.savefig(f"{sys_name}/plots/{sys_name}-r0_vs_work.png")
+    plt.savefig(f"{out_dir}/{sys_name}-r0_vs_work.png")
     plt.close()
 
     plt.figure(figsize=(6, 5))
@@ -159,7 +160,7 @@ def plot_sMD_statistics(data, sys_name):
     plt.ylabel("Work (KJ/mol)")
     plt.title(sys_name)
     plt.tight_layout()
-    plt.savefig(f"{sys_name}/plots/{sys_name}-com_vs_work.png")
+    plt.savefig(f"{out_dir}/{sys_name}-com_vs_work.png")
     plt.close()
 
     plt.figure(figsize=(6, 5))
@@ -168,24 +169,24 @@ def plot_sMD_statistics(data, sys_name):
     plt.ylabel("Force (KJ/mol)")
     plt.title(sys_name)
     plt.tight_layout()
-    plt.savefig(f"{sys_name}/plots/{sys_name}-r0_vs_force.png")
+    plt.savefig(f"{out_dir}/{sys_name}-r0_vs_force.png")
     plt.close()
 
-    plt.figure(figsize=(6, 5))
-    sns.lineplot(data, x="COMDist", y="force")  # , hue='replica')
-    plt.xlabel("COM dist (nm)")
-    plt.ylabel("Force (KJ/mol)")
-    plt.title(sys_name)
-    plt.tight_layout()
-    plt.savefig(f"{sys_name}/plots/{sys_name}-com_vs_force.png")
-    plt.close()
+    # plt.figure(figsize=(6, 5))
+    # sns.lineplot(data, x="COMDist", y="force")  # , hue='replica')
+    # plt.xlabel("COM dist (nm)")
+    # plt.ylabel("Force (KJ/mol)")
+    # plt.title(sys_name)
+    # plt.tight_layout()
+    # plt.savefig(f"{out_dir}/{sys_name}-com_vs_force.png")
+    # plt.close()
 
     # plt.figure(figsize=(6,4))
     # sns.relplot(data, x='COMDist', y='work', hue='replica', col='replica', kind='line')
     # plt.xlabel('COM dist (nm)'); plt.ylabel('Work (KJ/mol)')
     # # plt.title(sys_name)
     # plt.tight_layout()
-    # plt.savefig(f'{sys_name}/plots/{sys_name}-com_vs_work.png')
+    # plt.savefig(f'{out_dir}/{sys_name}-com_vs_work.png')
     # plt.close()
 
     # plt.figure(figsize=(6,5))
@@ -193,7 +194,7 @@ def plot_sMD_statistics(data, sys_name):
     # plt.xlabel('time (ns)'); plt.ylabel('Work (KJ/mol)')
     # plt.title(sys_name)
     # plt.tight_layout()
-    # plt.savefig(f'{sys_name}/plots/{sys_name}-time_vs_work.png')
+    # plt.savefig(f'{out_dir}/{sys_name}-time_vs_work.png')
     # plt.close()
 
     # plt.figure(figsize=(6,5))
@@ -201,25 +202,13 @@ def plot_sMD_statistics(data, sys_name):
     # plt.xlabel('time (ns)'); plt.ylabel('COM dist (nm)')
     # plt.title(sys_name)
     # plt.tight_layout()
-    # plt.savefig(f'{sys_name}/plots/{sys_name}-time_vs_com.png')
+    # plt.savefig(f'{out_dir}/{sys_name}-time_vs_com.png')
     # plt.close()
-
-    # plt.figure(figsize=(6,5))
-    # sns.displot(data=data, x='COMDist', kind='kde', hue='replica')
-    # plt.ylabel('fraction'); plt.xlabel('COM dist (nm)')
-    # plt.tight_layout()
-    # plt.savefig(f'{sys_name}/COM_dist.png')
-
-    # plt.figure(figsize=(6,5))
-    # sns.displot(data=data, x='force', kind='kde', hue='replica')
-    # plt.ylabel('fraction'); plt.xlabel('Force (KJ/mol)')
-    # plt.tight_layout()
-    # plt.savefig(f'{sys_name}/force_dist.png')
 
     return
 
 
-def plot_clusters(df_clustered, closest_points, sys_name):
+def plot_clusters(df_clustered, closest_points, sys_name, out_dir):
 
     plt.scatter(
         df_clustered["rmsd"],
@@ -231,10 +220,9 @@ def plot_clusters(df_clustered, closest_points, sys_name):
     for idx, row in closest_points.iterrows():
         plt.scatter(row["rmsd"], row["cog_d"], marker="x", c="black", alpha=1, zorder=3)
 
-    plt.xlabel("RMSD (nm)")
-    plt.ylabel("COG dist (nm)")
+    plt.xlabel("RMSD (nm)");    plt.ylabel("COG dist (nm)")
     plt.title(f"{sys_name} sMD centroids")
     plt.tight_layout()
-    plt.savefig(f"{sys_name}/plots/sMD_cluster_centroids.png")
+    plt.savefig(f"{out_dir}/{sys_name}_sMD_cluster_centroids.png")
     plt.close()
     return
