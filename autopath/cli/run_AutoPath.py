@@ -87,9 +87,10 @@ def main():
         # Metadynamics
         run_metadynamics=config.run_metadynamics,
         mMD_walkers=config.mMD_walkers,
+        mMD_time=config.mMD_time,
         mMD_bias_factor=config.mMD_bias_factor,
         mMD_hill_height=config.mMD_hill_height,
-        mMD_time=config.mMD_time,
+        mMD_hill_width=config.mMD_hill_width,        
     )
 
     for lig in ligands:

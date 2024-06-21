@@ -38,6 +38,7 @@
         "mMD_walkers": 5,
         "mMD_time": 2,
         "mMD_bias_factor": 5,
-        "mMD_hill_height": 0.3
+        "mMD_hill_height": 0.3,
+        "mMD_hill_width": 0.05
     }
 }

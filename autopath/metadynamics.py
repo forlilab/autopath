@@ -60,14 +60,14 @@ class MetadynamicsMD:
         system_file: str = None,
         checkpoint_file: str = None,
         run_id: str = None,
+        mMD_CV: str = None,
         mMD_time: int = 10,
         bias_factor: float = 10,
         hill_height: float = 0.3,
-        bias_frequency: int = 2,
-        saveFrequency: int = 50,
-        mMD_CV: str = None,
         hill_width: float = 0.01,
         grid_dimensions: tuple = (0.0, 1.0),
+        bias_frequency: int = 2,
+        saveFrequency: int = 50,
     ) -> None:
 
         start_time = time.monotonic()
