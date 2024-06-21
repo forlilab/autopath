@@ -27,6 +27,8 @@ import pytraj as pt
 
 from sklearn.cluster import KMeans
 
+from autopath.analysis import plot_clusters
+
 
 def align_trajectory(
     prmtop_file: str = None,
@@ -34,9 +36,7 @@ def align_trajectory(
     out_fname: str = None,
     strip_mask: str = None,  #':HOH,NA,CL,K,POP'
 ):
-
-    traj_fname = f"{out_fname}_aligned.dcd"
-
+    
     ptraj = pt.iterload(traj_file, prmtop_file)
     ptraj = ptraj.autoimage()
     ptraj = ptraj.center()
@@ -45,7 +45,7 @@ def align_trajectory(
     if strip_mask is not None:
         ptraj = ptraj.strip(strip_mask)
         pt.save(f"{out_fname}_dry.prmtop", ptraj.top, overwrite=True)
-    ptraj.save(traj_fname)
+    ptraj.save(f"{out_fname}.dcd")
 
     return
 
@@ -134,16 +134,18 @@ def load_system(system_path: str) -> System:
     Returns:
         System: system
     """
-    with open(system_path) as fi:
-        system = XmlSerializer.deserialize(fi.read())
-
+    try:
+        with open(system_path) as fi:
+            system = XmlSerializer.deserialize(fi.read())
+    except Exception as e:
+        logging.error(f'Something went wrong while opening {system_path}\n {e}')
+        exit(1)
     return system
 
 
 def save_amber_topology(
     topology: app.Topology = None,
     positions: list = None,
-    system: System = None,
     forcefield: app.ForceField = None,
     out_path: str = None,
 ):
@@ -152,7 +154,6 @@ def save_amber_topology(
     Args:
         topology (app.Topology): openmm topology
         positions (list): list of 3D coordinates of the topology
-        system (System): openmm system
         forcefield (app.Forcefield): openmm forcefield
         out_path (str): output path to where to save the topology files
     """
@@ -346,19 +347,20 @@ def calculate_com_distance(u, lig_name, pocket_atoms):
 
     com_distance = []
     for ts in u.trajectory:
-        lig_com = ligand_atoms.center_of_mass(pbc=True)
-        prot_com = pocket_atoms.center_of_mass(pbc=True)
+        lig_com = ligand_atoms.center_of_mass(wrap=True)
+        prot_com = pocket_atoms.center_of_mass(wrap=True)
         com_distance.append(np.linalg.norm(prot_com - lig_com))
 
     return pd.DataFrame(com_distance, columns=["com_d"], index=range(len(com_distance)))
 
 
 def calculate_cog_distance(u, ligand_atoms, pocket_atoms):
+    #TODO merge withn the other COM function
 
     cog_distance = []
     for ts in u.trajectory:
-        lig_cog = ligand_atoms.center_of_geometry(pbc=True)
-        prot_cog = pocket_atoms.center_of_geometry(pbc=True)
+        lig_cog = ligand_atoms.center_of_geometry(wrap=True)
+        prot_cog = pocket_atoms.center_of_geometry(wrap=True)
         dist = np.linalg.norm(prot_cog - lig_cog) / 10  # to nm
         cog_distance.append(dist)
 
@@ -409,19 +411,21 @@ def get_ligand_rmsd(
 
     return pd.DataFrame(rmsds, columns=["rmsd"], index=range(len(rmsds)))
 
-def _remove_force(force_name:str=None, system: System = None, simulation=None):
+
+def _remove_force(force_name: str = None, system: System = None, simulation=None):
     """Remove a force from an OpenMM system based on its name."""
-    counter=0
+    counter = 0
     for index, fc in enumerate(system.getForces()):
         if fc.getName() == force_name:
             simulation.context.getSystem().removeForce(index)
-            logging.info(f"Removing existing {force_name} force")    
-            counter+=1
+            logging.info(f"Removing existing {force_name} force")
+            counter += 1
     if counter == 0:
         logging.warning(f"No force was removed, check that {force_name} exist")
         _print_current_forces(system)
 
     return
+
 
 def add_COM_force(
     system: System = None,
@@ -514,7 +518,7 @@ def add_flatbottom_restraints(
     return None
 
 
-def extract_sMD_statistics(files):
+def extract_sMD_statistics(files:list=None) -> pd.DataFrame:
     data = []
     for f in files:
         run_n = os.path.splitext(os.path.basename(f))[0].split("_")[2]
@@ -580,7 +584,12 @@ def cluster_pulling_MD(
     lig_resname: str = "UNK",
     pocket_selection: str = None,
     n_clusters: int = 10,
-):
+    sys_name:str=None,
+    out_dir:str=None
+) -> None:
+    
+    os.makedirs(out_dir, exist_ok=True)
+
     distances = []
 
     u_ref = mda.Universe(equilibrated_pdb)
@@ -600,7 +609,7 @@ def cluster_pulling_MD(
         pocket_atoms = u.select_atoms(pocket_selection)
 
         cog_d = calculate_cog_distance(u, ligand_atoms, pocket_atoms)
-        rmsd = get_ligand_rmsd(u, None, lig_resname, alig_select="ligand")
+        rmsd = get_ligand_rmsd(u, u_ref, lig_resname, alig_select="ligand")
 
         dat = pd.concat([cog_d, rmsd], axis=1)
         dat["replica"] = f"rep_{run_n}"
@@ -614,7 +623,11 @@ def cluster_pulling_MD(
 
     df_clustered, closest_points = cluster_data(df, ["rmsd", "cog_d"], n_clusters)
 
-    return df_clustered, closest_points
+    plot_clusters(df_clustered, closest_points, sys_name, out_dir)
+
+    write_centroids_pdb(closest_points, prmtop_file, sys_name, out_dir)
+
+    return
 
 
 def cluster_milestone_pdbs(
@@ -681,6 +694,7 @@ def write_centroids_pdb(
     closest_points_df: pd.DataFrame = None,
     prmtop_file: str = None,
     sys_name: str = None,
+    out_dir:str=None
 ):
 
     os.makedirs(f"{sys_name}/milestones", exist_ok=True)
@@ -688,7 +702,7 @@ def write_centroids_pdb(
     for idx, row in closest_points_df.iterrows():
 
         replica = row["replica"].split("_")[1]
-        milestone = row["cluster"]
+        milestone = row["cluster"] + 1 #starts from 1
         frame = row["index"]
 
         traj_file = f"{sys_name}/sMD/trajectory_sMD_{replica}.dcd"
@@ -696,12 +710,7 @@ def write_centroids_pdb(
 
         # Get the frame and write a pdb
         u.trajectory[frame]
-        u.atoms.write(f"{sys_name}/milestones/milestone_{milestone}.pdb")
-
-    # Include the equilibrated initial pose as milestone 0
-    shutil.copyfile(
-        f"{sys_name}/system_equilibrated.pdb", f"{sys_name}/milestones/milestone_0.pdb"
-    )
+        u.atoms.write(f"{out_dir}/milestone_{milestone}.pdb")
 
     return
 
