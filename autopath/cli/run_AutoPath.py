@@ -68,6 +68,9 @@ def main():
         boxShape=config.boxShape,
         padding=config.padding,
         ionicStrength=config.ionicStrength,
+        variants=config.variants,
+        is_membrane=config.is_membrane,
+        lipid_type=config.lipid_type
         # Equilibration
         run_equilibration=config.run_equilibration,
         equilibration_scheme=config.equilibration_scheme,
@@ -90,7 +93,7 @@ def main():
         mMD_time=config.mMD_time,
         mMD_bias_factor=config.mMD_bias_factor,
         mMD_hill_height=config.mMD_hill_height,
-        mMD_hill_width=config.mMD_hill_width,        
+        mMD_hill_width=config.mMD_hill_width,
     )
 
     for lig in ligands:

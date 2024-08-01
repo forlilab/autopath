@@ -3,6 +3,7 @@ import os
 import time
 import logging
 import pandas as pd
+from sys import exit
 from glob import glob
 import MDAnalysis as mda
 
@@ -33,12 +34,18 @@ class AutoPath:
         temperature: float = 300,
         random_state: int = 42,
         run_preparation: bool = True,
-        forcefield: list = None,
+        forcefield: list = [
+            "amber14-all.xml",
+            "amber14/tip3pfb.xml",
+            "amber/tip3p_HFE_multivalent.xml",
+        ],
         lig_ff: str = "espaloma",
         boxShape: str = "dodecahedron",
-        padding: float = 1.5,
+        padding: float = 1.0,
         ionicStrength: float = 0.0,
         variants: dict = None,
+        is_membrane: bool = False,
+        lipid_type: str = None,
         run_equilibration: bool = True,
         equilibration_scheme: str = "autopath/data/equilibration.json",
         run_sMDpulling: bool = True,
@@ -72,6 +79,8 @@ class AutoPath:
         self.padding = padding
         self.ionicStrength = ionicStrength
         self.variants = variants
+        self.is_membrane = is_membrane
+        self.lipid_type = lipid_type
         # Equilibration
         self.run_equilibration = run_equilibration
         self.equilibration_scheme = equilibration_scheme
@@ -105,8 +114,6 @@ class AutoPath:
             self.pulling_checkpoint = True
 
         # Process the input PDB
-        assert pdb_path is not None, "Please provide a valid protein PDB file"
-
         if do_fix_pdb:
             protein_pdb = fix_pdb(pdbfile=pdb_path, keep_heterogens=True, pH=7.4)
             pdb_name = os.path.splitext(os.path.basename(pdb_path))[0]
@@ -119,7 +126,11 @@ class AutoPath:
 
         start_time = time.monotonic()
 
-        sys_name = os.path.splitext(os.path.basename(ligand_file))[0]
+        if ligand_file is not None:
+            sys_name = os.path.splitext(os.path.basename(ligand_file))[0]
+        else:
+            sys_name = os.path.splitext(os.path.basename(self.protein_file))[0]
+
         os.makedirs(sys_name, exist_ok=True)
 
         logging.basicConfig(
@@ -149,10 +160,14 @@ class AutoPath:
 
         if self.run_preparation:
             prepare_system = SystemPreparation(
-                lig_ff="espaloma",
-                boxShape="dodecahedron",
+                forcefield=self.forcefield,
+                lig_ff=self.lig_ff,
+                boxShape=self.boxShape,
+                padding=self.padding,
+                ionicStrength=self.ionicStrength,
+                is_membrane=self.is_membrane,
+                lipid_type=self.lipid_type,
             )
-
             prepare_system.run(self.protein_file, self.variants, ligand_file)
 
         ##############################################################################################
@@ -163,7 +178,7 @@ class AutoPath:
             equilibration = Equilibration(
                 system_file=system_file,
                 prmtop_file=prmtop_file,
-                out_dir=f'{sys_name}/equilibration',
+                out_dir=f"{sys_name}/equilibration",
                 equilibration_scheme=self.equilibration_scheme,
             )
 
@@ -280,11 +295,8 @@ class AutoPath:
                 self.pocket_selection,
                 n_clusters=self.n_milestones,
                 sys_name=sys_name,
-                out_dir=f'{sys_name}/milestones'
+                out_dir=f"{sys_name}/milestones",
             )
-
-            # # Include the equilibrated initial pose as milestone 0
-            # shutil.copyfile(equilibrated_pdb, f"{sys_name}/milestones/milestone_0.pdb")
 
             initial_cluster_centroids = sorted(
                 glob(f"{sys_name}/milestones/milestone_*.pdb", recursive=True)
@@ -327,11 +339,11 @@ class AutoPath:
             milestones_df = pd.read_csv(
                 f"{sys_name}/milestones/{sys_name}_milestones.csv", index_col=0
             )
-            
+
             # Get the most diverse set of milestones based on cog distance
             # substract one to include equilibration frame
             walkers_df = get_most_diverse_points(
-                milestones_df, n_points=self.mMD_walkers-1 
+                milestones_df, n_points=self.mMD_walkers - 1
             )
 
             # Include the equilibrated initial pose as milestone 0
@@ -339,13 +351,17 @@ class AutoPath:
             walkers_df.sort_values(by="final_dist", ascending=True, inplace=True)
             walkers_df.to_csv(f"{sys_name}/milestones/{sys_name}_walkers.csv")
 
-            shutil.copyfile(equilibrated_pdb, f"{sys_name}/milestones/milestone_0_relax.pdb")
-            shutil.copyfile(equilibrated_system, f"{sys_name}/milestones/milestone_0_relax_system.xml")
-            shutil.copyfile(equilibrated_chk, f"{sys_name}/milestones/milestone_0_relax_checkpoint.chk")
-
-            # walkers_df['milestone_fname'] = f"{sys_name}/milestones/milestone_0_relax.pdb"
-            # walkers_df['inital_dist'] = pdb"
-            # walkers_df['final_dist'] = f"{sys_name}/milestones/milestone_0_relax.pdb"
+            shutil.copyfile(
+                equilibrated_pdb, f"{sys_name}/milestones/milestone_0_relax.pdb"
+            )
+            shutil.copyfile(
+                equilibrated_system,
+                f"{sys_name}/milestones/milestone_0_relax_system.xml",
+            )
+            shutil.copyfile(
+                equilibrated_chk,
+                f"{sys_name}/milestones/milestone_0_relax_checkpoint.chk",
+            )
 
             min_cog = final_cog * 0.75
             max_cog = final_cog + self.sMD_pulling_dist

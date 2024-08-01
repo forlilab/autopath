@@ -45,7 +45,12 @@ def warm_up_system(
 
 
 def equilibrate_restrained_system(
-    simulation, system, integrator, equil_scheme: dict = None, temp: int = 300
+    simulation,
+    system,
+    integrator,
+    equil_scheme: dict = None,
+    temp: int = 300,
+    is_membrane: bool = False,
 ) -> None:
     """Do restrained equilibration, releasing constraints
     on protein and ligands and increasing timestep
@@ -80,10 +85,23 @@ def equilibrate_restrained_system(
             )
 
         # Enable NPT if needed
-        # if npt_prev is None or npt_flag != npt_prev and npt_flag:
         if npt_flag != npt_prev and npt_flag:
             logging.debug(f"Adding a Montecarlo Barostat to the system")
-            system.addForce(MonteCarloBarostat(1 * openmmunit.atmosphere, temp))
+            if is_membrane:
+                # Add the membrane barostat
+                barostat = MonteCarloMembraneBarostat(
+                    1 * openmmunit.atmosphere,
+                    0 * openmmunit.bar * openmmunit.nanometers,
+                    temp,
+                    MonteCarloMembraneBarostat.XYIsotropic,
+                    MonteCarloMembraneBarostat.ZFree,
+                    10,
+                )
+            else:
+                # Add a normal barostat
+                barostat = MonteCarloBarostat(1 * openmmunit.atmosphere, temp)
+
+            system.addForce(barostat)
             simulation.context.reinitialize(preserveState=True)
 
         # Adjust the timestep if it has changed
@@ -115,6 +133,7 @@ class Equilibration:
         warm_up_steps: int = 100000,
         temperature: float = 300,
         timestep: float = 0.004,
+        is_membrane: bool = False,
     ) -> None:
 
         self.system = load_system(system_file)
@@ -125,6 +144,7 @@ class Equilibration:
         self.out_dir = out_dir
         os.makedirs(out_dir, exist_ok=True)
 
+        self.is_membrane = is_membrane
         self.temperature = temperature * openmmunit.kelvin
         self.timestep = timestep * openmmunit.picoseconds
         self.warm_up_steps = warm_up_steps
@@ -216,6 +236,7 @@ class Equilibration:
             integrator,
             self.equilibration_scheme,
             self.temperature,
+            self.is_membrane,
         )
 
         # Remove both protein and ligand force restraints

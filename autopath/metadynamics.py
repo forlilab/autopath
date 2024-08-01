@@ -14,6 +14,7 @@ import cvpack
 from autopath.utils import *
 from autopath.analysis import plot_bias, plot_colvar, plot_FE
 
+
 class MetadynamicsMD:
 
     def __init__(
@@ -21,11 +22,12 @@ class MetadynamicsMD:
         prmtop_file: str = None,
         ligand_atoms: list[int] = None,
         pocket_atoms: list[int] = None,
-        out_dir: str = 'metadynamics',
+        out_dir: str = "metadynamics",
         HMR: bool = True,
         temp: float = 300,
         NPT: bool = True,
         verbose: bool = True,
+        is_membrane: bool = False,
     ) -> None:
 
         if HMR:
@@ -35,6 +37,7 @@ class MetadynamicsMD:
 
         self.temperature = temp * openmmunit.kelvin
         self.NPT = NPT
+        self.is_membrane = is_membrane
 
         self.out_dir = out_dir
         os.makedirs(self.out_dir, exist_ok=True)
@@ -60,7 +63,7 @@ class MetadynamicsMD:
         system_file: str = None,
         checkpoint_file: str = None,
         run_id: str = None,
-        mMD_CV: str = None,
+        mMD_CV: str = "cog",
         mMD_time: int = 10,
         bias_factor: float = 10,
         hill_height: float = 0.3,
@@ -107,10 +110,24 @@ class MetadynamicsMD:
         # integrator.setRandomNumberSeed(int(rep_idx))
 
         if self.NPT:
-            logging.debug(f"Adding a Montecarlo Barostat to the system")
-            system.addForce(
-                MonteCarloBarostat(1 * openmmunit.atmosphere, self.temperature)
-            )
+
+            if self.is_membrane:
+                logging.debug(f"Adding a Membrane Montecarlo Barostat to the system")
+                barostat = MonteCarloMembraneBarostat(
+                    1 * openmmunit.atmosphere,
+                    0 * openmmunit.bar * openmmunit.nanometers,
+                    self.temperature,
+                    MonteCarloMembraneBarostat.XYIsotropic,
+                    MonteCarloMembraneBarostat.ZFree,
+                    10,
+                )
+            else:
+                logging.debug(f"Adding a Montecarlo Barostat to the system")
+                barostat = MonteCarloBarostat(
+                    1 * openmmunit.atmosphere, self.temperature
+                )
+
+            system.addForce(barostat)
 
         logging.debug(f"Creating the simulation for {run_id}")
         simulation = Simulation(self.topology, system, integrator, self.platform)
@@ -152,44 +169,49 @@ class MetadynamicsMD:
             ).getPositions()
             num_atoms = self.topology.getNumAtoms()
             cv = cvpack.RMSD(input_positions, self.ligand_atoms, num_atoms)
-        
+
         elif mMD_CV == "rmsd_states":
 
-            model_pdb = PDBFile(f'2hu4/system.pdb')
+            model_pdb = PDBFile(f"2hu4/system.pdb")
             reference_positions = model_pdb.positions
             reference_residues = model_pdb.topology.residues()
-            ref_residues = [r for r in reference_residues if r.name == 'UNK']
-            logging.info([f'REFERENCE {r.name}_{r.index}' for r in ref_residues])
+            ref_residues = [r for r in reference_residues if r.name == "UNK"]
+            logging.info([f"REFERENCE {r.name}_{r.index}" for r in ref_residues])
 
             reference_dict = {}
             for residue in ref_residues:
                 for atom in residue.atoms():
-                    if not atom.name.startswith('H'):
-                        reference_dict[atom.index] = reference_positions[atom.index] / openmmunit.nanometers
+                    if not atom.name.startswith("H"):
+                        reference_dict[atom.index] = (
+                            reference_positions[atom.index] / openmmunit.nanometers
+                        )
 
-            logging.info(f'Matched {len(reference_dict)} heavy atoms from the reference')
+            logging.info(
+                f"Matched {len(reference_dict)} heavy atoms from the reference"
+            )
 
             n_atoms = self.topology.getNumAtoms()
 
-            system_residues = [r for r in self.topology.residues() if r.name == 'UNK']
-            logging.info([f'SYSTEM {r.name}_{r.index}' for r in system_residues])
-            
+            system_residues = [r for r in self.topology.residues() if r.name == "UNK"]
+            logging.info([f"SYSTEM {r.name}_{r.index}" for r in system_residues])
+
             system_atoms = []
             for residue in system_residues:
                 for atom in residue.atoms():
-                    if not atom.name.startswith('H'):
-                         system_atoms.append(atom.index)
+                    if not atom.name.startswith("H"):
+                        system_atoms.append(atom.index)
 
-            logging.info(f'Matched {len(system_atoms)} heavy atoms from the system')
+            logging.info(f"Matched {len(system_atoms)} heavy atoms from the system")
 
             # changing keys of reference dictionary to match system's atom names
             reference_dict = dict(zip(system_atoms, list(reference_dict.values())))
 
-            cv = cvpack.PathInRMSDSpace(metric=cvpack.path.progress,
-                                        milestones=[reference_dict,reference_dict],
-                                        sigma=0.01* openmmunit.nanometers,
-                                        numAtoms=n_atoms)
-
+            cv = cvpack.PathInRMSDSpace(
+                metric=cvpack.path.progress,
+                milestones=[reference_dict, reference_dict],
+                sigma=0.01 * openmmunit.nanometers,
+                numAtoms=n_atoms,
+            )
 
         elif mMD_CV == "nc":
 

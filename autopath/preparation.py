@@ -2,6 +2,8 @@
 import os
 import time
 import logging
+import numpy as np
+from sys import exit
 
 # OpenMM imports
 from openmm import *
@@ -39,6 +41,8 @@ class SystemPreparation:
         boxShape: str = "dodecahedron",
         padding: float = 1.0,
         ionicStrength: float = 0.0,
+        is_membrane: bool = False,
+        lipid_type: str = None,
     ) -> None:
 
         if lig_ff.upper() in ["ESPALOMA", "SMIRNOFF", "GAFF"]:
@@ -47,7 +51,7 @@ class SystemPreparation:
             logging.error(
                 f"Ligand forcefield must be one of Espaloma, SMIRNOFF or GAFF"
             )
-            exit(0)
+            exit(1)
 
         self.forcefield = ForceField(*forcefield)
         self.allow_undefined_stereo = allow_undefined_stereo
@@ -55,8 +59,29 @@ class SystemPreparation:
         self.hydrogenMass = hydrogenMass * openmmunit.amu  # Use HMR
         self.boxShape = boxShape  # cube, dodecahedron
         self.padding = padding * openmmunit.nanometers
-
         self.ionicStrength = ionicStrength * openmmunit.molar
+
+        self.is_membrane = is_membrane
+        self.lipid_type = lipid_type
+        self._available_lipids = [
+            "POPC",
+            "POPE",
+            "DLPC",
+            "DLPE",
+            "DMPC",
+            "DOPC",
+            "DPPC",
+        ]
+
+        if is_membrane and self.lipid_type is not None:
+            assert self.lipid_type in self._available_lipids, logging.error(
+                f"{self.lipid_type} lipid is not supported. Available lipids are:\n\t{self._available_lipids}"
+            )
+        elif is_membrane and self.lipid_type is None:
+            logging.error(
+                f"For building a membrane system a lipid type must be specified"
+            )
+            exit(1)
 
         # you proabably dont want to change this
         self.nb_cutoff = 1.0 * openmmunit.nanometers
@@ -107,45 +132,83 @@ class SystemPreparation:
 
         start_time = time.monotonic()
 
-        rec_name = os.path.splitext(os.path.basename(prot_path))[0]
-        out_dir = rec_name
+        if prot_path is not None:
+            rec_name = os.path.splitext(os.path.basename(prot_path))[0]
+            out_dir = rec_name
 
-        # process the protein
-        try:
-            protein_pdb = PDBFile(prot_path)
-            logging.info(f"Loaded {rec_name} PDB..")
-        except:
-            logging.error(f"Something went wrong loading {rec_name} PDB..")
-            raise
+            try:
+                protein_pdb = PDBFile(prot_path)
+                logging.info(f"Loaded {rec_name} PDB..")
+            except:
+                logging.error(f"Something went wrong loading {rec_name} PDB..")
+                raise
 
-        # make an OpenMM Modeller object with the protein
-        modeller = Modeller(protein_pdb.topology, protein_pdb.positions)
+            # make an OpenMM Modeller object with the protein
+            modeller = Modeller(protein_pdb.topology, protein_pdb.positions)
 
-        if variants is not None:
-            modeller = add_variants(modeller, variants)
+            if variants is not None:
+                modeller = add_variants(modeller, variants)
 
         if lig_path is not None:
             lig_name = os.path.splitext(os.path.basename(lig_path))[0]
+            out_dir = lig_name
+
             logging.info(f"Parametrizing ligand {lig_name}..")
 
             lig = self._sdf_to_mol(lig_path)
             ligand_topology, ligand_positions = self._parametrize_ligand(lig)
 
-            # add the ligand to the Modeller
-            modeller.add(ligand_topology, ligand_positions)
+            if prot_path is not None:
+                # add the ligand to the Modeller built from the protein structure
+                modeller.add(ligand_topology, ligand_positions)
+            else:
+                # create a new modeller from the ligand structure
+                modeller = Modeller(ligand_topology, ligand_positions)
 
-            out_dir = lig_name
+            # if self.is_membrane:
+            #     print(ligand_positions)
+            #     # Calculate the center of mass
+            #     center_of_mass = np.mean(ligand_positions, axis=0)
+            #     # Find the lowest z-coordinate
+            #     lowest_z = np.min(ligand_positions[:, 2])
+            #     # Calculate translation based on the center of mass and lowest z-coordinate
+            #     translation_distance = 16 + (center_of_mass[2] - lowest_z).value_in_unit(
+            #         openmmunit.nanometers
+            #     )
+            #     translation_vector = np.array([0, 0, translation_distance])
+            #     # print(translation_vector)
 
-        logging.info(f"Adding solvent..")
-        modeller.addSolvent(
-            self.forcefield,
-            neutralize=True,
-            ionicStrength=self.ionicStrength,
-            boxShape=self.boxShape,
-            padding=self.padding,
-        )
+            #     # Apply translation to coordinates
+            #     ligand_positions += translation_vector * openmmunit.nanometers
 
-        logging.info(f"Creating the system..")
+            #     # # Update positions in the conformer
+            #     # for i, pos in enumerate(coords):
+            #     #     conf.SetAtomPosition(i, pos)
+
+            logging.info(f"Adding a {self.lipid_type} membrane to the system..")
+            try:
+                modeller.addMembrane(
+                    forcefield=self.forcefield,
+                    lipidType=self.lipid_type,
+                    neutralize=True,
+                    ionicStrength=self.ionicStrength,
+                    minimumPadding=self.padding,
+                )
+
+            except OpenMMException as e:
+                logging.error(f"Something went wrong while building the membrane.\n{e}")
+                exit(1)
+        else:
+            logging.info(f"Solvating the system..")
+            modeller.addSolvent(
+                self.forcefield,
+                neutralize=True,
+                ionicStrength=self.ionicStrength,
+                boxShape=self.boxShape,
+                padding=self.padding,
+            )
+
+        logging.info(f"Creating the an OpenMM system..")
         system = self.forcefield.createSystem(
             modeller.topology,
             nonbondedMethod=PME,
@@ -160,7 +223,7 @@ class SystemPreparation:
         save_system(system, f"{out_dir}/system.xml")
         save_pdb(modeller.topology, modeller.positions, f"{out_dir}/system.pdb")
         save_amber_topology(
-            modeller.topology, modeller.positions, system, self.forcefield, out_dir
+            modeller.topology, modeller.positions, self.forcefield, out_dir
         )
 
         simulation_time = time.monotonic() - start_time

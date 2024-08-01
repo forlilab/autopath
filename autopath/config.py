@@ -20,11 +20,17 @@ class Config(object):
         temperature: float = 300,
         random_state: int = 42,
         run_preparation: bool = True,
-        forcefield: list = None,
+        forcefield: list = [
+            "amber14-all.xml",
+            "amber14/tip3pfb.xml",
+            "amber/tip3p_HFE_multivalent.xml",
+        ],
         lig_ff: str = "espaloma",
         boxShape: str = "dodecahedron",
         padding: float = 1.0,
         ionicStrength: float = 0.0,
+        is_membrane: bool = False,
+        lipid_type: str = None,
         variants: dict = None,
         run_equilibration: bool = True,
         equilibration_scheme: str = "autopath/data/equilibration.json",
@@ -44,7 +50,7 @@ class Config(object):
         mMD_time: int = 1,  # ns
         mMD_bias_factor: int = 3,
         mMD_hill_height: float = 0.3,  # Kcal/mol
-        mMD_hill_width:float = 0.05
+        mMD_hill_width: float = 0.05,
     ):
 
         # General
@@ -63,6 +69,8 @@ class Config(object):
         self.padding = padding
         self.ionicStrength = ionicStrength
         self.variants = variants
+        self.is_membrane = is_membrane
+        self.lipid_type = lipid_type
 
         # Equilibration
         self.run_equilibration = run_equilibration
