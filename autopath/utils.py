@@ -36,7 +36,7 @@ def align_trajectory(
     out_fname: str = None,
     strip_mask: str = None,  #':HOH,NA,CL,K,POP'
 ):
-    
+
     ptraj = pt.iterload(traj_file, prmtop_file)
     ptraj = ptraj.autoimage()
     ptraj = ptraj.center()
@@ -138,7 +138,7 @@ def load_system(system_path: str) -> System:
         with open(system_path) as fi:
             system = XmlSerializer.deserialize(fi.read())
     except Exception as e:
-        logging.error(f'Something went wrong while opening {system_path}\n {e}')
+        logging.error(f"Something went wrong while opening {system_path}\n {e}")
         exit(1)
     return system
 
@@ -355,7 +355,7 @@ def calculate_com_distance(u, lig_name, pocket_atoms):
 
 
 def calculate_cog_distance(u, ligand_atoms, pocket_atoms):
-    #TODO merge withn the other COM function
+    # TODO merge withn the other COM function
 
     cog_distance = []
     for ts in u.trajectory:
@@ -518,7 +518,7 @@ def add_flatbottom_restraints(
     return None
 
 
-def extract_sMD_statistics(files:list=None) -> pd.DataFrame:
+def extract_sMD_statistics(files: list = None) -> pd.DataFrame:
     data = []
     for f in files:
         run_n = os.path.splitext(os.path.basename(f))[0].split("_")[2]
@@ -584,10 +584,10 @@ def cluster_pulling_MD(
     lig_resname: str = "UNK",
     pocket_selection: str = None,
     n_clusters: int = 10,
-    sys_name:str=None,
-    out_dir:str=None
+    sys_name: str = None,
+    out_dir: str = None,
 ) -> None:
-    
+
     os.makedirs(out_dir, exist_ok=True)
 
     distances = []
@@ -694,7 +694,7 @@ def write_centroids_pdb(
     closest_points_df: pd.DataFrame = None,
     prmtop_file: str = None,
     sys_name: str = None,
-    out_dir:str=None
+    out_dir: str = None,
 ):
 
     os.makedirs(f"{sys_name}/milestones", exist_ok=True)
@@ -702,7 +702,7 @@ def write_centroids_pdb(
     for idx, row in closest_points_df.iterrows():
 
         replica = row["replica"].split("_")[1]
-        milestone = row["cluster"] + 1 #starts from 1
+        milestone = row["cluster"] + 1  # starts from 1
         frame = row["index"]
 
         traj_file = f"{sys_name}/sMD/trajectory_sMD_{replica}.dcd"
