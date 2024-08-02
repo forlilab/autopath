@@ -465,7 +465,8 @@ def add_harmonic_restraints(
     """
 
     atoms = topology.atoms()
-
+    atom_indices = {atom.index for atom in atom_list}
+    
     force = CustomExternalForce(f"{force_name}*periodicdistance(x, y, z, x0, y0, z0)^2")
     force_amount = (
         restraint_force * openmmunit.kilocalories_per_mole / openmmunit.angstroms**2
@@ -477,7 +478,7 @@ def add_harmonic_restraints(
 
     counter = 0
     for i, (atom_crd, atom) in enumerate(zip(positions, atoms)):
-        if atom.index in atom_list:
+        if atom.index in atom_indices:
             force.addParticle(i, atom_crd.value_in_unit(openmmunit.nanometers))
             counter += 1
     logging.info(f"{counter} atoms will be restrained")
