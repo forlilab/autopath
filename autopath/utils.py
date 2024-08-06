@@ -3,7 +3,7 @@ import shutil
 import logging
 import numpy as np
 import pandas as pd
-from sys import stdout
+from sys import stdout, exit
 
 from typing import Union, Tuple
 from collections import defaultdict
@@ -92,7 +92,7 @@ def fix_pdb(
     return fixer
 
 
-def save_pdb(topology: app.Topology, positions: list, file_path: str):
+def save_pdb(topology: app.Topology, positions: list, file_path: str) -> None:
     """Saves the specified topology and position to the out_path file.
 
     Args:
@@ -101,10 +101,11 @@ def save_pdb(topology: app.Topology, positions: list, file_path: str):
         out_path (str): path to where to save the file
     """
     app.PDBFile.writeFile(topology, positions, file_path, keepIds=True)
+
     return
 
 
-def save_system(system: System, out_file: str):
+def save_system(system: System, out_file: str) -> None:
     """Saves the openmm system to the desired out path.
 
     Args:
@@ -117,7 +118,7 @@ def save_system(system: System, out_file: str):
     return
 
 
-def save_simulation(simulation, out_file: str):
+def save_simulation(simulation, out_file: str) -> None:
 
     simulation.saveCheckpoint(f"{out_file}.chk")
     simulation.saveState(f"{out_file}.xml")
@@ -148,7 +149,7 @@ def save_amber_topology(
     positions: list = None,
     forcefield: app.ForceField = None,
     out_path: str = None,
-):
+) -> None:
     """Save the topology files necessary for MD simulations according to the simulation engine specified.
 
     Args:
@@ -205,7 +206,7 @@ def add_reporters(
     suffix: str = None,
     total_steps: int = 250000,
     logperiod: int = 2500,
-):
+) -> None:
     """Set up the reporters"""
 
     simulation.reporters = []  # Delete all current reporters
@@ -260,15 +261,15 @@ def add_reporters(
     return
 
 
-def _print_current_forces(system: System = None):
+def _print_current_forces(system: System = None) -> None:
     for index, fc in enumerate(system.getForces()):
         logging.info(
             f"Force Index:{index} | Name: {fc.getName()} | Group: {fc.getForceGroup()}"
         )
-    return None
+    return
 
 
-def get_protein_ha(topology: app.Topology, lig_name: str = "UNK"):
+def get_protein_ha(topology: app.Topology, lig_name: str = "UNK") -> Tuple[list, list]:
 
     ATOMSET = set(("HOH", "WAT", "POP", "K", "CL", "NA", lig_name))
 
@@ -293,7 +294,7 @@ def get_protein_ha(topology: app.Topology, lig_name: str = "UNK"):
     return protein_ha_idx, protein_ha_name
 
 
-def get_ligand_ha(topology: app.Topology, lig_name: str = "UNK"):
+def get_ligand_ha(topology: app.Topology, lig_name: str = "UNK") -> Tuple[list, list]:
     """get names for all non-hydrogen ligand atoms"""
 
     residues = topology.residues()
@@ -304,15 +305,15 @@ def get_ligand_ha(topology: app.Topology, lig_name: str = "UNK"):
             lig_ha_names = [a.name for a in r.atoms() if not a.name.startswith("H")]
             lig_ha_idx = [a.index for a in r.atoms() if not a.name.startswith("H")]
 
-    mg_names = [a.name for a in topology.atoms() if a.name == "MG"]
-    mg_idx = [a.index for a in topology.atoms() if a.name == "MG"]
-    lig_ha_idx.extend(mg_idx)
-    lig_ha_names.extend(mg_names)
+    # mg_names = [a.name for a in topology.atoms() if a.name == "MG"]
+    # mg_idx = [a.index for a in topology.atoms() if a.name == "MG"]
+    # lig_ha_idx.extend(mg_idx)
+    # lig_ha_names.extend(mg_names)
 
     return lig_ha_idx, lig_ha_names
 
 
-def get_pocket_ha(topology: app.Topology, pocket_resid: list[int] = None):
+def get_pocket_ha(topology: app.Topology, pocket_resid: list[int] = None) -> list:
     """get names for all non-hydrogen ligand atoms"""
 
     residues = topology.residues()
@@ -327,7 +328,7 @@ def get_pocket_ha(topology: app.Topology, pocket_resid: list[int] = None):
     return pocket_ha_idx
 
 
-def get_COG_dist(simulation, groupA, groupB):
+def get_COG_dist(simulation, groupA, groupB) -> float:
 
     # Get COM distance between two groups of atoms
     positions = simulation.context.getState(getPositions=True).getPositions()
@@ -341,30 +342,24 @@ def get_COG_dist(simulation, groupA, groupB):
     return dist  # This is unitless but its nm because of OpenMM
 
 
-def calculate_com_distance(u, lig_name, pocket_atoms):
+def calculate_com_distance(
+    u, lig_name: str = "UNK", pocket_atoms=None, massWeighted: bool = False
+) -> pd.DataFrame:
 
     ligand_atoms = u.select_atoms(f"resname {lig_name} and (not name H*)")
 
-    com_distance = []
+    distances = []
     for ts in u.trajectory:
-        lig_com = ligand_atoms.center_of_mass(wrap=True)
-        prot_com = pocket_atoms.center_of_mass(wrap=True)
-        com_distance.append(np.linalg.norm(prot_com - lig_com))
+        if massWeighted:
+            lig_com = ligand_atoms.center_of_mass(wrap=True)
+            prot_com = pocket_atoms.center_of_mass(wrap=True)
+        else:
+            lig_com = ligand_atoms.center_of_geometry(wrap=True)
+            prot_com = pocket_atoms.center_of_geometry(wrap=True)
 
-    return pd.DataFrame(com_distance, columns=["com_d"], index=range(len(com_distance)))
+        distances.append(np.linalg.norm(prot_com - lig_com))
 
-
-def calculate_cog_distance(u, ligand_atoms, pocket_atoms):
-    # TODO merge withn the other COM function
-
-    cog_distance = []
-    for ts in u.trajectory:
-        lig_cog = ligand_atoms.center_of_geometry(wrap=True)
-        prot_cog = pocket_atoms.center_of_geometry(wrap=True)
-        dist = np.linalg.norm(prot_cog - lig_cog) / 10  # to nm
-        cog_distance.append(dist)
-
-    return pd.DataFrame(cog_distance, columns=["cog_d"], index=range(len(cog_distance)))
+    return pd.DataFrame(distances, columns=["com_d"], index=range(len(distances)))
 
 
 def get_ligand_rmsd(
@@ -455,7 +450,7 @@ def add_harmonic_restraints(
     system: System = None,
     positions: list = None,
     topology: app.Topology = None,
-    atom_list: list = None,
+    atom_idx_list: list[int] = None,
     restraint_force: int = 5,
     force_name: str = "k_prot",
     force_group: int = 12,
@@ -477,7 +472,7 @@ def add_harmonic_restraints(
 
     counter = 0
     for i, (atom_crd, atom) in enumerate(zip(positions, atoms)):
-        if atom.index in atom_list:
+        if atom.index in atom_idx_list:
             force.addParticle(i, atom_crd.value_in_unit(openmmunit.nanometers))
             counter += 1
     logging.info(f"{counter} atoms will be restrained")
