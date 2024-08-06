@@ -132,6 +132,17 @@ class SystemPreparation:
 
         start_time = time.monotonic()
 
+        if lig_path is not None:
+            lig_name = os.path.splitext(os.path.basename(lig_path))[0]
+            out_dir = lig_name
+
+            logging.info(f"Parametrizing ligand {lig_name}..")
+
+            lig = self._sdf_to_mol(lig_path)
+            ligand_topology, ligand_positions = self._parametrize_ligand(lig)
+
+            modeller = Modeller(ligand_topology, ligand_positions)
+
         if prot_path is not None:
             rec_name = os.path.splitext(os.path.basename(prot_path))[0]
             out_dir = rec_name
@@ -146,44 +157,42 @@ class SystemPreparation:
             # make an OpenMM Modeller object with the protein
             modeller = Modeller(protein_pdb.topology, protein_pdb.positions)
 
+            # Add residue variants, like protonation states for HIS, CYS, etc.
             if variants is not None:
                 modeller = add_variants(modeller, variants)
 
-        if lig_path is not None:
-            lig_name = os.path.splitext(os.path.basename(lig_path))[0]
-            out_dir = lig_name
-
-            logging.info(f"Parametrizing ligand {lig_name}..")
-
-            lig = self._sdf_to_mol(lig_path)
-            ligand_topology, ligand_positions = self._parametrize_ligand(lig)
-
-            if prot_path is not None:
-                # add the ligand to the Modeller built from the protein structure
+            # Add the ligand to the Modeller built from the protein structure
+            if lig_path is not None:
                 modeller.add(ligand_topology, ligand_positions)
-            else:
-                # create a new modeller from the ligand structure
-                modeller = Modeller(ligand_topology, ligand_positions)
 
-            # if self.is_membrane:
-            #     print(ligand_positions)
-            #     # Calculate the center of mass
-            #     center_of_mass = np.mean(ligand_positions, axis=0)
-            #     # Find the lowest z-coordinate
-            #     lowest_z = np.min(ligand_positions[:, 2])
-            #     # Calculate translation based on the center of mass and lowest z-coordinate
-            #     translation_distance = 16 + (center_of_mass[2] - lowest_z).value_in_unit(
-            #         openmmunit.nanometers
-            #     )
-            #     translation_vector = np.array([0, 0, translation_distance])
-            #     # print(translation_vector)
+        # CASE: Ligand and membrane only
+        if prot_path is None and self.is_membrane:
 
-            #     # Apply translation to coordinates
-            #     ligand_positions += translation_vector * openmmunit.nanometers
+            # Center ligand at 0,0,0
+            lig_com = np.mean(ligand_positions, axis=0)
+            for i, xyz_i in enumerate(ligand_positions):
+                ligand_positions[i] = xyz_i - lig_com
 
-            #     # # Update positions in the conformer
-            #     # for i, pos in enumerate(coords):
-            #     #     conf.SetAtomPosition(i, pos)
+            # # Find the lowest z-coordinate
+            # lowest_z = np.min(ligand_positions[:, 2])
+
+            # Calculate the maximum distance between any two atoms in the molecule
+            pairwise_distances = np.linalg.norm(
+                ligand_positions[:, None] - ligand_positions, axis=2
+            )
+            max_length = np.max(pairwise_distances) * openmmunit.angstroms
+
+            translation_distance = 3.0
+
+            translation_vector = np.array([0, 0, translation_distance])
+
+            # Apply translation to coordinates and update positions
+            ligand_positions += translation_vector * openmmunit.nanometers
+
+            # create a new modeller from the ligand structure
+            modeller = Modeller(ligand_topology, ligand_positions)
+
+        if self.is_membrane:
 
             logging.info(f"Adding a {self.lipid_type} membrane to the system..")
             try:
@@ -192,7 +201,7 @@ class SystemPreparation:
                     lipidType=self.lipid_type,
                     neutralize=True,
                     ionicStrength=self.ionicStrength,
-                    minimumPadding=self.padding,
+                    minimumPadding=self.padding + max_length,
                 )
 
             except OpenMMException as e:
