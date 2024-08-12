@@ -13,17 +13,15 @@ from autopath.utils import *
 class VanillaMD:
     def __init__(
         self,
-        system_file: str = None,
-        prmtop_file: str = None,
+        system: str = None,
+        topology: str = None,
         HMR: bool = True,
         temp: float = 300,
-        out_dir: str = 'MD',
+        out_dir: str = "MD",
     ):
 
-        self.system_file = system_file
-
-        prmtop = AmberPrmtopFile(prmtop_file)
-        self.topology = prmtop.topology
+        self.system = system
+        self.topology = topology
 
         if HMR:
             self.timestep = 0.004

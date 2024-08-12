@@ -7,19 +7,18 @@ import numpy as np
 from openmm import *
 from openmm.app import *
 import openmm.unit as openmmunit
-from openmm.app.amberprmtopfile import AmberPrmtopFile
 
 import cvpack
 
 from autopath.utils import *
 from autopath.analysis import plot_bias, plot_colvar, plot_FE
-
+from autopath.utils import _print_current_forces
 
 class MetadynamicsMD:
 
     def __init__(
         self,
-        prmtop_file: str = None,
+        topology: str = None,
         ligand_atoms: list[int] = None,
         pocket_atoms: list[int] = None,
         out_dir: str = "metadynamics",
@@ -35,15 +34,14 @@ class MetadynamicsMD:
         else:
             self.timestep = 0.002
 
+        self.topology = topology
+
         self.temperature = temp * openmmunit.kelvin
         self.NPT = NPT
         self.is_membrane = is_membrane
 
         self.out_dir = out_dir
         os.makedirs(self.out_dir, exist_ok=True)
-
-        prmtop = AmberPrmtopFile(prmtop_file)
-        self.topology = prmtop.topology
 
         self.ligand_atoms = ligand_atoms
         self.pocket_atoms = pocket_atoms
@@ -60,10 +58,10 @@ class MetadynamicsMD:
     def run(
         self,
         pdb_file: str = None,
-        system_file: str = None,
+        system: str = None,
         checkpoint_file: str = None,
         run_id: str = None,
-        mMD_CV: str = "cog",
+        mMD_CV: str = "com",
         mMD_time: int = 10,
         bias_factor: float = 10,
         hill_height: float = 0.3,
@@ -76,10 +74,12 @@ class MetadynamicsMD:
         start_time = time.monotonic()
 
         assert mMD_CV in [
-            "cog",
+            "com",
             "rmsd",
             "rmsd_states",
             "nc",
+            "min_dist",
+            "dist",
         ], f"The selected colective variable {mMD_CV} is not implemented"
 
         # Calculate the number of steps required
@@ -87,7 +87,7 @@ class MetadynamicsMD:
         total_steps = 25000 + mMD_steps
         bias_frequency = (
             250 * bias_frequency
-        )  # deposit bias every 2 ps (250 is 1ns at 4fs timestep)
+        )  # deposit bias every 2 ps (250 is 1ps at 4fs timestep)
         saveFrequency = 250 * saveFrequency  # write bias every 50ps
 
         hill_height = hill_height * openmmunit.kilocalories_per_mole
@@ -100,46 +100,38 @@ class MetadynamicsMD:
         logging.info(f"Grid boundaries are min={grid_min:.3f} - max={grid_max:.3f}")
         logging.info(f"Sigma is {hill_width} nm and there are {grid} grid points ")
 
-        logging.debug(f"Loading a simulation file")
-        system = load_system(system_file)
-
         logging.debug("Setting up the integrator")
         integrator = LangevinMiddleIntegrator(
             self.temperature, 1 / openmmunit.picoseconds, self.timestep
         )
         # integrator.setRandomNumberSeed(int(rep_idx))
 
+        # Add a barostat to the system
         if self.NPT:
-
-            if self.is_membrane:
-                logging.debug(f"Adding a Membrane Montecarlo Barostat to the system")
-                barostat = MonteCarloMembraneBarostat(
-                    1 * openmmunit.atmosphere,
-                    0 * openmmunit.bar * openmmunit.nanometers,
-                    self.temperature,
-                    MonteCarloMembraneBarostat.XYIsotropic,
-                    MonteCarloMembraneBarostat.ZFree,
-                    10,
-                )
+            add_barostat(system, self.temperature, self.is_membrane)
+        _print_current_forces(system)
+        
+        if self.topology is None:
+            if pdb_file is None:
+                logging.error(f"Either a PDB or a prmtop file must be provided to get the topology from")
+                exit(1)
             else:
-                logging.debug(f"Adding a Montecarlo Barostat to the system")
-                barostat = MonteCarloBarostat(
-                    1 * openmmunit.atmosphere, self.temperature
-                )
-
-            system.addForce(barostat)
+                pdb = PDBFile(pdb_file)
+                self.topology = pdb.topology
 
         logging.debug(f"Creating the simulation for {run_id}")
         simulation = Simulation(self.topology, system, integrator, self.platform)
 
-        if pdb_file is not None:
-            logging.debug(f"Setting positions from PDB file {pdb_file}")
-            initial_positions = PDBFile(pdb_file).positions
-            simulation.context.setPositions(initial_positions)
-
         if checkpoint_file is not None:
             logging.debug(f"Loading simulation checkpoint {checkpoint_file}")
             simulation.loadCheckpoint(checkpoint_file)
+        else:
+            if pdb_file is not None:
+                logging.debug(f"Setting positions from PDB file {pdb_file}")
+                simulation.context.setPositions(pdb.positions)
+            else:
+                logging.error(f"Either a PDB or a checkpoint file must be provided to get coordinates from")
+                exit(1)
 
         logging.debug(f"Setting up reporters for {run_id}..")
         add_reporters(
@@ -150,7 +142,7 @@ class MetadynamicsMD:
             bias_frequency,
         )
 
-        if mMD_CV == "cog":
+        if mMD_CV == "com":
 
             groups = [self.pocket_atoms] + [self.ligand_atoms]
 
@@ -158,7 +150,7 @@ class MetadynamicsMD:
                 f"sqrt(distance(g1,g2)^2)",
                 openmmunit.nanometers,
                 groups,
-                weighByMass=False,
+                weighByMass=True,
                 pbc=True,
             )
 
@@ -228,6 +220,21 @@ class MetadynamicsMD:
                 reference=50,
             )
 
+        elif mMD_CV == "min_dist":
+
+            num_atoms = system.getNumParticles()
+            cv = cvpack.ShortestDistance(
+                self.pocket_atoms,
+                self.ligand_atoms,
+                num_atoms,
+                cutoffDistance=0.5,
+            )
+
+        elif mMD_CV == "dist":
+            cv = cvpack.Distance(
+                self.pocket_atoms[0], self.ligand_atoms[0], pbc=False, name="distance"
+            )
+
         bias_variable = BiasVariable(
             cv,
             minValue=grid_min,
@@ -278,6 +285,7 @@ class MetadynamicsMD:
 
         # Save everything
         final_positions = simulation.context.getState(getPositions=True).getPositions()
+
         save_system(system, f"{self.out_dir}/system_mMD_{run_id}.xml")
         save_simulation(simulation, f"{self.out_dir}/mMD_checkpoint_{run_id}")
         save_pdb(self.topology, final_positions, f"{self.out_dir}/mMD_{run_id}.pdb")
@@ -340,17 +348,16 @@ class MetadynamicsMD:
                 MonteCarloBarostat(1 * openmmunit.atmosphere, self.temperature)
             )
 
-        logging.info(f"Creating the simulation for {run_id}")
+        logging.debug(f"Creating the simulation for {run_id}")
         simulation = Simulation(self.topology, system, integrator, self.platform)
 
-        if pdb_file is not None:
-            logging.debug("Setting positions from PDB filet")
-            initial_positions = PDBFile(pdb_file).positions
-            simulation.context.setPositions(initial_positions)
-
         if checkpoint_file is not None:
-            logging.debug("Loading simulation checkpoint")
+            logging.debug(f"Loading simulation checkpoint {checkpoint_file}")
             simulation.loadCheckpoint(checkpoint_file)
+        else:
+            logging.debug(f"Setting positions from PDB file {pdb_file}")
+            pdb = PDBFile(pdb_file)
+            simulation.context.setPositions(pdb.positions)
 
         forces = {f.getName(): f for f in system.getForces()}
 

@@ -147,7 +147,10 @@ class AutoPath:
         logging.info(f"Processing system {sys_name}")
 
         prmtop_file = f"{sys_name}/system.prmtop"
-        system_file = f"{sys_name}/system.xml"
+        topology = AmberPrmtopFile(prmtop_file).topology
+
+        system = load_system(f"{sys_name}/system.xml")
+
         solvated_system_pdb = f"{sys_name}/system.pdb"
         equilibrated_system = f"{sys_name}/equilibration/system_equilibrated.xml"
         equilibrated_pdb = f"{sys_name}/equilibration/system_equilibrated.pdb"
@@ -168,7 +171,9 @@ class AutoPath:
                 is_membrane=self.is_membrane,
                 lipid_type=self.lipid_type,
             )
-            prepare_system.run(self.protein_file, self.variants, ligand_file)
+            system, topology = prepare_system.run(
+                self.protein_file, self.variants, ligand_file
+            )
 
         ##############################################################################################
         ##################################### System equilibration ###################################
@@ -176,13 +181,13 @@ class AutoPath:
 
         if self.run_equilibration:
             equilibration = Equilibration(
-                system_file=system_file,
-                prmtop_file=prmtop_file,
+                system=system,
+                topology=topology,
                 out_dir=f"{sys_name}/equilibration",
                 equilibration_scheme=self.equilibration_scheme,
             )
 
-            equilibration.run(solvated_system_pdb)
+            system = equilibration.run(solvated_system_pdb)
 
             # Wrap, align and save the clean trajectory
             align_trajectory(
@@ -221,7 +226,7 @@ class AutoPath:
             f"{atom.resname}_{atom.resid}_{atom.index}" for atom in pocket_atoms
         ]
 
-        eq_cog = calculate_cog_distance(u_eq, ligand_atoms, pocket_atoms)
+        eq_cog = calculate_com_distance(u_eq, ligand_atoms, pocket_atoms)
         final_cog = eq_cog.values[-1][0]
 
         logging.info(f"Pocket residues are: {', '.join(set(pocket_residues))}")
@@ -252,9 +257,8 @@ class AutoPath:
         if self.run_sMDpulling:
 
             steered_MD = SteeredMD(
-                equilibrated_chk,
-                equilibrated_system,
-                prmtop_file,
+                system=system,
+                topology=topology,
                 ligand_atoms=ligand_atoms_indexes,
                 pocket_atoms=pocket_atom_indexes,
                 restrained_atoms=protein_ca_far_from_ligand_indexes,
@@ -262,6 +266,7 @@ class AutoPath:
             )
 
             steered_MD.run(
+                checkpoint_file=equilibrated_chk,
                 sMD_time=self.sMD_time,
                 displacement=self.sMD_pulling_dist,
                 steps_per_move=self.sMD_steps_per_move,
@@ -303,8 +308,8 @@ class AutoPath:
             )
 
             relaxMD = RelaxMD(
-                system_file=system_file,
-                prmtop_file=prmtop_file,
+                system=system,
+                topology=topology,
                 lig_name=lig_resname,
                 out_dir=f"{sys_name}/milestones",
                 pocket_atoms=pocket_atom_indexes,
@@ -376,6 +381,7 @@ class AutoPath:
             for walker_fname in walkers_df["milestone_fname"]:
                 basename = os.path.splitext(os.path.basename(walker_fname))[0]
                 system_file = f"{sys_name}/milestones/{basename}_relax_system.xml"
+                system = load_system(system_file)
                 checkpoint_file = (
                     f"{sys_name}/milestones/{basename}_relax_checkpoint.chk"
                 )
@@ -383,7 +389,7 @@ class AutoPath:
                 logging.info(f"Running metadynamics for {basename}/{len(walkers_df)}")
 
                 metadynamics_MD.run(
-                    system_file=system_file,
+                    system=system,
                     checkpoint_file=checkpoint_file,
                     run_id=basename,
                     mMD_CV=self.mMD_CV,

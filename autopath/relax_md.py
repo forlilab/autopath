@@ -13,11 +13,12 @@ from openmm.app.amberprmtopfile import AmberPrmtopFile
 from autopath.utils import *
 from autopath.equilibration import warm_up_system
 
+
 class RelaxMD:
     def __init__(
         self,
-        system_file: str = None,
-        prmtop_file: str = None,
+        system: str = None,
+        topology: str = None,
         lig_name: str = "UNK",
         out_dir: str = "relax_md",
         pocket_atoms: list[int] = None,
@@ -26,10 +27,8 @@ class RelaxMD:
         temp: float = 300,
     ) -> None:
 
-        self.system_file = system_file
-
-        prmtop = AmberPrmtopFile(prmtop_file)
-        self.topology = prmtop.topology
+        self.system = system
+        self.topology = topology
 
         if HMR:
             self.timestep = 0.004
@@ -66,10 +65,8 @@ class RelaxMD:
         )
         # integrator.setRandomNumberSeed(int(rep_idx))
 
-        system = load_system(self.system_file)
-
         # Setting Simulation object and loading the checkpoint
-        simulation = Simulation(self.topology, system, integrator, self.platform)
+        simulation = Simulation(self.topology, self.system, integrator, self.platform)
 
         if checkpoint_file is not None:
             logging.debug("Loading simulation checkpoint..")
@@ -82,7 +79,7 @@ class RelaxMD:
 
         if self.use_flat_bottom_rest:
             add_flatbottom_restraints(
-                system, self.ligand_ha_idx, self.pocket_atoms, startdist
+                self.system, self.ligand_ha_idx, self.pocket_atoms, startdist
             )
 
         logging.debug("Minimizing..")
@@ -105,7 +102,7 @@ class RelaxMD:
         # save stuff
         final_positions = simulation.context.getState(getPositions=True).getPositions()
         save_simulation(simulation, f"{self.out_dir}/{run_id}_relax_checkpoint")
-        save_system(system, f"{self.out_dir}/{run_id}_relax_system.xml")
+        save_system(self.system, f"{self.out_dir}/{run_id}_relax_system.xml")
         save_pdb(
             self.topology,
             final_positions,

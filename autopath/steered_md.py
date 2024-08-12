@@ -10,7 +10,6 @@ from autopath.analysis import plot_sMD_statistics
 from openmm import *
 from openmm.app import *
 import openmm.unit as openmmunit
-from openmm.app.amberprmtopfile import AmberPrmtopFile
 
 
 class SteeredMD:
@@ -20,9 +19,8 @@ class SteeredMD:
 
     def __init__(
         self,
-        checkpoint_file: str = None,
-        system_file: str = None,
-        prmtop_file: str = None,
+        system: str = None,
+        topology: str = None,
         ligand_atoms: list[int] = None,
         pocket_atoms: list[int] = None,
         restrained_atoms: list[int] = None,
@@ -32,10 +30,8 @@ class SteeredMD:
         out_dir: str = None,
     ):
 
-        self.checkpoint_file = checkpoint_file
-        self.system_file = system_file
-        prmtop = AmberPrmtopFile(prmtop_file)
-        self.topology = prmtop.topology
+        self.system = system
+        self.topology = topology
 
         self.out_dir = out_dir
         os.makedirs(out_dir, exist_ok=True)
@@ -61,6 +57,7 @@ class SteeredMD:
         steps_per_move: int = 250,  # 1ps
         pulling_force: int = 1000,
         replicas: int = 5,
+        checkpoint_file: str = None,
     ):
 
         start_time = time.monotonic()
@@ -79,25 +76,25 @@ class SteeredMD:
         )
         # integrator.setRandomNumberSeed(int(rep_idx))
 
-        system = load_system(self.system_file)
-
         # Setting Simulation object and loading the checkpoint
-        simulation = Simulation(self.topology, system, integrator, self.platform)
-        if self.checkpoint_file is not None:
+        simulation = Simulation(self.topology, self.system, integrator, self.platform)
+
+        if checkpoint_file is not None:
             logging.info("Loading simulation checkpoint..")
-            simulation.loadCheckpoint(self.checkpoint_file)
+            simulation.loadCheckpoint(checkpoint_file)
 
         if not self.NPT:
-            for index, fc in enumerate(system.getForces()):
+            for index, fc in enumerate(self.system.getForces()):
                 if fc.getName() == "MonteCarloBarostat":
                     simulation.context.getSystem().removeForce(index)
                     logging.info(f"Removing existing MonteCarloBarostat")
-                    _print_current_forces(system)
+                    _print_current_forces(self.system)
 
         # Add harmonic positional restraints to protein CA
         input_positions = simulation.context.getState(getPositions=True).getPositions()
+
         add_harmonic_restraints(
-            system,
+            self.system,
             input_positions,
             self.topology,
             self.restrained_atoms,
@@ -120,7 +117,7 @@ class SteeredMD:
         )
 
         add_COM_force(
-            system, self.ligand_atoms, self.pocket_atoms, self.fc_pull, initial_r0
+            self.system, self.ligand_atoms, self.pocket_atoms, self.fc_pull, initial_r0
         )
         simulation.context.reinitialize(preserveState=True)
         simulation.context.setTime(0)  # reset simulation time
