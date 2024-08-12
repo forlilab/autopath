@@ -35,7 +35,7 @@ def align_trajectory(
     traj_file: Union[str, list] = None,
     out_fname: str = None,
     strip_mask: str = None,  #':HOH,NA,CL,K,POP'
-):
+) -> None:
 
     ptraj = pt.iterload(traj_file, prmtop_file)
     ptraj = ptraj.autoimage()
@@ -255,9 +255,33 @@ def add_reporters(
         DCDReporter(
             f"{out_dir}/trajectory_{suffix}.dcd",
             reportInterval=logperiod,
-            enforcePeriodicBox=None,
+            enforcePeriodicBox=False,  # WARNING this compromises autoimaging afterwards in some cases
         )
     )
+    return
+
+
+def add_barostat(system, temp: int, is_membrane: bool) -> None:
+    """Add an appropriate barostat to the system.
+    Simulation for membrane proteins are run at 0 surface tension and semiisotropic pressure
+    """
+
+    if is_membrane:
+        logging.debug(f"Adding a Membrane Montecarlo Barostat to the system")
+        barostat = MonteCarloMembraneBarostat(
+            1 * openmmunit.atmosphere,
+            0 * openmmunit.bar * openmmunit.nanometers,
+            temp,
+            MonteCarloMembraneBarostat.XYIsotropic,
+            MonteCarloMembraneBarostat.ZFree,
+            15,
+        )
+    else:
+        logging.debug(f"Adding a Montecarlo Barostat to the system")
+        barostat = MonteCarloBarostat(1 * openmmunit.atmosphere, temp)
+
+    system.addForce(barostat)
+
     return
 
 
@@ -343,14 +367,14 @@ def get_COG_dist(simulation, groupA, groupB) -> float:
 
 
 def calculate_com_distance(
-    u, lig_name: str = "UNK", pocket_atoms=None, massWeighted: bool = False
+    u, lig_name: str = "UNK", pocket_atoms=None, weighByMass: bool = False
 ) -> pd.DataFrame:
 
     ligand_atoms = u.select_atoms(f"resname {lig_name} and (not name H*)")
 
     distances = []
     for ts in u.trajectory:
-        if massWeighted:
+        if weighByMass:
             lig_com = ligand_atoms.center_of_mass(wrap=True)
             prot_com = pocket_atoms.center_of_mass(wrap=True)
         else:
