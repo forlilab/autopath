@@ -31,7 +31,7 @@ class SystemPreparation:
     def __init__(
         self,
         forcefield: list = [
-            "amber14/protein.ff14SB.xml",
+            "amber14-all.xml",
             "amber14/tip3pfb.xml",
             "amber/tip3p_HFE_multivalent.xml",
         ],
@@ -128,7 +128,9 @@ class SystemPreparation:
 
         return ligand_omm_topology, ligand_positions
 
-    def run(self, prot_path: str = None, variants: dict = None, lig_path: str = None):
+    def run(
+        self, prot_path: str = None, variants: dict = None, lig_path: str = None
+    ) -> tuple[System, Topology]:
 
         start_time = time.monotonic()
 
@@ -173,9 +175,6 @@ class SystemPreparation:
             for i, xyz_i in enumerate(ligand_positions):
                 ligand_positions[i] = xyz_i - lig_com
 
-            # # Find the lowest z-coordinate
-            # lowest_z = np.min(ligand_positions[:, 2])
-
             # Calculate the maximum distance between any two atoms in the molecule
             pairwise_distances = np.linalg.norm(
                 ligand_positions[:, None] - ligand_positions, axis=2
@@ -207,6 +206,7 @@ class SystemPreparation:
             except OpenMMException as e:
                 logging.error(f"Something went wrong while building the membrane.\n{e}")
                 exit(1)
+
         else:
             logging.info(f"Solvating the system..")
             modeller.addSolvent(
@@ -229,6 +229,7 @@ class SystemPreparation:
             constraints=HBonds,
         )
 
+        os.makedirs(out_dir, exist_ok=True)
         save_system(system, f"{out_dir}/system.xml")
         save_pdb(modeller.topology, modeller.positions, f"{out_dir}/system.pdb")
         save_amber_topology(
@@ -238,4 +239,4 @@ class SystemPreparation:
         simulation_time = time.monotonic() - start_time
         logging.info(f"Finished system preparation in {simulation_time:.2f} seconds.")
 
-        return None
+        return system, modeller.topology
