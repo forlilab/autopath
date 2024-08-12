@@ -24,9 +24,9 @@ def plot_rmsd(rmsd_df:pd.DataFrame=None,
     return
 
 
-def plot_colvar(dir_path, colvar_name):
-    sys_name = dir_path.split("/")[0]
-    files = glob(f"{dir_path}/COLVAR_*")
+def plot_colvar(out_dir, colvar_name):
+    sys_name = out_dir.split("/")[0]
+    files = glob(f"{out_dir}/COLVAR_*")
     data = []
     for f in files:
         walker_name = f.split("/")[2].split(".")[0]
@@ -44,17 +44,17 @@ def plot_colvar(dir_path, colvar_name):
     plt.ylabel("COM distance (A)")
     plt.xlabel("Frame #")
     plt.tight_layout()
-    plt.savefig(f"{sys_name}/metadynamics/{sys_name}_COLVAR.png")
+    plt.savefig(f"{out_dir}/{sys_name}_COLVAR.png")
     plt.close()
     return
 
 
-def plot_bias(dir_path, x_min, x_max, grid_points):
-    sys_name = dir_path.split("/")[0]
+def plot_bias(out_dir, x_min, x_max, grid_points):
+    sys_name = out_dir.split("/")[0]
     axis_values = np.linspace(x_min, x_max, grid_points)
     axis_values = [round(i * 10, 2) for i in axis_values]
 
-    files = glob(f"{dir_path}/bias_*")
+    files = glob(f"{out_dir}/bias_*")
     data = []
     for f in files:
         walker_name = f.split("/")[2].split(".")[0]
@@ -73,18 +73,18 @@ def plot_bias(dir_path, x_min, x_max, grid_points):
     plt.xlabel("COM distance (A)")
     plt.legend(bbox_to_anchor=(1.1, 1.05), fontsize="12")
     plt.tight_layout()
-    plt.savefig(f"{sys_name}/metadynamics/{sys_name}_BIAS.png")
+    plt.savefig(f"{out_dir}/{sys_name}_BIAS.png")
     plt.close()
     return
 
 
-def plot_FE(dir_path, x_min, x_max, grid_points):
+def plot_FE(out_dir, x_min, x_max, grid_points):
 
-    sys_name = dir_path.split("/")[0]
+    sys_name = out_dir.split("/")[0]
     axis_values = np.linspace(x_min, x_max, grid_points)
     axis_values = [round(i * 10, 2) for i in axis_values]
 
-    files = glob(f"{dir_path}/FE_*.npy")
+    files = glob(f"{out_dir}/FE_*.npy")
     data = []
     for i, f in enumerate(files):
         walker_name = f.split("/")[2].split(".")[0]  # +str(i)
@@ -103,7 +103,7 @@ def plot_FE(dir_path, x_min, x_max, grid_points):
     plt.xlabel("COM distance (A)")
     plt.legend(bbox_to_anchor=(1.1, 1.05), fontsize="12")
     plt.tight_layout()
-    plt.savefig(f"{sys_name}/metadynamics/{sys_name}_FE.png")
+    plt.savefig(f"{out_dir}/{sys_name}_FE.png")
     plt.close()
     return
 
