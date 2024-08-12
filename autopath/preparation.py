@@ -175,6 +175,25 @@ class SystemPreparation:
             for i, xyz_i in enumerate(ligand_positions):
                 ligand_positions[i] = xyz_i - lig_com
 
+            lig_com = lig_com.value_in_unit(openmmunit.nanometer)
+
+            dummy_position = openmm.Vec3(
+                lig_com[0],
+                lig_com[1],
+                0,
+            )
+
+            # Ensure dummy_position is a Quantity with units
+            dummy_position_quantity = openmmunit.Quantity(
+                dummy_position, openmmunit.angstrom
+            )
+
+            # Create a new topology for the dummy atom
+            dummy_topology = app.Topology()
+            dummy_chain = dummy_topology.addChain()
+            dummy_residue = dummy_topology.addResidue("DUM", dummy_chain)
+            dummy_atom = dummy_topology.addAtom("C", element.carbon, dummy_residue)
+
             # Calculate the maximum distance between any two atoms in the molecule
             pairwise_distances = np.linalg.norm(
                 ligand_positions[:, None] - ligand_positions, axis=2
@@ -229,12 +248,45 @@ class SystemPreparation:
             constraints=HBonds,
         )
 
+        # Add the dummy atom to the modeller
+        modeller.add(dummy_topology, [dummy_position_quantity])
+
+        unmatched_residues = self.forcefield.getUnmatchedResidues(modeller.topology)
+        print(
+            f"unmatched residues:{[unmatched_residue.name for unmatched_residue in unmatched_residues]}"
+        )
+        [templates, residues] = self.forcefield.generateTemplatesForUnmatchedResidues(
+            modeller.topology
+        )
+
+        # reduce residues to uniquely named
+        residues = list(dict.values({r.name: r for r in residues}))
+        templates = {t.name: t for t in templates}
+        for residue in residues:
+            print(f"creating template for residue {residue.name}")
+            template = templates[residue.name]
+            for atom in template.atoms:
+                atom.type = "protein-C"
+            self.forcefield.registerResidueTemplate(template)
+
+        unmatched_residues = self.forcefield.getUnmatchedResidues(modeller.topology)
+        print(
+            f"unmatched residues:{[unmatched_residue.name for unmatched_residue in unmatched_residues]}"
+        )
+
+        nonbonded = [f for f in system.getForces() if isinstance(f, NonbondedForce)][0]
+        # Add a single dummy particle
+        dummyIndex = system.addParticle(0)  # 0 mass
+        nonbonded.addParticle(
+            0, 0, 0
+        )  # 0 charge, 0 sigma (VDWR), 0 epsilon (interaction strength)
+
         os.makedirs(out_dir, exist_ok=True)
         save_system(system, f"{out_dir}/system.xml")
         save_pdb(modeller.topology, modeller.positions, f"{out_dir}/system.pdb")
-        save_amber_topology(
-            modeller.topology, modeller.positions, self.forcefield, out_dir
-        )
+        # save_amber_topology(
+        #     modeller.topology, modeller.positions, self.forcefield, out_dir
+        # )
 
         simulation_time = time.monotonic() - start_time
         logging.info(f"Finished system preparation in {simulation_time:.2f} seconds.")
