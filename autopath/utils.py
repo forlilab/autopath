@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 from sys import stdout, exit
 
-from typing import Union, Tuple
+from typing import Union, Tuple, List, Optional
 from collections import defaultdict
 
 from openmm import *
@@ -452,7 +452,7 @@ def add_COM_force(
     group_B: list = None,
     fc_pull=None,
     r0=None,
-    force_group: int = 15,
+    force_group: Optional[int] = 15,
 ):
 
     force = CustomCentroidBondForce(2, "0.5 * fc_pull * (distance(g1,g2)-r0)^2")
@@ -477,7 +477,7 @@ def add_harmonic_restraints(
     atom_idx_list: list[int] = None,
     restraint_force: int = 5,
     force_name: str = "k_prot",
-    force_group: int = 12,
+    force_group: Optional[int] = 12,
 ):
     """
     Function to add positional harmonic restraints to a set of atoms
@@ -507,35 +507,147 @@ def add_harmonic_restraints(
     return
 
 
-def add_flatbottom_restraints(
+def add_flatbottom_XY_restraint(
     system: System = None,
-    groupA: list = None,
-    groupB: list = None,
+    simulation: app.Simulation = None,
+    restrain_indexes: List[int] = None,
     r0: float = None,
-    upper_wall: int = 0.1,
+    upper_wall: float = 0.1,
     K_flat: float = 200,
-    force_group: int = 30,
+    force_group: Optional[int] = 31,
 ):
+    
+    initial_positions = simulation.context.getState(getPositions=True).getPositions()
 
-    fb_eq = "(k_flat/2)*max(distance(g1,g2) - upper_wall, r0)^2"
-    upper_wall_rest = CustomCentroidBondForce(2, fb_eq)
-    upper_wall_rest.addGroup(groupA)
-    upper_wall_rest.addGroup(groupB)
-    upper_wall_rest.addBond([0, 1])
-    upper_wall_rest.addGlobalParameter(
-        "k_flat", K_flat * openmmunit.kilojoules_per_mole
-    )
+    # Define the flat-bottom restraint potential
+    fb_eq = """
+    k_flat/2 * max(sqrt((x - x0)^2 + (y - y0)^2) - upper_wall, r0)^2
+    """
+    # fb_eq = """
+    # (k_flat/2)*max(periodicdistance(x, y, x0, y0) - upper_wall, r0)^2
+    # """
+
+    # Create the CustomExternalForce object
+    upper_wall_rest = CustomExternalForce(fb_eq)
+
+    # Get the initial positions of the ligand atoms
+    ligand_positions = [initial_positions[index] for index in restrain_indexes]
+
+    # Add per-particle parameters for the reference position
+    upper_wall_rest.addPerParticleParameter("x0")
+    upper_wall_rest.addPerParticleParameter("y0")
+
+    # Add global parameters
     upper_wall_rest.addGlobalParameter("upper_wall", upper_wall * openmmunit.nanometer)
     upper_wall_rest.addGlobalParameter("r0", r0 * openmmunit.nanometer)
+    upper_wall_rest.addGlobalParameter("k_flat", K_flat * openmmunit.kilojoules_per_mole)
 
-    upper_wall_rest.setUsesPeriodicBoundaryConditions(True)
+    # Assign the reference coordinates to each particle
+    for particle, positions in zip(restrain_indexes, ligand_positions):
+        upper_wall_rest.addParticle(particle, [positions.x, positions.y])
 
+    # Set the force group
     upper_wall_rest.setForceGroup(force_group)
 
+    # Add the force to the system
     system.addForce(upper_wall_rest)
 
     return None
 
+def add_funnel_restraint(
+    system: System,
+    host_index: List[int],
+    guest_index: List[int],
+    k_xy: Optional[openmmunit.Quantity] = 10.0
+    * openmmunit.kilocalorie_per_mole
+    / openmmunit.angstrom**2,
+    z_cc: Optional[openmmunit.Quantity] = 11.0 * openmmunit.angstrom,
+    alpha: Optional[openmmunit.Quantity] = 35.0 * openmmunit.degrees,
+    R_cylinder: Optional[openmmunit.Quantity] = 1.0 * openmmunit.angstrom,
+    force_group: Optional[int] = 10,
+):
+    """
+    Applies a funnel potential restraint to a guest molecule.
+    Limongelli, V., Bonomi, M., & Parrinello, M. (2013). Funnel metadynamics as accurate binding free-energy method. Proceedings of the National Academy of Sciences, 110(16), 6358-6363.
+    https://github.com/jeff231li/funnel_potential
+    """
+
+    # Funnel potential string expression
+    funnel = CustomCentroidBondForce(
+        2,
+        "U_funnel + U_cylinder;"
+        "U_funnel = step(z_cc - abs(r_z))*step(r_xy - R_funnel)*Wall_funnel;"
+        "U_cylinder = step(abs(r_z) - z_cc)*step(r_xy - R_cylinder)*Wall_cylinder;"
+        "Wall_funnel = 0.5 * k_xy * (r_xy - R_funnel)^2;"
+        "Wall_cylinder = 0.5 * k_xy * (r_xy - R_cylinder)^2;"
+        "R_funnel = (z_cc-abs(r_z))*tan(alpha) + R_cylinder;"
+        "r_xy = sqrt((x2 - x1)^2 + (y2 - y1)^2);"
+        "r_z = z2 - z1;",
+    )
+    funnel.setUsesPeriodicBoundaryConditions(False)
+    funnel.setForceGroup(force_group)
+
+    # Funnel parameters
+    funnel.addGlobalParameter("k_xy", k_xy)
+    funnel.addGlobalParameter("z_cc", z_cc)
+    funnel.addGlobalParameter("alpha", alpha)
+    funnel.addGlobalParameter("R_cylinder", R_cylinder)
+
+    # Add host and guest indices
+    g1 = funnel.addGroup(host_index, [1.0 for i in range(len(host_index))])
+    g2 = funnel.addGroup(guest_index, [1.0 for i in range(len(guest_index))])
+
+    # Add bond
+    funnel.addBond([g1, g2], [])
+
+    # Add force to system
+    system.addForce(funnel)
+
+    return
+
+def add_cylindrical_restraint(
+    system: System,
+    host_index: List[int],
+    guest_index: List[int],
+    k_xy: Optional[openmmunit.Quantity] = 10.0
+    * openmmunit.kilocalorie_per_mole
+    / openmmunit.angstrom**2,
+    R_cylinder: Optional[openmmunit.Quantity] = 10.0 * openmmunit.angstrom,
+    r0: Optional[openmmunit.Quantity] = 5 * openmmunit.angstrom,
+    force_group: Optional[int] = 10,
+):
+    """
+    Applies a cylindrical restraint to a guest molecule, allowing it to move freely in the Z direction
+    but restricting its motion in the XY plane.
+    Inpired by https://github.com/jeff231li/funnel_potential
+    """
+
+    # Cylindrical restraint potential string expression
+    cylindrical_restraint = CustomCentroidBondForce(
+        2,
+        "U_cylinder;"
+        "U_cylinder = step(r_xy - R_cylinder) * 0.5 * k_xy * (r_xy - R_cylinder)^2;"
+        "r_xy = sqrt((x2 - x1)^2 + (y2 - y1)^2);"
+    )
+    cylindrical_restraint.setUsesPeriodicBoundaryConditions(False)
+    cylindrical_restraint.setForceGroup(force_group)
+
+    # Cylindrical restraint parameters
+    cylindrical_restraint.addGlobalParameter("k_xy", k_xy)
+    cylindrical_restraint.addGlobalParameter("R_cylinder", R_cylinder)
+    cylindrical_restraint.addGlobalParameter("r0", r0)
+
+    # Add host and guest indices
+    g1 = cylindrical_restraint.addGroup(host_index, [1.0 for i in range(len(host_index))])
+    g2 = cylindrical_restraint.addGroup(guest_index, [1.0 for i in range(len(guest_index))])
+
+    # Add bond
+    cylindrical_restraint.addBond([g1, g2], [])
+
+    # Add force to system
+    system.addForce(cylindrical_restraint)
+
+    return
 
 def extract_sMD_statistics(files: list = None) -> pd.DataFrame:
     data = []

@@ -222,6 +222,14 @@ class SystemPreparation:
                     minimumPadding=self.padding + max_length,
                 )
 
+                modeller.addSolvent(
+                        self.forcefield,
+                        neutralize=True,
+                        # ionicStrength=self.ionicStrength,
+                        # boxShape=self.boxShape,
+                        padding=5,
+                    )
+
             except OpenMMException as e:
                 logging.error(f"Something went wrong while building the membrane.\n{e}")
                 exit(1)
@@ -248,6 +256,21 @@ class SystemPreparation:
             constraints=HBonds,
         )
 
+        # # Add a water molecule to the modeller to increase the water padding
+        # wat_pdb = PDBFile('wat.pdb')
+        # topology_toAdd = wat_pdb.topology
+        # positions_toAdd = openmm.Vec3(
+        #         lig_com[0],
+        #         lig_com[1],
+        #         lig_com[2]+0.3,
+        #     )
+        # # Ensure dummy_position is a Quantity with units
+        # positions_toAdd = openmmunit.Quantity(
+        #         positions_toAdd, openmmunit.angstrom
+        #     )
+
+        # modeller.add(topology_toAdd, [positions_toAdd])
+       
         # Add the dummy atom to the modeller
         modeller.add(dummy_topology, [dummy_position_quantity])
 
