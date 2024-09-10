@@ -79,10 +79,6 @@ class SteeredMD:
         # Setting Simulation object and loading the checkpoint
         simulation = Simulation(self.topology, self.system, integrator, self.platform)
 
-        if checkpoint_file is not None:
-            logging.info("Loading simulation checkpoint..")
-            simulation.loadCheckpoint(checkpoint_file)
-
         if not self.NPT:
             for index, fc in enumerate(self.system.getForces()):
                 if fc.getName() == "MonteCarloBarostat":
@@ -90,18 +86,23 @@ class SteeredMD:
                     logging.info(f"Removing existing MonteCarloBarostat")
                     _print_current_forces(self.system)
 
+        if checkpoint_file is not None:
+            logging.info("Loading simulation checkpoint..")
+            simulation.loadCheckpoint(checkpoint_file)
+
         # Add harmonic positional restraints to protein CA
         input_positions = simulation.context.getState(getPositions=True).getPositions()
-
-        add_harmonic_restraints(
-            self.system,
-            input_positions,
-            self.topology,
-            self.restrained_atoms,
-            10,
-            "k_CA",
-            14,
-        )
+        
+        if self.restrained_atoms is not None:
+            add_harmonic_restraints(
+                self.system,
+                input_positions,
+                self.topology,
+                self.restrained_atoms,
+                10,
+                "k_CA",
+                14,
+            )
 
         startdist = get_COG_dist(simulation, self.ligand_atoms, self.pocket_atoms)
         initial_r0 = startdist * openmmunit.nanometers
@@ -127,8 +128,9 @@ class SteeredMD:
 
             logging.info(f"Replica {rep_idx}/{replicas}")
 
-            if self.checkpoint_file is not None:
-                simulation.loadCheckpoint(self.checkpoint_file)
+            if checkpoint_file is not None:
+                logging.info("Loading simulation checkpoint..")
+                simulation.loadCheckpoint(checkpoint_file)
 
             simulation.context.setParameter("r0", initial_r0)
 
