@@ -56,10 +56,8 @@ class VanillaMD:
         )
         # integrator.setRandomNumberSeed(int(rep_idx))
 
-        system = load_system(self.system_file)
-
         # Setting Simulation object and loading the checkpoint
-        simulation = Simulation(self.topology, system, integrator, self.platform)
+        simulation = Simulation(self.topology, self.system, integrator, self.platform)
 
         # If a checkpoint is provided, it will assume it comes from an equilibration simulation, so it will just continue
         if checkpoint_file is not None:
@@ -76,7 +74,7 @@ class VanillaMD:
         # save stuff
         final_positions = simulation.context.getState(getPositions=True).getPositions()
         save_simulation(simulation, f"{self.out_dir}/MD_{run_id}_checkpoint")
-        save_system(system, f"{self.out_dir}/MD_{run_id}_system.xml")
+        save_system(self.system, f"{self.out_dir}/MD_{run_id}_system.xml")
         save_pdb(self.topology, final_positions, f"{self.out_dir}/MD_{run_id}.pdb")
 
         simulation_time = time.monotonic() - start_time

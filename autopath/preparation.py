@@ -147,7 +147,8 @@ class SystemPreparation:
 
         if prot_path is not None:
             rec_name = os.path.splitext(os.path.basename(prot_path))[0]
-            out_dir = rec_name
+            if lig_path is None:
+                out_dir = rec_name
 
             try:
                 protein_pdb = PDBFile(prot_path)

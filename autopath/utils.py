@@ -261,7 +261,7 @@ def add_reporters(
     return
 
 
-def add_barostat(system, temp: int, is_membrane: bool) -> None:
+def add_barostat(system, temp: float=298.15, is_membrane: bool=False) -> None:
     """Add an appropriate barostat to the system.
     Simulation for membrane proteins are run at 0 surface tension and semiisotropic pressure
     """
@@ -367,10 +367,8 @@ def get_COG_dist(simulation, groupA, groupB) -> float:
 
 
 def calculate_com_distance(
-    u, lig_name: str = "UNK", pocket_atoms=None, weighByMass: bool = False
+    u, ligand_atoms=None, pocket_atoms=None, weighByMass: bool = False
 ) -> pd.DataFrame:
-
-    ligand_atoms = u.select_atoms(f"resname {lig_name} and (not name H*)")
 
     distances = []
     for ts in u.trajectory:
@@ -411,8 +409,8 @@ def get_ligand_rmsd(
         alig_select = f"resname {lig_resname} and not name H*"
 
     # Make sure molecules are whole before rmsd calculation
-    transform = wrap(u.atoms)
-    u.trajectory.add_transformations(transform)
+    # transform = wrap(u.atoms)
+    # u.trajectory.add_transformations(transform)
 
     # Align each frame using the backbone as reference
     # Calculate the RMSD of ligand heavy atoms
@@ -627,7 +625,7 @@ def cluster_pulling_MD(
 
         pocket_atoms = u.select_atoms(pocket_selection)
 
-        cog_d = calculate_cog_distance(u, ligand_atoms, pocket_atoms)
+        cog_d = calculate_com_distance(u, ligand_atoms, pocket_atoms)
         rmsd = get_ligand_rmsd(u, u_ref, lig_resname, alig_select="ligand")
 
         dat = pd.concat([cog_d, rmsd], axis=1)
@@ -660,7 +658,7 @@ def cluster_milestone_pdbs(
         u = mda.Universe(f, in_memory=True)
         pocket_atoms = u.select_atoms(pocket_selection)
         ligand_atoms = u.select_atoms(f"resname {lig_resname} and (not name H*)")
-        cog_dist = calculate_cog_distance(u, ligand_atoms, pocket_atoms)
+        cog_dist = calculate_com_distance(u, ligand_atoms, pocket_atoms)
         # rmsd = get_ligand_rmsd(u, lig_resname, alig_select='ligand')
         # data = pd.concat([cog_dist, rmsd], axis=1)
         cog_dist["fname"] = f
