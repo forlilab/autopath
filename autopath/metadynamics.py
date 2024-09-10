@@ -21,6 +21,7 @@ class MetadynamicsMD:
         topology: str = None,
         ligand_atoms: list[int] = None,
         pocket_atoms: list[int] = None,
+        restrained_atoms: list[int] = None,
         out_dir: str = "metadynamics",
         HMR: bool = True,
         temp: float = 300,
@@ -45,6 +46,7 @@ class MetadynamicsMD:
 
         self.ligand_atoms = ligand_atoms
         self.pocket_atoms = pocket_atoms
+        self.restrained_atoms = restrained_atoms
 
         self.platform = select_platform("fastest")
 
@@ -107,8 +109,8 @@ class MetadynamicsMD:
         # integrator.setRandomNumberSeed(int(rep_idx))
 
         # Add a barostat to the system
-        if self.NPT:
-            add_barostat(system, self.temperature, self.is_membrane)
+        # if self.NPT:
+        #     add_barostat(system, self.temperature, self.is_membrane)
         _print_current_forces(system)
         
         if self.topology is None:
@@ -132,6 +134,18 @@ class MetadynamicsMD:
             else:
                 logging.error(f"Either a PDB or a checkpoint file must be provided to get coordinates from")
                 exit(1)
+
+        input_positions = simulation.context.getState(getPositions=True).getPositions()
+        if self.restrained_atoms is not None:
+            add_harmonic_restraints(
+                system,
+                input_positions,
+                self.topology,
+                self.restrained_atoms,
+                10,
+                "k_CA",
+                14,
+            )
 
         logging.debug(f"Setting up reporters for {run_id}..")
         add_reporters(
