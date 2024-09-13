@@ -23,11 +23,10 @@ class MetadynamicsMD:
         pocket_atoms: list[int] = None,
         restrained_atoms: list[int] = None,
         out_dir: str = "metadynamics",
+        is_membrane: bool = False,
         HMR: bool = True,
         temp: float = 300,
-        NPT: bool = True,
         verbose: bool = True,
-        is_membrane: bool = False,
     ) -> None:
 
         if HMR:
@@ -38,7 +37,6 @@ class MetadynamicsMD:
         self.topology = topology
 
         self.temperature = temp * openmmunit.kelvin
-        self.NPT = NPT
         self.is_membrane = is_membrane
 
         self.out_dir = out_dir
@@ -107,11 +105,6 @@ class MetadynamicsMD:
             self.temperature, 1 / openmmunit.picoseconds, self.timestep
         )
         # integrator.setRandomNumberSeed(int(rep_idx))
-
-        # Add a barostat to the system
-        if self.NPT:
-            add_barostat(system, self.temperature, self.is_membrane)
-        _print_current_forces(system)
         
         if self.topology is None:
             if pdb_file is None:
@@ -151,8 +144,7 @@ class MetadynamicsMD:
             
         lig_name = "UNK"
         ligand_atoms = [a.index for a in self.topology.atoms() if a.residue.name == lig_name]
-        # add_flatbottom_XY_restraint(system, simulation, ligand_atoms, 0.5, 0.5, 200, 31)
-        add_cylindrical_restraint(system, host_index=self.pocket_atoms, guest_index=ligand_atoms, R_cylinder=1.5 * openmmunit.nanometers, force_group=31)
+        add_cylindrical_restraint(system, host_index=self.pocket_atoms, guest_index=ligand_atoms, R_cylinder=1.3 * openmmunit.nanometers, force_group=31)
 
         logging.debug(f"Setting up reporters for {run_id}..")
         add_reporters(
@@ -326,9 +318,9 @@ class MetadynamicsMD:
         mMD_time: int = 10,
         bias_factor: float = 10,
         hill_height: float = 0.3,
-        hill_width_A: float = 0.01,  # also known as sigma
+        hill_width_A: float = 0.01,
         grid_dimensions_A: tuple = (0.0, 1.0),
-        hill_width_B: float = 0.01,  # also known as sigma
+        hill_width_B: float = 0.01,
         grid_dimensions_B: tuple = (0.0, 1.0),
         bias_frequency: int = 2,
         saveFrequency: int = 50,
@@ -349,11 +341,6 @@ class MetadynamicsMD:
             self.temperature, 1 / openmmunit.picoseconds, self.timestep
         )
         # integrator.setRandomNumberSeed(int(rep_idx))
-
-        # Add a barostat to the system
-        if self.NPT:
-            add_barostat(system, self.temperature, self.is_membrane)
-        _print_current_forces(system)
 
         if self.topology is None:
             if pdb_file is None:
@@ -397,8 +384,7 @@ class MetadynamicsMD:
 
         lig_name = "UNK"
         ligand_atoms = [a.index for a in self.topology.atoms() if a.residue.name == lig_name]
-        # add_flatbottom_XY_restraint(system, simulation, ligand_atoms, 0.5, 0.5, 200, 31)
-        add_cylindrical_restraint(system, host_index=self.pocket_atoms, guest_index=ligand_atoms, R_cylinder=1.0 * openmmunit.nanometers, force_group=31)
+        add_cylindrical_restraint(system, host_index=self.pocket_atoms, guest_index=ligand_atoms, R_cylinder=1.25 * openmmunit.nanometers, force_group=31)
 
         ##################### Number of contacts CV #################################
 

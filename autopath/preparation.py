@@ -210,6 +210,7 @@ class SystemPreparation:
             # create a new modeller from the ligand structure
             modeller = Modeller(ligand_topology, ligand_positions)
 
+
         if self.is_membrane:
 
             logging.info(f"Adding a {self.lipid_type} membrane to the system..")
@@ -221,13 +222,24 @@ class SystemPreparation:
                     ionicStrength=self.ionicStrength,
                     minimumPadding=self.padding + max_length,
                 )
+               
+                # Get the periodic box vectors
+                vectors = modeller.topology.getPeriodicBoxVectors().value_in_unit(openmmunit.nanometer)
+                print(vectors)
 
+                # Define the box vector with an increased z dimension
+                box_vector = (
+                    openmm.Vec3(vectors[0][0], 0, 0),
+                    openmm.Vec3(0, vectors[1][1], 0),
+                    openmm.Vec3(0, 0, vectors[2][2] * 1.35)
+                )
+                print(box_vector)
+                
+                # Add solvent to the system
                 modeller.addSolvent(
                         self.forcefield,
                         neutralize=True,
-                        # ionicStrength=self.ionicStrength,
-                        # boxShape=self.boxShape,
-                        padding=5,
+                        boxVectors=box_vector
                     )
 
             except OpenMMException as e:
@@ -244,7 +256,7 @@ class SystemPreparation:
                 padding=self.padding,
             )
 
-        logging.info(f"Creating the an OpenMM system..")
+        logging.info(f"Creating an OpenMM system..")
         system = self.forcefield.createSystem(
             modeller.topology,
             nonbondedMethod=PME,
@@ -255,21 +267,6 @@ class SystemPreparation:
             hydrogenMass=self.hydrogenMass,
             constraints=HBonds,
         )
-
-        # # Add a water molecule to the modeller to increase the water padding
-        # wat_pdb = PDBFile('wat.pdb')
-        # topology_toAdd = wat_pdb.topology
-        # positions_toAdd = openmm.Vec3(
-        #         lig_com[0],
-        #         lig_com[1],
-        #         lig_com[2]+0.3,
-        #     )
-        # # Ensure dummy_position is a Quantity with units
-        # positions_toAdd = openmmunit.Quantity(
-        #         positions_toAdd, openmmunit.angstrom
-        #     )
-
-        # modeller.add(topology_toAdd, [positions_toAdd])
        
         # Add the dummy atom to the modeller
         modeller.add(dummy_topology, [dummy_position_quantity])

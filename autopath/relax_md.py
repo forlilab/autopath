@@ -30,11 +30,7 @@ class RelaxMD:
         self.system = system
         self.topology = topology
 
-        if HMR:
-            self.timestep = 0.004
-        else:
-            self.timestep = 0.002
-
+        self.timestep = 0.004 if HMR else 0.002
         self.temperature = temp * openmmunit.kelvin
 
         self.ligand_ha_idx, self.lig_ha_names = get_ligand_ha(self.topology, lig_name)
