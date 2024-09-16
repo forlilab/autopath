@@ -7,7 +7,6 @@ import logging
 from openmm import *
 from openmm.app import *
 import openmm.unit as openmmunit
-from openmm.app.amberprmtopfile import AmberPrmtopFile
 
 # AutoPath imports
 from autopath.utils import *
@@ -30,21 +29,16 @@ class RelaxMD:
         self.system = system
         self.topology = topology
 
-        if HMR:
-            self.timestep = 0.004
-        else:
-            self.timestep = 0.002
+        os.makedirs(out_dir, exist_ok=True)
+        self.out_dir = out_dir
 
+        self.timestep = 0.004 if HMR else 0.002
         self.temperature = temp * openmmunit.kelvin
 
         self.ligand_ha_idx, self.lig_ha_names = get_ligand_ha(self.topology, lig_name)
         self.pocket_atoms = pocket_atoms
         self.use_flat_bottom_rest = use_flat_bottom_rest
 
-        os.makedirs(out_dir, exist_ok=True)
-        self.out_dir = out_dir
-
-        # Select MD platform
         self.platform = select_platform("fastest")
 
         return None
@@ -78,7 +72,7 @@ class RelaxMD:
         startdist = get_COG_dist(simulation, self.ligand_ha_idx, self.pocket_atoms)
 
         if self.use_flat_bottom_rest:
-            add_flatbottom_restraints(
+            add_flatbottom_COM_restraints(
                 self.system, self.ligand_ha_idx, self.pocket_atoms, startdist
             )
 

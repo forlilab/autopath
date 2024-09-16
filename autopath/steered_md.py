@@ -24,7 +24,6 @@ class SteeredMD:
         ligand_atoms: list[int] = None,
         pocket_atoms: list[int] = None,
         restrained_atoms: list[int] = None,
-        NPT: bool = True,
         HMR: bool = True,
         temp: float = 300,
         out_dir: str = None,
@@ -36,12 +35,7 @@ class SteeredMD:
         self.out_dir = out_dir
         os.makedirs(out_dir, exist_ok=True)
 
-        if HMR:
-            self.timestep = 0.004
-        else:
-            self.timestep = 0.002
-
-        self.NPT = NPT
+        self.timestep = 0.004 if HMR else 0.002
         self.temperature = temp * openmmunit.kelvin
 
         self.ligand_atoms = ligand_atoms
@@ -78,13 +72,6 @@ class SteeredMD:
 
         # Setting Simulation object and loading the checkpoint
         simulation = Simulation(self.topology, self.system, integrator, self.platform)
-
-        if not self.NPT:
-            for index, fc in enumerate(self.system.getForces()):
-                if fc.getName() == "MonteCarloBarostat":
-                    simulation.context.getSystem().removeForce(index)
-                    logging.info(f"Removing existing MonteCarloBarostat")
-                    _print_current_forces(self.system)
 
         if checkpoint_file is not None:
             logging.info("Loading simulation checkpoint..")

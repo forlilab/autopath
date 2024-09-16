@@ -91,8 +91,8 @@ class SystemPreparation:
         """Load ligand SDF and transform to OpenMM molecule"""
         try:
             rdkit_mol = SDMolSupplier(lig_sdf)[0]
-        except:
-            logging.error(f"Something went wrong loading {lig_sdf}..")
+        except Exception as e:
+            logging.error(f"Something went wrong loading {lig_sdf}..\n{e}")
             raise
 
         # Convert to OpenMM molecule
@@ -153,8 +153,8 @@ class SystemPreparation:
             try:
                 protein_pdb = PDBFile(prot_path)
                 logging.info(f"Loaded {rec_name} PDB..")
-            except:
-                logging.error(f"Something went wrong loading {rec_name} PDB..")
+            except Exception as e:
+                logging.error(f"Something went wrong loading {rec_name} PDB..\n{e}")
                 raise
 
             # make an OpenMM Modeller object with the protein

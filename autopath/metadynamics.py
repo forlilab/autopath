@@ -12,7 +12,6 @@ import cvpack
 
 from autopath.utils import *
 from autopath.analysis import plot_bias, plot_colvar, plot_FE
-from autopath.utils import _print_current_forces
 
 class MetadynamicsMD:
 
@@ -25,24 +24,18 @@ class MetadynamicsMD:
         out_dir: str = "metadynamics",
         HMR: bool = True,
         temp: float = 300,
-        NPT: bool = True,
-        verbose: bool = True,
         is_membrane: bool = False,
+        verbose: bool = True
     ) -> None:
-
-        if HMR:
-            self.timestep = 0.004
-        else:
-            self.timestep = 0.002
 
         self.topology = topology
 
-        self.temperature = temp * openmmunit.kelvin
-        self.NPT = NPT
-        self.is_membrane = is_membrane
-
         self.out_dir = out_dir
         os.makedirs(self.out_dir, exist_ok=True)
+
+        self.timestep = 0.004 if HMR else 0.002
+        self.temperature = temp * openmmunit.kelvin
+        self.is_membrane = is_membrane
 
         self.ligand_atoms = ligand_atoms
         self.pocket_atoms = pocket_atoms
@@ -108,11 +101,6 @@ class MetadynamicsMD:
         )
         # integrator.setRandomNumberSeed(int(rep_idx))
 
-        # Add a barostat to the system
-        # if self.NPT:
-        #     add_barostat(system, self.temperature, self.is_membrane)
-        _print_current_forces(system)
-        
         if self.topology is None:
             if pdb_file is None:
                 logging.error(f"Either a PDB or a prmtop file must be provided to get the topology from")
@@ -355,12 +343,6 @@ class MetadynamicsMD:
 
         logging.debug(f"Loading a simulation file")
         system = load_system(system_file)
-
-        if self.NPT:
-            logging.debug(f"Adding a Montecarlo Barostat to the system")
-            system.addForce(
-                MonteCarloBarostat(1 * openmmunit.atmosphere, self.temperature)
-            )
 
         logging.debug(f"Creating the simulation for {run_id}")
         simulation = Simulation(self.topology, system, integrator, self.platform)
