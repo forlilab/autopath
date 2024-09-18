@@ -182,6 +182,28 @@ def plot_FE_2D(
 
     return
 
+def plot_colvar_2D(out_dir, xCV_name, yCV_name):
+    sys_name = out_dir.split("/")[0]
+    files = glob(f"{out_dir}/COLVAR_*")
+    data = []
+    for f in files:
+        walker_name = os.path.basename(f).split(".")[0]
+        np_data = np.load(f)
+        df = pd.DataFrame(np_data, columns=[xCV_name, yCV_name])
+        df["walker"] = walker_name
+        data.append(df)
+    data = pd.concat(data, axis=0)
+
+    plt.figure(figsize=(10, 5))
+    sns.lineplot(data, x=data.index, y=xCV_name, hue="walker")
+    plt.legend(bbox_to_anchor=(1.1, 1.05), fontsize="12")
+    plt.xlabel('Step #'); plt.ylabel(xCV_name)
+    plt.title(f'{xCV_name} vs. Step # - {sys_name}')
+    plt.tight_layout()
+    plt.savefig(f"{out_dir}/{sys_name}_{xCV_name}_COLVAR.png")
+    plt.close()
+
+    return
 
 def plot_sMD_statistics(data:pd.DataFrame=None, sys_name:str=None, out_dir:str=None) -> None:
 
