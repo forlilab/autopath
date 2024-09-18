@@ -144,7 +144,7 @@ class MetadynamicsMD:
             
         lig_name = "UNK"
         ligand_atoms = [a.index for a in self.topology.atoms() if a.residue.name == lig_name]
-        add_cylindrical_restraint(system, host_index=self.pocket_atoms, guest_index=ligand_atoms, R_cylinder=1.3 * openmmunit.nanometers, force_group=31)
+        add_cylindrical_restraint(system, host_index=self.pocket_atoms, guest_index=ligand_atoms, R_cylinder=1.5 * openmmunit.nanometers, force_group=31)
 
         logging.debug(f"Setting up reporters for {run_id}..")
         add_reporters(
@@ -384,7 +384,7 @@ class MetadynamicsMD:
 
         lig_name = "UNK"
         ligand_atoms = [a.index for a in self.topology.atoms() if a.residue.name == lig_name]
-        add_cylindrical_restraint(system, host_index=self.pocket_atoms, guest_index=ligand_atoms, R_cylinder=1.25 * openmmunit.nanometers, force_group=31)
+        add_cylindrical_restraint(system, host_index=self.pocket_atoms, guest_index=ligand_atoms, R_cylinder=1.5 * openmmunit.nanometers, force_group=31)
 
         ##################### Number of contacts CV #################################
 

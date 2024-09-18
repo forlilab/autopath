@@ -231,7 +231,7 @@ class SystemPreparation:
                 box_vector = (
                     openmm.Vec3(vectors[0][0], 0, 0),
                     openmm.Vec3(0, vectors[1][1], 0),
-                    openmm.Vec3(0, 0, vectors[2][2] * 1.35)
+                    openmm.Vec3(0, 0, vectors[2][2] * 1.5)
                 )
                 print(box_vector)
                 
