@@ -54,7 +54,7 @@ def plot_rmsd(rmsd_df:pd.DataFrame=None,
               sys_name:str=None,
               out_dir:str=None) -> None:
     rmsd_df["rmsd"] = rmsd_df["rmsd"] * 10  # nM to A
-    plt.figure(figsize=(6, 4))
+    plt.figure(figsize=(10, 5))
     sns.lineplot(data=rmsd_df, y="rmsd", x=rmsd_df.index)
     plt.ylabel("RMSD (A)");     plt.xlabel("Frame #")
     plt.title(f"RMSD {sys_name}", fontsize=10)
@@ -64,14 +64,13 @@ def plot_rmsd(rmsd_df:pd.DataFrame=None,
     return
 
 
-def plot_colvar(out_dir, colvar_name):
+def plot_colvar(out_dir:str=None, colvar_name:str=None):
     sys_name = out_dir.split("/")[0]
     files = glob(f"{out_dir}/COLVAR_*")
     data = []
     for f in files:
         walker_name = f.split("/")[2].split(".")[0]
         np_data = np.load(f)
-        np_data = np_data * 10  # nM to A
         df = pd.DataFrame(np_data, columns=[colvar_name])
         df["walker"] = walker_name
         data.append(df)
@@ -81,7 +80,7 @@ def plot_colvar(out_dir, colvar_name):
     plt.figure(figsize=(10, 5))
     sns.lineplot(data, x=data.index, y=colvar_name, hue="walker")
     plt.legend(bbox_to_anchor=(1.1, 1.05), fontsize="12")
-    plt.ylabel("COM distance (A)")
+    plt.ylabel(colvar_name)
     plt.xlabel("Frame #")
     plt.tight_layout()
     plt.savefig(f"{out_dir}/{sys_name}_COLVAR.png")
@@ -89,7 +88,7 @@ def plot_colvar(out_dir, colvar_name):
     return
 
 
-def plot_bias(out_dir, x_min, x_max, grid_points):
+def plot_bias(out_dir:str=None, x_min:float=None, x_max:float=None, grid_points:int=None, colvar_name:str=None):
     sys_name = out_dir.split("/")[0]
     axis_values = np.linspace(x_min, x_max, grid_points)
     axis_values = [round(i * 10, 2) for i in axis_values]
@@ -110,15 +109,16 @@ def plot_bias(out_dir, x_min, x_max, grid_points):
     plt.figure(figsize=(10, 4))
     sns.lineplot(data, x=data.index, y="bias", hue="walker")
     plt.ylabel("Bias (Kcal/mol)")
-    plt.xlabel("COM distance (A)")
+    plt.xlabel(colvar_name)
     plt.legend(bbox_to_anchor=(1.1, 1.05), fontsize="12")
+    plt.title(f"Bias deposited - {sys_name}")
     plt.tight_layout()
     plt.savefig(f"{out_dir}/{sys_name}_BIAS.png")
     plt.close()
     return
 
 
-def plot_FE(out_dir, x_min, x_max, grid_points):
+def plot_FE(out_dir, x_min, x_max, grid_points, colvar_name):
 
     sys_name = out_dir.split("/")[0]
     axis_values = np.linspace(x_min, x_max, grid_points)
@@ -138,10 +138,10 @@ def plot_FE(out_dir, x_min, x_max, grid_points):
     data = pd.concat(data, axis=0)
     plt.figure(figsize=(10, 4))
     sns.lineplot(data, x=data.index, y="FE", hue="walker")
-    # plt.vlines(ymin=-22, ymax=0, x=0.31, colors='black')
     plt.ylabel("FE (Kcal/mol)")
-    plt.xlabel("COM distance (A)")
+    plt.xlabel(colvar_name)
     plt.legend(bbox_to_anchor=(1.1, 1.05), fontsize="12")
+    plt.title(f"Free Energy - {sys_name}")
     plt.tight_layout()
     plt.savefig(f"{out_dir}/{sys_name}_FE.png")
     plt.close()
@@ -174,8 +174,8 @@ def plot_FE_2D(
         plt.title(f"Metadynamics - {sys_name} - {walker_name}", fontsize=12)
         plt.xlabel(x_name)
         plt.ylabel(y_name)
+        plt.title(f"Free Energy - {sys_name}")
         plt.tight_layout()
-
         plt.savefig(f"{out_dir}/{sys_name}_{walker_name}.png")
         # plt.show()
         plt.close()
@@ -189,7 +189,7 @@ def plot_sMD_statistics(data:pd.DataFrame=None, sys_name:str=None, out_dir:str=N
     sns.lineplot(data, x="r0", y="work", hue="replica")
     plt.xlabel("r0 dist (nm)")
     plt.ylabel("Work (KJ/mol)")
-    plt.title(sys_name)
+    plt.title(f'r0 vs Work - {sys_name}')
     plt.tight_layout()
     plt.savefig(f"{out_dir}/{sys_name}-r0_vs_work.png")
     plt.close()
@@ -198,7 +198,7 @@ def plot_sMD_statistics(data:pd.DataFrame=None, sys_name:str=None, out_dir:str=N
     sns.lineplot(data, x="COMDist", y="work", hue="replica")
     plt.xlabel("COM dist (nm)")
     plt.ylabel("Work (KJ/mol)")
-    plt.title(sys_name)
+    plt.title(f'COM vs Work - {sys_name}')
     plt.tight_layout()
     plt.savefig(f"{out_dir}/{sys_name}-com_vs_work.png")
     plt.close()
@@ -207,7 +207,7 @@ def plot_sMD_statistics(data:pd.DataFrame=None, sys_name:str=None, out_dir:str=N
     sns.lineplot(data, x="r0", y="force")  # , hue='replica')
     plt.xlabel("r0 dist (nm)")
     plt.ylabel("Force (KJ/mol)")
-    plt.title(sys_name)
+    plt.title(f'r0 vs Force - {sys_name}')
     plt.tight_layout()
     plt.savefig(f"{out_dir}/{sys_name}-r0_vs_force.png")
     plt.close()

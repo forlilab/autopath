@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 from sys import stdout, exit
 
-from typing import Union, Tuple
+from typing import Union, Tuple, Optional, List
 from collections import defaultdict
 
 from openmm import *
