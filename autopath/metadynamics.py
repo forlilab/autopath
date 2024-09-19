@@ -11,8 +11,7 @@ import openmm.unit as openmmunit
 import cvpack
 
 from autopath.utils import *
-from autopath.analysis import plot_bias, plot_colvar, plot_FE, plot_FE_2D
-from autopath.utils import _print_current_forces
+from autopath.analysis import plot_bias, plot_colvar, plot_FE, plot_FE_2D, plot_colvar_2D
 
 class MetadynamicsMD:
 
@@ -29,14 +28,11 @@ class MetadynamicsMD:
         verbose: bool = True,
     ) -> None:
 
-        if HMR:
-            self.timestep = 0.004
-        else:
-            self.timestep = 0.002
+        self.timestep = 0.004 if HMR else 0.002
+        self.temperature = temp * openmmunit.kelvin
 
         self.topology = topology
 
-        self.temperature = temp * openmmunit.kelvin
         self.is_membrane = is_membrane
 
         self.out_dir = out_dir
@@ -164,7 +160,7 @@ class MetadynamicsMD:
                 openmmunit.nanometers,
                 groups,
                 weighByMass=False,
-                pbc=False,
+                pbc=True,
             )
 
         elif mMD_CV == "rmsd":
@@ -579,9 +575,7 @@ class MetadynamicsMD:
         np.save(os.path.join(self.out_dir, f"FE_{run_id}.npy"), meta.getFreeEnergy())
 
         # Create plots for all current runs
-        # plot_colvar(self.out_dir, 'COM_dist')
-        # plot_bias(self.out_dir, grid_min, grid_max, grid)
-
+        plot_colvar_2D(self.out_dir, "COM", "RMSD")
         plot_FE_2D(
             self.out_dir,
             grid_min_A,

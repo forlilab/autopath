@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 from sys import stdout, exit
 
-from typing import Union, Tuple, List, Optional
+from typing import Union, Tuple, Optional, List
 from collections import defaultdict
 
 from openmm import *
@@ -261,7 +261,7 @@ def add_reporters(
     return
 
 
-def add_barostat(system, temp: int, is_membrane: bool) -> None:
+def add_barostat(system, temp: float=298.15, is_membrane: bool=False) -> None:
     """Add an appropriate barostat to the system.
     Simulation for membrane proteins are run at 0 surface tension and semiisotropic pressure
     """
@@ -367,10 +367,8 @@ def get_COG_dist(simulation, groupA, groupB) -> float:
 
 
 def calculate_com_distance(
-    u, lig_name: str = "UNK", pocket_atoms=None, weighByMass: bool = False
+    u, ligand_atoms=None, pocket_atoms=None, weighByMass: bool = False
 ) -> pd.DataFrame:
-
-    ligand_atoms = u.select_atoms(f"resname {lig_name} and (not name H*)")
 
     distances = []
     for ts in u.trajectory:
@@ -411,8 +409,8 @@ def get_ligand_rmsd(
         alig_select = f"resname {lig_resname} and not name H*"
 
     # Make sure molecules are whole before rmsd calculation
-    transform = wrap(u.atoms)
-    u.trajectory.add_transformations(transform)
+    # transform = wrap(u.atoms)
+    # u.trajectory.add_transformations(transform)
 
     # Align each frame using the backbone as reference
     # Calculate the RMSD of ligand heavy atoms
@@ -476,8 +474,8 @@ def add_harmonic_restraints(
     topology: app.Topology = None,
     atom_idx_list: list[int] = None,
     restraint_force: int = 5,
-    force_name: str = "k_prot",
-    force_group: Optional[int] = 12,
+    force_name: str = "k",
+    force_group: int = 12,
 ):
     """
     Function to add positional harmonic restraints to a set of atoms
@@ -552,9 +550,56 @@ def add_flatbottom_XY_restraint(
     # Add the force to the system
     system.addForce(upper_wall_rest)
 
+    return
+
+def add_flatbottom_XY_restraints(
+    system: System = None,
+    simulation: app.Simulation = None,
+    restrain_indexes: List[int] = None,
+    r0: float = None,
+    upper_wall: float = 0.1,
+    K_flat: float = 200,
+    force_group: Optional[int] = 31,
+):
+    
+    initial_positions = simulation.context.getState(getPositions=True).getPositions()
+
+    # Define the flat-bottom restraint potential
+    fb_eq = """
+    k_flat/2 * max(sqrt((x - x0)^2 + (y - y0)^2) - upper_wall, r0)^2
+    """
+    # fb_eq = """
+    # (k_flat/2)*max(periodicdistance(x, y, x0, y0) - upper_wall, r0)^2
+    # """
+
+    # Create the CustomExternalForce object
+    upper_wall_rest = CustomExternalForce(fb_eq)
+
+    # Get the initial positions of the ligand atoms
+    ligand_positions = [initial_positions[index] for index in restrain_indexes]
+
+    # Add per-particle parameters for the reference position
+    upper_wall_rest.addPerParticleParameter("x0")
+    upper_wall_rest.addPerParticleParameter("y0")
+
+    # Add global parameters
+    upper_wall_rest.addGlobalParameter("upper_wall", upper_wall * openmmunit.nanometer)
+    upper_wall_rest.addGlobalParameter("r0", r0 * openmmunit.nanometer)
+    upper_wall_rest.addGlobalParameter("k_flat", K_flat * openmmunit.kilojoules_per_mole)
+
+    # Assign the reference coordinates to each particle
+    for particle, positions in zip(restrain_indexes, ligand_positions):
+        upper_wall_rest.addParticle(particle, [positions.x, positions.y])
+
+    # Set the force group
+    upper_wall_rest.setForceGroup(force_group)
+
+    # Add the force to the system
+    system.addForce(upper_wall_rest)
+
     return None
 
-def add_funnel_restraint(
+def add_funnel_restraints(
     system: System,
     host_index: List[int],
     guest_index: List[int],
@@ -605,7 +650,7 @@ def add_funnel_restraint(
 
     return
 
-def add_cylindrical_restraint(
+def add_cylindrical_restraints(
     system: System,
     host_index: List[int],
     guest_index: List[int],
@@ -739,7 +784,7 @@ def cluster_pulling_MD(
 
         pocket_atoms = u.select_atoms(pocket_selection)
 
-        cog_d = calculate_cog_distance(u, ligand_atoms, pocket_atoms)
+        cog_d = calculate_com_distance(u, ligand_atoms, pocket_atoms)
         rmsd = get_ligand_rmsd(u, u_ref, lig_resname, alig_select="ligand")
 
         dat = pd.concat([cog_d, rmsd], axis=1)
@@ -772,7 +817,7 @@ def cluster_milestone_pdbs(
         u = mda.Universe(f, in_memory=True)
         pocket_atoms = u.select_atoms(pocket_selection)
         ligand_atoms = u.select_atoms(f"resname {lig_resname} and (not name H*)")
-        cog_dist = calculate_cog_distance(u, ligand_atoms, pocket_atoms)
+        cog_dist = calculate_com_distance(u, ligand_atoms, pocket_atoms)
         # rmsd = get_ligand_rmsd(u, lig_resname, alig_select='ligand')
         # data = pd.concat([cog_dist, rmsd], axis=1)
         cog_dist["fname"] = f
