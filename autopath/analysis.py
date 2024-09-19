@@ -203,6 +203,15 @@ def plot_colvar_2D(out_dir, xCV_name, yCV_name):
     plt.savefig(f"{out_dir}/{sys_name}_{xCV_name}_COLVAR.png")
     plt.close()
 
+    plt.figure(figsize=(10, 5))
+    sns.lineplot(data, x=data.index, y=yCV_name, hue="walker")
+    plt.legend(bbox_to_anchor=(1.1, 1.05), fontsize="12")
+    plt.xlabel('Step #'); plt.ylabel(yCV_name)
+    plt.title(f'{yCV_name} vs. Step # - {sys_name}')
+    plt.tight_layout()
+    plt.savefig(f"{out_dir}/{sys_name}_{yCV_name}_COLVAR.png")
+    plt.close()
+
     return
 
 def plot_sMD_statistics(data:pd.DataFrame=None, sys_name:str=None, out_dir:str=None) -> None:
