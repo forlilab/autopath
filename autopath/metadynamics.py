@@ -11,7 +11,7 @@ import openmm.unit as openmmunit
 import cvpack
 
 from autopath.utils import *
-from autopath.analysis import plot_bias, plot_colvar, plot_FE
+from autopath.analysis import plot_bias, plot_colvar, plot_FE, plot_FE_2D, plot_colvar_2D
 
 class MetadynamicsMD:
 
@@ -22,20 +22,21 @@ class MetadynamicsMD:
         pocket_atoms: list[int] = None,
         restrained_atoms: list[int] = None,
         out_dir: str = "metadynamics",
+        is_membrane: bool = False,
         HMR: bool = True,
         temp: float = 300,
-        is_membrane: bool = False,
-        verbose: bool = True
+        verbose: bool = True,
     ) -> None:
-
-        self.topology = topology
-
-        self.out_dir = out_dir
-        os.makedirs(self.out_dir, exist_ok=True)
 
         self.timestep = 0.004 if HMR else 0.002
         self.temperature = temp * openmmunit.kelvin
+
+        self.topology = topology
+
         self.is_membrane = is_membrane
+
+        self.out_dir = out_dir
+        os.makedirs(self.out_dir, exist_ok=True)
 
         self.ligand_atoms = ligand_atoms
         self.pocket_atoms = pocket_atoms
@@ -100,7 +101,7 @@ class MetadynamicsMD:
             self.temperature, 1 / openmmunit.picoseconds, self.timestep
         )
         # integrator.setRandomNumberSeed(int(rep_idx))
-
+        
         if self.topology is None:
             if pdb_file is None:
                 logging.error(f"Either a PDB or a prmtop file must be provided to get the topology from")
@@ -123,7 +124,9 @@ class MetadynamicsMD:
                 logging.error(f"Either a PDB or a checkpoint file must be provided to get coordinates from")
                 exit(1)
 
+        # Add harmonic positional restraints to protein CA
         input_positions = simulation.context.getState(getPositions=True).getPositions()
+
         if self.restrained_atoms is not None:
             add_harmonic_restraints(
                 system,
@@ -134,7 +137,7 @@ class MetadynamicsMD:
                 "k_CA",
                 14,
             )
-
+            
         logging.debug(f"Setting up reporters for {run_id}..")
         add_reporters(
             simulation,
@@ -152,7 +155,7 @@ class MetadynamicsMD:
                 f"sqrt(distance(g1,g2)^2)",
                 openmmunit.nanometers,
                 groups,
-                weighByMass=True,
+                weighByMass=False,
                 pbc=True,
             )
 
@@ -300,14 +303,17 @@ class MetadynamicsMD:
     def run2D(
         self,
         pdb_file: str = None,
-        system_file: str = None,
+        ref_ligand: str = None,
+        system: str = None,
         checkpoint_file: str = None,
         run_id: str = None,
         mMD_time: int = 10,
         bias_factor: float = 10,
         hill_height: float = 0.3,
-        hill_width: float = 0.01,  # also known as sigma
-        grid_dimensions: tuple = (0.0, 1.0),
+        hill_width_A: float = 0.01,
+        grid_dimensions_A: tuple = (0.0, 1.0),
+        hill_width_B: float = 0.01,
+        grid_dimensions_B: tuple = (0.0, 1.0),
         bias_frequency: int = 2,
         saveFrequency: int = 50,
     ) -> None:
@@ -316,24 +322,11 @@ class MetadynamicsMD:
 
         # Metadynamics time in ns
         mMD_steps = 250000 * mMD_time  # 250.000 1ns at 4fs
-        total_steps = self.warming_steps + mMD_steps
+        total_steps = 25000 + mMD_steps
         bias_frequency = (
             250 * bias_frequency
         )  # deposit bias every 2 ps (250 is 1ns at 4fs timestep)
         saveFrequency = 250 * saveFrequency  # write bias every 50ps
-
-        hill_height = hill_height * openmmunit.kilocalories_per_mole
-
-        grid_width = hill_width / 5
-        grid_min, grid_max = grid_dimensions  # nm
-        # 'grid' here refers to the number of grid points (2500 points)
-        grid = int(abs(grid_min - grid_max) / grid_width)
-        logging.info(
-            f"COM boundaries are min={grid_min:.3f} nM - max={grid_max:.3f} nM"
-        )
-        logging.info(f"Sigma is {hill_width} nm and there are {grid} grid points ")
-
-        groups = [self.pocket_atoms] + [self.ligand_atoms]
 
         logging.debug("Setting up the integrator")
         integrator = LangevinMiddleIntegrator(
@@ -341,8 +334,15 @@ class MetadynamicsMD:
         )
         # integrator.setRandomNumberSeed(int(rep_idx))
 
-        logging.debug(f"Loading a simulation file")
-        system = load_system(system_file)
+        if self.topology is None:
+            if pdb_file is None:
+                logging.error(
+                    f"Either a PDB or a prmtop file must be provided to get the topology from"
+                )
+                exit(1)
+            else:
+                pdb = PDBFile(pdb_file)
+                self.topology = pdb.topology
 
         logging.debug(f"Creating the simulation for {run_id}")
         simulation = Simulation(self.topology, system, integrator, self.platform)
@@ -351,73 +351,182 @@ class MetadynamicsMD:
             logging.debug(f"Loading simulation checkpoint {checkpoint_file}")
             simulation.loadCheckpoint(checkpoint_file)
         else:
-            logging.debug(f"Setting positions from PDB file {pdb_file}")
-            pdb = PDBFile(pdb_file)
-            simulation.context.setPositions(pdb.positions)
+            if pdb_file is not None:
+                logging.debug(f"Setting positions from PDB file {pdb_file}")
+                simulation.context.setPositions(pdb.positions)
+            else:
+                logging.error(
+                    f"Either a PDB or a checkpoint file must be provided to get coordinates from"
+                )
+                exit(1)
+                
+        # Add harmonic positional restraints to protein CA
+        input_positions = simulation.context.getState(getPositions=True).getPositions()
 
-        forces = {f.getName(): f for f in system.getForces()}
+        if self.restrained_atoms is not None:
+            add_harmonic_restraints(
+                system,
+                input_positions,
+                self.topology,
+                self.restrained_atoms,
+                10,
+                "k_CA",
+                14,
+            )
 
-        nc_cv = cvpack.NumberOfContacts(
-            self.pocket_atoms,
-            self.ligand_atoms,
-            forces["NonbondedForce"],
-            stepFunction="1/(1+x^6)",
-            thresholdDistance=0.35,
-            cutoffFactor=2.0,
-            switchFactor=1.5,
-            reference=50,
-        )
+        ##################### Number of contacts CV #################################
 
-        hill_width = 0.01
-        grid_width = hill_width / 5
-        grid_min, grid_max = 0, 1  # # nm
-        grid = int(abs(grid_min - grid_max) / grid_width)  # 2500 points
-
-        nc_variable = BiasVariable(
-            nc_cv,
-            minValue=grid_min,
-            maxValue=grid_max,
-            biasWidth=hill_width,
-            periodic=False,
-            gridWidth=grid,
-        )
-
-        # fb_eq = f"sqrt(distance(g1,g2)^2)"
-        # COM = cvpack.CentroidFunction(fb_eq,
-        #                               openmmunit.nanometers,
-        #                               groups,
-        #                               weighByMass=False,
-        #                               pbc=True)
-
-        # com_cv = BiasVariable(
-        #     COM,
-        #     minValue=grid_min,
-        #     maxValue=grid_max,
-        #     biasWidth=hill_width,
-        #     periodic=False,
-        #     gridWidth=grid,
+        # forces = {f.getName(): f for f in system.getForces()}
+        # nc_cv = cvpack.NumberOfContacts(
+        #     self.pocket_atoms,
+        #     self.ligand_atoms,
+        #     forces["NonbondedForce"],
+        #     stepFunction="1/(1+x^6)",
+        #     thresholdDistance=0.35,
+        #     cutoffFactor=2.0,
+        #     switchFactor=1.5,
+        #     reference=50,
         # )
 
-        input_positions = simulation.context.getState(getPositions=True).getPositions()
-        num_atoms = self.topology.getNumAtoms()
-        rmsd = cvpack.RMSD(input_positions, self.ligand_atoms, num_atoms)
+        # grid_width_A = hill_width_A / 5
+        # grid_min_A, grid_max_A = grid_dimensions_A
+        # grid_A = int(abs(grid_min_A - grid_max_A) / grid_width_A)
+        # nc_variable = BiasVariable(
+        #     nc_cv,
+        #     minValue=grid_min_A,
+        #     maxValue=grid_max_A,
+        #     biasWidth=hill_width_A,
+        #     periodic=False,
+        #     gridWidth=grid_A,
+        # )
 
-        hill_width = 0.01
-        grid_width = hill_width / 5
-        grid_min, grid_max = 0.0, 0.3  # # nm
-        grid = int(abs(grid_min - grid_max) / grid_width)  # 2500 points
-        rmsd_cv = BiasVariable(
-            rmsd,
-            minValue=grid_min,
-            maxValue=grid_max,
-            biasWidth=hill_width,
-            periodic=False,
-            gridWidth=grid,
+        # logging.info(
+        #     f"COM boundaries are min={grid_min_A:.3f} nM - max={grid_max_A:.3f} nM"
+        # )
+        # logging.info(f"Sigma is {hill_width_A} nm and there are {grid_A} grid points ")
+
+        ##################### COM CV #################################
+
+        groups = [self.pocket_atoms] + [self.ligand_atoms]
+
+        fb_eq = f"sqrt(distance(g1,g2)^2)"
+
+        COM = cvpack.CentroidFunction(
+            fb_eq, openmmunit.nanometers, groups, weighByMass=False, pbc=True
         )
 
+        grid_width_A = hill_width_A / 5
+        grid_min_A, grid_max_A = grid_dimensions_A
+        grid_A = int(abs(grid_min_A - grid_max_A) / grid_width_A)
+
+        com_cv = BiasVariable(
+            COM,
+            minValue=grid_min_A,
+            maxValue=grid_max_A,
+            biasWidth=hill_width_A,
+            periodic=False,
+            gridWidth=grid_A,
+        )
+
+        ##################### RMSD CV #################################
+        input_positions = simulation.context.getState(getPositions=True).getPositions()
+        n_atoms = self.topology.getNumAtoms()
+
+        ref_pdb = PDBFile(ref_ligand)
+        reference_positions = ref_pdb.positions
+        reference_atoms = ref_pdb.topology.atoms()
+
+        reference_dict_B = {}
+        reference_dict = {}
+        for atom in reference_atoms:
+            if not atom.name.startswith("H"):
+                reference_dict[atom.index] = (
+                    reference_positions[atom.index] / openmmunit.nanometers
+                )
+                reference_dict_B[atom.index] = (atom.name, reference_positions[atom.index])
+        print(f"Matched {len(reference_dict)} heavy atoms from the reference")
+        
+        print('reference_dict')
+        print(reference_dict_B)
+
+        system_residues = [r for r in self.topology.residues() if r.name == "UNK"]
+        print([f"SYSTEM {r.name}_{r.index}" for r in system_residues])
+
+        system_atoms = []
+        system_dict_B = {}
+        for residue in system_residues:
+            for atom in residue.atoms():
+                if not atom.name.startswith("H"):
+                    system_atoms.append(atom.index)
+                    system_dict_B[atom.index] = (atom.name, input_positions[atom.index])
+        print(f"Matched {len(system_atoms)} heavy atoms from the system")
+
+        print('system_dict')
+        print(system_dict_B)
+
+        # # changing keys of reference dictionary to match system's atom names
+        reference_dict = dict(zip(system_atoms, list(reference_dict.values())))
+
+        print('system_dict')
+        print(reference_dict)
+
+        rmsd = cvpack.RMSD(input_positions, self.ligand_atoms, n_atoms)
+
+        grid_width_B = hill_width_B / 5
+        grid_min_B, grid_max_B = grid_dimensions_B
+        grid_B = int(abs(grid_min_B - grid_max_B) / grid_width_B)
+
+        rmsd_cv = BiasVariable(
+            rmsd,
+            minValue=grid_min_B,
+            maxValue=grid_max_B,
+            biasWidth=hill_width_B,
+            periodic=False,
+            gridWidth=grid_B,
+        )
+
+        ##################### RMSD STATES CV #################################
+
+        # ref_pdb = PDBFile(ref_ligand)
+        # reference_positions = ref_pdb.positions
+        # reference_atoms = ref_pdb.topology.atoms()
+
+        # reference_dict = {}
+        # for atom in reference_atoms:
+        #     if not atom.name.startswith("H"):
+        #         reference_dict[atom.index] = (
+        #             reference_positions[atom.index] / openmmunit.nanometers
+        #         )
+
+        # print(f"Matched {len(reference_dict)} heavy atoms from the reference")
+
+        # n_atoms = self.topology.getNumAtoms()
+
+        # system_residues = [r for r in self.topology.residues() if r.name == "UNK"]
+        # logging.info([f"SYSTEM {r.name}_{r.index}" for r in system_residues])
+
+        # system_atoms = []
+        # for residue in system_residues:
+        #     for atom in residue.atoms():
+        #         if not atom.name.startswith("H"):
+        #             system_atoms.append(atom.index)
+
+        # logging.info(f"Matched {len(system_atoms)} heavy atoms from the system")
+
+        # # changing keys of reference dictionary to match system's atom names
+        # reference_dict = dict(zip(system_atoms, list(reference_dict.values())))
+
+        # rmsd_cv = cvpack.PathInRMSDSpace(
+        #     metric=cvpack.path.progress,
+        #     milestones=[reference_dict],
+        #     sigma=0.01 * openmmunit.nanometers,
+        #     numAtoms=n_atoms,
+        # )
+
+        ##############################################################
         meta = Metadynamics(
             system,
-            [rmsd_cv, nc_variable],
+            [com_cv, rmsd_cv],
             self.temperature,
             bias_factor,
             hill_height,
@@ -458,9 +567,18 @@ class MetadynamicsMD:
         np.save(os.path.join(self.out_dir, f"FE_{run_id}.npy"), meta.getFreeEnergy())
 
         # Create plots for all current runs
-        # plot_colvar(self.out_dir, 'COM_dist')
-        # plot_bias(self.out_dir, grid_min, grid_max, grid)
-        # plot_FE(self.out_dir, grid_min, grid_max, grid)
+        plot_colvar_2D(self.out_dir, "COM", "RMSD")
+        plot_FE_2D(
+            self.out_dir,
+            grid_min_A,
+            grid_max_A,
+            grid_A,
+            "COM",
+            grid_min_B,
+            grid_max_B,
+            grid_B,
+            "RMSD",
+        )
 
         final_positions = simulation.context.getState(getPositions=True).getPositions()
         save_system(system, f"{self.out_dir}/system_mMD_{run_id}.xml")
