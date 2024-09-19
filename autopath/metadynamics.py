@@ -424,7 +424,7 @@ class MetadynamicsMD:
         fb_eq = f"sqrt(distance(g1,g2)^2)"
 
         COM = cvpack.CentroidFunction(
-            fb_eq, openmmunit.nanometers, groups, weighByMass=False, pbc=False
+            fb_eq, openmmunit.nanometers, groups, weighByMass=False, pbc=True
         )
 
         grid_width_A = hill_width_A / 5
