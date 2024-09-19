@@ -504,54 +504,6 @@ def add_harmonic_restraints(
 
     return
 
-
-def add_flatbottom_XY_restraint(
-    system: System = None,
-    simulation: app.Simulation = None,
-    restrain_indexes: List[int] = None,
-    r0: float = None,
-    upper_wall: float = 0.1,
-    K_flat: float = 200,
-    force_group: Optional[int] = 31,
-):
-    
-    initial_positions = simulation.context.getState(getPositions=True).getPositions()
-
-    # Define the flat-bottom restraint potential
-    fb_eq = """
-    k_flat/2 * max(sqrt((x - x0)^2 + (y - y0)^2) - upper_wall, r0)^2
-    """
-    # fb_eq = """
-    # (k_flat/2)*max(periodicdistance(x, y, x0, y0) - upper_wall, r0)^2
-    # """
-
-    # Create the CustomExternalForce object
-    upper_wall_rest = CustomExternalForce(fb_eq)
-
-    # Get the initial positions of the ligand atoms
-    ligand_positions = [initial_positions[index] for index in restrain_indexes]
-
-    # Add per-particle parameters for the reference position
-    upper_wall_rest.addPerParticleParameter("x0")
-    upper_wall_rest.addPerParticleParameter("y0")
-
-    # Add global parameters
-    upper_wall_rest.addGlobalParameter("upper_wall", upper_wall * openmmunit.nanometer)
-    upper_wall_rest.addGlobalParameter("r0", r0 * openmmunit.nanometer)
-    upper_wall_rest.addGlobalParameter("k_flat", K_flat * openmmunit.kilojoules_per_mole)
-
-    # Assign the reference coordinates to each particle
-    for particle, positions in zip(restrain_indexes, ligand_positions):
-        upper_wall_rest.addParticle(particle, [positions.x, positions.y])
-
-    # Set the force group
-    upper_wall_rest.setForceGroup(force_group)
-
-    # Add the force to the system
-    system.addForce(upper_wall_rest)
-
-    return
-
 def add_flatbottom_XY_restraints(
     system: System = None,
     simulation: app.Simulation = None,
