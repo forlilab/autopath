@@ -53,10 +53,9 @@ def plot_atomic_rmsf(u, lig_resname:str='UNK', outname:str='rmsf.png', log_rmsf:
 def plot_rmsd(rmsd_df:pd.DataFrame=None,
               sys_name:str=None,
               out_dir:str=None) -> None:
-    rmsd_df["rmsd"] = rmsd_df["rmsd"] * 10  # nM to A
     plt.figure(figsize=(10, 5))
     sns.lineplot(data=rmsd_df, y="rmsd", x=rmsd_df.index)
-    plt.ylabel("RMSD (A)");     plt.xlabel("Frame #")
+    plt.ylabel("RMSD (nm)");     plt.xlabel("Frame #")
     plt.title(f"RMSD {sys_name}", fontsize=10)
     plt.tight_layout()
     plt.savefig(f"{out_dir}/{sys_name}_rmsd.png")
@@ -91,7 +90,7 @@ def plot_colvar(out_dir:str=None, colvar_name:str=None):
 def plot_bias(out_dir:str=None, x_min:float=None, x_max:float=None, grid_points:int=None, colvar_name:str=None):
     sys_name = out_dir.split("/")[0]
     axis_values = np.linspace(x_min, x_max, grid_points)
-    axis_values = [round(i * 10, 2) for i in axis_values]
+    axis_values = [round(i, 2) for i in axis_values]
 
     files = glob(f"{out_dir}/bias_*")
     data = []
@@ -122,7 +121,7 @@ def plot_FE(out_dir, x_min, x_max, grid_points, colvar_name):
 
     sys_name = out_dir.split("/")[0]
     axis_values = np.linspace(x_min, x_max, grid_points)
-    axis_values = [round(i * 10, 2) for i in axis_values]
+    axis_values = [round(i, 2) for i in axis_values]
 
     files = glob(f"{out_dir}/FE_*.npy")
     data = []
@@ -149,7 +148,7 @@ def plot_FE(out_dir, x_min, x_max, grid_points, colvar_name):
 
 
 def plot_FE_2D(
-    out_dir, x_min, x_max, x_grid_points, x_name, y_min, y_max, y_grid_points, y_name
+    out_dir, x_min, x_max, x_grid_points, xCV_name, y_min, y_max, y_grid_points, yCV_name
 ):
 
     sys_name = out_dir.split("/")[0]
@@ -172,12 +171,11 @@ def plot_FE_2D(
 
         sns.heatmap(df, cmap="Spectral")  # , vmin=0, vmax=-8)
         plt.title(f"Metadynamics - {sys_name} - {walker_name}", fontsize=12)
-        plt.xlabel(x_name)
-        plt.ylabel(y_name)
+        plt.xlabel(xCV_name)
+        plt.ylabel(yCV_name)
         plt.title(f"Free Energy - {sys_name}")
         plt.tight_layout()
         plt.savefig(f"{out_dir}/{sys_name}_{walker_name}.png")
-        # plt.show()
         plt.close()
 
     return

@@ -285,8 +285,8 @@ class MetadynamicsMD:
 
         # Create plots for all current runs
         plot_colvar(self.out_dir, mMD_CV)
-        plot_bias(self.out_dir, grid_min, grid_max, grid)
-        plot_FE(self.out_dir, grid_min, grid_max, grid)
+        plot_bias(self.out_dir, grid_min, grid_max, grid, mMD_CV)
+        plot_FE(self.out_dir, grid_min, grid_max, grid, mMD_CV)
 
         # Save everything
         final_positions = simulation.context.getState(getPositions=True).getPositions()
