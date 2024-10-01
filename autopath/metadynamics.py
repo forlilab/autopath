@@ -140,7 +140,7 @@ class MetadynamicsMD:
             
         lig_name = "UNK"
         ligand_atoms = [a.index for a in self.topology.atoms() if a.residue.name == lig_name]
-        add_cylindrical_restraint(system, host_index=self.pocket_atoms, guest_index=ligand_atoms, R_cylinder=1.5 * openmmunit.nanometers, force_group=31)
+        add_cylindrical_restraints(system, host_index=self.pocket_atoms, guest_index=ligand_atoms, R_cylinder=1.5 * openmmunit.nanometers, force_group=31)
 
         logging.debug(f"Setting up reporters for {run_id}..")
         add_reporters(
@@ -151,12 +151,24 @@ class MetadynamicsMD:
             bias_frequency,
         )
 
+        # if mMD_CV == "com":
+
+        #     groups = [self.pocket_atoms] + [self.ligand_atoms]
+
+        #     cv = cvpack.CentroidFunction(
+        #         f"sqrt(distance(g1,g2)^2)",
+        #         openmmunit.nanometers,
+        #         groups,
+        #         weighByMass=False,
+        #         pbc=True,
+        #     )
+
         if mMD_CV == "com":
 
             groups = [self.pocket_atoms] + [self.ligand_atoms]
 
             cv = cvpack.CentroidFunction(
-                f"sqrt(distance(g1,g2)^2)",
+                f"sqrt(pointdistance(0,0,z1,0,0,z2)^2)",
                 openmmunit.nanometers,
                 groups,
                 weighByMass=False,
@@ -289,8 +301,8 @@ class MetadynamicsMD:
 
         # Create plots for all current runs
         plot_colvar(self.out_dir, mMD_CV)
-        plot_bias(self.out_dir, grid_min, grid_max, grid)
-        plot_FE(self.out_dir, grid_min, grid_max, grid)
+        plot_bias(self.out_dir, grid_min, grid_max, grid, mMD_CV)
+        plot_FE(self.out_dir, grid_min, grid_max, grid, mMD_CV)
 
         # Save everything
         final_positions = simulation.context.getState(getPositions=True).getPositions()
@@ -380,7 +392,7 @@ class MetadynamicsMD:
 
         lig_name = "UNK"
         ligand_atoms = [a.index for a in self.topology.atoms() if a.residue.name == lig_name]
-        add_cylindrical_restraint(system, host_index=self.pocket_atoms, guest_index=ligand_atoms, R_cylinder=1.5 * openmmunit.nanometers, force_group=31)
+        add_cylindrical_restraints(system, host_index=self.pocket_atoms, guest_index=ligand_atoms, R_cylinder=1.5 * openmmunit.nanometers, force_group=31)
 
         ##################### Number of contacts CV #################################
 
@@ -415,11 +427,37 @@ class MetadynamicsMD:
 
         ##################### COM CV #################################
 
+        # groups = [self.pocket_atoms] + [self.ligand_atoms]
+
+        # fb_eq = f"sqrt(distance(g1,g2)^2)"
+
+        # COM = cvpack.CentroidFunction(
+        #     fb_eq, openmmunit.nanometers, groups, weighByMass=False, pbc=True
+        # )
+
+        # grid_width_A = hill_width_A / 5
+        # grid_min_A, grid_max_A = grid_dimensions_A
+        # grid_A = int(abs(grid_min_A - grid_max_A) / grid_width_A)
+
+        # com_cv = BiasVariable(
+        #     COM,
+        #     minValue=grid_min_A,
+        #     maxValue=grid_max_A,
+        #     biasWidth=hill_width_A,
+        #     periodic=False,
+        #     gridWidth=grid_A,
+        # )
+
+        ##################### COM CV #################################
+
         groups = [self.pocket_atoms] + [self.ligand_atoms]
 
-        fb_eq = f"sqrt(distance(g1,g2)^2)"
+        # fb_eq = f"sqrt(distance(g1,g2)^2)"
+        fb_eq = f"sqrt(pointdistance(0,0,z1,0,0,z2)^2)"
 
-        COM = cvpack.CentroidFunction(
+        # fb_eq = f"pointdistance(x1, y1, z1, (x2+x3)/2, (y2+y3)/2, (z2+z3)/2)"
+
+        COM_Z = cvpack.CentroidFunction(
             fb_eq, openmmunit.nanometers, groups, weighByMass=False, pbc=True
         )
 
@@ -428,7 +466,7 @@ class MetadynamicsMD:
         grid_A = int(abs(grid_min_A - grid_max_A) / grid_width_A)
 
         com_cv = BiasVariable(
-            COM,
+            COM_Z,
             minValue=grid_min_A,
             maxValue=grid_max_A,
             biasWidth=hill_width_A,

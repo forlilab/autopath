@@ -21,13 +21,8 @@ class VanillaMD:
 
         self.system = system
         self.topology = topology
-<<<<<<< HEAD
-        self.timestep = 0.004 if HMR else 0.002
-
-=======
 
         self.timestep = 0.004 if HMR else 0.002
->>>>>>> main
         self.temperature = temp * openmmunit.kelvin
 
         self.out_dir = out_dir

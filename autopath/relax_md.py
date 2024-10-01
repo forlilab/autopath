@@ -29,12 +29,9 @@ class RelaxMD:
         self.system = system
         self.topology = topology
 
-<<<<<<< HEAD
-=======
         os.makedirs(out_dir, exist_ok=True)
         self.out_dir = out_dir
 
->>>>>>> main
         self.timestep = 0.004 if HMR else 0.002
         self.temperature = temp * openmmunit.kelvin
 
