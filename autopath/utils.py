@@ -351,19 +351,29 @@ def get_pocket_ha(topology: app.Topology, pocket_resid: list[int] = None) -> lis
 
     return pocket_ha_idx
 
+def get_COM_dist(simulation, groupA:list[int]=None, groupB:list[int]=None, weighByMass:bool=True) -> float:
+    
+    # Get positions
+    state = simulation.context.getState(getPositions=True, getVelocities=False)
+    positions = state.getPositions(asNumpy=True) / openmmunit.nanometers
 
-def get_COG_dist(simulation, groupA, groupB) -> float:
+    # Function to calculate center (COM or COG)
+    def _get_center(group, weighByMass):
+        group_positions = positions[group]  # Get positions for the group
+        if weighByMass:
+            masses = np.array([simulation.topology.getAtom(index).element.mass.value_in_unit(openmmunit.dalton)
+                               for index in group])
+            center = np.average(group_positions, axis=0, weights=masses)  # Weighted average for COM
+        else:
+            center = np.mean(group_positions, axis=0)  # Simple mean for COG
+        return center
 
-    # Get COM distance between two groups of atoms
-    positions = simulation.context.getState(getPositions=True).getPositions()
-    g1_positions = [positions[index] / openmmunit.nanometers for index in groupA]
-    g2_positions = [positions[index] / openmmunit.nanometers for index in groupB]
-    dist = np.linalg.norm(
-        np.mean(np.asarray(g1_positions), axis=0)
-        - np.mean(np.asarray(g2_positions), axis=0)
-    )
+    # Calculate centers for both groups and their distance
+    centerA = _get_center(groupA, weighByMass)
+    centerB = _get_center(groupB, weighByMass)
+    dist = np.linalg.norm(centerA - centerB)
 
-    return dist  # This is unitless but its nm because of OpenMM
+    return dist  # Unitless, but effectively in nanometers because.... openMM
 
 
 def calculate_com_distance(
