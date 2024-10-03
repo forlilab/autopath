@@ -185,7 +185,7 @@ def select_platform(platform_name: str = None, device_index: str = "0"):
 
     try:
         platform = Platform.getPlatformByName(platform_name)
-        logging.info(f"Using {platform_name} platform.")
+        logging.debug(f"Using {platform_name} platform.")
 
         if platform_name in ["OpenCL"]:
             platform.setPropertyDefaultValue("Precision", "mixed")
@@ -675,23 +675,6 @@ def add_cylindrical_restraints(
 
     return
 
-def extract_sMD_statistics(files: list = None) -> pd.DataFrame:
-    data = []
-    for f in files:
-        run_n = os.path.splitext(os.path.basename(f))[0].split("_")[2]
-
-        df = pd.read_csv(f, names=["r0", "COMDist", "force", "work"])  # [:500]
-        df["replica"] = f"rep_{run_n}"
-        df.reset_index(inplace=True, drop=False)
-        data.append(df)
-
-    data = pd.concat(data, axis=0)
-    data["time"] = data["index"] / 1000  # ps to ns
-    data.reset_index(inplace=True, drop=True)
-
-    return data
-
-
 # Find the closest points to the centroids
 def find_closest_points(X, centroids):
     closest_points = []
@@ -710,7 +693,7 @@ def cluster_data(
 ):
 
     if weight_by_dist:
-        kmeans_weights = 1 / np.array(data["cog_d"].values)
+        kmeans_weights = 1 / np.array(data["com_dist"].values)
     else:
         kmeans_weights = None
 
@@ -723,7 +706,7 @@ def cluster_data(
 
     # This is to order cluster centroids or milestones by distance
     cluster_means = data.groupby("cluster")[var_names].mean().reset_index()
-    sorted_clusters = cluster_means.sort_values(by="cog_d").reset_index(drop=True)
+    sorted_clusters = cluster_means.sort_values(by="com_dist").reset_index(drop=True)
     sorted_clusters["new_cluster"] = range(len(sorted_clusters))
     cluster_mapping = sorted_clusters.set_index("cluster")["new_cluster"].to_dict()
     data["cluster"] = data["cluster"].map(cluster_mapping)
@@ -765,10 +748,10 @@ def cluster_pulling_MD(
 
         pocket_atoms = u.select_atoms(pocket_selection)
 
-        cog_d = calculate_com_distance(u, ligand_atoms, pocket_atoms)
+        com_dist = calculate_com_distance(u, ligand_atoms, pocket_atoms)
         rmsd = get_ligand_rmsd(u, u_ref, lig_resname, alig_select="ligand")
 
-        dat = pd.concat([cog_d, rmsd], axis=1)
+        dat = pd.concat([com_dist, rmsd], axis=1)
         dat["replica"] = f"rep_{run_n}"
         distances.append(dat)
 
@@ -776,9 +759,9 @@ def cluster_pulling_MD(
     df.reset_index(inplace=True, drop=False)
     df.dropna(inplace=True)
 
-    # df = df[df['cog_d'] <= 1.5]
+    # df = df[df['com_dist'] <= 1.5]
 
-    df_clustered, closest_points = cluster_data(df, ["rmsd", "cog_d"], n_clusters)
+    df_clustered, closest_points = cluster_data(df, ["rmsd", "com_dist"], n_clusters)
 
     plot_clusters(df_clustered, closest_points, sys_name, out_dir)
 
@@ -798,15 +781,15 @@ def cluster_milestone_pdbs(
         u = mda.Universe(f, in_memory=True)
         pocket_atoms = u.select_atoms(pocket_selection)
         ligand_atoms = u.select_atoms(f"resname {lig_resname} and (not name H*)")
-        cog_dist = calculate_com_distance(u, ligand_atoms, pocket_atoms)
+        com_distist = calculate_com_distance(u, ligand_atoms, pocket_atoms)
         # rmsd = get_ligand_rmsd(u, lig_resname, alig_select='ligand')
-        # data = pd.concat([cog_dist, rmsd], axis=1)
-        cog_dist["fname"] = f
-        distances.append(cog_dist)
+        # data = pd.concat([com_distist, rmsd], axis=1)
+        com_distist["fname"] = f
+        distances.append(com_distist)
 
     df_dist = pd.concat(distances, axis=0)
-    clustered_data, milestones = cluster_data(df_dist, ["cog_d"], n_clust)
-    milestones.sort_values(by="cog_d", ascending=False, inplace=True)
+    clustered_data, milestones = cluster_data(df_dist, ["com_dist"], n_clust)
+    milestones.sort_values(by="com_dist", ascending=False, inplace=True)
 
     return clustered_data, milestones
 
