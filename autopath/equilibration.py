@@ -176,7 +176,7 @@ class Equilibration:
 
         return equilibration_scheme
 
-    def run(self, pdb_file: str = None) -> None:
+    def run(self, pdb_file: str = None, run_id:str=None) -> None:
 
         start_time = time.monotonic()
 
@@ -196,7 +196,7 @@ class Equilibration:
         add_reporters(
             simulation,
             self.out_dir,
-            "equilibration",
+            f"equil_{run_id}",
             logperiod=1250,
             total_steps=self.total_steps,
         )
@@ -272,10 +272,10 @@ class Equilibration:
 
         final_positions = simulation.context.getState(getPositions=True).getPositions()
 
-        save_system(self.system, f"{self.out_dir}/system_equilibrated.xml")
-        save_simulation(simulation, f"{self.out_dir}/equilibration_checkpoint")
+        save_system(self.system, f"{self.out_dir}/system_equil_{run_id}.xml")
+        save_simulation(simulation, f"{self.out_dir}/checkpoint_equil_{run_id}")
         save_pdb(
-            self.topology, final_positions, f"{self.out_dir}/system_equilibrated.pdb"
+            self.topology, final_positions, f"{self.out_dir}/{run_id}_equilibrated.pdb"
         )
 
         simulation_time = time.monotonic() - start_time
