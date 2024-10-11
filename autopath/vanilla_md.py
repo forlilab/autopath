@@ -16,6 +16,7 @@ class VanillaMD:
         topology: str = None,
         HMR: bool = True,
         temp: float = 300,
+        save_freq: int = 12500, # save /0.1ns
         out_dir: str = "MD",
     ):
 
@@ -25,6 +26,7 @@ class VanillaMD:
         self.timestep = 0.004 if HMR else 0.002
         self.temperature = temp * openmmunit.kelvin
 
+        self.save_freq = save_freq
         self.out_dir = out_dir
         os.makedirs(out_dir, exist_ok=True)
 
@@ -59,8 +61,8 @@ class VanillaMD:
             simulation.loadCheckpoint(checkpoint_file)
 
         add_reporters(
-            simulation, self.out_dir, f"MD_{run_id}", MD_steps, 12500
-        )  # save /0.1ns
+            simulation, self.out_dir, f"MD_{run_id}", MD_steps, self.save_freq
+        )
 
         # Run the simulation
         simulation.step(MD_steps)
