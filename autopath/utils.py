@@ -356,13 +356,14 @@ def get_COM_dist(simulation, groupA:list[int]=None, groupB:list[int]=None, weigh
     # Get positions
     state = simulation.context.getState(getPositions=True, getVelocities=False)
     positions = state.getPositions(asNumpy=True) / openmmunit.nanometers
+    atoms = [atom for atom in simulation.topology.atoms()]
 
     # Function to calculate center (COM or COG)
     def _get_center(group, weighByMass):
         group_positions = positions[group]  # Get positions for the group
+
         if weighByMass:
-            masses = np.array([simulation.topology.getAtom(index).element.mass.value_in_unit(openmmunit.dalton)
-                               for index in group])
+            masses = np.array([atom.element.mass.value_in_unit(openmmunit.dalton) for atom in atoms if atom.index in group])
             center = np.average(group_positions, axis=0, weights=masses)  # Weighted average for COM
         else:
             center = np.mean(group_positions, axis=0)  # Simple mean for COG
