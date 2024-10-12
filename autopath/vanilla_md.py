@@ -16,6 +16,7 @@ class VanillaMD:
         topology: str = None,
         HMR: bool = True,
         temp: float = 300,
+        restart_velocities: bool = False,
         save_freq: int = 12500, # save /0.1ns
         out_dir: str = "MD",
     ):
@@ -25,6 +26,7 @@ class VanillaMD:
 
         self.timestep = 0.004 if HMR else 0.002
         self.temperature = temp * openmmunit.kelvin
+        self.restart_velocities = restart_velocities
 
         self.save_freq = save_freq
         self.out_dir = out_dir
@@ -59,6 +61,10 @@ class VanillaMD:
         if checkpoint_file is not None:
             logging.debug("Loading simulation checkpoint..")
             simulation.loadCheckpoint(checkpoint_file)
+
+        # Reset velocities to temperature
+        if self.restart_velocities:
+            simulation.context.setVelocitiesToTemperature(self.temperature)
 
         add_reporters(
             simulation, self.out_dir, f"MD_{run_id}", MD_steps, self.save_freq
