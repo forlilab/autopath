@@ -12,6 +12,7 @@ from .steered_md import SteeredMD
 from .metadynamics import MetadynamicsMD
 from .relax_md import RelaxMD
 from .vanilla_md import VanillaMD
+from .clustering import ClusterTrajectories
 
 __all__ = [
     "Equilibration",
@@ -20,4 +21,5 @@ __all__ = [
     "MetadynamicsMD",
     "RelaxMD",
     "VanillaMD",
+    "ClusterTrajectories",
 ]
