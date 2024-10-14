@@ -27,9 +27,6 @@ import pytraj as pt
 
 from sklearn.cluster import KMeans
 
-from autopath.analysis import plot_clusters
-
-
 def align_trajectory(
     prmtop_file: str = None,
     traj_file: Union[str, list] = None,
@@ -261,7 +258,7 @@ def add_reporters(
     return
 
 
-def add_barostat(system, temp: float=298.15, is_membrane: bool=False) -> None:
+def add_barostat(system: System=None, temp: float=298.15, is_membrane: bool=False) -> System:
     """Add an appropriate barostat to the system.
     Simulation for membrane proteins are run at 0 surface tension and semiisotropic pressure
     """
@@ -282,8 +279,36 @@ def add_barostat(system, temp: float=298.15, is_membrane: bool=False) -> None:
 
     system.addForce(barostat)
 
-    return
+    return system
 
+def add_variants(modeller: Modeller, variants_dict: dict = None) -> Modeller:
+    """Adds variants for specific protonation states.
+
+    :param modeller: OpenMM Modeller
+    :type Modeller: Modeller
+    :param variants_dict: dict of variants to apply for the protonation states
+    :type variants: dict
+    :return: Modeller object with added protonation states
+    :rtype: Modeller
+    """
+
+    variants = list()
+    residues = list(modeller.topology.residues())
+    mapping = defaultdict(list)
+    for r in residues:
+        mapping[r.chain.id].append(int(r.id))
+
+    for chain in mapping:
+        for res_number in mapping[chain]:
+            key = f"{chain}:{res_number}"
+            if key in variants_dict:
+                variants.append(variants_dict[key])
+            else:
+                variants.append(None)
+
+    modeller.addHydrogens(variants=variants)
+
+    return modeller 
 
 def _print_current_forces(system: System = None) -> None:
     for index, fc in enumerate(system.getForces()):
@@ -685,231 +710,3 @@ def add_cylindrical_restraints(
     system.addForce(cylindrical_restraint)
 
     return
-
-# Find the closest points to the centroids
-def find_closest_points(X, centroids):
-    closest_points = []
-    for centroid in centroids:
-        distances = np.linalg.norm(X - centroid, axis=1)
-        closest_point_index = np.argmin(distances)
-        closest_points.append(closest_point_index)
-    return closest_points
-
-
-def cluster_data(
-    data: pd.DataFrame = None,
-    var_names: list = None,
-    n_clust: int = 10,
-    weight_by_dist: bool = False,
-):
-
-    if weight_by_dist:
-        kmeans_weights = 1 / np.array(data["com_dist"].values)
-    else:
-        kmeans_weights = None
-
-    X = data[var_names].values
-    kmeans = KMeans(n_clusters=n_clust, random_state=42, n_init="auto").fit(
-        X, sample_weight=kmeans_weights
-    )
-    data["cluster"] = kmeans.labels_
-    centroids = kmeans.cluster_centers_
-
-    # This is to order cluster centroids or milestones by distance
-    cluster_means = data.groupby("cluster")[var_names].mean().reset_index()
-    sorted_clusters = cluster_means.sort_values(by="com_dist").reset_index(drop=True)
-    sorted_clusters["new_cluster"] = range(len(sorted_clusters))
-    cluster_mapping = sorted_clusters.set_index("cluster")["new_cluster"].to_dict()
-    data["cluster"] = data["cluster"].map(cluster_mapping)
-
-    closest_points_indices = find_closest_points(X, centroids)
-    closest_points_df = data.iloc[closest_points_indices]
-
-    return data, closest_points_df
-
-
-def cluster_pulling_MD(
-    traj_files: list = None,
-    equilibrated_pdb: str = None,
-    prmtop_file: str = None,
-    lig_resname: str = "UNK",
-    pocket_selection: str = None,
-    n_clusters: int = 10,
-    sys_name: str = None,
-    out_dir: str = None,
-) -> None:
-
-    os.makedirs(out_dir, exist_ok=True)
-
-    distances = []
-
-    u_ref = mda.Universe(equilibrated_pdb)
-    reference = u_ref.select_atoms("protein and name CA")
-
-    for traj in traj_files:
-
-        run_n = os.path.splitext(os.path.basename(traj))[0].split("_")[2]
-
-        u = mda.Universe(prmtop_file, traj, in_memory=True)
-        ligand_atoms = u.select_atoms(f"resname {lig_resname} and (not name H*)")
-
-        aligner = align.AlignTraj(
-            u, reference=reference, select="protein and name CA", in_memory=True
-        ).run()
-
-        pocket_atoms = u.select_atoms(pocket_selection)
-
-        com_dist = calculate_com_distance(u, ligand_atoms, pocket_atoms)
-        rmsd = get_ligand_rmsd(u, u_ref, lig_resname, alig_select="ligand")
-
-        dat = pd.concat([com_dist, rmsd], axis=1)
-        dat["replica"] = f"rep_{run_n}"
-        distances.append(dat)
-
-    df = pd.concat(distances, axis=0)
-    df.reset_index(inplace=True, drop=False)
-    df.dropna(inplace=True)
-
-    # df = df[df['com_dist'] <= 1.5]
-
-    df_clustered, closest_points = cluster_data(df, ["rmsd", "com_dist"], n_clusters)
-
-    plot_clusters(df_clustered, closest_points, sys_name, out_dir)
-
-    write_centroids_pdb(closest_points, prmtop_file, sys_name, out_dir)
-
-    return
-
-
-def cluster_milestone_pdbs(
-    files: list = None,
-    lig_resname: str = "UNK",
-    pocket_selection: str = None,
-    n_clust: int = 10,
-):
-    distances = []
-    for f in files:
-        u = mda.Universe(f, in_memory=True)
-        pocket_atoms = u.select_atoms(pocket_selection)
-        ligand_atoms = u.select_atoms(f"resname {lig_resname} and (not name H*)")
-        com_distist = calculate_com_distance(u, ligand_atoms, pocket_atoms)
-        # rmsd = get_ligand_rmsd(u, lig_resname, alig_select='ligand')
-        # data = pd.concat([com_distist, rmsd], axis=1)
-        com_distist["fname"] = f
-        distances.append(com_distist)
-
-    df_dist = pd.concat(distances, axis=0)
-    clustered_data, milestones = cluster_data(df_dist, ["com_dist"], n_clust)
-    milestones.sort_values(by="com_dist", ascending=False, inplace=True)
-
-    return clustered_data, milestones
-
-
-def get_most_diverse_points(
-    centroids_df: pd.DataFrame, var: str = "final_dist", n_points: int = 5
-):
-
-    points = centroids_df[var]
-
-    # Ensure n is less than the total number of points
-    assert n_points < len(
-        centroids_df
-    ), "n must be less than the total number of points"
-
-    selected_indices = []
-
-    # Randomly select the first point and add it to the list
-    selected_indices.append(np.random.choice(len(points)))
-
-    # Loop until we have selected n points
-    while len(selected_indices) < n_points:
-        # Calculate the distances between each point and the set of selected points
-        distances = np.array(
-            [
-                min([np.linalg.norm(points[i] - points[j]) for j in selected_indices])
-                for i in range(len(points))
-            ]
-        )
-
-        # Exclude already selected points by setting their distances to -1
-        distances[selected_indices] = -1
-
-        # Select the point with the maximum distance to the selected points
-        next_point_index = np.argmax(distances)
-        selected_indices.append(next_point_index)
-
-    return centroids_df.iloc[selected_indices]
-
-
-def write_centroids_pdb(
-    closest_points_df: pd.DataFrame = None,
-    prmtop_file: str = None,
-    sys_name: str = None,
-    out_dir: str = None,
-):
-
-    os.makedirs(f"{sys_name}/milestones", exist_ok=True)
-
-    for idx, row in closest_points_df.iterrows():
-
-        replica = row["replica"].split("_")[1]
-        milestone = row["cluster"] + 1  # starts from 1
-        frame = row["index"]
-
-        traj_file = f"{sys_name}/sMD/trajectory_sMD_{replica}.dcd"
-        u = mda.Universe(prmtop_file, traj_file, in_memory=True)
-
-        # Get the frame and write a pdb
-        u.trajectory[frame]
-        u.atoms.write(f"{out_dir}/milestone_{milestone}.pdb")
-
-    return
-
-
-def add_variants(modeller: Modeller, variants_dict: dict = None) -> Modeller:
-    """Adds variants for specific protonation states.
-
-    :param modeller: OpenMM Modeller
-    :type Modeller: Modeller
-    :param variants_dict: dict of variants to apply for the protonation states
-    :type variants: dict
-    :return: Modeller object with added protonation states
-    :rtype: Modeller
-    """
-
-    variants = list()
-    residues = list(modeller.topology.residues())
-    mapping = defaultdict(list)
-    for r in residues:
-        mapping[r.chain.id].append(int(r.id))
-
-    for chain in mapping:
-        for res_number in mapping[chain]:
-            key = f"{chain}:{res_number}"
-            if key in variants_dict:
-                variants.append(variants_dict[key])
-            else:
-                variants.append(None)
-
-    modeller.addHydrogens(variants=variants)
-
-    return modeller
-
-
-# from scipy.optimize import fsolve
-# from scipy.interpolate import CubicSpline
-
-# def find_inflexion_points(X, Y):
-
-#         # Fit a cubic spline to the data
-#         cs = CubicSpline(X, Y)
-
-#         # Define the second derivative of the spline
-#         def second_derivative(x):
-#             return cs(x, 2)  # 2 indicates the second derivative
-
-#         # Find potential inflection points by solving second_derivative(x) = 0
-#         initial_guesses = np.linspace(X.min(), X.max(), num=3)
-#         inflexion_points = fsolve(second_derivative, initial_guesses)
-
-#         return inflexion_points
