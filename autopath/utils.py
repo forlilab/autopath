@@ -16,6 +16,7 @@ from pdbfixer.pdbfixer import PDBFixer
 from openmmtools.utils import get_fastest_platform
 
 import parmed
+import pickle
 
 import MDAnalysis as mda
 from MDAnalysis.analysis import align
@@ -25,7 +26,15 @@ from MDAnalysis.analysis.rms import RMSD, RMSF
 
 import pytraj as pt
 
-from sklearn.cluster import KMeans
+def save_model(model, filename):
+    with open(filename, 'wb') as file:
+        pickle.dump(model, file)
+    return None
+
+def load_model(filename):
+    with open(filename, 'rb') as file:
+        model = pickle.load(file)
+    return model
 
 def align_trajectory(
     prmtop_file: str = None,
