@@ -1,5 +1,4 @@
 import os
-import pickle
 import logging
 import numpy as np
 import pandas as pd
@@ -9,10 +8,14 @@ from typing import Union, List
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from deeptime.decomposition import VAMP
+from deeptime.decomposition import VAMP, KVAD
 from deeptime.clustering import KMeans
+from deeptime.kernels import GaussianKernel
+
 import MDAnalysis as mda
 import pyemma
+
+from autopath.utils import save_model, load_model
 
 class ClusterTrajectories:
     def __init__(self, 
@@ -37,18 +40,6 @@ class ClusterTrajectories:
         np.random.seed(seed)
 
         return
-
-    @staticmethod
-    def save_model(model, filename):
-        with open(filename, 'wb') as file:
-            pickle.dump(model, file)
-        return None
-
-    @staticmethod
-    def load_model(filename):
-        with open(filename, 'rb') as file:
-            model = pickle.load(file)
-        return model
     
     def get_raw_data(self):
 
@@ -88,6 +79,18 @@ class ClusterTrajectories:
         vamp_model = vamp_estimator.fit(data).fetch_model()
 
         return vamp_model
+
+    @staticmethod
+    def fit_kvad_model(data, lagtime, embedding_dim):
+
+        logging.info('Fitting KVAD model..')
+        kvad_estimator = KVAD(kernel=GaussianKernel(1.),
+            lagtime=lagtime, epsilon=1e-5, dim=embedding_dim,
+            # observable_transform=ChiRnd()
+            )
+        kvad_model = kvad_estimator.fit(data).fetch_model()
+
+        return kvad_model
 
     def score_cv(self, data, dim, lag, n_splits=10, val_frac=0.5):
         """Compute a cross-validated VAMP2 score.
@@ -138,7 +141,7 @@ class ClusterTrajectories:
         return kmeans_model
 
     def plot_projection(self, projection, centroids, n_clusters):
-        pyemma.plots.plot_density(*projection.T, cbar=False, alpha=0.2)
+        pyemma.plots.plot_density(*projection.T, alpha=0.2)
         # plot_density(*projection.T, contourf_kws={'norm':'logit'})
         plt.scatter(*(centroids.T), s=15, c='C1')
         plt.xlabel('comp 1')
@@ -166,16 +169,19 @@ class ClusterTrajectories:
         cumulative_lengths = np.cumsum(traj_lengths)
 
         for index in indexes:
-            traj_idx = np.searchsorted(cumulative_lengths, index, side='right')
-            if traj_idx == 0:
-                frame_idx = index
-            else:
-                frame_idx = index - cumulative_lengths[traj_idx - 1]
+            try:
+                traj_idx = np.searchsorted(cumulative_lengths, index, side='right')
+                if traj_idx == 0:
+                    frame_idx = index
+                else:
+                    frame_idx = index - cumulative_lengths[traj_idx - 1]
 
-            traj = self.traj_list[traj_idx]
-            u = mda.Universe(self.prmtop_file, traj)
-            u.trajectory[frame_idx]
-            u.atoms.write(f"{self.out_dir}/milestone_{index}.pdb")
+                traj = self.traj_list[traj_idx]
+                u = mda.Universe(self.prmtop_file, traj)
+                u.trajectory[frame_idx]
+                u.atoms.write(f"{self.out_dir}/milestone_{index}.pdb")
+            except Exception as e:
+                logging.error(f'Error writing pdb for index {index} in traj {traj_idx}\n{e}')
         return
 
     def run_vamp_cv(self, 
@@ -212,15 +218,19 @@ class ClusterTrajectories:
                 lagtime:int=20,
                 n_clusters:int=100,
                 write_pdb:bool=False,
-                plot_projection:bool=True
+                plot_projection:bool=False
                 ):
 
         data = self.get_raw_data()
 
-        vamp_model = self.fit_vamp_model(data, lagtime, embedding_dim)
-        self.save_model(vamp_model, f'{self.out_dir}/vamp_model.pkl')
+        # vamp_model = self.fit_vamp_model(data, lagtime, embedding_dim)
+        # save_model(vamp_model, f'{self.out_dir}/vamp_model.pkl')
+        # projection = vamp_model.transform(data)
+        kvar_model = self.fit_kvad_model(data, lagtime, embedding_dim)
+        save_model(kvar_model, f'{self.out_dir}/kvar_model.pkl')
+        projection = kvar_model.transform(data)
 
-        projection = vamp_model.transform(data)
+        np.save(f'{self.out_dir}/projection_kvar.npy', projection)
         projection_concatenated = np.concatenate(projection, axis=0)
 
         kmeans_model = self.kmeans_clustering(projection_concatenated, n_clusters)
