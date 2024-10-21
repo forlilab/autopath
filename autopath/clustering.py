@@ -15,56 +15,34 @@ from deeptime.kernels import GaussianKernel
 import MDAnalysis as mda
 import pyemma
 
-from autopath.utils import save_model, load_model
+from autopath.utils import save_model
 
 class ClusterTrajectories:
     def __init__(self, 
-                prmtop_file:str=None,
-                traj_ref:str=None, 
-                traj_list:List[str]=None,
-                ligand_atoms_indexes:List[int]=None,
-                pocket_atom_indexes:List[int]=None,
+                data_fname:str=None,
                 out_dir:str='milestones',
                 seed:int=42
                 ):
-        self.prmtop_file = prmtop_file
-        self.traj_ref = traj_ref
-        self.traj_list = traj_list
-        self.ligand_atoms_indexes = ligand_atoms_indexes
-        self.pocket_atom_indexes = pocket_atom_indexes
 
+        self.data_fname = data_fname
         self.out_dir = out_dir
         os.makedirs(out_dir, exist_ok=True)
 
         self.seed = seed
         np.random.seed(seed)
 
-        return
+        return        
     
-    def get_raw_data(self):
+    def _get_raw_data(self):
 
-        data_fname = f'{self.out_dir}/features_raw.npy'
-
-        if os.path.exists(data_fname):
-            logging.info(f'Loading precomputed features from {data_fname}')
-            return np.load(data_fname)
+        if os.path.exists(self.data_fname):
+            logging.info(f'Loading precomputed features from {self.data_fname}')
+            return np.load(self.data_fname)
         else:
-            data = self.compute_features()
-            np.save(data_fname, data)
-            return data
-
-    def compute_features(self):
-        logging.info('Computing features..')
-
-        featurizer = pyemma.coordinates.featurizer(self.prmtop_file)
-        # featurizer.add_minrmsd_to_ref(self.traj_ref, ref_frame=0, atom_indices=self.ligand_atoms_indexes)
-        # featurizer.add_group_COM([self.pocket_atom_indexes,self.ligand_atoms_indexes], mass_weighted=True)
-        featurizer.add_distances(indices=self.pocket_atom_indexes)
+            logging.error(f'No data found at {self.data_fname}')
+            exit(1)
+            return None
         
-        data = pyemma.coordinates.load(self.traj_list, featurizer)
-
-        return data
-
     @staticmethod
     def fit_vamp_model(data, lagtime, embedding_dim):
         
@@ -75,7 +53,7 @@ class ClusterTrajectories:
             var_cutoff = None
             dim = embedding_dim
 
-        vamp_estimator = VAMP(lagtime=lagtime, dim=dim, var_cutoff=var_cutoff)
+        vamp_estimator = VAMP(lagtime=lagtime, dim=dim, var_cutoff=var_cutoff, scaling=None)#'kinetic_map')
         vamp_model = vamp_estimator.fit(data).fetch_model()
 
         return vamp_model
@@ -86,44 +64,10 @@ class ClusterTrajectories:
         logging.info('Fitting KVAD model..')
         kvad_estimator = KVAD(kernel=GaussianKernel(1.),
             lagtime=lagtime, epsilon=1e-5, dim=embedding_dim,
-            # observable_transform=ChiRnd()
             )
         kvad_model = kvad_estimator.fit(data).fetch_model()
 
         return kvad_model
-
-    def score_cv(self, data, dim, lag, n_splits=10, val_frac=0.5):
-        """Compute a cross-validated VAMP2 score.
-
-        We randomly split the list of independent trajectories into
-        a training and a validation set, compute the VAMP2 score,
-        and repeat this process several times.
-
-        Parameters
-        ----------
-        data : list of numpy.ndarrays
-            The input data.
-        dim : int
-            Number of processes to score; equivalent to the dimension
-            after projecting the data with VAMP2.
-        lag : int
-            Lag time for the VAMP2 scoring.
-        n_splits : int, optional, default=10
-            How often do we repeat the splitting and score calculation.
-        val_frac : int, optional, default=0.5
-            Fraction of trajectories which should go into the validation
-            set during a split.
-        """
-        nval = int(len(data) * val_frac)
-        scores = np.zeros(n_splits)
-        for n in range(n_splits):
-            ival = np.random.choice(len(data), size=nval, replace=False)
-            vamp_estimator = VAMP(lagtime=lag, dim=dim)
-            # vamp_estimator.scaling = "kinetic_map"
-            model = vamp_estimator.fit([d for i, d in enumerate(data) if i not in ival]).fetch_model()
-            test_model = vamp_estimator.fit([d for i, d in enumerate(data) if i in ival]).fetch_model()
-            scores[n] = model.score(r=2, test_model=test_model)
-        return scores
 
     @staticmethod
     def kmeans_clustering(projection_concatenated, n_clusters=100):
@@ -139,17 +83,59 @@ class ClusterTrajectories:
         kmeans_model = kmeans_estimator.fit(projection_concatenated).fetch_model()
 
         return kmeans_model
-
-    def plot_projection(self, projection, centroids, n_clusters):
+    
+    def plot_projection(self, projection, centroids, lagtime):
+        n_clusters = centroids.shape[0]
         pyemma.plots.plot_density(*projection.T, alpha=0.2)
         # plot_density(*projection.T, contourf_kws={'norm':'logit'})
-        plt.scatter(*(centroids.T), s=15, c='C1')
         plt.xlabel('comp 1')
         plt.ylabel('comp 2')
-        plt.title(f'k = {n_clusters} centers')
-        plt.savefig(f'{self.out_dir}/projection_{n_clusters}-clusters.png')
+        if centroids is not None:
+            plt.scatter(*(centroids.T), s=15, c='C1')
+            plt.title(f'k = {n_clusters} | lag = {lagtime}')
+            plt.savefig(f'{self.out_dir}/projection_{n_clusters}K_{lagtime}lag.png')
+        else:
+            plt.title(f'lag = {lagtime}')
+            plt.savefig(f'{self.out_dir}/projection_{lagtime}lag.png')
+        plt.show()
         plt.close()
         return
+    
+    def plot_individual_projections(self, projection, lagtime, plots_per_row=4):
+        num_plots = len(projection)
+        num_rows = (num_plots + plots_per_row - 1) // plots_per_row
+        fig, axes = plt.subplots(num_rows, plots_per_row, figsize=(5 * plots_per_row, 4 * num_rows))
+        
+        if num_rows == 1:
+            axes = [axes]
+        else:
+            axes = axes.flatten()
+        
+        colors = plt.cm.viridis(np.linspace(0, 1, num_plots))
+        
+        # Determine the limits for the axes
+        all_data = np.concatenate(projection, axis=0)
+        x_min, x_max = all_data[:, 0].min(), all_data[:, 0].max()
+        y_min, y_max = all_data[:, 1].min(), all_data[:, 1].max()
+        
+        for i, (ax, p, color) in enumerate(zip(axes, projection, colors)):
+            ax.scatter(p[:, 0], p[:, 1], s=20, alpha=0.2, label=f'Trajectory {i}', color=color)
+            ax.set_xlabel('Comp 1')
+            ax.set_ylabel('Comp 2')
+            ax.set_title(f'Traj {i}')
+            ax.set_xlim(x_min, x_max)
+            ax.set_ylim(y_min, y_max)
+            # ax.legend()
+        
+        # Hide any unused subplots
+        for j in range(i + 1, len(axes)):
+            fig.delaxes(axes[j])
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.out_dir, f'vamp_{lagtime}lag_individual_projections.png'))
+        plt.show()
+        plt.close()
+        return None
 
     def find_closest_points(self, X, centroids):
         closest_points = []
@@ -183,7 +169,41 @@ class ClusterTrajectories:
             except Exception as e:
                 logging.error(f'Error writing pdb for index {index} in traj {traj_idx}\n{e}')
         return
+    
+    def score_cv(self, data, dim, lag, n_splits=10, val_frac=0.5):
+        """Compute a cross-validated VAMP2 score.
 
+        We randomly split the list of independent trajectories into
+        a training and a validation set, compute the VAMP2 score,
+        and repeat this process several times.
+
+        Parameters
+        ----------
+        data : list of numpy.ndarrays
+            The input data.
+        dim : int
+            Number of processes to score; equivalent to the dimension
+            after projecting the data with VAMP2.
+        lag : int
+            Lag time for the VAMP2 scoring.
+        n_splits : int, optional, default=10
+            How often do we repeat the splitting and score calculation.
+        val_frac : int, optional, default=0.5
+            Fraction of trajectories which should go into the validation
+            set during a split.
+        """
+        nval = int(len(data) * val_frac)
+        scores = np.zeros(n_splits)
+        for n in range(n_splits):
+            ival = np.random.choice(len(data), size=nval, replace=False)
+
+            vamp_estimator = VAMP(lagtime=lag, dim=dim)
+            # vamp_estimator.scaling = "kinetic_map"
+            model = vamp_estimator.fit([d for i, d in enumerate(data) if i not in ival]).fetch_model()
+            test_model = vamp_estimator.fit([d for i, d in enumerate(data) if i in ival]).fetch_model()
+            scores[n] = model.score(r=2, test_model=test_model)
+        return scores
+    
     def run_vamp_cv(self, 
                     dims:List[int], 
                     lags:List[int], 
@@ -191,7 +211,7 @@ class ClusterTrajectories:
                     val_frac:float=0.5
                     ):
 
-        data = self.get_raw_data()
+        data = self._get_raw_data()
 
         lista = []
         for lag in lags:
@@ -214,36 +234,41 @@ class ClusterTrajectories:
         return df
 
     def run(self,
-                embedding_dim:Union[int, float]=2, 
+                model:str='vamp',
+                dim:Union[int, float]=2, 
                 lagtime:int=20,
                 n_clusters:int=100,
-                write_pdb:bool=False,
-                plot_projection:bool=False
+                write_pdbs:bool=False,
+                plot_projection:bool=True
                 ):
 
-        data = self.get_raw_data()
+        self.model = model
+        self.lagtime = lagtime
+        data = self._get_raw_data()
 
-        # vamp_model = self.fit_vamp_model(data, lagtime, embedding_dim)
-        # save_model(vamp_model, f'{self.out_dir}/vamp_model.pkl')
-        # projection = vamp_model.transform(data)
-        kvar_model = self.fit_kvad_model(data, lagtime, embedding_dim)
-        save_model(kvar_model, f'{self.out_dir}/kvar_model.pkl')
-        projection = kvar_model.transform(data)
+        if model == 'vamp':
+            fitted_model = self.fit_vamp_model(data, lagtime, dim)
+        elif model == 'kvad':
+            fitted_model = self.fit_kvad_model(data, lagtime, dim)
 
-        np.save(f'{self.out_dir}/projection_kvar.npy', projection)
+        save_model(fitted_model, f'{self.out_dir}/{model}_model_{dim}d_{lagtime}lag.pkl')
+        projection = fitted_model.transform(data)
+
+        np.save(f'{self.out_dir}/projection_{model}_{dim}d_{lagtime}lag.npy', projection)
         projection_concatenated = np.concatenate(projection, axis=0)
 
         kmeans_model = self.kmeans_clustering(projection_concatenated, n_clusters)
-        
+        save_model(kmeans_model, f'{self.out_dir}/kmeans_model_{n_clusters}.pkl')
+
         kmeans_labels = [kmeans_model.transform(run) for run in projection] #Transform each run to cluster labels separately
         kmeans_labels_concatenated = np.concatenate(kmeans_labels, axis=0)
         kmeans_centroids = kmeans_model.cluster_centers
         
-        if write_pdb:
+        if write_pdbs:
             closest_points_indices = self.find_closest_points(projection_concatenated, kmeans_centroids)
             self.write_centroids_pdb(closest_points_indices, projection)
             
         if plot_projection:
-            self.plot_projection(projection_concatenated, kmeans_centroids, n_clusters)
+            self.plot_projection(projection_concatenated, kmeans_centroids, lagtime)
 
         return
