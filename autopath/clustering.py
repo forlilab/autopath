@@ -68,6 +68,23 @@ class ClusterTrajectories:
         kvad_model = kvad_estimator.fit(data).fetch_model()
 
         return kvad_model
+    
+    def plot_cumulative_variance(self, vamp_model):
+        vamp1_score = vamp_model.score(r=1)
+        vamp2_score = vamp_model.score(r=2)
+        vampE_score = vamp_model.score(r="E")
+
+        # Plot the cumulative kinetic variance
+        plt.figure(figsize=(5, 5))
+        plt.plot(vamp_model.cumulative_kinetic_variance)
+        plt.xlabel('Number of components')
+        plt.ylabel('Cumulative kinetic variance')
+        plt.title('VAMP cumulative kinetic variance')
+        plt.legend([f'VAMP1 score: {vamp1_score:.2f}\nVAMP2 score: {vamp2_score:.2f}\nVAMP-E score: {vampE_score:.2f}'])
+        plt.savefig(f'{self.out_dir}/cumulative_kinetic_variance.png')
+        plt.show()
+        plt.close()
+        return None
 
     @staticmethod
     def kmeans_clustering(projection_concatenated, n_clusters=100):
