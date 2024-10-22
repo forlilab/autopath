@@ -21,11 +21,15 @@ import umap
 class ClusterTrajectories:
     def __init__(self, 
                 data_fname:str=None,
+                prmtop_file:str=None,
+                traj_list:List[str]=None,
                 out_dir:str='milestones',
                 seed:int=42
                 ):
 
         self.data_fname = data_fname
+        self.prmtop_file = prmtop_file
+        self.traj_list = traj_list
         self.out_dir = out_dir
         os.makedirs(out_dir, exist_ok=True)
 
@@ -183,42 +187,50 @@ class ClusterTrajectories:
         plt.show()
         plt.close()
         return None
-
-    def find_closest_points(self, X, centroids):
+    
+    @staticmethod
+    def find_closest_points(X, centroids, N=1):
         closest_points = []
         for centroid in centroids:
             distances = np.linalg.norm(X - centroid, axis=1)
-            closest_point_index = np.argmin(distances)
-            closest_points.append(closest_point_index)
+            closest_point_indices = np.argsort(distances)[:N]
+            closest_points.append(closest_point_indices)
         return closest_points
-  
-    def write_centroids_pdb(self, closest_points_indices, projection):
 
-        os.makedirs(f'{self.out_dir}/pdbs', exist_ok=True)
+    def write_centroids_pdb(self, projection, centers, N=1):
+
+        n_clusters = centers.shape[0]
+        os.makedirs(f'{self.out_dir}/centroids_{n_clusters}K', exist_ok=True)
+
+        projection_concatenated = np.concatenate(projection, axis=0)
+        closest_points_indices = self.find_closest_points(projection_concatenated, centers, N)
 
         # This is a bit tricky, but we need to map the indices of the concatenated projection back to the original runs
         index_mapping = np.concatenate([np.arange(proj.shape[0]) for proj in projection])
-        indexes = index_mapping[closest_points_indices]
+        indexes = [index_mapping[indices] for indices in closest_points_indices]
 
         traj_lengths = [len(mda.Universe(self.prmtop_file, traj).trajectory) for traj in self.traj_list]
         cumulative_lengths = np.cumsum(traj_lengths)
 
-        for index in indexes:
-            try:
-                traj_idx = np.searchsorted(cumulative_lengths, index, side='right')
-                if traj_idx == 0:
-                    frame_idx = index
-                else:
-                    frame_idx = index - cumulative_lengths[traj_idx - 1]
+        for centroid_idx, centroid_indexes in enumerate(indexes):
+            centroid_x, centroid_y = centers[centroid_idx]
+            for index in centroid_indexes:
+                try:
+                    traj_idx = np.searchsorted(cumulative_lengths, index, side='right')
+                    if traj_idx == 0:
+                        frame_idx = index
+                    else:
+                        frame_idx = index - cumulative_lengths[traj_idx - 1]
 
-                traj = self.traj_list[traj_idx]
-                u = mda.Universe(self.prmtop_file, traj)
-                u.trajectory[frame_idx]
-                u.atoms.write(f"{self.out_dir}/pdbs/milestone_{index}.pdb")
-            except Exception as e:
-                logging.error(f'Error writing pdb for index {index} in traj {traj_idx}\n{e}')
-        return
-    
+                    traj = self.traj_list[traj_idx]
+                    u = mda.Universe(self.prmtop_file, traj)
+
+                    u.trajectory[frame_idx]
+                    u.atoms.write(f"{self.out_dir}/centroids_{n_clusters}K/milestone_{centroid_x:.2f}_{centroid_y:.2f}_frame{index}.pdb")
+                except Exception as e:
+                    logging.error(f'Error writing pdb for index {index} in traj {traj_idx}\n{e}')
+        return None
+   
     def score_cv(self, data, dim, lag, n_splits=10, val_frac=0.5):
         """Compute a cross-validated VAMP2 score.
 
@@ -293,7 +305,6 @@ class ClusterTrajectories:
                 plot_projection:bool=True
                 ):
 
-        # self.model = model
         self.lagtime = lagtime
         data = self._get_raw_data()
 
@@ -312,16 +323,13 @@ class ClusterTrajectories:
             save_model(fitted_model, f'{self.out_dir}/{dim_model}_model_{dim}d_{lagtime}lag.pkl')
 
         projection = fitted_model.transform(data)
-
         np.save(f'{self.out_dir}/projection_{dim_model}_{dim}d_{lagtime}lag.npy', projection)
-        projection_concatenated = np.concatenate(projection, axis=0)
 
         fitted_clustering_model, dtrajs, centers = self.fit_clustering_model(clustering_model, projection, n_clusters, dmin)
         save_model(fitted_clustering_model, f'{self.out_dir}/{clustering_model}_model_K{n_clusters}.pkl')
         
         if write_pdbs:
-            closest_points_indices = self.find_closest_points(projection_concatenated, centers)
-            self.write_centroids_pdb(closest_points_indices, projection)
+            self.write_centroids_pdb(projection, centers, N=1)
             
         if plot_projection:
             self.plot_projection(projection, centers, lagtime)
