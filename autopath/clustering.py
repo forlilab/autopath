@@ -16,6 +16,7 @@ import MDAnalysis as mda
 import pyemma
 
 from autopath.utils import save_model
+import umap
 
 class ClusterTrajectories:
     def __init__(self, 
@@ -45,7 +46,7 @@ class ClusterTrajectories:
         
     @staticmethod
     def fit_vamp_model(data, lagtime, embedding_dim):
-        
+        logging.info('Fitting VAMP model..')
         if isinstance(embedding_dim, float):
             var_cutoff = embedding_dim
             dim = None
@@ -69,7 +70,17 @@ class ClusterTrajectories:
 
         return kvad_model
     
+    @staticmethod
+    def fit_umap_model(data, n_components=2, n_neighbors=15, min_dist=0.1, metric='euclidean'):
+        logging.info('Fitting UMAP model..')
+        X = np.concatenate(data, axis=0)
+        umap_estimator = umap.UMAP(n_components=n_components, n_neighbors=n_neighbors, min_dist=min_dist, metric=metric)
+        umap_model = umap_estimator.fit(X)
+
+        return umap_model
+    
     def plot_cumulative_variance(self, vamp_model):
+        
         vamp1_score = vamp_model.score(r=1)
         vamp2_score = vamp_model.score(r=2)
         vampE_score = vamp_model.score(r="E")
@@ -289,6 +300,8 @@ class ClusterTrajectories:
             self.plot_cumulative_variance(fitted_model)
         elif dim_model == 'kvad':
             fitted_model = self.fit_kvad_model(data, lagtime, dim)
+        elif dim_model == 'umap':
+            fitted_model = self.fit_umap_model(data, n_components=dim)
 
         save_model(fitted_model, f'{self.out_dir}/{dim_model}_model_{dim}d_{lagtime}lag.pkl')
         projection = fitted_model.transform(data)
