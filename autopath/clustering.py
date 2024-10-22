@@ -9,8 +9,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 from deeptime.decomposition import VAMP, KVAD
-from deeptime.clustering import KMeans
 from deeptime.kernels import GaussianKernel
+from deeptime.clustering import KMeans, RegularSpace, BoxDiscretization
 
 import MDAnalysis as mda
 import pyemma
@@ -86,20 +86,39 @@ class ClusterTrajectories:
         plt.close()
         return None
 
-    @staticmethod
-    def kmeans_clustering(projection_concatenated, n_clusters=100):
 
-        kmeans_estimator = KMeans(
-            n_clusters=n_clusters,  # place 100 cluster centers
-            init_strategy='kmeans++',  # uniform initialization strategy
-            # max_iter=0,  # don't actually perform the optimization, just place centers
-            fixed_seed=42,
-            n_jobs=None,
-        )
+    def fit_clustering_model(self, model:str='kmeans', projection:np.ndarray=None, n_clusters:int=100, dmin:float=0.1):
 
-        kmeans_model = kmeans_estimator.fit(projection_concatenated).fetch_model()
+        projection_concatenated = np.concatenate(projection, axis=0)
 
-        return kmeans_model
+        if model == 'kmeans':
+            estimator = KMeans(
+                n_clusters=n_clusters,  # place 100 cluster centers
+                init_strategy='kmeans++',  # uniform initialization strategy
+                # max_iter=0,  # don't actually perform the optimization, just place centers
+                fixed_seed=self.seed,
+                n_jobs=None,
+            )
+        elif model == 'regular_space':
+            estimator = RegularSpace(
+                        dmin=dmin,  # minimum distance between cluster centers
+                        max_centers=n_clusters,  # maximum number of cluster centers
+                        n_jobs=None
+            )
+        elif model == 'box_discretization':
+            estimator = BoxDiscretization(
+                        dim=2,
+                        n_boxes=n_clusters # Number of boxes per dimension
+            )
+        else:
+            logging.error(f'Invalid clustering model {model}')
+            return None
+            
+        fitted_model = estimator.fit(projection_concatenated).fetch_model()       
+        cluster_labels = [fitted_model.transform(run) for run in projection] #Transform each run to cluster labels separately
+        cluster_centers = fitted_model.cluster_centers
+
+        return fitted_model, cluster_labels, cluster_centers
     
     def plot_projection(self, projection, centroids, lagtime):
         n_clusters = centroids.shape[0]
@@ -251,41 +270,40 @@ class ClusterTrajectories:
         return df
 
     def run(self,
-                model:str='vamp',
+                dim_model:str='vamp',
                 dim:Union[int, float]=2, 
                 lagtime:int=20,
+                clustering_model:str='regular_space',
+                dmin:float=0.5,
                 n_clusters:int=100,
                 write_pdbs:bool=False,
                 plot_projection:bool=True
                 ):
 
-        self.model = model
+        # self.model = model
         self.lagtime = lagtime
         data = self._get_raw_data()
 
-        if model == 'vamp':
+        if dim_model == 'vamp':
             fitted_model = self.fit_vamp_model(data, lagtime, dim)
-        elif model == 'kvad':
+            self.plot_cumulative_variance(fitted_model)
+        elif dim_model == 'kvad':
             fitted_model = self.fit_kvad_model(data, lagtime, dim)
 
-        save_model(fitted_model, f'{self.out_dir}/{model}_model_{dim}d_{lagtime}lag.pkl')
+        save_model(fitted_model, f'{self.out_dir}/{dim_model}_model_{dim}d_{lagtime}lag.pkl')
         projection = fitted_model.transform(data)
 
-        np.save(f'{self.out_dir}/projection_{model}_{dim}d_{lagtime}lag.npy', projection)
+        np.save(f'{self.out_dir}/projection_{dim_model}_{dim}d_{lagtime}lag.npy', projection)
         projection_concatenated = np.concatenate(projection, axis=0)
 
-        kmeans_model = self.kmeans_clustering(projection_concatenated, n_clusters)
-        save_model(kmeans_model, f'{self.out_dir}/kmeans_model_{n_clusters}.pkl')
-
-        kmeans_labels = [kmeans_model.transform(run) for run in projection] #Transform each run to cluster labels separately
-        kmeans_labels_concatenated = np.concatenate(kmeans_labels, axis=0)
-        kmeans_centroids = kmeans_model.cluster_centers
+        fitted_clustering_model, dtrajs, centers = self.fit_clustering_model(clustering_model, projection, n_clusters, dmin)
+        save_model(fitted_clustering_model, f'{self.out_dir}/{clustering_model}_model_K{n_clusters}.pkl')
         
         if write_pdbs:
-            closest_points_indices = self.find_closest_points(projection_concatenated, kmeans_centroids)
+            closest_points_indices = self.find_closest_points(projection_concatenated, centers)
             self.write_centroids_pdb(closest_points_indices, projection)
             
         if plot_projection:
-            self.plot_projection(projection_concatenated, kmeans_centroids, lagtime)
+            self.plot_projection(projection_concatenated, centers, lagtime)
 
         return
