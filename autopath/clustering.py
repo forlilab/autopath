@@ -15,7 +15,7 @@ from deeptime.clustering import KMeans, RegularSpace, BoxDiscretization
 import MDAnalysis as mda
 import pyemma
 
-from autopath.utils import save_model
+from autopath.utils import save_model, load_model
 import umap
 
 class ClusterTrajectories:
@@ -80,7 +80,7 @@ class ClusterTrajectories:
         return umap_model
     
     def plot_cumulative_variance(self, vamp_model):
-        
+
         vamp1_score = vamp_model.score(r=1)
         vamp2_score = vamp_model.score(r=2)
         vampE_score = vamp_model.score(r="E")
@@ -132,8 +132,10 @@ class ClusterTrajectories:
         return fitted_model, cluster_labels, cluster_centers
     
     def plot_projection(self, projection, centroids, lagtime):
+        projection_concatenated = np.concatenate(projection, axis=0)
         n_clusters = centroids.shape[0]
-        pyemma.plots.plot_density(*projection.T, alpha=0.2)
+
+        pyemma.plots.plot_density(*projection_concatenated.T, alpha=0.2)
         # plot_density(*projection.T, contourf_kws={'norm':'logit'})
         plt.xlabel('comp 1')
         plt.ylabel('comp 2')
@@ -148,15 +150,13 @@ class ClusterTrajectories:
         plt.close()
         return
     
-    def plot_individual_projections(self, projection, lagtime, plots_per_row=4):
+    def plot_individual_projections(self, projection, plots_per_row:int=4):
         num_plots = len(projection)
         num_rows = (num_plots + plots_per_row - 1) // plots_per_row
         fig, axes = plt.subplots(num_rows, plots_per_row, figsize=(5 * plots_per_row, 4 * num_rows))
         
         if num_rows == 1:
-            axes = [axes]
-        else:
-            axes = axes.flatten()
+            axes = axes.flatten()  # Ensure axes is always a list of axes objects
         
         colors = plt.cm.viridis(np.linspace(0, 1, num_plots))
         
@@ -179,7 +179,7 @@ class ClusterTrajectories:
             fig.delaxes(axes[j])
         
         plt.tight_layout()
-        plt.savefig(os.path.join(self.out_dir, f'vamp_{lagtime}lag_individual_projections.png'))
+        plt.savefig(f'{self.out_dir}/vamp_individual_projections.png')
         plt.show()
         plt.close()
         return None
@@ -193,6 +193,8 @@ class ClusterTrajectories:
         return closest_points
   
     def write_centroids_pdb(self, closest_points_indices, projection):
+
+        os.makedirs(f'{self.out_dir}/pdbs', exist_ok=True)
 
         # This is a bit tricky, but we need to map the indices of the concatenated projection back to the original runs
         index_mapping = np.concatenate([np.arange(proj.shape[0]) for proj in projection])
@@ -212,7 +214,7 @@ class ClusterTrajectories:
                 traj = self.traj_list[traj_idx]
                 u = mda.Universe(self.prmtop_file, traj)
                 u.trajectory[frame_idx]
-                u.atoms.write(f"{self.out_dir}/milestone_{index}.pdb")
+                u.atoms.write(f"{self.out_dir}/pdbs/milestone_{index}.pdb")
             except Exception as e:
                 logging.error(f'Error writing pdb for index {index} in traj {traj_idx}\n{e}')
         return
@@ -295,15 +297,20 @@ class ClusterTrajectories:
         self.lagtime = lagtime
         data = self._get_raw_data()
 
-        if dim_model == 'vamp':
-            fitted_model = self.fit_vamp_model(data, lagtime, dim)
-            self.plot_cumulative_variance(fitted_model)
-        elif dim_model == 'kvad':
-            fitted_model = self.fit_kvad_model(data, lagtime, dim)
-        elif dim_model == 'umap':
-            fitted_model = self.fit_umap_model(data, n_components=dim)
+        if os.path.exists(f'{self.out_dir}/{dim_model}_model_{dim}d_{lagtime}lag.pkl'):
+            logging.info(f'Loading precomputed {dim_model} model from {self.out_dir}')
+            fitted_model = load_model(f'{self.out_dir}/{dim_model}_model_{dim}d_{lagtime}lag.pkl')
+        else:
+            if dim_model == 'vamp':
+                fitted_model = self.fit_vamp_model(data, lagtime, dim)
+                self.plot_cumulative_variance(fitted_model)
+            elif dim_model == 'kvad':
+                fitted_model = self.fit_kvad_model(data, lagtime, dim)
+            elif dim_model == 'umap':
+                fitted_model = self.fit_umap_model(data, n_components=dim)
 
-        save_model(fitted_model, f'{self.out_dir}/{dim_model}_model_{dim}d_{lagtime}lag.pkl')
+            save_model(fitted_model, f'{self.out_dir}/{dim_model}_model_{dim}d_{lagtime}lag.pkl')
+
         projection = fitted_model.transform(data)
 
         np.save(f'{self.out_dir}/projection_{dim_model}_{dim}d_{lagtime}lag.npy', projection)
@@ -317,6 +324,7 @@ class ClusterTrajectories:
             self.write_centroids_pdb(closest_points_indices, projection)
             
         if plot_projection:
-            self.plot_projection(projection_concatenated, centers, lagtime)
+            self.plot_projection(projection, centers, lagtime)
+            self.plot_individual_projections(projection)
 
         return
