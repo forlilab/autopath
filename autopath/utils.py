@@ -156,14 +156,7 @@ def save_amber_topology(
     forcefield: app.ForceField = None,
     out_path: str = None,
 ) -> None:
-    """Save the topology files necessary for MD simulations according to the simulation engine specified.
 
-    Args:
-        topology (app.Topology): openmm topology
-        positions (list): list of 3D coordinates of the topology
-        forcefield (app.Forcefield): openmm forcefield
-        out_path (str): output path to where to save the topology files
-    """
     os.makedirs(out_path, exist_ok=True)
     new_system = forcefield.createSystem(
         topology,
