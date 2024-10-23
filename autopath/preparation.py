@@ -43,6 +43,7 @@ class SystemPreparation:
         ionicStrength: float = 0.0,
         is_membrane: bool = False,
         lipid_type: str = None,
+        out_dir: str = ".",
     ) -> None:
 
         if lig_ff.upper() in ["ESPALOMA", "SMIRNOFF", "GAFF"]:
@@ -52,6 +53,9 @@ class SystemPreparation:
                 f"Ligand forcefield must be one of Espaloma, SMIRNOFF or GAFF"
             )
             exit(1)
+
+        self.out_dir = out_dir
+        os.makedirs(out_dir, exist_ok=True)
 
         self.forcefield = ForceField(*forcefield)
         self.allow_undefined_stereo = allow_undefined_stereo
@@ -136,7 +140,6 @@ class SystemPreparation:
 
         if lig_path is not None:
             lig_name = os.path.splitext(os.path.basename(lig_path))[0]
-            out_dir = lig_name
 
             logging.info(f"Parametrizing ligand {lig_name}..")
 
@@ -147,9 +150,6 @@ class SystemPreparation:
 
         if prot_path is not None:
             rec_name = os.path.splitext(os.path.basename(prot_path))[0]
-            if lig_path is None:
-                out_dir = rec_name
-
             try:
                 protein_pdb = PDBFile(prot_path)
                 logging.info(f"Loaded {rec_name} PDB..")
@@ -167,6 +167,14 @@ class SystemPreparation:
             # Add the ligand to the Modeller built from the protein structure
             if lig_path is not None:
                 modeller.add(ligand_topology, ligand_positions)
+
+            # logging.info(f"Parametrizing GDP..")
+            # gdp_path = '/gpfs/group/forli/mllanos/kras/input/gdp.sdf'
+            # gdp_lig = self._sdf_to_mol(gdp_path)
+            # gdp_topology, gdp_positions = self._parametrize_ligand(gdp_lig)
+            # for res in gdp_topology.residues():
+            #     res.name = 'UNK'
+            # modeller.add(gdp_topology, gdp_positions)
 
         # CASE: Ligand and membrane only
         if prot_path is None and self.is_membrane:
@@ -230,11 +238,10 @@ class SystemPreparation:
             constraints=HBonds,
         )
 
-        os.makedirs(out_dir, exist_ok=True)
-        save_system(system, f"{out_dir}/system.xml")
-        save_pdb(modeller.topology, modeller.positions, f"{out_dir}/system.pdb")
+        save_system(system, f"{self.out_dir}/system.xml")
+        save_pdb(modeller.topology, modeller.positions, f"{self.out_dir}/system.pdb")
         save_amber_topology(
-            modeller.topology, modeller.positions, self.forcefield, out_dir
+            modeller.topology, modeller.positions, self.forcefield, self.out_dir
         )
 
         simulation_time = time.monotonic() - start_time
