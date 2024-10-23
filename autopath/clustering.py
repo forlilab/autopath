@@ -11,7 +11,7 @@ import seaborn as sns
 from deeptime.decomposition import VAMP, KVAD
 from deeptime.kernels import GaussianKernel
 from deeptime.clustering import KMeans, RegularSpace, BoxDiscretization
-
+from sklearn.decomposition import PCA
 import MDAnalysis as mda
 import pyemma
 
@@ -83,6 +83,16 @@ class ClusterTrajectories:
 
         return umap_model
     
+    @staticmethod
+    def fit_pca_model(data, n_components=2):
+        logging.info('Fitting PCA model..')
+        X = np.concatenate(data, axis=0)
+        print(X.shape)
+        pca_estimator = PCA(n_components=n_components)
+        pca_model = pca_estimator.fit(X)
+
+        return pca_model
+
     def plot_cumulative_variance(self, vamp_model):
 
         vamp1_score = vamp_model.score(r=1)
@@ -319,20 +329,22 @@ class ClusterTrajectories:
                 fitted_model = self.fit_kvad_model(data, lagtime, dim)
             elif dim_model == 'umap':
                 fitted_model = self.fit_umap_model(data, n_components=dim)
+            elif dim_model == 'pca':
+                fitted_model = self.fit_pca_model(data, n_components=dim)
 
             save_model(fitted_model, f'{self.out_dir}/{dim_model}_model_{dim}d_{lagtime}lag.pkl')
-
+        
         projection = fitted_model.transform(data)
         np.save(f'{self.out_dir}/projection_{dim_model}_{dim}d_{lagtime}lag.npy', projection)
 
         fitted_clustering_model, dtrajs, centers = self.fit_clustering_model(clustering_model, projection, n_clusters, dmin)
         save_model(fitted_clustering_model, f'{self.out_dir}/{clustering_model}_model_K{n_clusters}.pkl')
-        
-        if write_pdbs:
-            self.write_centroids_pdb(projection, centers, N=1)
             
         if plot_projection:
             self.plot_projection(projection, centers, lagtime)
             self.plot_individual_projections(projection)
+        
+        if write_pdbs:
+            self.write_centroids_pdb(projection, centers, N=1)
 
         return
