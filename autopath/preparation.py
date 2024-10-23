@@ -40,6 +40,7 @@ class SystemPreparation:
         hydrogenMass: float = 3,
         boxShape: str = "dodecahedron",
         padding: float = 1.0,
+        num_solvent: int = None,
         ionicStrength: float = 0.0,
         is_membrane: bool = False,
         lipid_type: str = None,
@@ -63,6 +64,7 @@ class SystemPreparation:
         self.hydrogenMass = hydrogenMass * openmmunit.amu  # Use HMR
         self.boxShape = boxShape  # cube, dodecahedron
         self.padding = padding * openmmunit.nanometers
+        self.num_solvent = num_solvent
         self.ionicStrength = ionicStrength * openmmunit.molar
 
         self.is_membrane = is_membrane
@@ -221,6 +223,7 @@ class SystemPreparation:
             modeller.addSolvent(
                 self.forcefield,
                 neutralize=True,
+                numAdded=self.num_solvent,
                 ionicStrength=self.ionicStrength,
                 boxShape=self.boxShape,
                 padding=self.padding,
