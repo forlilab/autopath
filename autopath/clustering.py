@@ -48,8 +48,7 @@ class ClusterTrajectories:
             exit(1)
             return None
         
-    @staticmethod
-    def fit_vamp_model(data, lagtime, embedding_dim):
+    def fit_vamp_model(self, data, lagtime, embedding_dim, plot_cumulative_variance:bool=True):
         logging.info('Fitting VAMP model..')
         if isinstance(embedding_dim, float):
             var_cutoff = embedding_dim
@@ -60,6 +59,9 @@ class ClusterTrajectories:
 
         vamp_estimator = VAMP(lagtime=lagtime, dim=dim, var_cutoff=var_cutoff, scaling=None)#'kinetic_map')
         vamp_model = vamp_estimator.fit(data).fetch_model()
+
+        if plot_cumulative_variance:
+            self._plot_cumulative_variance(vamp_model)
 
         return vamp_model
 
@@ -92,8 +94,8 @@ class ClusterTrajectories:
         pca_model = pca_estimator.fit(X)
 
         return pca_model
-
-    def plot_cumulative_variance(self, vamp_model):
+    
+    def _plot_cumulative_variance(self, vamp_model):
 
         vamp1_score = vamp_model.score(r=1)
         vamp2_score = vamp_model.score(r=2)
@@ -106,7 +108,7 @@ class ClusterTrajectories:
         plt.ylabel('Cumulative kinetic variance')
         plt.title('VAMP cumulative kinetic variance')
         plt.legend([f'VAMP1 score: {vamp1_score:.2f}\nVAMP2 score: {vamp2_score:.2f}\nVAMP-E score: {vampE_score:.2f}'])
-        plt.savefig(f'{self.out_dir}/cumulative_kinetic_variance.png')
+        plt.savefig(f'{self.out_dir}/vamp_cumulative_kinetic_variance.png')
         plt.show()
         plt.close()
         return None
@@ -165,13 +167,15 @@ class ClusterTrajectories:
         return
     
     def plot_individual_projections(self, projection, plots_per_row:int=4):
-        num_plots = len(projection)
+        num_plots = projection.shape[0]
         num_rows = (num_plots + plots_per_row - 1) // plots_per_row
         fig, axes = plt.subplots(num_rows, plots_per_row, figsize=(5 * plots_per_row, 4 * num_rows))
-        
+                
         if num_rows == 1:
-            axes = axes.flatten()  # Ensure axes is always a list of axes objects
-        
+            axes = np.array([axes])  # Ensure axes is always a list of axes objects
+        else:
+            axes = axes.flatten()
+
         colors = plt.cm.viridis(np.linspace(0, 1, num_plots))
         
         # Determine the limits for the axes
@@ -324,7 +328,6 @@ class ClusterTrajectories:
         else:
             if dim_model == 'vamp':
                 fitted_model = self.fit_vamp_model(data, lagtime, dim)
-                self.plot_cumulative_variance(fitted_model)
             elif dim_model == 'kvad':
                 fitted_model = self.fit_kvad_model(data, lagtime, dim)
             elif dim_model == 'umap':
