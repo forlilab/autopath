@@ -191,21 +191,39 @@ class ClusterTrajectories:
 
         return fitted_model, cluster_labels, cluster_centers
     
-    def plot_projection(self, projection, centroids):
+    def plot_projection(self, projection, labels, centroids):
+        """
+        Plot the projection of the data.
+        Depending on the dimensionality of the projection, either plot a 2D density plot or a pairplot.
+        If clustering has been done, use labels to color by cluster labels and also plot centroids, otherwise just plot the projection.
+        """
         projection_concatenated = np.concatenate(projection, axis=0)
-        n_clusters = centroids.shape[0]
 
-        pyemma.plots.plot_density(*projection_concatenated.T, alpha=0.2)
-        # plot_density(*projection.T, contourf_kws={'norm':'logit'})
-        plt.xlabel('comp 1')
-        plt.ylabel('comp 2')
+        if projection_concatenated.shape[1] == 2:
+            pyemma.plots.plot_density(*projection_concatenated.T, alpha=0.2)
+            plt.xlabel('comp 1')
+            plt.ylabel('comp 2')
+
+        elif projection_concatenated.shape[1] > 2:    
+            df = pd.DataFrame(projection_concatenated, columns=[f'comp {i+1}' for i in range(projection_concatenated.shape[1])])
+            if labels is not None:
+                df['cluster'] = np.concatenate(labels, axis=0)
+                g = sns.PairGrid(df, hue='cluster', corner=True, palette='Set1')
+            else:
+                g = sns.PairGrid(df, corner=True)
+            g.map_lower(sns.scatterplot, alpha=0.2, s=5)
+            g.map_diag(sns.kdeplot, hue=None, color=".3")
+            # g.map_upper(sns.kdeplot)
+            g.add_legend(title="", adjust_subtitles=True)
+
         if centroids is not None:
-            plt.scatter(*(centroids.T), s=15, c='C1')
-            plt.title(f'{self.embedding_model} projection | lag = {self.embedding_lagtime} | K = {n_clusters}')
-            plt.savefig(f'{self.out_dir}/{self.embedding_model}_projection-{self.embedding_dim}d_{n_clusters}K_{self.embedding_lagtime}lag.png')
+            n_clusters = centroids.shape[0]
+            # plt.scatter(*(centroids.T), s=15, c='C1')
+            out_fname = f'{self.out_dir}/{self.embedding_model}_projection-{self.embedding_dim}d_{n_clusters}K_{self.embedding_lagtime}lag.png'
         else:
-            plt.title(f'{self.embedding_model} projection | lag = {self.embedding_lagtime}')
-            plt.savefig(f'{self.out_dir}/{self.embedding_model}_projection-{self.embedding_dim}d_{self.embedding_lagtime}lag.png')
+            out_fname = f'{self.out_dir}/{self.embedding_model}_projection-{self.embedding_dim}d_{self.embedding_lagtime}lag.png'
+
+        plt.savefig(out_fname)
         plt.show()
         plt.close()
         return
@@ -373,7 +391,7 @@ class ClusterTrajectories:
         save_model(fitted_clustering_model, f'{self.out_dir}/{self.clustering_model}_model_K{self.n_clusters}.pkl')
             
         # Plot the projections
-        self.plot_projection(projection, centers)
+        self.plot_projection(projection, dtrajs, centers)
         # self.plot_individual_projections(projection)
     
         if self.write_pdbs:
