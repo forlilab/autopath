@@ -20,44 +20,56 @@ import umap
 
 class ClusterTrajectories:
     def __init__(self, 
-                data_fname:str=None,
-                prmtop_file:str=None,
-                traj_list:List[str]=None,
+                embedding_model:str='vamp',
+                embedding_dim:Union[int, float]=2, 
+                embedding_lagtime:int=20,
+                clustering_model:str='regular_space',
+                n_clusters:int=100,
+                dmin:float=0.5, #only for regular_space
+                write_pdbs:bool=False,
                 out_dir:str='milestones',
-                seed:int=42
+                seed:int=42,
                 ):
 
-        self.data_fname = data_fname
-        self.prmtop_file = prmtop_file
-        self.traj_list = traj_list
+        self.embedding_model = embedding_model
+        self.embedding_dim = embedding_dim
+        self.embedding_lagtime = embedding_lagtime
+        self.clustering_model = clustering_model
+        self.n_clusters = n_clusters
+        self.dmin = dmin
+        self.write_pdbs = write_pdbs
+
         self.out_dir = out_dir
         os.makedirs(out_dir, exist_ok=True)
 
         self.seed = seed
         np.random.seed(seed)
 
-        return        
-    
-    def _get_raw_data(self):
+        return   
+         
+    @staticmethod
+    def _get_raw_data(data_fname):
 
-        if os.path.exists(self.data_fname):
-            logging.info(f'Loading precomputed features from {self.data_fname}')
-            return np.load(self.data_fname)
+        if os.path.exists(data_fname):
+            logging.info(f'Loading precomputed features from {data_fname}')
+            return np.load(data_fname)
         else:
-            logging.error(f'No data found at {self.data_fname}')
+            logging.error(f'No data found at {data_fname}')
             exit(1)
             return None
         
-    def fit_vamp_model(self, data, lagtime, embedding_dim, plot_cumulative_variance:bool=True):
+    def fit_vamp_model(self, data, plot_cumulative_variance:bool=True):
+
         logging.info('Fitting VAMP model..')
-        if isinstance(embedding_dim, float):
-            var_cutoff = embedding_dim
+
+        if isinstance(self.embedding_dim, float):
+            var_cutoff = self.embedding_dim
             dim = None
         else:
             var_cutoff = None
-            dim = embedding_dim
+            dim = self.embedding_dim
 
-        vamp_estimator = VAMP(lagtime=lagtime, dim=dim, var_cutoff=var_cutoff, scaling=None)#'kinetic_map')
+        vamp_estimator = VAMP(lagtime=self.embedding_lagtime, dim=dim, var_cutoff=var_cutoff, scaling=None)#'kinetic_map')
         vamp_model = vamp_estimator.fit(data).fetch_model()
 
         if plot_cumulative_variance:
@@ -65,35 +77,66 @@ class ClusterTrajectories:
 
         return vamp_model
 
-    @staticmethod
-    def fit_kvad_model(data, lagtime, embedding_dim):
+    def fit_kvad_model(self, data):
 
         logging.info('Fitting KVAD model..')
-        kvad_estimator = KVAD(kernel=GaussianKernel(1.),
-            lagtime=lagtime, epsilon=1e-5, dim=embedding_dim,
+
+        kvad_estimator = KVAD(kernel=GaussianKernel(0.5),
+            lagtime=self.embedding_lagtime, epsilon=1e-5, dim=self.embedding_dim,
             )
         kvad_model = kvad_estimator.fit(data).fetch_model()
 
         return kvad_model
     
-    @staticmethod
-    def fit_umap_model(data, n_components=2, n_neighbors=15, min_dist=0.1, metric='euclidean'):
+    def fit_umap_model(self, data, n_neighbors=15, min_dist=0.1, metric='euclidean'):
         logging.info('Fitting UMAP model..')
         X = np.concatenate(data, axis=0)
-        umap_estimator = umap.UMAP(n_components=n_components, n_neighbors=n_neighbors, min_dist=min_dist, metric=metric)
+        umap_estimator = umap.UMAP(n_components=self.embedding_dim, n_neighbors=n_neighbors, min_dist=min_dist, metric=metric)
         umap_model = umap_estimator.fit(X)
 
         return umap_model
     
-    @staticmethod
-    def fit_pca_model(data, n_components=2):
+    def fit_pca_model(self, data):
         logging.info('Fitting PCA model..')
         X = np.concatenate(data, axis=0)
-        print(X.shape)
-        pca_estimator = PCA(n_components=n_components)
+        pca_estimator = PCA(n_components=self.embedding_dim)
         pca_model = pca_estimator.fit(X)
 
         return pca_model
+    
+    def fit_tica_model(self, data):
+        logging.info('Fitting TICA model..')
+        tica_estimator = pyemma.coordinates.tica(data, lag=self.embedding_lagtime, dim=self.embedding_dim)
+        tica_model = tica_estimator.get_output()
+
+        return tica_model
+    
+    def fit_embedding_model(self, data):
+
+        if os.path.exists(f'{self.out_dir}/{self.embedding_model}_model_{self.embedding_dim}d_{self.embedding_lagtime}lag.pkl'):
+            logging.info(f'Loading precomputed {self.embedding_model} model from {self.out_dir}')
+            fitted_model = load_model(f'{self.out_dir}/{self.embedding_model}_model_{self.embedding_dim}d_{self.embedding_lagtime}lag.pkl')
+            projection = np.array([fitted_model.transform(run) for run in data])
+        else:
+            if self.embedding_model == 'vamp':
+                fitted_model = self.fit_vamp_model(data)
+                projection = fitted_model.transform(data)
+            elif self.embedding_model == 'kvad':
+                fitted_model = self.fit_kvad_model(data)
+                projection = fitted_model.transform(data)
+            elif self.embedding_model == 'tica':
+                fitted_model = self.fit_tica_model(data)
+                projection = fitted_model.transform(data)
+            elif self.embedding_model == 'umap':
+                fitted_model = self.fit_umap_model(data)
+                projection = [fitted_model.transform(run) for run in data]
+            elif self.embedding_model == 'pca':
+                fitted_model = self.fit_pca_model(data)
+                projection = np.array([fitted_model.transform(run) for run in data])
+        
+        # np.save(f'{self.out_dir}/projection_{self.embedding_model}_{self.embedding_dim}d_{self.embedding_lagtime}lag.npy', projection)
+
+        return fitted_model, projection
     
     def _plot_cumulative_variance(self, vamp_model):
 
@@ -114,31 +157,32 @@ class ClusterTrajectories:
         return None
 
 
-    def fit_clustering_model(self, model:str='kmeans', projection:np.ndarray=None, n_clusters:int=100, dmin:float=0.1):
+    def fit_clustering_model(self, projection:np.ndarray=None):
 
         projection_concatenated = np.concatenate(projection, axis=0)
 
-        if model == 'kmeans':
+        if self.clustering_model == 'kmeans':
             estimator = KMeans(
-                n_clusters=n_clusters,  # place 100 cluster centers
+                n_clusters=self.n_clusters,  # place 100 cluster centers
                 init_strategy='kmeans++',  # uniform initialization strategy
                 # max_iter=0,  # don't actually perform the optimization, just place centers
                 fixed_seed=self.seed,
                 n_jobs=None,
             )
-        elif model == 'regular_space':
+        elif self.clustering_model == 'regular_space':
             estimator = RegularSpace(
-                        dmin=dmin,  # minimum distance between cluster centers
-                        max_centers=n_clusters,  # maximum number of cluster centers
+                        dmin=self.dmin,  # minimum distance between cluster centers
+                        max_centers=self.n_clusters,  # maximum number of cluster centers
                         n_jobs=None
             )
-        elif model == 'box_discretization':
+        elif self.clustering_model == 'box_discretization':
             estimator = BoxDiscretization(
-                        dim=2,
-                        n_boxes=n_clusters # Number of boxes per dimension
+                        dim=self.embedding_dim,  # dimension of the space
+                        n_boxes=self.n_clusters # Number of boxes per dimension
             )
         else:
-            logging.error(f'Invalid clustering model {model}')
+            logging.error(f'Invalid clustering model {self.clustering_model}')
+
             return None
             
         fitted_model = estimator.fit(projection_concatenated).fetch_model()       
@@ -147,7 +191,7 @@ class ClusterTrajectories:
 
         return fitted_model, cluster_labels, cluster_centers
     
-    def plot_projection(self, projection, centroids, lagtime):
+    def plot_projection(self, projection, centroids):
         projection_concatenated = np.concatenate(projection, axis=0)
         n_clusters = centroids.shape[0]
 
@@ -157,17 +201,19 @@ class ClusterTrajectories:
         plt.ylabel('comp 2')
         if centroids is not None:
             plt.scatter(*(centroids.T), s=15, c='C1')
-            plt.title(f'k = {n_clusters} | lag = {lagtime}')
-            plt.savefig(f'{self.out_dir}/projection_{n_clusters}K_{lagtime}lag.png')
+            plt.title(f'{self.embedding_model} projection | lag = {self.embedding_lagtime} | K = {n_clusters}')
+            plt.savefig(f'{self.out_dir}/{self.embedding_model}_projection-{self.embedding_dim}d_{n_clusters}K_{self.embedding_lagtime}lag.png')
         else:
-            plt.title(f'lag = {lagtime}')
-            plt.savefig(f'{self.out_dir}/projection_{lagtime}lag.png')
+            plt.title(f'{self.embedding_model} projection | lag = {self.embedding_lagtime}')
+            plt.savefig(f'{self.out_dir}/{self.embedding_model}_projection-{self.embedding_dim}d_{self.embedding_lagtime}lag.png')
         plt.show()
         plt.close()
         return
     
     def plot_individual_projections(self, projection, plots_per_row:int=4):
         num_plots = projection.shape[0]
+        if num_plots < plots_per_row:
+            plots_per_row = num_plots
         num_rows = (num_plots + plots_per_row - 1) // plots_per_row
         fig, axes = plt.subplots(num_rows, plots_per_row, figsize=(5 * plots_per_row, 4 * num_rows))
                 
@@ -197,7 +243,7 @@ class ClusterTrajectories:
             fig.delaxes(axes[j])
         
         plt.tight_layout()
-        plt.savefig(f'{self.out_dir}/vamp_individual_projections.png')
+        plt.savefig(f'{self.out_dir}/{self.embedding_model}_{self.embedding_dim}d_{self.embedding_lagtime}lag_individual_projections.png')
         plt.show()
         plt.close()
         return None
@@ -214,7 +260,8 @@ class ClusterTrajectories:
     def write_centroids_pdb(self, projection, centers, N=1):
 
         n_clusters = centers.shape[0]
-        os.makedirs(f'{self.out_dir}/centroids_{n_clusters}K', exist_ok=True)
+        pdbs_dir = f"{self.out_dir}/centroids_{n_clusters}K_{self.clustering_model}_{self.embedding_model}"
+        os.makedirs(pdbs_dir, exist_ok=True)
 
         projection_concatenated = np.concatenate(projection, axis=0)
         closest_points_indices = self.find_closest_points(projection_concatenated, centers, N)
@@ -240,7 +287,7 @@ class ClusterTrajectories:
                     u = mda.Universe(self.prmtop_file, traj)
 
                     u.trajectory[frame_idx]
-                    u.atoms.write(f"{self.out_dir}/centroids_{n_clusters}K/milestone_{centroid_x:.2f}_{centroid_y:.2f}_frame{index}.pdb")
+                    u.atoms.write(f"{pdbs_dir}/milestone_{centroid_x:.2f}_{centroid_y:.2f}_frame{index}.pdb")
                 except Exception as e:
                     logging.error(f'Error writing pdb for index {index} in traj {traj_idx}\n{e}')
         return None
@@ -308,46 +355,28 @@ class ClusterTrajectories:
 
         return df
 
+ 
     def run(self,
-                dim_model:str='vamp',
-                dim:Union[int, float]=2, 
-                lagtime:int=20,
-                clustering_model:str='regular_space',
-                dmin:float=0.5,
-                n_clusters:int=100,
-                write_pdbs:bool=False,
-                plot_projection:bool=True
-                ):
-
-        self.lagtime = lagtime
-        data = self._get_raw_data()
-
-        if os.path.exists(f'{self.out_dir}/{dim_model}_model_{dim}d_{lagtime}lag.pkl'):
-            logging.info(f'Loading precomputed {dim_model} model from {self.out_dir}')
-            fitted_model = load_model(f'{self.out_dir}/{dim_model}_model_{dim}d_{lagtime}lag.pkl')
-        else:
-            if dim_model == 'vamp':
-                fitted_model = self.fit_vamp_model(data, lagtime, dim)
-            elif dim_model == 'kvad':
-                fitted_model = self.fit_kvad_model(data, lagtime, dim)
-            elif dim_model == 'umap':
-                fitted_model = self.fit_umap_model(data, n_components=dim)
-            elif dim_model == 'pca':
-                fitted_model = self.fit_pca_model(data, n_components=dim)
-
-            save_model(fitted_model, f'{self.out_dir}/{dim_model}_model_{dim}d_{lagtime}lag.pkl')
+            data_fname:str=None,
+            prmtop_file:str=None,
+            traj_list:List[str]=None,
+            ):
         
-        projection = fitted_model.transform(data)
-        np.save(f'{self.out_dir}/projection_{dim_model}_{dim}d_{lagtime}lag.npy', projection)
+        data = self._get_raw_data(data_fname)
+        self.prmtop_file = prmtop_file
+        self.traj_list = traj_list
 
-        fitted_clustering_model, dtrajs, centers = self.fit_clustering_model(clustering_model, projection, n_clusters, dmin)
-        save_model(fitted_clustering_model, f'{self.out_dir}/{clustering_model}_model_K{n_clusters}.pkl')
+        fitted_embedding_model, projection = self.fit_embedding_model(data)
+        save_model(fitted_embedding_model, f'{self.out_dir}/{self.embedding_model}_model_{self.embedding_dim}d_{self.embedding_lagtime}lag.pkl')
+
+        fitted_clustering_model, dtrajs, centers = self.fit_clustering_model(projection)
+        save_model(fitted_clustering_model, f'{self.out_dir}/{self.clustering_model}_model_K{self.n_clusters}.pkl')
             
-        if plot_projection:
-            self.plot_projection(projection, centers, lagtime)
-            self.plot_individual_projections(projection)
-        
-        if write_pdbs:
+        # Plot the projections
+        self.plot_projection(projection, centers)
+        # self.plot_individual_projections(projection)
+    
+        if self.write_pdbs:
             self.write_centroids_pdb(projection, centers, N=1)
 
         return
