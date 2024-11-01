@@ -205,24 +205,20 @@ def add_reporters(
     suffix: str = None,
     total_steps: int = 250000,
     logperiod: int = 2500,
+    verbose: bool = True,
 ) -> None:
     """Set up the reporters"""
 
+    logging.debug(f"Adding reporters to the simulation")
     simulation.reporters = []  # Delete all current reporters
-
+    
     simulation.reporters.append(
         StateDataReporter(
             stdout,
             logperiod,
             step=True,
             time=True,
-            potentialEnergy=True,
-            kineticEnergy=True,
-            totalEnergy=True,
-            temperature=True,
             progress=True,
-            volume=True,
-            density=True,
             remainingTime=True,
             speed=True,
             totalSteps=total_steps,
@@ -231,36 +227,37 @@ def add_reporters(
     )
 
     simulation.reporters.append(
-        StateDataReporter(
-            f"{out_dir}/statistics_{suffix}.csv",
-            logperiod,
-            step=True,
-            time=True,
-            potentialEnergy=True,
-            kineticEnergy=True,
-            totalEnergy=True,
-            temperature=True,
-            progress=True,
-            volume=True,
-            density=True,
-            remainingTime=True,
-            speed=True,
-            totalSteps=total_steps,
-        )
-    )
-
-    # Save coordinates every N logperiods
-    simulation.reporters.append(
         DCDReporter(
             f"{out_dir}/trajectory_{suffix}.dcd",
             reportInterval=logperiod,
             enforcePeriodicBox=False,  # WARNING this compromises autoimaging afterwards in some cases
         )
     )
+
+    if verbose:
+
+        simulation.reporters.append(
+            StateDataReporter(
+                f"{out_dir}/statistics_{suffix}.csv",
+                logperiod,
+                step=True,
+                time=True,
+                potentialEnergy=True,
+                kineticEnergy=True,
+                totalEnergy=True,
+                temperature=True,
+                progress=True,
+                volume=True,
+                density=True,
+                remainingTime=True,
+                speed=True,
+                totalSteps=total_steps,
+            )
+        )
+
     return
 
-
-def add_barostat(system: System=None, temp: float=298.15, is_membrane: bool=False) -> System:
+def add_barostat(system: System=None, temp: float=300, is_membrane: bool=False) -> System:
     """Add an appropriate barostat to the system.
     Simulation for membrane proteins are run at 0 surface tension and semiisotropic pressure
     """
