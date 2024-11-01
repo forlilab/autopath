@@ -12,6 +12,8 @@ from deeptime.decomposition import VAMP, KVAD
 from deeptime.kernels import GaussianKernel
 from deeptime.clustering import KMeans, RegularSpace, BoxDiscretization
 from sklearn.decomposition import PCA
+from scipy.spatial import KDTree
+
 import MDAnalysis as mda
 import pyemma
 
@@ -58,6 +60,13 @@ class ClusterTrajectories:
             exit(1)
             return None
         
+    def fit_tica_model(self, data):
+        logging.info('Fitting TICA model..')
+        tica_estimator = pyemma.coordinates.tica(data, lag=self.embedding_lagtime, dim=self.embedding_dim)
+        tica_model = tica_estimator.get_output()
+
+        return tica_model
+            
     def fit_vamp_model(self, data, plot_cumulative_variance:bool=True):
 
         logging.info('Fitting VAMP model..')
@@ -96,21 +105,52 @@ class ClusterTrajectories:
 
         return umap_model
     
-    def fit_pca_model(self, data):
+    def fit_pca_model(self, data, plot_cumulative_variance:bool=True):
         logging.info('Fitting PCA model..')
-        X = np.concatenate(data, axis=0)
+        if data.ndim == 2:
+            X = data
+        else:
+            X = np.concatenate(data, axis=0)
+        print(f'shape of X: {X.shape}')
         pca_estimator = PCA(n_components=self.embedding_dim)
         pca_model = pca_estimator.fit(X)
 
+        if plot_cumulative_variance:
+            self._plot_cumulative_variance(pca_model)
+        
         return pca_model
     
-    def fit_tica_model(self, data):
-        logging.info('Fitting TICA model..')
-        tica_estimator = pyemma.coordinates.tica(data, lag=self.embedding_lagtime, dim=self.embedding_dim)
-        tica_model = tica_estimator.get_output()
+    def _plot_cumulative_variance(self, pca_model):
 
-        return tica_model
-    
+        # Plot the cumulative variance
+        plt.figure(figsize=(5, 5))
+        plt.plot(np.cumsum(pca_model.explained_variance_ratio_))
+        plt.xlabel('Number of components')
+        plt.ylabel('Cumulative explained variance')
+        plt.title('PCA cumulative explained variance')
+        plt.tight_layout()
+        plt.savefig(f'{self.out_dir}/pca_cumulative_variance.png')
+        plt.close()
+        return None
+
+    def _plot_cumulative_kinetic_variance(self, vamp_model):
+
+        vamp1_score = vamp_model.score(r=1)
+        vamp2_score = vamp_model.score(r=2)
+        vampE_score = vamp_model.score(r="E")
+
+        # Plot the cumulative kinetic variance
+        plt.figure(figsize=(5, 5))
+        plt.plot(vamp_model.cumulative_kinetic_variance)
+        plt.xlabel('Number of components')
+        plt.ylabel('Cumulative kinetic variance')
+        plt.title('VAMP cumulative kinetic variance')
+        plt.legend([f'VAMP1 score: {vamp1_score:.2f}\nVAMP2 score: {vamp2_score:.2f}\nVAMP-E score: {vampE_score:.2f}'])
+        plt.tight_layout()
+        plt.savefig(f'{self.out_dir}/vamp_cumulative_kinetic_variance.png')
+        plt.close()
+        return None
+            
     def fit_embedding_model(self, data):
 
         if os.path.exists(f'{self.out_dir}/{self.embedding_model}_model_{self.embedding_dim}d_{self.embedding_lagtime}lag.pkl'):
@@ -129,34 +169,15 @@ class ClusterTrajectories:
                 projection = fitted_model.transform(data)
             elif self.embedding_model == 'umap':
                 fitted_model = self.fit_umap_model(data)
-                projection = [fitted_model.transform(run) for run in data]
+                projection = np.array([fitted_model.transform(run) for run in data])
             elif self.embedding_model == 'pca':
                 fitted_model = self.fit_pca_model(data)
                 projection = np.array([fitted_model.transform(run) for run in data])
         
-        # np.save(f'{self.out_dir}/projection_{self.embedding_model}_{self.embedding_dim}d_{self.embedding_lagtime}lag.npy', projection)
+        np.save(f'{self.out_dir}/projection_{self.embedding_model}_{self.embedding_dim}d_{self.embedding_lagtime}lag.npy', projection)
 
         return fitted_model, projection
     
-    def _plot_cumulative_variance(self, vamp_model):
-
-        vamp1_score = vamp_model.score(r=1)
-        vamp2_score = vamp_model.score(r=2)
-        vampE_score = vamp_model.score(r="E")
-
-        # Plot the cumulative kinetic variance
-        plt.figure(figsize=(5, 5))
-        plt.plot(vamp_model.cumulative_kinetic_variance)
-        plt.xlabel('Number of components')
-        plt.ylabel('Cumulative kinetic variance')
-        plt.title('VAMP cumulative kinetic variance')
-        plt.legend([f'VAMP1 score: {vamp1_score:.2f}\nVAMP2 score: {vamp2_score:.2f}\nVAMP-E score: {vampE_score:.2f}'])
-        plt.savefig(f'{self.out_dir}/vamp_cumulative_kinetic_variance.png')
-        plt.show()
-        plt.close()
-        return None
-
-
     def fit_clustering_model(self, projection:np.ndarray=None):
 
         projection_concatenated = np.concatenate(projection, axis=0)
@@ -176,9 +197,10 @@ class ClusterTrajectories:
                         n_jobs=None
             )
         elif self.clustering_model == 'box_discretization':
+            nbox = int(self.n_clusters**(1/self.embedding_dim))
             estimator = BoxDiscretization(
                         dim=self.embedding_dim,  # dimension of the space
-                        n_boxes=self.n_clusters # Number of boxes per dimension
+                        n_boxes=nbox # Number of boxes per dimension
             )
         else:
             logging.error(f'Invalid clustering model {self.clustering_model}')
@@ -200,9 +222,9 @@ class ClusterTrajectories:
         projection_concatenated = np.concatenate(projection, axis=0)
 
         if projection_concatenated.shape[1] == 2:
-            pyemma.plots.plot_density(*projection_concatenated.T, alpha=0.2)
-            plt.xlabel('comp 1')
-            plt.ylabel('comp 2')
+            # pyemma.plots.plot_density(*projection_concatenated.T, alpha=0.2)
+            plt.scatter(*projection_concatenated.T, s=5, alpha=0.2)
+            plt.xlabel('comp 1'); plt.ylabel('comp 2')
 
         elif projection_concatenated.shape[1] > 2:    
             df = pd.DataFrame(projection_concatenated, columns=[f'comp {i+1}' for i in range(projection_concatenated.shape[1])])
@@ -224,7 +246,6 @@ class ClusterTrajectories:
             out_fname = f'{self.out_dir}/{self.embedding_model}_projection-{self.embedding_dim}d_{self.embedding_lagtime}lag.png'
 
         plt.savefig(out_fname)
-        plt.show()
         plt.close()
         return
     
@@ -249,8 +270,7 @@ class ClusterTrajectories:
         
         for i, (ax, p, color) in enumerate(zip(axes, projection, colors)):
             ax.scatter(p[:, 0], p[:, 1], s=20, alpha=0.2, label=f'Trajectory {i}', color=color)
-            ax.set_xlabel('Comp 1')
-            ax.set_ylabel('Comp 2')
+            ax.set_xlabel('Comp 1'); ax.set_ylabel('Comp 2')
             ax.set_title(f'Traj {i}')
             ax.set_xlim(x_min, x_max)
             ax.set_ylim(y_min, y_max)
@@ -262,20 +282,26 @@ class ClusterTrajectories:
         
         plt.tight_layout()
         plt.savefig(f'{self.out_dir}/{self.embedding_model}_{self.embedding_dim}d_{self.embedding_lagtime}lag_individual_projections.png')
-        plt.show()
         plt.close()
         return None
     
     @staticmethod
     def find_closest_points(X, centroids, N=1):
+        """A function to find the N closest points to each centroid in the dataset X.
+        Centroids may not be real data points, so we need to find the closest real data points to them.
+        """
+        kdtree = KDTree(X)
         closest_points = []
         for centroid in centroids:
-            distances = np.linalg.norm(X - centroid, axis=1)
-            closest_point_indices = np.argsort(distances)[:N]
-            closest_points.append(closest_point_indices)
-        return closest_points
+            _, indices = kdtree.query(centroid, k=N)
+            closest_points.append(indices)
 
+        return closest_points
+    
     def write_centroids_pdb(self, projection, centers, N=1):
+        """A function to write the closest points to the cluster centers to PDB files.
+        It is a bit tricky, because we need to map the indices of the concatenated projection back to the original runs.
+        """
 
         n_clusters = centers.shape[0]
         pdbs_dir = f"{self.out_dir}/centroids_{n_clusters}K_{self.clustering_model}_{self.embedding_model}"
@@ -283,16 +309,21 @@ class ClusterTrajectories:
 
         projection_concatenated = np.concatenate(projection, axis=0)
         closest_points_indices = self.find_closest_points(projection_concatenated, centers, N)
-
+        
         # This is a bit tricky, but we need to map the indices of the concatenated projection back to the original runs
-        index_mapping = np.concatenate([np.arange(proj.shape[0]) for proj in projection])
+        index_mapping = np.concatenate([np.arange(len(proj)) for proj in projection])
         indexes = [index_mapping[indices] for indices in closest_points_indices]
 
-        traj_lengths = [len(mda.Universe(self.prmtop_file, traj).trajectory) for traj in self.traj_list]
+        traj_lengths = [len(traj) for traj in projection]
         cumulative_lengths = np.cumsum(traj_lengths)
 
         for centroid_idx, centroid_indexes in enumerate(indexes):
-            centroid_x, centroid_y = centers[centroid_idx]
+            if self.embedding_dim == 2:
+                centroid_x, centroid_y = centers[centroid_idx]
+
+            if isinstance(centroid_indexes, np.int64): # If N=1, centroid_indexes is an integer
+                centroid_indexes = [centroid_indexes]
+
             for index in centroid_indexes:
                 try:
                     traj_idx = np.searchsorted(cumulative_lengths, index, side='right')
@@ -305,7 +336,10 @@ class ClusterTrajectories:
                     u = mda.Universe(self.prmtop_file, traj)
 
                     u.trajectory[frame_idx]
-                    u.atoms.write(f"{pdbs_dir}/milestone_{centroid_x:.2f}_{centroid_y:.2f}_frame{index}.pdb")
+                    if self.embedding_dim == 2:
+                        u.atoms.write(f"{pdbs_dir}/milestone_{centroid_x:.2f}_{centroid_y:.2f}_frame{index}.pdb")
+                    else:
+                        u.atoms.write(f"{pdbs_dir}/milestone_{centroid_idx}_frame{index}.pdb")
                 except Exception as e:
                     logging.error(f'Error writing pdb for index {index} in traj {traj_idx}\n{e}')
         return None
@@ -387,14 +421,14 @@ class ClusterTrajectories:
         fitted_embedding_model, projection = self.fit_embedding_model(data)
         save_model(fitted_embedding_model, f'{self.out_dir}/{self.embedding_model}_model_{self.embedding_dim}d_{self.embedding_lagtime}lag.pkl')
 
-        fitted_clustering_model, dtrajs, centers = self.fit_clustering_model(projection)
+        fitted_clustering_model, dtrajs, centroids = self.fit_clustering_model(projection)
         save_model(fitted_clustering_model, f'{self.out_dir}/{self.clustering_model}_model_K{self.n_clusters}.pkl')
-            
+
         # Plot the projections
-        self.plot_projection(projection, dtrajs, centers)
+        self.plot_projection(projection, dtrajs, centroids)
         # self.plot_individual_projections(projection)
     
         if self.write_pdbs:
-            self.write_centroids_pdb(projection, centers, N=1)
+            self.write_centroids_pdb(projection, centroids, N=1)
 
         return
