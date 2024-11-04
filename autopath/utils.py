@@ -205,7 +205,7 @@ def add_reporters(
     suffix: str = None,
     total_steps: int = 250000,
     logperiod: int = 2500,
-    verbose: bool = True,
+    verbose: int = 2,
 ) -> None:
     """Set up the reporters"""
 
@@ -234,7 +234,7 @@ def add_reporters(
         )
     )
 
-    if verbose:
+    if verbose > 0:
 
         simulation.reporters.append(
             StateDataReporter(
@@ -242,13 +242,13 @@ def add_reporters(
                 logperiod,
                 step=True,
                 time=True,
-                potentialEnergy=True,
-                kineticEnergy=True,
-                totalEnergy=True,
-                temperature=True,
+                potentialEnergy=True if verbose > 1 else False,
+                kineticEnergy=True if verbose > 1 else False,
+                totalEnergy=True if verbose > 1 else False, 
+                temperature=True if verbose > 1 else False,
                 progress=True,
-                volume=True,
-                density=True,
+                volume=True if verbose > 1 else False,
+                density=True if verbose > 1 else False,
                 remainingTime=True,
                 speed=True,
                 totalSteps=total_steps,
