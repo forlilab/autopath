@@ -19,6 +19,7 @@ class VanillaMD:
         restart_velocities: bool = False,
         save_freq: int = 12500, # save /0.1ns
         out_dir: str = "MD",
+        verbose: int = 0,
     ):
 
         self.system = system
@@ -32,6 +33,7 @@ class VanillaMD:
         self.out_dir = out_dir
         os.makedirs(out_dir, exist_ok=True)
 
+        self.verbose = verbose
         self.platform = select_platform("fastest")
 
         return
@@ -41,7 +43,7 @@ class VanillaMD:
         checkpoint_file: str = None,
         run_id: str = None,
         MD_time: int = 10,
-    ):
+    ):        
 
         start_time = time.monotonic()
 
@@ -59,7 +61,7 @@ class VanillaMD:
 
         # If a checkpoint is provided, it will assume it comes from an equilibration simulation, so it will just continue
         if checkpoint_file is not None:
-            logging.debug("Loading simulation checkpoint..")
+            logging.info("Loading simulation checkpoint..")
             simulation.loadCheckpoint(checkpoint_file)
 
         # Reset velocities to temperature
@@ -67,7 +69,7 @@ class VanillaMD:
             simulation.context.setVelocitiesToTemperature(self.temperature)
 
         add_reporters(
-            simulation, self.out_dir, f"MD_{run_id}", MD_steps, self.save_freq
+            simulation, self.out_dir, f"MD_{run_id}", MD_steps, self.save_freq, self.verbose
         )
 
         # Run the simulation
