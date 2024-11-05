@@ -19,13 +19,14 @@ import pyemma
 
 from autopath.utils import save_model, load_model
 import umap
+from sklearn.metrics import silhouette_score
 
 class ClusterTrajectories:
     def __init__(self, 
-                embedding_model:str='vamp',
+                embedding_model:str='umap',
                 embedding_dim:Union[int, float]=2, 
                 embedding_lagtime:int=20,
-                clustering_model:str='regular_space',
+                clustering_model:str='kmeans',
                 n_clusters:int=100,
                 dmin:float=0.5, #only for regular_space
                 write_pdbs:bool=False,
@@ -53,8 +54,12 @@ class ClusterTrajectories:
     def _get_raw_data(data_fname):
 
         if os.path.exists(data_fname):
-            logging.info(f'Loading precomputed features from {data_fname}')
-            return np.load(data_fname)
+            data = np.load(data_fname)
+            logging.info(f'Loading data from {data_fname}')
+            logging.info(f"Trajectories: {data.shape[0]}")
+            logging.info(f"Frames per trajectory: {data.shape[1]}")
+            logging.info(f"Features: {data.shape[2]}")
+            return data
         else:
             logging.error(f'No data found at {data_fname}')
             exit(1)
@@ -82,7 +87,7 @@ class ClusterTrajectories:
         vamp_model = vamp_estimator.fit(data).fetch_model()
 
         if plot_cumulative_variance:
-            self._plot_cumulative_variance(vamp_model)
+            self._plot_cumulative_kinetic_variance(vamp_model)
 
         return vamp_model
 
@@ -97,10 +102,14 @@ class ClusterTrajectories:
 
         return kvad_model
     
-    def fit_umap_model(self, data, n_neighbors=15, min_dist=0.1, metric='euclidean'):
+    def fit_umap_model(self, data, n_neighbors=50, min_dist=0.5, metric='euclidean'):
         logging.info('Fitting UMAP model..')
         X = np.concatenate(data, axis=0)
-        umap_estimator = umap.UMAP(n_components=self.embedding_dim, n_neighbors=n_neighbors, min_dist=min_dist, metric=metric)
+        umap_estimator = umap.UMAP(n_components=self.embedding_dim, 
+                                   n_neighbors=n_neighbors, 
+                                   min_dist=min_dist, 
+                                   metric=metric, 
+                                   densmap=False)
         umap_model = umap_estimator.fit(X)
 
         return umap_model
@@ -220,16 +229,27 @@ class ClusterTrajectories:
         If clustering has been done, use labels to color by cluster labels and also plot centroids, otherwise just plot the projection.
         """
         projection_concatenated = np.concatenate(projection, axis=0)
+        df = pd.DataFrame(projection_concatenated, columns=[f'comp {i+1}' for i in range(projection_concatenated.shape[1])])
+        if labels is not None and centroids is not None:
+            df['cluster'] = np.concatenate(labels, axis=0)
+            centroids_df = pd.DataFrame(centroids, columns=[f'comp {i+1}' for i in range(centroids.shape[1])])
+            n_clusters = centroids.shape[0]
+            out_fname = f'{self.out_dir}/{self.embedding_model}_projection-{self.embedding_dim}d_{n_clusters}K_{self.embedding_lagtime}lag.png'
+        else:
+            out_fname = f'{self.out_dir}/{self.embedding_model}_projection-{self.embedding_dim}d_{self.embedding_lagtime}lag.png'
 
         if projection_concatenated.shape[1] == 2:
-            # pyemma.plots.plot_density(*projection_concatenated.T, alpha=0.2)
-            plt.scatter(*projection_concatenated.T, s=5, alpha=0.2)
+        #     # pyemma.plots.plot_density(*projection_concatenated.T, alpha=0.2)
+            if labels is not None and centroids is not None:
+                sns.scatterplot(data=df, x='comp 1', y='comp 2', s=5, alpha=0.2, hue='cluster', palette='Set1')
+                sns.scatterplot(data=centroids_df,  x='comp 1', y='comp 2', s=15, c='black', marker='X')#, color='black', label='Centroids')
+            else:
+                sns.scatterplot(df, s=5, alpha=0.2)
             plt.xlabel('comp 1'); plt.ylabel('comp 2')
 
         elif projection_concatenated.shape[1] > 2:    
-            df = pd.DataFrame(projection_concatenated, columns=[f'comp {i+1}' for i in range(projection_concatenated.shape[1])])
-            if labels is not None:
-                df['cluster'] = np.concatenate(labels, axis=0)
+            df = df.iloc[:, :5]  # Only plot the first 5 components
+            if labels is not None and centroids is not None:
                 g = sns.PairGrid(df, hue='cluster', corner=True, palette='Set1')
             else:
                 g = sns.PairGrid(df, corner=True)
@@ -238,13 +258,10 @@ class ClusterTrajectories:
             # g.map_upper(sns.kdeplot)
             g.add_legend(title="", adjust_subtitles=True)
 
-        if centroids is not None:
-            n_clusters = centroids.shape[0]
-            # plt.scatter(*(centroids.T), s=15, c='C1')
-            out_fname = f'{self.out_dir}/{self.embedding_model}_projection-{self.embedding_dim}d_{n_clusters}K_{self.embedding_lagtime}lag.png'
-        else:
-            out_fname = f'{self.out_dir}/{self.embedding_model}_projection-{self.embedding_dim}d_{self.embedding_lagtime}lag.png'
+        if n_clusters > 5:
+            plt.legend().remove()
 
+        plt.tight_layout()
         plt.savefig(out_fname)
         plt.close()
         return
@@ -378,6 +395,31 @@ class ClusterTrajectories:
             scores[n] = model.score(r=2, test_model=test_model)
         return scores
     
+    def evaluate_silhouette_scores(self, projection, k_values: List[int]):
+
+        silhouette_scores = []
+
+        for k in k_values:
+            self.n_clusters = k
+            _, cluster_labels, _ = self.fit_clustering_model(projection)
+            cluster_labels_concatenated = np.concatenate(cluster_labels, axis=0)
+            projection_concatenated = np.concatenate(projection, axis=0)
+            score = silhouette_score(projection_concatenated, cluster_labels_concatenated)
+            silhouette_scores.append(score)
+            logging.info(f'K={k}, Silhouette Score={score}')
+
+        # Plot the silhouette scores
+        plt.figure(figsize=(10, 6))
+        plt.plot(k_values, silhouette_scores, marker='o')
+        plt.xlabel('Number of Clusters (K)')
+        plt.ylabel('Silhouette Score')
+        plt.title('Silhouette Score vs. Number of Clusters')
+        plt.tight_layout()
+        plt.savefig(f'{self.out_dir}/silhouette_scores.png')
+        plt.close()
+
+        return silhouette_scores
+    
     def run_vamp_cv(self, 
                     dims:List[int], 
                     lags:List[int], 
@@ -422,7 +464,9 @@ class ClusterTrajectories:
         save_model(fitted_embedding_model, f'{self.out_dir}/{self.embedding_model}_model_{self.embedding_dim}d_{self.embedding_lagtime}lag.pkl')
 
         fitted_clustering_model, dtrajs, centroids = self.fit_clustering_model(projection)
-        save_model(fitted_clustering_model, f'{self.out_dir}/{self.clustering_model}_model_K{self.n_clusters}.pkl')
+        save_model(fitted_clustering_model, f'{self.out_dir}/{self.clustering_model}_model_{self.embedding_dim}d_K{self.n_clusters}.pkl')
+
+        # self.evaluate_silhouette_scores(projection, k_values=range(2, 50, 2))
 
         # Plot the projections
         self.plot_projection(projection, dtrajs, centroids)
