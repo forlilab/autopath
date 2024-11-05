@@ -14,16 +14,20 @@ class VanillaMD:
         self,
         system: str = None,
         topology: str = None,
+        restrained_atoms: list[int] = None,
         HMR: bool = True,
         temp: float = 300,
         restart_velocities: bool = False,
-        save_freq: int = 12500, # save /0.1ns
+        save_freq: int = 25000, # save /0.1ns
         out_dir: str = "MD",
-        verbose: int = 0,
+        verbose: int = 2,
     ):
 
         self.system = system
         self.topology = topology
+
+        # Im not exposing all options here because I want to keep it simple
+        self.restrained_atoms = restrained_atoms
 
         self.timestep = 0.004 if HMR else 0.002
         self.temperature = temp * openmmunit.kelvin
@@ -67,6 +71,19 @@ class VanillaMD:
         # Reset velocities to temperature
         if self.restart_velocities:
             simulation.context.setVelocitiesToTemperature(self.temperature)
+
+        # Add harmonic positional restraints to protein CA
+        input_positions = simulation.context.getState(getPositions=True).getPositions()
+        if self.restrained_atoms is not None:
+            add_harmonic_restraints(
+                self.system,
+                input_positions,
+                self.topology,
+                self.restrained_atoms,
+                10,
+                "k_restraint_MD",
+                14,
+            )
 
         add_reporters(
             simulation, self.out_dir, f"MD_{run_id}", MD_steps, self.save_freq, self.verbose
