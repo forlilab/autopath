@@ -8,7 +8,7 @@ from typing import Union, List
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from deeptime.decomposition import VAMP, KVAD
+from deeptime.decomposition import TICA, VAMP, KVAD
 from deeptime.kernels import GaussianKernel
 from deeptime.clustering import KMeans, RegularSpace, BoxDiscretization
 from sklearn.decomposition import PCA
@@ -34,7 +34,7 @@ class ClusterTrajectories:
                 seed:int=42,
                 ):
 
-        self.embedding_model = embedding_model
+        self.embedding_model = embedding_model.upper()
         self.embedding_dim = embedding_dim
         self.embedding_lagtime = embedding_lagtime
         self.clustering_model = clustering_model
@@ -66,15 +66,10 @@ class ClusterTrajectories:
             return None
         
     def fit_tica_model(self, data):
-        logging.info('Fitting TICA model..')
-        tica_estimator = pyemma.coordinates.tica(data, lag=self.embedding_lagtime, dim=self.embedding_dim)
-        tica_model = tica_estimator.get_output()
 
-        return tica_model
-            
-    def fit_vamp_model(self, data, plot_cumulative_variance:bool=True):
-
-        logging.info('Fitting VAMP model..')
+        # Scaling parameter
+        # ‘kinetic_map’: Eigenvectors will be scaled by eigenvalues. As a result, Euclidean distances in the transformed data approximate kinetic distances [2]. This is a good choice when the data is further processed by clustering.
+        # ‘commute_map’: Eigenvector i will be scaled by sqrt(timescale_i / 2). As a result, Euclidean distances in the transformed data will approximate commute distances [3].
 
         if isinstance(self.embedding_dim, float):
             var_cutoff = self.embedding_dim
@@ -83,7 +78,21 @@ class ClusterTrajectories:
             var_cutoff = None
             dim = self.embedding_dim
 
-        vamp_estimator = VAMP(lagtime=self.embedding_lagtime, dim=dim, var_cutoff=var_cutoff, scaling=None)#'kinetic_map')
+        tica_estimator = TICA(lagtime=self.embedding_lagtime, dim=dim, var_cutoff=var_cutoff, scaling='kinetic_map')
+        tica_model = tica_estimator.fit(data).fetch_model()
+
+        return tica_model
+            
+    def fit_vamp_model(self, data, plot_cumulative_variance:bool=True):
+
+        if isinstance(self.embedding_dim, float):
+            var_cutoff = self.embedding_dim
+            dim = None
+        else:
+            var_cutoff = None
+            dim = self.embedding_dim
+
+        vamp_estimator = VAMP(lagtime=self.embedding_lagtime, dim=dim, var_cutoff=var_cutoff, scaling='kinetic_map')
         vamp_model = vamp_estimator.fit(data).fetch_model()
 
         if plot_cumulative_variance:
@@ -93,8 +102,6 @@ class ClusterTrajectories:
 
     def fit_kvad_model(self, data):
 
-        logging.info('Fitting KVAD model..')
-
         kvad_estimator = KVAD(kernel=GaussianKernel(0.5),
             lagtime=self.embedding_lagtime, epsilon=1e-5, dim=self.embedding_dim,
             )
@@ -103,7 +110,7 @@ class ClusterTrajectories:
         return kvad_model
     
     def fit_umap_model(self, data, n_neighbors=50, min_dist=0.5, metric='euclidean'):
-        logging.info('Fitting UMAP model..')
+
         X = np.concatenate(data, axis=0)
         umap_estimator = umap.UMAP(n_components=self.embedding_dim, 
                                    n_neighbors=n_neighbors, 
@@ -115,7 +122,7 @@ class ClusterTrajectories:
         return umap_model
     
     def fit_pca_model(self, data, plot_cumulative_variance:bool=True):
-        logging.info('Fitting PCA model..')
+
         if data.ndim == 2:
             X = data
         else:
@@ -162,24 +169,26 @@ class ClusterTrajectories:
             
     def fit_embedding_model(self, data):
 
+        logging.info(f'Fitting {self.embedding_model} model..')
+
         if os.path.exists(f'{self.out_dir}/{self.embedding_model}_model_{self.embedding_dim}d_{self.embedding_lagtime}lag.pkl'):
             logging.info(f'Loading precomputed {self.embedding_model} model from {self.out_dir}')
             fitted_model = load_model(f'{self.out_dir}/{self.embedding_model}_model_{self.embedding_dim}d_{self.embedding_lagtime}lag.pkl')
             projection = np.array([fitted_model.transform(run) for run in data])
         else:
-            if self.embedding_model == 'vamp':
+            if self.embedding_model == 'VAMP':
                 fitted_model = self.fit_vamp_model(data)
                 projection = fitted_model.transform(data)
-            elif self.embedding_model == 'kvad':
+            elif self.embedding_model == 'KVAD':
                 fitted_model = self.fit_kvad_model(data)
                 projection = fitted_model.transform(data)
-            elif self.embedding_model == 'tica':
+            elif self.embedding_model == 'TICA':
                 fitted_model = self.fit_tica_model(data)
                 projection = fitted_model.transform(data)
-            elif self.embedding_model == 'umap':
+            elif self.embedding_model == 'UMAP':
                 fitted_model = self.fit_umap_model(data)
                 projection = np.array([fitted_model.transform(run) for run in data])
-            elif self.embedding_model == 'pca':
+            elif self.embedding_model == 'PCA':
                 fitted_model = self.fit_pca_model(data)
                 projection = np.array([fitted_model.transform(run) for run in data])
         
