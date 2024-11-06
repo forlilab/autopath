@@ -333,41 +333,39 @@ class ClusterTrajectories:
         pdbs_dir = f"{self.out_dir}/centroids_{n_clusters}K_{self.clustering_model}_{self.embedding_model}"
         os.makedirs(pdbs_dir, exist_ok=True)
 
+        # Concatenate the projection to create a single array for KDTree search
         projection_concatenated = np.concatenate(projection, axis=0)
         closest_points_indices = self.find_closest_points(projection_concatenated, centers, N)
         
-        # This is a bit tricky, but we need to map the indices of the concatenated projection back to the original runs
-        index_mapping = np.concatenate([np.arange(len(proj)) for proj in projection])
-        indexes = [index_mapping[indices] for indices in closest_points_indices]
-
+        # Map indices back to their corresponding trajectories and frames
         traj_lengths = [len(traj) for traj in projection]
-        cumulative_lengths = np.cumsum(traj_lengths)
+        cumulative_lengths = np.insert(np.cumsum(traj_lengths), 0, 0)
 
-        for centroid_idx, centroid_indexes in enumerate(indexes):
+        for centroid_idx, centroid_indexes in enumerate(closest_points_indices):
+            if isinstance(centroid_indexes, np.int64):  # If N=1, convert to list for consistency
+                centroid_indexes = [centroid_indexes]
+
             if self.embedding_dim == 2:
                 centroid_x, centroid_y = centers[centroid_idx]
 
-            if isinstance(centroid_indexes, np.int64): # If N=1, centroid_indexes is an integer
-                centroid_indexes = [centroid_indexes]
-
             for index in centroid_indexes:
+                traj_idx = np.searchsorted(cumulative_lengths, index, side='right') - 1
+                frame_idx = index - cumulative_lengths[traj_idx]
+
+                traj_file = self.traj_list[traj_idx]
                 try:
-                    traj_idx = np.searchsorted(cumulative_lengths, index, side='right')
-                    if traj_idx == 0:
-                        frame_idx = index
-                    else:
-                        frame_idx = index - cumulative_lengths[traj_idx - 1]
-
-                    traj = self.traj_list[traj_idx]
-                    u = mda.Universe(self.prmtop_file, traj)
-
+                    u = mda.Universe(self.prmtop_file, traj_file)
                     u.trajectory[frame_idx]
+                    
                     if self.embedding_dim == 2:
-                        u.atoms.write(f"{pdbs_dir}/milestone_{centroid_x:.2f}_{centroid_y:.2f}_frame{index}.pdb")
+                        filename = f"{pdbs_dir}/milestone_{centroid_x:.2f}_{centroid_y:.2f}_frame{frame_idx}.pdb"
                     else:
-                        u.atoms.write(f"{pdbs_dir}/milestone_{centroid_idx}_frame{index}.pdb")
+                        filename = f"{pdbs_dir}/milestone_{centroid_idx}_frame{frame_idx}.pdb"
+
+                    u.atoms.write(filename)
                 except Exception as e:
-                    logging.error(f'Error writing pdb for index {index} in traj {traj_idx}\n{e}')
+                    logging.error(f"Error writing PDB for centroid {centroid_idx} at frame {frame_idx} in traj {traj_idx}: {e}")
+                    
         return None
    
     def score_cv(self, data, dim, lag, n_splits=10, val_frac=0.5):
