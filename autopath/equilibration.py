@@ -134,11 +134,14 @@ class Equilibration:
         timestep: float = 0.004,
         is_membrane: bool = False,
         lipid_type: str = "POPC",
+        verbose: int = 2,
+
     ) -> None:
 
         self.system = system
         self.topology = topology
         self.lig_name = lig_name
+        self.verbose = verbose
 
         self.out_dir = out_dir
         os.makedirs(out_dir, exist_ok=True)
@@ -199,6 +202,7 @@ class Equilibration:
             f"equil_{run_id}",
             logperiod=1250,
             total_steps=self.total_steps,
+            verbose=self.verbose
         )
 
         logging.info("Adding harmonic restraints to the protein..")
