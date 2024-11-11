@@ -72,9 +72,12 @@ class ClusterTrajectories:
     ### MoSAIC analysis ###
     @staticmethod
     def mosaic_clustering(X, similarity_metric='correlation', 
-                        clustering_mode='CPM', weighted=True, 
-                        resolution_parameter=0.5):
-
+                            clustering_mode='CPM', 
+                            weighted=True, 
+                            resolution_parameter=None,
+                            out_dir='.'
+                            ):
+        logging.info('Running MoSAIC clustering..')
         # Merge all trajs together
         X = np.concatenate(X, axis=0)
 
@@ -83,7 +86,8 @@ class ClusterTrajectories:
         )
         sim.fit(X)
         correlation_matrix = sim.matrix_
-
+        np.save(f"{out_dir}/correlation_matrix.npy", correlation_matrix)
+        
         # Cluster the correlation matrix
         clustering = mosaic.Clustering(
             mode=clustering_mode,  # or 'modularity
@@ -93,23 +97,25 @@ class ClusterTrajectories:
         clustering.fit(correlation_matrix)
 
         clusters = clustering.clusters_
-        clustered_X = clustering.matrix_
+        # clustered_X = clustering.matrix_
 
-        return correlation_matrix, clusters, clustered_X
-    
-    @staticmethod
-    def plot_clusters(correlation_matrix, clusters, out_dir):
-
-        idxs = np.argsort(
-            [len(cluster) for cluster in clusters],
-        )[::-1]
+        idxs = np.argsort([len(cluster) for cluster in clusters],)[::-1]
         clusters_sorted = clusters[idxs]
-        clusters_sorted_flattened = np.concatenate(clusters[idxs])
+        np.save(f"{out_dir}/clusters.npy", clusters_sorted)
 
         # sort the matrix accordingly
-        matrix_sorted = correlation_matrix[
+        clusters_sorted_flattened = np.concatenate(clusters_sorted)
+        correlation_matrix_sorted = correlation_matrix[
             np.ix_(clusters_sorted_flattened, clusters_sorted_flattened)
         ]
+
+        return correlation_matrix_sorted, clusters_sorted
+    
+    @staticmethod
+    def plot_mosaic_clusters(correlation_matrix, clusters, out_dir):
+        logging.info('Plotting MoSAIC clusters..')
+        
+        idxs = np.argsort([len(cluster) for cluster in clusters],)[::-1]
 
         ticks = np.cumsum([len(cluster) for cluster in clusters[idxs]])
         ticks = [0, *ticks[:-1]]  # ticks start with 0 
@@ -117,7 +123,7 @@ class ClusterTrajectories:
         # Perform the same plot again, but with sorted clusters
         fig, ax = plt.subplots()
         im = ax.pcolormesh(
-            matrix_sorted,
+            correlation_matrix,
             snap=True,
             vmin=0,
             vmax=1,
@@ -135,21 +141,53 @@ class ClusterTrajectories:
         plt.show()
         plt.savefig(f"{out_dir}/mosaic_clustering.png")
         plt.close()
-        return clusters_sorted
+        return
     
-    @staticmethod
-    def filter_data_mosaic(data, clusters_sorted, top_clusters=3):
-        features = set()
-        for cluster in range(top_clusters):
-            for feats in clusters_sorted[cluster]:
-                features.add(feats)
+    def select_mosaic_features(self, X, sorted_correlation_matrix, sorted_clusters, method, top_n_clusters=5, N=100):
+        """
+        Perform feature selection using various MoSAIC-based methods.
+        """
+        X = np.concatenate(X, axis=0)
 
-        print(f"Number of unique features: {len(features)}")
+        selected_features = []
 
-        cols = list(features)
-        filtered_data = data[:,:,cols]
+        max_n_features = top_n_clusters * N
 
-        return filtered_data
+        if method == 'top_n_correlation':
+            # Calculate average correlation and select top-N features among all of them
+            avg_correlation = sorted_correlation_matrix.mean(axis=0)
+            selected_features = np.argsort(avg_correlation)[-max_n_features:]
+
+        elif method == 'top_n_clusters':
+            # Select all unique features within the top-N largest clusters
+            features = set()
+            for cluster in range(top_n_clusters):
+                for feat in sorted_clusters[cluster]:
+                    features.add(feat)
+            selected_features = np.array(list(features))
+
+        elif method == 'top_n_clusters_correlation':
+            # Select top N features with highest average correlation within each cluster
+            for cluster in sorted_clusters[:top_n_clusters]:
+                avg_correlation = sorted_correlation_matrix[np.ix_(cluster, cluster)].mean(axis=0)
+                top_n_corr_idx = np.argsort(avg_correlation)[-N:]
+                selected_features.extend([cluster[i] for i in top_n_corr_idx])
+
+        elif method == 'cluster_centrality':
+            # Select top N central features within each cluster
+            for cluster in sorted_clusters[:top_n_clusters]:  # Limit to top_n_clusters
+                intra_cluster_corr = sorted_correlation_matrix[np.ix_(cluster, cluster)].mean(axis=1)
+                top_n_central_idx = np.argsort(intra_cluster_corr)[-N:]  # Select the top N central features
+                selected_features.extend([cluster[i] for i in top_n_central_idx])  # Ensure each index is used properly
+
+        elif method == 'variance_pruning':
+            # Prune top N features in each cluster by variance
+            for cluster in sorted_clusters[:top_n_clusters]:  # Limit to top_n_clusters
+                variances = np.var(X[:, cluster], axis=0)
+                top_n_variance_idx = np.argsort(variances)[-N:]  # Select the top N features by variance
+                selected_features.extend([cluster[i] for i in top_n_variance_idx])
+
+        return list(np.unique(selected_features))
 
     def fit_tica_model(self, data):
 
@@ -316,7 +354,7 @@ class ClusterTrajectories:
         cluster_centers = fitted_model.cluster_centers
 
         return fitted_model, cluster_labels, cluster_centers
-    
+
     def plot_projection(self, projection, labels, centroids):
         """
         Plot the projection of the data.
@@ -334,16 +372,17 @@ class ClusterTrajectories:
             out_fname = f'{self.out_dir}/{self.embedding_model}_projection-{self.embedding_dim}d_{self.embedding_lagtime}lag.png'
 
         if projection_concatenated.shape[1] == 2:
-        #     # pyemma.plots.plot_density(*projection_concatenated.T, alpha=0.2)
+            # 2D scatter plot with centroids
             if labels is not None and centroids is not None:
                 sns.scatterplot(data=df, x='comp 1', y='comp 2', s=5, alpha=0.2, hue='cluster', palette='Set1')
-                sns.scatterplot(data=centroids_df,  x='comp 1', y='comp 2', s=25, c='black', marker='X')#, color='black', label='Centroids')
+                sns.scatterplot(data=centroids_df,  x='comp 1', y='comp 2', s=25, color='black', marker='X')
             else:
                 sns.scatterplot(df, s=5, alpha=0.2)
-            plt.xlabel('comp 1'); plt.ylabel('comp 2')
+            plt.xlabel('comp 1')
+            plt.ylabel('comp 2')
 
         elif projection_concatenated.shape[1] > 2:    
-            _df = df.iloc[:, :5]  # Only plot the first 5 components
+            _df = df.iloc[:, :10]  # Only plot the first 10 components
             _df['cluster'] = df['cluster']
             if labels is not None and centroids is not None:
                 g = sns.PairGrid(_df, hue='cluster', corner=True, palette='Set1')
@@ -351,8 +390,15 @@ class ClusterTrajectories:
                 g = sns.PairGrid(_df, corner=True)
             g.map_lower(sns.scatterplot, alpha=0.2, s=5)
             g.map_diag(sns.kdeplot, hue=None, color=".3")
-            # g.map_upper(sns.kdeplot)
             g.add_legend(title="", adjust_subtitles=True)
+
+            # Plot centroids on each subplot
+            for i, j in zip(*np.tril_indices_from(g.axes, -1)):
+                x, y = g.axes[i, j].get_xlabel(), g.axes[i, j].get_ylabel()
+                sns.scatterplot(
+                    data=centroids_df, x=x, y=y,
+                    ax=g.axes[i, j], s=50, color="black", marker="X", legend=False
+                )
 
         if n_clusters > 5:
             plt.legend().remove()
@@ -554,9 +600,22 @@ class ClusterTrajectories:
         self.traj_list = traj_list
 
         if self.mosaic_top_clusters is not None:
-            correlation_matrix, clusters, clustered_X = self.mosaic_clustering(data)
-            clusters_sorted = self.plot_clusters(correlation_matrix, clusters, self.out_dir)
-            data = self.filter_data_mosaic(data, clusters_sorted, top_clusters=self.mosaic_top_clusters)
+            if os.path.exists(f'{self.out_dir}/filtered_data_mosaic_{self.mosaic_top_clusters}K.npy'):
+                data = np.load(f'{self.out_dir}/filtered_data_mosaic_{self.mosaic_top_clusters}K.npy')
+                logging.info(f'Loading precomputed filtered data from {self.out_dir}')
+                logging.info(f'Features after filtering: {data.shape[2]}')
+            else:
+                correlation_matrix, clusters = self.mosaic_clustering(data, out_dir=self.out_dir)
+                self.plot_mosaic_clusters(correlation_matrix, clusters, self.out_dir)
+                selected_features = self.select_mosaic_features(data, correlation_matrix, clusters, 
+                                                                method='cluster_centrality', 
+                                                                top_n_clusters=self.mosaic_top_clusters,
+                                                                N=100)
+                data = data[:,:,selected_features]
+
+                np.save(f'{self.out_dir}/filtered_data_mosaic_{self.mosaic_top_clusters}K.npy', data)
+                
+            logging.info(f'Features after filtering: {data.shape[2]}')
 
         fitted_embedding_model, projection = self.fit_embedding_model(data)
         save_model(fitted_embedding_model, f'{self.out_dir}/{self.embedding_model}_model_{self.embedding_dim}d_{self.embedding_lagtime}lag.pkl')
