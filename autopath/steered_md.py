@@ -23,6 +23,7 @@ class SteeredMD:
         ligand_atoms: list[int] = None,
         pocket_atoms: list[int] = None,
         restrained_atoms: list[int] = None,
+        restart_velocities: bool = False,
         HMR: bool = True,
         temp: float = 300,
         out_dir: str = None,
@@ -33,6 +34,7 @@ class SteeredMD:
         self.out_dir = out_dir
         os.makedirs(out_dir, exist_ok=True)
 
+        self.restart_velocities = restart_velocities
         self.timestep = 0.004 if HMR else 0.002
         self.temperature = temp * openmmunit.kelvin
         self.ligand_atoms = ligand_atoms
@@ -129,9 +131,9 @@ class SteeredMD:
         )
         simulation = Simulation(self.topology, self.system, integrator, self.platform)
 
-        if checkpoint_file:
-            simulation.loadCheckpoint(checkpoint_file)
-
+        # Load checkpoint file
+        simulation.loadCheckpoint(checkpoint_file)
+            
         # Add harmonic positional restraints to protein CA
         input_positions = simulation.context.getState(getPositions=True).getPositions()
         if self.restrained_atoms is not None:
@@ -155,10 +157,12 @@ class SteeredMD:
         for rep_idx in range(1, replicas + 1):
             replica_start_time = time.monotonic()
 
-            if checkpoint_file:
-                simulation.loadCheckpoint(checkpoint_file)
+            # Load checkpoint file
+            simulation.loadCheckpoint(checkpoint_file)
 
-            # simulation.context.setVelocitiesToTemperature(self.temperature)
+            # Reset velocities to temperature
+            if self.restart_velocities:
+                simulation.context.setVelocitiesToTemperature(self.temperature)
 
             startdist = get_COM_dist(simulation, self.ligand_atoms, self.pocket_atoms)
             initial_r0 = startdist * openmmunit.nanometers
@@ -176,6 +180,8 @@ class SteeredMD:
 
             if do_backwards:
                 # Run backward direction
+                # Reset velocities to temperature after forward pulling
+                simulation.context.setVelocitiesToTemperature(self.temperature)
                 self.run_single_direction(
                     simulation, rep_idx, direction="backward", dx_per_move=-dx_per_move, sMD_moves=sMD_moves,
                     steps_per_move=steps_per_move, initial_r0=initial_r0, final_r0=final_r0
