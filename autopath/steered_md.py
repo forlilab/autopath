@@ -26,6 +26,7 @@ class SteeredMD:
         HMR: bool = True,
         temp: float = 300,
         out_dir: str = None,
+        verbose: int = 2,
     ):
         self.system = system
         self.topology = topology
@@ -37,6 +38,8 @@ class SteeredMD:
         self.ligand_atoms = ligand_atoms
         self.pocket_atoms = pocket_atoms
         self.restrained_atoms = restrained_atoms
+        self.verbose = verbose
+
         self.platform = select_platform("fastest")
 
     def run_single_direction(
@@ -51,6 +54,7 @@ class SteeredMD:
             f"sMD_{rep_idx}_{direction}",
             sMD_moves,
             steps_per_move * 2,
+            self.verbose
         )
 
         logging.info(f"Initial COM distance: {initial_r0} nm")
@@ -63,7 +67,7 @@ class SteeredMD:
         for i in range(sMD_moves):
             current_dist = get_COM_dist(simulation, self.ligand_atoms, self.pocket_atoms) * openmmunit.nanometers
 
-            # Get radius of starting point and end point
+            # Get distance of starting point and end point
             if direction == "backward":
                 r_current = final_r0 - float(i + 1) * abs(dx_per_move)
                 r_start = final_r0 - float(i) * abs(dx_per_move)
