@@ -59,7 +59,7 @@ class SteeredMD:
             self.verbose
         )
 
-        logging.info(f"Initial COM distance: {initial_r0} nm")
+        logging.info(f"Initial COM distance: {initial_r0}")
         simulation.context.setParameter("r0", initial_r0)
 
         # Initialize work
