@@ -172,7 +172,7 @@ def main():
         ligand_atoms=ligand_atoms_indices,
         pocket_atoms=pocket_atom_indices,
         restrained_atoms=restrained_atoms_indices,
-        out_dir=f"{sys_name}/sMD_restart",
+        out_dir=f"{sys_name}/sMD",
     )
 
     sMD.run(sMD_time=1, #ns
