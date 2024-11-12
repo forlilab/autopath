@@ -1,0 +1,110 @@
+{
+    "components": ["ligand", "protein"],
+    "steps": [
+      {
+        "name": "step1",
+        "force_constants": [5.0, 5.0],
+        "npt_flag": false,
+        "nsteps": 50000,
+        "stepsize": 0.002
+      },
+      {
+        "name": "step2",
+        "force_constants": [5.0, 4.5],
+        "npt_flag": true,
+        "nsteps": 50000,
+        "stepsize": 0.004
+      },
+      {
+        "name": "step3",
+        "force_constants": [5.0, 4.0],
+        "npt_flag": true,
+        "nsteps": 50000,
+        "stepsize": 0.004
+      },
+      {
+        "name": "step4",
+        "force_constants": [5.0, 3.5],
+        "npt_flag": true,
+        "nsteps": 50000,
+        "stepsize": 0.004
+      },
+      {
+        "name": "step5",
+        "force_constants": [4.5, 3.0],
+        "npt_flag": true,
+        "nsteps": 50000,
+        "stepsize": 0.004
+      },
+      {
+        "name": "step6",
+        "force_constants": [4.0, 2.5],
+        "npt_flag": true,
+        "nsteps": 50000,
+        "stepsize": 0.004
+      },
+      {
+        "name": "step7",
+        "force_constants": [3.5, 2.0],
+        "npt_flag": true,
+        "nsteps": 50000,
+        "stepsize": 0.004
+      },
+      {
+        "name": "step8",
+        "force_constants": [3.5, 1.5],
+        "npt_flag": true,
+        "nsteps": 50000,
+        "stepsize": 0.004
+      },
+      {
+        "name": "step9",
+        "force_constants": [3.0, 1.0],
+        "npt_flag": true,
+        "nsteps": 50000,
+        "stepsize": 0.004
+      },
+      {
+        "name": "step10",
+        "force_constants": [2.5, 0.5],
+        "npt_flag": true,
+        "nsteps": 50000,
+        "stepsize": 0.004
+      },      
+      {
+        "name": "step11",
+        "force_constants": [2.0, 0.0],
+        "npt_flag": true,
+        "nsteps": 50000,
+        "stepsize": 0.004
+      },      
+      {
+        "name": "step12",
+        "force_constants": [1.5, 0.0],
+        "npt_flag": true,
+        "nsteps": 50000,
+        "stepsize": 0.004
+      },      
+      {
+        "name": "step13",
+        "force_constants": [1.0, 0.0],
+        "npt_flag": true,
+        "nsteps": 50000,
+        "stepsize": 0.004
+      },      
+      {
+        "name": "step14",
+        "force_constants": [0.5, 0.0],
+        "npt_flag": true,
+        "nsteps": 50000,
+        "stepsize": 0.004
+      },
+      {
+        "name": "step15",
+        "force_constants": [0.0, 0.0],
+        "npt_flag": true,
+        "nsteps": 50000,
+        "stepsize": 0.004
+      }
+    ]
+}
