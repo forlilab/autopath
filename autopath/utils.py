@@ -4,6 +4,7 @@ import logging
 import numpy as np
 import pandas as pd
 from sys import stdout, exit
+from glob import glob
 
 from typing import Union, Tuple, Optional, List
 from collections import defaultdict
@@ -23,6 +24,7 @@ from MDAnalysis.analysis import align
 from MDAnalysis.transformations import wrap
 from MDAnalysis.core.universe import Universe
 from MDAnalysis.analysis.rms import RMSD, RMSF
+from scipy.spatial.distance import cdist
 
 import pytraj as pt
 
@@ -184,7 +186,7 @@ def select_platform(platform_name: str = None, device_index: str = "0"):
 
     try:
         platform = Platform.getPlatformByName(platform_name)
-        logging.debug(f"Using {platform_name} platform.")
+        logging.info(f"Using {platform_name} platform.")
 
         if platform_name in ["OpenCL"]:
             platform.setPropertyDefaultValue("Precision", "mixed")
@@ -309,14 +311,6 @@ def add_variants(modeller: Modeller, variants_dict: dict = None) -> Modeller:
 
     return modeller 
 
-def _print_current_forces(system: System = None) -> None:
-    for index, fc in enumerate(system.getForces()):
-        logging.info(
-            f"Force Index:{index} | Name: {fc.getName()} | Group: {fc.getForceGroup()}"
-        )
-    return
-
-
 def get_protein_ha(topology: app.Topology, lig_name: str = "UNK") -> Tuple[list, list]:
 
     ATOMSET = set(("HOH", "WAT", "POP", "K", "CL", "NA", lig_name))
@@ -402,9 +396,9 @@ def get_COM_dist(simulation, groupA:list[int]=None, groupB:list[int]=None, weigh
 
 
 def calculate_com_distance(
-    u, ligand_atoms=None, pocket_atoms=None, weighByMass: bool = False
+    u, ligand_atoms=None, pocket_atoms=None, weighByMass: bool = True
 ) -> pd.DataFrame:
-
+    # Distance will be in Angstroms because of MDanalysis
     distances = []
     for ts in u.trajectory:
         if weighByMass:
@@ -463,6 +457,12 @@ def get_ligand_rmsd(
 
     return pd.DataFrame(rmsds, columns=["rmsd"], index=range(len(rmsds)))
 
+def _print_current_forces(system: System = None) -> None:
+    for index, fc in enumerate(system.getForces()):
+        logging.info(
+            f"Force Index:{index} | Name: {fc.getName()} | Group: {fc.getForceGroup()}"
+        )
+    return
 
 def _remove_force(force_name: str = None, system: System = None, simulation=None):
     """Remove a force from an OpenMM system based on its name."""
@@ -709,3 +709,63 @@ def add_cylindrical_restraints(
     system.addForce(cylindrical_restraint)
 
     return
+
+def find_closest_points(
+    out_dir, x_min, x_max, x_grid_points, x_name, 
+    y_min, y_max, y_grid_points, y_name, ref_point, num_neighbors=5
+):
+    """
+    This function finds the closest grid points in the heatmap data to a given reference point.
+    
+    Parameters:
+    - out_dir: Directory containing the heatmap .npy files.
+    - x_min, x_max: Min and max values of the x axis in the plot.
+    - x_grid_points: Number of grid points along the x axis.
+    - x_name: Label name for the x axis.
+    - y_min, y_max: Min and max values of the y axis in the plot.
+    - y_grid_points: Number of grid points along the y axis.
+    - y_name: Label name for the y axis.
+    - ref_point: The reference point on the plot (x_ref, y_ref) whose neighbors you want to find.
+    - num_neighbors: Number of closest points to retrieve.
+    
+    Returns:
+    A DataFrame of the closest points and their coordinates (x, y) in plot units.
+    """
+    
+    # Extract system name from directory
+    sys_name = out_dir.split("/")[0]
+
+    # Generate the x and y axis values (matching the plot)
+    x_values = np.linspace(x_min, x_max, x_grid_points)
+    y_values = np.linspace(y_min, y_max, y_grid_points)
+
+    # Load the first FE data file (assuming there's one file per walker)
+    file_fe = glob(f"{out_dir}/FE_*.npy")[0]
+    np_data = np.load(file_fe)
+    np_data = np_data * 0.239006  # Convert from KJ to Kcal
+
+    # Reshape np_data into a list of points with (x, y) coordinates
+    grid_x, grid_y = np.meshgrid(x_values, y_values)
+    grid_points = np.column_stack((grid_x.ravel(), grid_y.ravel()))
+    
+    # Reference point provided in plot axis units
+    ref_point = np.array([ref_point])  # Ensure it's in the correct shape for cdist
+
+    # Use scipy to calculate the Euclidean distance from each grid point to the reference point
+    distances = cdist(grid_points, ref_point, metric='euclidean').ravel()
+
+    # Find the indices of the closest points
+    closest_indices = np.argsort(distances)[:num_neighbors]
+
+    # Retrieve the closest points in grid coordinates and their corresponding values in np_data
+    closest_points = grid_points[closest_indices]
+    closest_values = np_data.ravel()[closest_indices]
+
+    # Prepare a DataFrame with the results
+    closest_df = pd.DataFrame({
+        'x_value': closest_points[:, 0],
+        'y_value': closest_points[:, 1],
+        'FE_value': closest_values
+    })
+    
+    return closest_df
