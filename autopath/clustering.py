@@ -21,7 +21,6 @@ from autopath.utils import save_model, load_model
 from sklearn.metrics import silhouette_score
 
 import mosaic
-import umap
 
 class ClusterTrajectories:
     def __init__(self, 
@@ -233,17 +232,18 @@ class ClusterTrajectories:
 
         return kvad_model
     
-    def fit_umap_model(self, data, n_neighbors=15, min_dist=0.5, metric='euclidean'):
+    # def fit_umap_model(self, data, n_neighbors=15, min_dist=0.5, metric='euclidean'):
+    #     import umap
 
-        X = np.concatenate(data, axis=0)
-        umap_estimator = umap.UMAP(n_components=self.embedding_dim, 
-                                   n_neighbors=n_neighbors, 
-                                   min_dist=min_dist, 
-                                   metric=metric, 
-                                   densmap=False)
-        umap_model = umap_estimator.fit(X)
+    #     X = np.concatenate(data, axis=0)
+    #     umap_estimator = umap.UMAP(n_components=self.embedding_dim, 
+    #                                n_neighbors=n_neighbors, 
+    #                                min_dist=min_dist, 
+    #                                metric=metric, 
+    #                                densmap=False)
+    #     umap_model = umap_estimator.fit(X)
 
-        return umap_model
+    #     return umap_model
     
     def fit_pca_model(self, data, plot_cumulative_variance:bool=True):
 
@@ -309,9 +309,9 @@ class ClusterTrajectories:
             elif self.embedding_model == 'TICA':
                 fitted_model = self.fit_tica_model(data)
                 projection = fitted_model.transform(data)
-            elif self.embedding_model == 'UMAP':
-                fitted_model = self.fit_umap_model(data)
-                projection = np.array([fitted_model.transform(run) for run in data])
+            # elif self.embedding_model == 'UMAP':
+            #     fitted_model = self.fit_umap_model(data)
+            #     projection = np.array([fitted_model.transform(run) for run in data])
             elif self.embedding_model == 'PCA':
                 fitted_model = self.fit_pca_model(data)
                 projection = np.array([fitted_model.transform(run) for run in data])
