@@ -47,6 +47,8 @@ class MetadynamicsMD:
 
         self.ligand_atoms = ligand_atoms
         self.pocket_atoms = pocket_atoms
+        
+        # Im not exposing all options here because I want to keep it simple
         self.restrained_atoms = restrained_atoms
 
         self.platform = select_platform("fastest")
