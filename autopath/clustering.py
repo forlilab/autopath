@@ -375,6 +375,7 @@ class ClusterTrajectories:
             # 2D scatter plot with centroids
             if labels is not None and centroids is not None:
                 sns.scatterplot(data=df, x='comp 1', y='comp 2', s=5, alpha=0.2, hue='cluster', palette='Set1')
+                # sns.kdeplot(data=df, x='comp 1', y='comp 2', cmap="coolwarm", fill=True, thresh=0.0, bw_adjust=0.5, cbar=True)
                 sns.scatterplot(data=centroids_df,  x='comp 1', y='comp 2', s=25, color='black', marker='X')
             else:
                 sns.scatterplot(df, s=5, alpha=0.2)

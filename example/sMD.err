@@ -1,0 +1,69 @@
+/gpfs/home/mllanos/micromamba/envs/autopath2/lib/python3.11/site-packages/Bio/Application/__init__.py:39: BiopythonDeprecationWarning: The Bio.Application modules and modules relying on it have been deprecated.
+
+Due to the on going maintenance burden of keeping command line application
+wrappers up to date, we have decided to deprecate and eventually remove these
+modules.
+
+We instead now recommend building your command line and invoking it directly
+with the subprocess module.
+  warnings.warn(
+2024-11-11 18:02:34.420933: I tensorflow/core/platform/cpu_feature_guard.cc:182] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: SSE4.1 SSE4.2 AVX AVX2 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+/gpfs/home/mllanos/micromamba/envs/autopath2/lib/python3.11/site-packages/openmm/app/internal/pdbstructure.py:443: UserWarning: WARNING: two consecutive residues with same number (ATOM   1321  N   TYR A 169       2.737  55.514 105.558  1.00 14.35           N  , ATOM   1320  HD3 PRO A 169       1.721  56.899 108.754  1.00 18.74           H  )
+  warnings.warn("WARNING: two consecutive residues with same number (%s, %s)" % (atom, self._current_residue.atoms[-1]))
+/gpfs/home/mllanos/micromamba/envs/autopath2/lib/python3.11/site-packages/openmm/app/internal/pdbstructure.py:443: UserWarning: WARNING: two consecutive residues with same number (ATOM   3848  N   GLY A 345     -10.656  93.168 110.996  1.00 26.48           N  , ATOM   3847 HD22 ASN A 345     -14.600  91.763 116.210  1.00 27.75           H  )
+  warnings.warn("WARNING: two consecutive residues with same number (%s, %s)" % (atom, self._current_residue.atoms[-1]))
+/gpfs/home/mllanos/micromamba/envs/autopath2/lib/python3.11/site-packages/openmm/app/internal/pdbstructure.py:443: UserWarning: WARNING: two consecutive residues with same number (ATOM   4854  N   HIS A 412     -10.291  70.113  85.629  1.00 16.40           N  , ATOM   4853 HE22 GLN A 412     -12.779  65.331  90.961  1.00 15.23           H  )
+  warnings.warn("WARNING: two consecutive residues with same number (%s, %s)" % (atom, self._current_residue.atoms[-1]))
+/gpfs/home/mllanos/micromamba/envs/autopath2/lib/python3.11/site-packages/openmm/app/internal/pdbstructure.py:443: UserWarning: WARNING: two consecutive residues with same number (ATOM   4871  N   PRO A 412     -11.381  69.969  82.123  1.00 17.93           N  , ATOM   4870  HE2 HIS A 412      -6.506  73.889  86.061  1.00 18.08           H  )
+  warnings.warn("WARNING: two consecutive residues with same number (%s, %s)" % (atom, self._current_residue.atoms[-1]))
+/gpfs/home/mllanos/micromamba/envs/autopath2/lib/python3.11/site-packages/openmm/app/internal/pdbstructure.py:443: UserWarning: WARNING: two consecutive residues with same number (ATOM   4885  N   GLU A 412      -9.915  67.970  80.753  1.00 18.33           N  , ATOM   4884  HD3 PRO A 412     -10.483  71.762  81.426  1.00 18.17           H  )
+  warnings.warn("WARNING: two consecutive residues with same number (%s, %s)" % (atom, self._current_residue.atoms[-1]))
+/gpfs/home/mllanos/micromamba/envs/autopath2/lib/python3.11/site-packages/openmm/app/internal/pdbstructure.py:443: UserWarning: WARNING: two consecutive residues with same number (ATOM   4900  N   LEU A 412      -9.828  66.048  82.650  1.00 20.69           N  , ATOM   4899  HG3 GLU A 412      -7.712  68.886  81.389  1.00 21.55           H  )
+  warnings.warn("WARNING: two consecutive residues with same number (%s, %s)" % (atom, self._current_residue.atoms[-1]))
+/gpfs/home/mllanos/micromamba/envs/autopath2/lib/python3.11/site-packages/openmm/app/internal/pdbstructure.py:443: UserWarning: WARNING: two consecutive residues with same number (ATOM   1321  N   TYR A 169       2.737  55.514 105.558  1.00  0.00           N  , ATOM   1320  HD3 PRO A 169       1.721  56.899 108.754  1.00  0.00           H  )
+  warnings.warn("WARNING: two consecutive residues with same number (%s, %s)" % (atom, self._current_residue.atoms[-1]))
+/gpfs/home/mllanos/micromamba/envs/autopath2/lib/python3.11/site-packages/openmm/app/internal/pdbstructure.py:443: UserWarning: WARNING: two consecutive residues with same number (ATOM   3848  N   GLY A 345     -10.656  93.168 110.996  1.00  0.00           N  , ATOM   3847 HD22 ASN A 345     -14.600  91.763 116.210  1.00  0.00           H  )
+  warnings.warn("WARNING: two consecutive residues with same number (%s, %s)" % (atom, self._current_residue.atoms[-1]))
+/gpfs/home/mllanos/micromamba/envs/autopath2/lib/python3.11/site-packages/openmm/app/internal/pdbstructure.py:443: UserWarning: WARNING: two consecutive residues with same number (ATOM   4854  N   HIS A 412     -10.291  70.113  85.629  1.00  0.00           N  , ATOM   4853 HE22 GLN A 412     -12.779  65.331  90.961  1.00  0.00           H  )
+  warnings.warn("WARNING: two consecutive residues with same number (%s, %s)" % (atom, self._current_residue.atoms[-1]))
+/gpfs/home/mllanos/micromamba/envs/autopath2/lib/python3.11/site-packages/openmm/app/internal/pdbstructure.py:443: UserWarning: WARNING: two consecutive residues with same number (ATOM   4871  N   PRO A 412     -11.381  69.969  82.123  1.00  0.00           N  , ATOM   4870  HE2 HIS A 412      -6.506  73.889  86.061  1.00  0.00           H  )
+  warnings.warn("WARNING: two consecutive residues with same number (%s, %s)" % (atom, self._current_residue.atoms[-1]))
+/gpfs/home/mllanos/micromamba/envs/autopath2/lib/python3.11/site-packages/openmm/app/internal/pdbstructure.py:443: UserWarning: WARNING: two consecutive residues with same number (ATOM   4885  N   GLU A 412      -9.915  67.970  80.753  1.00  0.00           N  , ATOM   4884  HD3 PRO A 412     -10.483  71.762  81.426  1.00  0.00           H  )
+  warnings.warn("WARNING: two consecutive residues with same number (%s, %s)" % (atom, self._current_residue.atoms[-1]))
+/gpfs/home/mllanos/micromamba/envs/autopath2/lib/python3.11/site-packages/openmm/app/internal/pdbstructure.py:443: UserWarning: WARNING: two consecutive residues with same number (ATOM   4900  N   LEU A 412      -9.828  66.048  82.650  1.00  0.00           N  , ATOM   4899  HG3 GLU A 412      -7.712  68.886  81.389  1.00  0.00           H  )
+  warnings.warn("WARNING: two consecutive residues with same number (%s, %s)" % (atom, self._current_residue.atoms[-1]))
+2024-11-11 18:02:58,740 [INFO] Using CUDA platform.
+2024-11-11 18:02:58,749 [INFO] Loading equilibration protocol from JSON file.
+/gpfs/home/mllanos/micromamba/envs/autopath2/lib/python3.11/site-packages/MDAnalysis/coordinates/DCD.py:165: DeprecationWarning: DCDReader currently makes independent timesteps by copying self.ts while other readers update self.ts inplace. This behavior will be changed in 3.0 to be the same as other readers. Read more at https://github.com/MDAnalysis/mdanalysis/issues/3889 to learn if this change in behavior might affect you.
+  warnings.warn("DCDReader currently makes independent timesteps"
+2024-11-11 18:03:02,358 [INFO] RMS calculation for 1540 atoms.
+2024-11-11 18:03:02,361 [INFO] Choosing frames to analyze
+2024-11-11 18:03:02,361 [INFO] Starting preparation
+2024-11-11 18:03:02,362 [INFO] Starting analysis loop over 681 trajectory frames
+2024-11-11 18:03:03,205 [INFO] Finishing up
+2024-11-11 18:03:03,610 [INFO] Choosing frames to analyze
+2024-11-11 18:03:03,611 [INFO] Starting preparation
+2024-11-11 18:03:03,611 [INFO] Starting analysis loop over 681 trajectory frames
+2024-11-11 18:03:03,628 [INFO] Finishing up
+/gpfs/home/mllanos/micromamba/envs/autopath2/lib/python3.11/site-packages/MDAnalysis/analysis/rms.py:887: DeprecationWarning: The `rmsf` attribute was deprecated in MDAnalysis 2.0.0 and will be removed in MDAnalysis 3.0.0. Please use `results.rmsd` instead.
+  warnings.warn(wmsg, DeprecationWarning)
+/gpfs/home/mllanos/micromamba/envs/autopath2/lib/python3.11/site-packages/MDAnalysis/coordinates/DCD.py:165: DeprecationWarning: DCDReader currently makes independent timesteps by copying self.ts while other readers update self.ts inplace. This behavior will be changed in 3.0 to be the same as other readers. Read more at https://github.com/MDAnalysis/mdanalysis/issues/3889 to learn if this change in behavior might affect you.
+  warnings.warn("DCDReader currently makes independent timesteps"
+2024-11-11 18:03:04,770 [INFO] Pocket atoms are: SER_98_1495, SER_98_1489, ARG_143_2158, GLU_195_2929, SER_98_1486, SER_165_2449, GLU_196_2940, TRP_97_1481, GLU_196_2946, ARG_143_2146, ARG_143_2148, TRP_97_1468, SER_98_1490, TRP_97_1482, ARG_143_2168, ARG_143_2145, TRP_97_1465, TRP_97_1464, ARG_143_2152, GLU_196_2945, ARG_143_2150, TRP_97_1483, GLU_195_2928, TRP_97_1471, SER_165_2451, GLU_195_2926, ARG_143_2162, GLU_195_2932, ARG_143_2166, ASN_213_3172, TRP_97_1462, TRP_97_1477, GLU_195_2927, TRP_97_1485, SER_165_2443, TRP_97_1480, GLU_196_2948, GLU_195_2935, GLU_195_2924, TRP_97_1479, ARG_143_2167, TRP_97_1470, GLU_195_2936, ARG_143_2160, TRP_97_1463, ARG_143_2159, ARG_143_2157, GLU_196_2953, GLU_196_2942, ARG_143_2165, GLU_195_2925, ASN_213_3171, ASN_213_3179, ASN_213_3176, ASN_213_3174, GLU_195_2934, SER_98_1492, SER_165_2453, GLU_196_2944, GLU_196_2949, SER_98_1496, ARG_143_2155, SER_165_2444, ASN_213_3182, TRP_97_1473, GLU_196_2952, TRP_97_1478, SER_165_2447, ARG_143_2151, ARG_143_2164, ASN_213_3178, ASN_213_3180, TRP_97_1484, GLU_196_2947, ARG_143_2156, GLU_196_2950, TRP_97_1475, TRP_97_1466, ARG_143_2161, SER_165_2448, TRP_97_1472, GLU_195_2938, TRP_97_1476, GLU_196_2939, ARG_143_2149, TRP_97_1467, SER_98_1491, SER_165_2446, ARG_143_2163, ASN_213_3181, ARG_143_2154, SER_165_2445, TRP_97_1474, SER_165_2450, GLU_195_2930, ASN_213_3183, SER_98_1487, GLU_195_2933, SER_165_2452, ARG_143_2153, SER_98_1494, ASN_213_3173, ASN_213_3184, GLU_196_2941, GLU_195_2931, SER_98_1488, TRP_97_1469, ARG_143_2147, GLU_196_2943, ASN_213_3177, SER_98_1493, GLU_196_2951, ASN_213_3175, GLU_195_2937
+2024-11-11 18:03:05,006 [INFO] COM distance after equilibration is: 4.81 A
+2024-11-11 18:03:05,153 [INFO] Using CUDA platform.
+2024-11-11 18:03:05,585 [INFO] 185 atoms will be restrained
+2024-11-11 18:03:05,909 [INFO] Replica 1 - forward pulling
+2024-11-11 18:03:05,911 [INFO] Initial COM distance: 0.47456787921482174 nm
+2024-11-11 18:07:28,665 [INFO] Final COM distance: 1.76 nm
+2024-11-11 18:07:29,187 [INFO] Finished replica 1/3 in 4.39 min
+2024-11-11 18:07:29,275 [INFO] Replica 2 - forward pulling
+2024-11-11 18:07:29,277 [INFO] Initial COM distance: 0.47456787921482174 nm
+2024-11-11 18:11:52,290 [INFO] Final COM distance: 1.89 nm
+2024-11-11 18:12:03,164 [INFO] Finished replica 2/3 in 4.57 min
+2024-11-11 18:12:03,254 [INFO] Replica 3 - forward pulling
+2024-11-11 18:12:03,255 [INFO] Initial COM distance: 0.47456787921482174 nm
+2024-11-11 18:16:26,040 [INFO] Final COM distance: 1.72 nm
+2024-11-11 18:16:36,928 [INFO] Finished replica 3/3 in 4.56 min
+2024-11-11 18:16:36,928 [INFO] Finished 3 replicas of sMD  in 13.53 min.
