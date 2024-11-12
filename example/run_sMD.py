@@ -28,7 +28,7 @@ def cmd_lineparser():
         dest="rec",
         required=True,
         action="store",
-        help="path to the json config file",
+        help="path to the receptor PDB file",
     )
 
     parser.add_argument(
@@ -37,7 +37,7 @@ def cmd_lineparser():
         dest="lig",
         required=True,
         action="store",
-        help="ligand SDF file or path ligands directory",
+        help="path to the ligand SDF file",
     )
 
     return parser.parse_args()
@@ -112,7 +112,7 @@ def main():
         )
     
     # If you re-run the script and the system is equilibrated prepared comment the following line
-    # system_eq = equilibration.run(pdb_file=system_pdb_file, run_id=sys_name)
+    system_eq = equilibration.run(pdb_file=system_pdb_file, run_id=sys_name)
 
     system_prmtop = f"{sys_name}/system.prmtop"
     equilibrated_traj = f"{sys_name}/equilibration/trajectory_equil_{sys_name}.dcd"
