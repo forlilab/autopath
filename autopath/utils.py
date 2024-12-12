@@ -42,13 +42,14 @@ def align_trajectory(
     prmtop_file: str = None,
     traj_file: Union[str, list] = None,
     out_fname: str = None,
+    super_mask: str = "@CA,C,N",
     strip_mask: str = None,  #':HOH,NA,CL,K,POP'
 ) -> None:
 
     ptraj = pt.iterload(traj_file, prmtop_file)
     ptraj = ptraj.autoimage()
     ptraj = ptraj.center()
-    ptraj = ptraj.superpose(ref=0, mask="@CA,C,N")
+    ptraj = ptraj.superpose(ref=0, mask=super_mask)
 
     if strip_mask is not None:
         ptraj = ptraj.strip(strip_mask)
