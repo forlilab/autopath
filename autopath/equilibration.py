@@ -200,7 +200,7 @@ class Equilibration:
             simulation,
             self.out_dir,
             f"equil_{run_id}",
-            logperiod=1250,
+            logperiod=12500, #25000 is 0.1 ns at 4 fs timestep
             total_steps=self.total_steps,
             verbose=self.verbose
         )
@@ -243,7 +243,7 @@ class Equilibration:
                 initial_positions,
                 self.topology,
                 lipid_ha_idx,
-                restraint_force=10,
+                restraint_force=100,
                 force_name="k_membrane",
                 force_group=14,
             )
