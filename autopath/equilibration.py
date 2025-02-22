@@ -78,8 +78,7 @@ def warm_up_system(
 
     return
 
-
-def equilibrate_restrained_system(
+def run_restrained_md(
     simulation,
     system,
     integrator,
@@ -205,47 +204,27 @@ class Equilibration:
             verbose=self.verbose
         )
 
-        logging.info("Adding harmonic restraints to the protein..")
-        prot_ha_idx, prot_ha_names = get_protein_ha(self.topology, self.lig_name)
-        logging.debug(
-            f"The following protein heavy atoms will be restrained: {', '.join(prot_ha_names)}"
-        )
-        add_harmonic_restraints(
-            self.system,
-            initial_positions,
-            self.topology,
-            prot_ha_idx,
-            restraint_force=5,
-            force_name="k_protein",
-            force_group=12,
-        )
+        for num, component in enumerate(self.equilibration_scheme["components"]):
 
-        logging.info("Adding harmonic restraints to the ligand..")
-        lig_ha_idx, lig_ha_names = get_ligand_ha(self.topology, self.lig_name)
-        logging.info(
-            f"The following ligand heavy atoms will be restrained: {', '.join(lig_ha_names)}"
-        )
-        add_harmonic_restraints(
-            self.system,
-            initial_positions,
-            self.topology,
-            lig_ha_idx,
-            restraint_force=5,
-            force_name="k_ligand",
-            force_group=13,
-        )
+            logging.info(f"Adding harmonic restraints to {component}..")
 
-        if self.is_membrane:
-            logging.info("Adding harmonic restraints to the membrane..")
-            lipid_ha_idx, lipid_ha_names = get_ligand_ha(self.topology, "POP")
+            if component == "protein":  
+                restrain_idxs, restrain_names = get_protein_ha(self.topology, self.lig_name)
+            elif component == "ligand":
+                restrain_idxs, restrain_names = get_ligand_ha(self.topology, self.lig_name)
+            elif component == "membrane":
+                restrain_idxs, restrain_names = get_ligand_ha(self.topology, self.lipid_type)
+            logging.debug(
+                f"The following {component} atoms will be restrained: {', '.join(restrain_names)}")
+
             add_harmonic_restraints(
                 self.system,
                 initial_positions,
                 self.topology,
-                lipid_ha_idx,
-                restraint_force=100,
-                force_name="k_membrane",
-                force_group=14,
+                restrain_idxs,
+                restraint_force=5,
+                force_name=f"k_{component}",
+                force_group=num+15, #Offset by 15 to avoid overlap with other forces
             )
 
         logging.info("Minimizing..")
@@ -255,7 +234,7 @@ class Equilibration:
         warm_up_system(simulation, integrator, warming_steps=self.warm_up_steps)
 
         logging.info("Running restrained equilibration protocol..")
-        equilibrate_restrained_system(
+        run_restrained_md(
             simulation,
             self.system,
             integrator,
