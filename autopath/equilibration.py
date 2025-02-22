@@ -131,6 +131,7 @@ class Equilibration:
         warm_up_steps: int = 100000,
         temperature: float = 300,
         timestep: float = 0.004,
+        save_freq: int = 12500, # save every 0.05ns at 4fs timestep
         is_membrane: bool = False,
         lipid_type: str = "POPC",
         verbose: int = 2,
@@ -152,7 +153,8 @@ class Equilibration:
         self.temperature = temperature * openmmunit.kelvin
         self.timestep = timestep * openmmunit.picoseconds
         self.warm_up_steps = warm_up_steps
-
+        self.save_freq = save_freq
+        
         self.platform = select_platform("fastest")
 
         self.equilibration_scheme = self.from_json(equilibration_fname)
@@ -199,7 +201,7 @@ class Equilibration:
             simulation,
             self.out_dir,
             f"equil_{run_id}",
-            logperiod=12500, #25000 is 0.1 ns at 4 fs timestep
+            logperiod=self.save_freq, #25000 is 0.1 ns at 4 fs timestep
             total_steps=self.total_steps,
             verbose=self.verbose
         )
