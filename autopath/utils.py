@@ -33,6 +33,10 @@ style.use("fivethirtyeight")
 
 import pytraj as pt
 
+from rdkit import Chem
+from rdkit.Chem.Draw import SimilarityMaps
+
+
 def save_model(model, filename):
     with open(filename, 'wb') as file:
         pickle.dump(model, file)
@@ -500,6 +504,41 @@ def compute_rmsd(u, u_ref,
             plt.close()
 
     return rmsd_df
+
+def plot_atomic_rmsf(u, lig_resname:str='UNK', outname:str='rmsf.png', log_rmsf:bool=False):
+    """
+    Draws a RMSF (Root Mean Square Fluctuation) plot for a specified ligand and saves it as an image file.
+    Parameters:
+    -----------
+    u : MDAnalysis.Universe
+        The MDAnalysis universe object containing the molecular dynamics trajectory and topology.
+    lig_resname : str, optional
+        The residue name of the ligand to analyze (default is 'UNK').
+    outname : str, optional
+        The name of the output image file where the RMSF plot will be saved (default is 'rmsf.png').
+    log_rmsf : bool, optional
+        If True, logs the RMSF values to a CSV file with the same name as the output image (default is False).
+    Returns:
+    --------
+    None
+        This function does not return any value. It saves the RMSF plot and optionally logs the RMSF values.
+    """
+
+    lig_select = u.select_atoms(f'resname {lig_resname}')
+    r = RMSF(atomgroup=lig_select).run()
+    probe_mol = lig_select.convert_to('RDKIT')
+    probe_mol.Compute2DCoords()
+    probe_mol = Chem.RemoveHs(probe_mol)
+    fig = SimilarityMaps.GetSimilarityMapFromWeights(probe_mol, r.rmsf, step=0.01, alpha=0.3, contourLines=5) 
+    fig.savefig(outname, bbox_inches='tight')
+    
+    # Optionally, log the RMSF values for further analysis
+    if log_rmsf:
+        log_fname = os.path.splitext(outname)[0]
+        with open(f'{log_fname}.csv', 'w') as f:
+            for res_id, rmsf_value in enumerate(r.rmsf):
+                f.write(f'{res_id},{rmsf_value:.3f}\n')
+    return
 
 def _print_current_forces(system: System = None) -> None:
     for index, fc in enumerate(system.getForces()):
