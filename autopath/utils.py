@@ -26,6 +26,11 @@ from MDAnalysis.core.universe import Universe
 from MDAnalysis.analysis.rms import RMSD, RMSF
 from scipy.spatial.distance import cdist
 
+import seaborn as sns
+import matplotlib.pyplot as plt
+import matplotlib.style as style
+style.use("fivethirtyeight")
+
 import pytraj as pt
 
 def save_model(model, filename):
@@ -41,20 +46,21 @@ def load_model(filename):
 def align_trajectory(
     prmtop_file: str = None,
     traj_file: Union[str, list] = None,
-    out_fname: str = None,
+    stride: int = None,
     super_mask: str = "@CA,C,N",
     strip_mask: str = None,  #':HOH,NA,CL,K,POP'
+    out_fname: str = None,
 ) -> None:
 
-    ptraj = pt.iterload(traj_file, prmtop_file)
+    ptraj = pt.iterload(traj_file, prmtop_file, stride=stride)
     ptraj = ptraj.autoimage()
     ptraj = ptraj.center()
     ptraj = ptraj.superpose(ref=0, mask=super_mask)
 
     if strip_mask is not None:
         ptraj = ptraj.strip(strip_mask)
-        pt.save(f"{out_fname}_dry.prmtop", ptraj.top, overwrite=True)
-    ptraj.save(f"{out_fname}.dcd")
+        pt.save(out_fname.replace('.dcd','_dry.prmtop'), ptraj.top, overwrite=True)
+    ptraj.save(out_fname)
 
     return
 
@@ -414,49 +420,86 @@ def calculate_com_distance(
     return pd.DataFrame(distances, columns=["com_d"], index=range(len(distances)))
 
 
-def get_ligand_rmsd(
-    u: Universe = None,
-    u_ref: Universe = None,
-    lig_resname: str = "UNK",
-    alig_select: str = "ligand",
-):
-    """A function to calculate the ligand RMSD from a trajectory.
+# def get_ligand_rmsd(
+#     u: Universe = None,
+#     u_ref: Universe = None,
+#     lig_resname: str = "UNK",
+#     alig_select: str = "ligand",
+# ):
+#     """A function to calculate the ligand RMSD from a trajectory.
 
-    Parameters
-    ----------
-    'u : Universe
-        MDAnalysis Universe
-    lig_resname : str
-        Residue name of the ligand that was biased.
-    alig_select : str
-        Selection to be considered in the alignment.
-    Returns
-    -------
-    rmsds : np.array
-        ligand rmsd for every frame of the trajectory.
-    """
-    if alig_select == "ligand":
-        alig_select = f"resname {lig_resname} and not name H*"
+#     Parameters
+#     ----------
+#     'u : Universe
+#         MDAnalysis Universe
+#     lig_resname : str
+#         Residue name of the ligand that was biased.
+#     alig_select : str
+#         Selection to be considered in the alignment.
+#     Returns
+#     -------
+#     rmsds : np.array
+#         ligand rmsd for every frame of the trajectory.
+#     """
+#     if alig_select == "ligand":
+#         alig_select = f"resname {lig_resname} and not name H*"
 
-    # Make sure molecules are whole before rmsd calculation
-    # transform = wrap(u.atoms)
-    # u.trajectory.add_transformations(transform)
+#     # Make sure molecules are whole before rmsd calculation
+#     # transform = wrap(u.atoms)
+#     # u.trajectory.add_transformations(transform)
 
-    # Align each frame using the backbone as reference
-    # Calculate the RMSD of ligand heavy atoms
+#     # Align each frame using the backbone as reference
+#     # Calculate the RMSD of ligand heavy atoms
 
-    r = RMSD(
-        atomgroup=u,
-        reference=u_ref,
-        select=alig_select,
-        groupselections=[f"resname {lig_resname} and not name H*"],
-        ref_frame=0,
-    ).run()
+#     r = RMSD(
+#         atomgroup=u,
+#         reference=u_ref,
+#         select=alig_select,
+#         groupselections=[f"resname {lig_resname} and not name H*"],
+#         ref_frame=0,
+#     ).run()
 
-    rmsds = r.results.rmsd[1:, -1]
-    rmsds = rmsds / 10  # angstroms to nm
+#     rmsds = r.results.rmsd[1:, -1]
+#     rmsds = rmsds / 10  # angstroms to nm
 
-    return pd.DataFrame(rmsds, columns=["rmsd"], index=range(len(rmsds)))
+#     return pd.DataFrame(rmsds, columns=["rmsd"], index=range(len(rmsds)))
+
+def compute_rmsd(u, u_ref,
+                    alig_select:str='backbone', 
+                    groupselections=['protein and not name H*', f'resname UNK and not name H*'], 
+                    save_aligned=False,
+                    aligned_filename='aligned_trajectory.dcd',
+                    do_plot=True,
+                    out_dir=None
+                    ) -> pd.DataFrame:
+    r = RMSD(u, 
+             u_ref,
+             select=alig_select,
+             groupselections=groupselections,
+             ref_frame=0).run()
+
+    rmsd_results = r.results.rmsd  # Do not skip any columns
+    columns = ['frame','time (ps)', f'RMSD_{alig_select}'] + [f'RMSD_{group}' for group in groupselections]
+    rmsd_df = pd.DataFrame(rmsd_results, columns=columns)
+
+    if save_aligned:
+        with mda.Writer(aligned_filename, n_atoms=u.atoms.n_atoms) as W:
+            for ts in u.trajectory:
+                W.write(u.atoms)
+
+    if do_plot:
+        
+        plt.figure(figsize=(10, 5))
+        for col in columns[2:]:
+            sns.lineplot(x='frame', y=col, data=rmsd_df)
+            plt.xlabel('Frame')
+            plt.ylabel(f'RMSD (nm)')
+            plt.title(f'{col} over Time')
+            plt.tight_layout()
+            plt.savefig(f'{out_dir}/{col}.png')
+            plt.close()
+
+    return rmsd_df
 
 def _print_current_forces(system: System = None) -> None:
     for index, fc in enumerate(system.getForces()):
