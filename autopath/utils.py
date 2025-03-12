@@ -423,54 +423,9 @@ def calculate_com_distance(
 
     return pd.DataFrame(distances, columns=["com_d"], index=range(len(distances)))
 
-
-# def get_ligand_rmsd(
-#     u: Universe = None,
-#     u_ref: Universe = None,
-#     lig_resname: str = "UNK",
-#     alig_select: str = "ligand",
-# ):
-#     """A function to calculate the ligand RMSD from a trajectory.
-
-#     Parameters
-#     ----------
-#     'u : Universe
-#         MDAnalysis Universe
-#     lig_resname : str
-#         Residue name of the ligand that was biased.
-#     alig_select : str
-#         Selection to be considered in the alignment.
-#     Returns
-#     -------
-#     rmsds : np.array
-#         ligand rmsd for every frame of the trajectory.
-#     """
-#     if alig_select == "ligand":
-#         alig_select = f"resname {lig_resname} and not name H*"
-
-#     # Make sure molecules are whole before rmsd calculation
-#     # transform = wrap(u.atoms)
-#     # u.trajectory.add_transformations(transform)
-
-#     # Align each frame using the backbone as reference
-#     # Calculate the RMSD of ligand heavy atoms
-
-#     r = RMSD(
-#         atomgroup=u,
-#         reference=u_ref,
-#         select=alig_select,
-#         groupselections=[f"resname {lig_resname} and not name H*"],
-#         ref_frame=0,
-#     ).run()
-
-#     rmsds = r.results.rmsd[1:, -1]
-#     rmsds = rmsds / 10  # angstroms to nm
-
-#     return pd.DataFrame(rmsds, columns=["rmsd"], index=range(len(rmsds)))
-
 def compute_rmsd(u, u_ref,
                     alig_select:str='backbone', 
-                    groupselections=['protein and not name H*', f'resname UNK and not name H*'], 
+                    groupselections={}, 
                     save_aligned=False,
                     aligned_filename='aligned_trajectory.dcd',
                     do_plot=True,
@@ -479,11 +434,11 @@ def compute_rmsd(u, u_ref,
     r = RMSD(u, 
              u_ref,
              select=alig_select,
-             groupselections=groupselections,
+             groupselections=list(groupselections.values()),
              ref_frame=0).run()
 
     rmsd_results = r.results.rmsd  # Do not skip any columns
-    columns = ['frame','time (ps)', f'RMSD_{alig_select}'] + [f'RMSD_{group}' for group in groupselections]
+    columns = ['frame','time (ps)', f'RMSD_selected_alignment'] + [f'RMSD_{group}' for group in groupselections.keys()]
     rmsd_df = pd.DataFrame(rmsd_results, columns=columns)
 
     if save_aligned:
@@ -494,11 +449,10 @@ def compute_rmsd(u, u_ref,
     if do_plot:
         
         plt.figure(figsize=(10, 5))
-        for col in columns[2:]:
+        for col in columns[3:]:
             sns.lineplot(x='frame', y=col, data=rmsd_df)
-            plt.xlabel('Frame')
-            plt.ylabel(f'RMSD (nm)')
-            plt.title(f'{col} over Time')
+            plt.xlabel('Frame');            plt.ylabel(f'RMSD (A)')
+            plt.title(f'{col} RMSD')
             plt.tight_layout()
             plt.savefig(f'{out_dir}/{col}.png')
             plt.close()
