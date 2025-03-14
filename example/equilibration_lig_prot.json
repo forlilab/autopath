@@ -1,110 +1,90 @@
 {
-    "components": ["ligand", "protein"],
-    "steps": [
-      {
-        "name": "step1",
-        "force_constants": [5.0, 5.0],
+"components_lookup":{
+                    "membrane":"resname POP", 
+                    "protein_SC":"protein and not name CA C N O", 
+                    "ligand":"resname UNK", 
+                    "protein_BB":"protein and name CA C N O"
+                    },
+"minimization": [{
+                    "name": "Minimization Stage1",
+                    "forces": [10.0, 10.0, 10.0, 10.0]
+                    },
+                    {
+                    "name": "Minimization Stage2",
+                    "forces": [0.0, 5.0, 5.0, 5.0]
+                    },
+                    {
+                    "name": "Minimization Stage3",
+                    "forces": [0.0, 0.0, 0.0, 3.0]
+                    },
+                    {
+                    "name": "Minimization Stage4",
+                    "forces": [0.0, 0.0, 0.0, 0.0]
+                    }
+                  ],
+"warmup": {
+  "T_initial": 100.0,
+  "T_final": 300.0,
+  "T_step": 5.0,
+  "npt_flag": false,
+  "nsteps": 100000
+},
+
+"equilibration": [{
+        "name": "Equilibration Stage1",
+        "forces": [10.0, 10.0, 10.0, 10.0],
         "npt_flag": false,
-        "nsteps": 50000,
+        "nsteps": 100000,
         "stepsize": 0.002
-      },
-      {
-        "name": "step2",
-        "force_constants": [5.0, 4.5],
+        },
+        {
+        "name": "Equilibration Stage2",
+        "forces": [5.0, 5.0, 10.0, 10.0],
         "npt_flag": true,
-        "nsteps": 50000,
+        "nsteps": 100000,
         "stepsize": 0.004
-      },
-      {
-        "name": "step3",
-        "force_constants": [5.0, 4.0],
+        },
+        {
+        "name": "Equilibration Stage3",
+        "forces": [2.5, 5.0, 5.0, 10.0],
         "npt_flag": true,
-        "nsteps": 50000,
+        "nsteps": 100000,
         "stepsize": 0.004
-      },
-      {
-        "name": "step4",
-        "force_constants": [5.0, 3.5],
+        },
+        {
+        "name": "Equilibration Stage4",
+        "forces": [1.0, 5.0, 5.0, 10.0],
         "npt_flag": true,
-        "nsteps": 50000,
+        "nsteps": 100000,
         "stepsize": 0.004
-      },
-      {
-        "name": "step5",
-        "force_constants": [4.5, 3.0],
+        },
+        {
+        "name": "Equilibration Stage5",
+        "forces": [0.0, 2.5, 5.0, 10.0],
         "npt_flag": true,
-        "nsteps": 50000,
+        "nsteps": 100000,
         "stepsize": 0.004
-      },
-      {
-        "name": "step6",
-        "force_constants": [4.0, 2.5],
+        },
+        {
+        "name": "Equilibration Stage6",
+        "forces": [0.0, 0.0, 2.5, 5.0],
         "npt_flag": true,
-        "nsteps": 50000,
+        "nsteps": 100000,
         "stepsize": 0.004
-      },
-      {
-        "name": "step7",
-        "force_constants": [3.5, 2.0],
+        },
+        {
+        "name": "Equilibration Stage7",
+        "forces": [0.0, 0.0, 0.0, 2.5],
         "npt_flag": true,
-        "nsteps": 50000,
+        "nsteps": 100000,
         "stepsize": 0.004
-      },
-      {
-        "name": "step8",
-        "force_constants": [3.5, 1.5],
-        "npt_flag": true,
-        "nsteps": 50000,
-        "stepsize": 0.004
-      },
-      {
-        "name": "step9",
-        "force_constants": [3.0, 1.0],
-        "npt_flag": true,
-        "nsteps": 50000,
-        "stepsize": 0.004
-      },
-      {
-        "name": "step10",
-        "force_constants": [2.5, 0.5],
-        "npt_flag": true,
-        "nsteps": 50000,
-        "stepsize": 0.004
-      },      
-      {
-        "name": "step11",
-        "force_constants": [2.0, 0.0],
-        "npt_flag": true,
-        "nsteps": 50000,
-        "stepsize": 0.004
-      },      
-      {
-        "name": "step12",
-        "force_constants": [1.5, 0.0],
-        "npt_flag": true,
-        "nsteps": 50000,
-        "stepsize": 0.004
-      },      
-      {
-        "name": "step13",
-        "force_constants": [1.0, 0.0],
-        "npt_flag": true,
-        "nsteps": 50000,
-        "stepsize": 0.004
-      },      
-      {
-        "name": "step14",
-        "force_constants": [0.5, 0.0],
-        "npt_flag": true,
-        "nsteps": 50000,
-        "stepsize": 0.004
-      },
-      {
-        "name": "step15",
-        "force_constants": [0.0, 0.0],
-        "npt_flag": true,
-        "nsteps": 50000,
-        "stepsize": 0.004
-      }
-    ]
+        },
+        {
+          "name": "Equilibration Stage8",
+          "forces": [0.0, 0.0, 0.0, 0.0],
+          "npt_flag": true,
+          "nsteps": 100000,
+          "stepsize": 0.004
+          }
+      ]
 }
