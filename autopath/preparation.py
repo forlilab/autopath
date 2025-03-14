@@ -4,6 +4,7 @@ import time
 import logging
 import numpy as np
 from sys import exit
+from typing import Union, List
 
 # OpenMM imports
 from openmm import *
@@ -142,26 +143,36 @@ class SystemPreparation:
 
         return ligand_omm_topology, ligand_positions
 
-    def run(
-        self, prot_path: str = None, variants: dict = None, lig_path: str = None
-    ) -> tuple[System, Topology]:
+    def run(self, 
+            protein: str = None, 
+            variants: dict = None, 
+            ligands: Union[str,dict] = None
+            ) -> tuple[System, Topology]:
 
         start_time = time.monotonic()
 
-        if lig_path is not None:
-            lig_name = os.path.splitext(os.path.basename(lig_path))[0]
+        # if ligands is not None and protein is None:
+        #     if isinstance(ligands, str):
+        #         logging.info(f"Parametrizing ligand {os.path.basename(ligands)}..")
+        #         lig = self._sdf_to_mol(ligands)
+        #         ligand_topology, ligand_positions = self._parametrize_ligand(lig)
+        #         for res in ligand_topology.residues():
+        #             res.name ='UNK'
+        #         modeller = Modeller(ligand_topology, ligand_positions)
 
-            logging.info(f"Parametrizing ligand {lig_name}..")
+        #     elif isinstance(ligands, dict):
+        #         for lig_name, lig_path in ligands.items():
+        #             logging.info(f"Parametrizing ligand {lig_name}..")
+        #             lig = self._sdf_to_mol(lig_path)
+        #             ligand_topology, ligand_positions = self._parametrize_ligand(lig)
+        #             for res in ligand_topology.residues():
+        #                 res.name = lig_name
+        #             modeller = Modeller(ligand_topology, ligand_positions)
 
-            lig = self._sdf_to_mol(lig_path)
-            ligand_topology, ligand_positions = self._parametrize_ligand(lig)
-
-            modeller = Modeller(ligand_topology, ligand_positions)
-
-        if prot_path is not None:
-            rec_name = os.path.splitext(os.path.basename(prot_path))[0]
+        if protein is not None:
+            rec_name = os.path.splitext(os.path.basename(protein))[0]
             try:
-                protein_pdb = PDBFile(prot_path)
+                protein_pdb = PDBFile(protein)
                 logging.info(f"Loaded {rec_name} PDB..")
             except Exception as e:
                 logging.error(f"Something went wrong loading {rec_name} PDB..\n{e}")
@@ -175,19 +186,26 @@ class SystemPreparation:
                 modeller = add_variants(modeller, variants)
 
             # Add the ligand to the Modeller built from the protein structure
-            if lig_path is not None:
-                modeller.add(ligand_topology, ligand_positions)
+            if ligands is not None:
+                if isinstance(ligands, str):
+                    logging.info(f"Parametrizing ligand {os.path.basename(ligands)}..")
+                    lig = self._sdf_to_mol(ligands)
+                    ligand_topology, ligand_positions = self._parametrize_ligand(lig)
+                    for res in ligand_topology.residues():
+                        res.name ='UNK'
+                    modeller.add(ligand_topology, ligand_positions)
 
-            # logging.info(f"Parametrizing GDP..")
-            # gdp_path = '/gpfs/group/forli/mllanos/kras/input/gdp.sdf'
-            # gdp_lig = self._sdf_to_mol(gdp_path)
-            # gdp_topology, gdp_positions = self._parametrize_ligand(gdp_lig)
-            # for res in gdp_topology.residues():
-            #     res.name = 'UNK'
-            # modeller.add(gdp_topology, gdp_positions)
+                elif isinstance(ligands, dict):
+                    for lig_name, lig_path in ligands.items():
+                        logging.info(f"Parametrizing ligand {lig_name}..")
+                        lig = self._sdf_to_mol(lig_path)
+                        ligand_topology, ligand_positions = self._parametrize_ligand(lig)
+                        for res in ligand_topology.residues():
+                            res.name = lig_name
+                        modeller.add(ligand_topology, ligand_positions)
 
         # CASE: Ligand and membrane only
-        if prot_path is None and self.is_membrane:
+        if protein is None and self.is_membrane:
 
             # Center ligand at 0,0,0
             lig_com = np.mean(ligand_positions, axis=0)
@@ -251,9 +269,7 @@ class SystemPreparation:
 
         save_system(system, f"{self.out_dir}/system.xml")
         save_pdb(modeller.topology, modeller.positions, f"{self.out_dir}/system.pdb")
-        save_amber_topology(
-            modeller.topology, modeller.positions, self.forcefield, self.out_dir
-        )
+        save_amber_topology(modeller.topology, modeller.positions, self.forcefield, self.out_dir)
 
         simulation_time = time.monotonic() - start_time
         logging.info(f"Finished system preparation in {simulation_time:.2f} seconds.")
