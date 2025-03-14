@@ -16,8 +16,7 @@ class VanillaMD:
         topology: str = None,
         restrained_atoms: list[int] = None,
         HMR: bool = True,
-        temp: float = 300,
-        restart_velocities: bool = False,
+        temperature: float = 300,
         save_freq: int = 25000, # save /0.1ns
         out_dir: str = "MD",
         verbose: int = 2,
@@ -30,8 +29,7 @@ class VanillaMD:
         self.restrained_atoms = restrained_atoms
 
         self.timestep = 0.004 if HMR else 0.002
-        self.temperature = temp * openmmunit.kelvin
-        self.restart_velocities = restart_velocities
+        self.temperature = temperature * openmmunit.kelvin
 
         self.save_freq = save_freq
         self.out_dir = out_dir
@@ -47,6 +45,7 @@ class VanillaMD:
         checkpoint_file: str = None,
         run_id: str = None,
         MD_time: int = 10,
+        restart_velocities: bool = False,
     ):        
 
         start_time = time.monotonic()
@@ -69,7 +68,8 @@ class VanillaMD:
             simulation.loadCheckpoint(checkpoint_file)
 
         # Reset velocities to temperature
-        if self.restart_velocities:
+        if restart_velocities:
+            logging.info(f"Resetting velocities to temperature {self.temperature}..")
             simulation.context.setVelocitiesToTemperature(self.temperature)
 
         # Add harmonic positional restraints to protein CA
