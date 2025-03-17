@@ -47,17 +47,16 @@ def plot_atomic_rmsf(u, lig_resname:str='UNK', outname:str='rmsf.png', log_rmsf:
         with open(f'{log_fname}.csv', 'w') as f:
             for res_id, rmsf_value in enumerate(r.rmsf):
                 f.write(f'{res_id},{rmsf_value:.3f}\n')
-
+        
     return
 
 def plot_rmsd(rmsd_df:pd.DataFrame=None,
               sys_name:str=None,
               out_dir:str=None) -> None:
-    rmsd_df["rmsd"] = rmsd_df["rmsd"] * 10  # nM to A
     plt.figure(figsize=(10, 5))
     sns.lineplot(data=rmsd_df, y="rmsd", x=rmsd_df.index)
-    plt.ylabel("RMSD (A)");     plt.xlabel("Frame #")
-    plt.title(f"RMSD {sys_name}", fontsize=10)
+    plt.ylabel("RMSD (nm)");     plt.xlabel("Frame #")
+    plt.title(f"RMSD {sys_name}", fontsize=15)
     plt.tight_layout()
     plt.savefig(f"{out_dir}/{sys_name}_rmsd.png")
     plt.close()
@@ -91,7 +90,7 @@ def plot_colvar(out_dir:str=None, colvar_name:str=None):
 def plot_bias(out_dir:str=None, x_min:float=None, x_max:float=None, grid_points:int=None, colvar_name:str=None):
     sys_name = out_dir.split("/")[0]
     axis_values = np.linspace(x_min, x_max, grid_points)
-    axis_values = [round(i * 10, 2) for i in axis_values]
+    axis_values = [round(i, 2) for i in axis_values]
 
     files = glob(f"{out_dir}/bias_*")
     data = []
@@ -122,7 +121,7 @@ def plot_FE(out_dir, x_min, x_max, grid_points, colvar_name):
 
     sys_name = out_dir.split("/")[0]
     axis_values = np.linspace(x_min, x_max, grid_points)
-    axis_values = [round(i * 10, 2) for i in axis_values]
+    axis_values = [round(i, 2) for i in axis_values]
 
     files = glob(f"{out_dir}/FE_*.npy")
     data = []
@@ -149,7 +148,7 @@ def plot_FE(out_dir, x_min, x_max, grid_points, colvar_name):
 
 
 def plot_FE_2D(
-    out_dir, x_min, x_max, x_grid_points, x_name, y_min, y_max, y_grid_points, y_name
+    out_dir, x_min, x_max, x_grid_points, xCV_name, y_min, y_max, y_grid_points, yCV_name
 ):
 
     sys_name = out_dir.split("/")[0]
@@ -172,12 +171,11 @@ def plot_FE_2D(
 
         sns.heatmap(df, cmap="Spectral")  # , vmin=0, vmax=-8)
         plt.title(f"Metadynamics - {sys_name} - {walker_name}", fontsize=12)
-        plt.xlabel(x_name)
-        plt.ylabel(y_name)
+        plt.xlabel(xCV_name)
+        plt.ylabel(yCV_name)
         plt.title(f"Free Energy - {sys_name}")
         plt.tight_layout()
         plt.savefig(f"{out_dir}/{sys_name}_{walker_name}.png")
-        # plt.show()
         plt.close()
 
     return
@@ -214,37 +212,56 @@ def plot_colvar_2D(out_dir, xCV_name, yCV_name):
 
     return
 
-def plot_sMD_statistics(data:pd.DataFrame=None, sys_name:str=None, out_dir:str=None) -> None:
+def _extract_sMD_statistics(files: list = None) -> pd.DataFrame:
+    data = []
+    for f in files:
+        run_n = os.path.splitext(os.path.basename(f))[0].split("_")[2]
+
+        df = pd.read_csv(f, names=["r0", "com_dist", "force", "work"])  # [:500]
+        df["replica"] = f"rep_{run_n}"
+        df.reset_index(inplace=True, drop=False)
+        data.append(df)
+
+    data = pd.concat(data, axis=0)
+    data["time"] = data["index"] / 1000  # ps to ns
+    data.reset_index(inplace=True, drop=True)
+
+    return data
+
+def plot_sMD_statistics(files: list = None, sys_name:str=None, out_dir:str=None,return_data:bool=False) -> None:
+
+    # Get statistics from sMD .dat files
+    data = _extract_sMD_statistics(files)
 
     plt.figure(figsize=(6, 5))
     sns.lineplot(data, x="r0", y="work", hue="replica")
     plt.xlabel("r0 dist (nm)")
-    plt.ylabel("Work (KJ/mol)")
+    plt.ylabel("Work (KJ/mol/nm)")
     plt.title(f'r0 vs Work - {sys_name}')
     plt.tight_layout()
     plt.savefig(f"{out_dir}/{sys_name}-r0_vs_work.png")
     plt.close()
 
     plt.figure(figsize=(6, 5))
-    sns.lineplot(data, x="COMDist", y="work", hue="replica")
-    plt.xlabel("COM dist (nm)")
-    plt.ylabel("Work (KJ/mol)")
-    plt.title(f'COM vs Work - {sys_name}')
-    plt.tight_layout()
-    plt.savefig(f"{out_dir}/{sys_name}-com_vs_work.png")
-    plt.close()
-
-    plt.figure(figsize=(6, 5))
     sns.lineplot(data, x="r0", y="force")  # , hue='replica')
     plt.xlabel("r0 dist (nm)")
-    plt.ylabel("Force (KJ/mol)")
+    plt.ylabel("Force (KJ/mol/nm^2)")
     plt.title(f'r0 vs Force - {sys_name}')
     plt.tight_layout()
     plt.savefig(f"{out_dir}/{sys_name}-r0_vs_force.png")
     plt.close()
 
+    plt.figure(figsize=(6, 5))
+    sns.lineplot(data, x="com_dist", y="work", hue="replica")
+    plt.xlabel("COM dist (nm)")
+    plt.ylabel("Work (KJ/mol/nm)")
+    plt.title(f'COM vs Work - {sys_name}')
+    plt.tight_layout()
+    plt.savefig(f"{out_dir}/{sys_name}-com_vs_work.png")
+    plt.close()
+
     # plt.figure(figsize=(6, 5))
-    # sns.lineplot(data, x="COMDist", y="force")  # , hue='replica')
+    # sns.lineplot(data, x="com_dist", y="force")  # , hue='replica')
     # plt.xlabel("COM dist (nm)")
     # plt.ylabel("Force (KJ/mol)")
     # plt.title(sys_name)
@@ -253,7 +270,7 @@ def plot_sMD_statistics(data:pd.DataFrame=None, sys_name:str=None, out_dir:str=N
     # plt.close()
 
     # plt.figure(figsize=(6,4))
-    # sns.relplot(data, x='COMDist', y='work', hue='replica', col='replica', kind='line')
+    # sns.relplot(data, x='com_dist', y='work', hue='replica', col='replica', kind='line')
     # plt.xlabel('COM dist (nm)'); plt.ylabel('Work (KJ/mol)')
     # # plt.title(sys_name)
     # plt.tight_layout()
@@ -269,31 +286,14 @@ def plot_sMD_statistics(data:pd.DataFrame=None, sys_name:str=None, out_dir:str=N
     # plt.close()
 
     # plt.figure(figsize=(6,5))
-    # sns.lineplot(data, x=data['time'], y='COMDist', hue='replica')
+    # sns.lineplot(data, x=data['time'], y='com_dist', hue='replica')
     # plt.xlabel('time (ns)'); plt.ylabel('COM dist (nm)')
     # plt.title(sys_name)
     # plt.tight_layout()
     # plt.savefig(f'{out_dir}/{sys_name}-time_vs_com.png')
     # plt.close()
 
-    return
-
-
-def plot_clusters(df_clustered, closest_points, sys_name, out_dir):
-
-    plt.scatter(
-        df_clustered["rmsd"],
-        df_clustered["cog_d"],
-        marker="o",
-        c=df_clustered["cluster"],
-        alpha=0.5,
-    )
-    for idx, row in closest_points.iterrows():
-        plt.scatter(row["rmsd"], row["cog_d"], marker="x", c="black", alpha=1, zorder=3)
-
-    plt.xlabel("RMSD (nm)");    plt.ylabel("COG dist (nm)")
-    plt.title(f"{sys_name} sMD centroids")
-    plt.tight_layout()
-    plt.savefig(f"{out_dir}/{sys_name}_sMD_cluster_centroids.png")
-    plt.close()
-    return
+    if return_data:
+        return data
+    else:
+        return None

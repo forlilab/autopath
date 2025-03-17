@@ -9,9 +9,16 @@ from openmm.app import *
 import openmm.unit as openmmunit
 
 import cvpack
-
+from glob import glob
 from autopath.utils import *
-from autopath.analysis import plot_bias, plot_colvar, plot_FE, plot_FE_2D, plot_colvar_2D
+from autopath.analysis import (
+    plot_bias,
+    plot_colvar,
+    plot_FE,
+    plot_FE_2D,
+    plot_colvar_2D,
+)
+
 
 class MetadynamicsMD:
 
@@ -40,6 +47,8 @@ class MetadynamicsMD:
 
         self.ligand_atoms = ligand_atoms
         self.pocket_atoms = pocket_atoms
+        
+        # Im not exposing all options here because I want to keep it simple
         self.restrained_atoms = restrained_atoms
 
         self.platform = select_platform("fastest")
@@ -50,6 +59,30 @@ class MetadynamicsMD:
         self.store_CV = 25000  # log the stored COLVAR every 100ps
 
         return
+
+    def _get_reference_dict(
+        self,
+        pdb_file,
+        atoms_names: list[str] = ["CA"],
+        system_atom_indexes: list[int] = None,
+    ) -> dict[int, tuple[float, float, float]]:
+        """
+        Get the reference dictionary for the RMSD CV
+        """
+        pdb = PDBFile(pdb_file)
+        reference_positions = pdb.positions
+        reference_atoms = pdb.topology.atoms()
+
+        reference_dict = {}
+        for atom in reference_atoms:
+            if atom.name in atoms_names:
+                reference_dict[atom.index] = (
+                    reference_positions[atom.index] / openmmunit.nanometers
+                )
+
+        reference_dict = dict(zip(system_atom_indexes, list(reference_dict.values())))
+
+        return reference_dict
 
     def run(
         self,
@@ -101,10 +134,12 @@ class MetadynamicsMD:
             self.temperature, 1 / openmmunit.picoseconds, self.timestep
         )
         # integrator.setRandomNumberSeed(int(rep_idx))
-        
+
         if self.topology is None:
             if pdb_file is None:
-                logging.error(f"Either a PDB or a prmtop file must be provided to get the topology from")
+                logging.error(
+                    f"Either a PDB or a prmtop file must be provided to get the topology from"
+                )
                 exit(1)
             else:
                 pdb = PDBFile(pdb_file)
@@ -121,11 +156,14 @@ class MetadynamicsMD:
                 logging.debug(f"Setting positions from PDB file {pdb_file}")
                 simulation.context.setPositions(pdb.positions)
             else:
-                logging.error(f"Either a PDB or a checkpoint file must be provided to get coordinates from")
+                logging.error(
+                    f"Either a PDB or a checkpoint file must be provided to get coordinates from"
+                )
                 exit(1)
 
         # Add harmonic positional restraints to protein CA
         input_positions = simulation.context.getState(getPositions=True).getPositions()
+        num_atoms = self.topology.getNumAtoms()
 
         if self.restrained_atoms is not None:
             add_harmonic_restraints(
@@ -148,7 +186,7 @@ class MetadynamicsMD:
             self.out_dir,
             f"metadynamics_{run_id}",
             total_steps,
-            bias_frequency,
+            saveFrequency,
         )
 
         # if mMD_CV == "com":
@@ -176,54 +214,36 @@ class MetadynamicsMD:
             )
 
         elif mMD_CV == "rmsd":
-
-            input_positions = simulation.context.getState(
-                getPositions=True
-            ).getPositions()
-            num_atoms = self.topology.getNumAtoms()
             cv = cvpack.RMSD(input_positions, self.ligand_atoms, num_atoms)
 
         elif mMD_CV == "rmsd_states":
 
-            model_pdb = PDBFile(f"2hu4/system.pdb")
-            reference_positions = model_pdb.positions
-            reference_residues = model_pdb.topology.residues()
-            ref_residues = [r for r in reference_residues if r.name == "UNK"]
-            logging.info([f"REFERENCE {r.name}_{r.index}" for r in ref_residues])
+            atom_names_to_match = ["CA"]
+            system_residues = [
+                r
+                for r in self.topology.residues()
+                if r.name not in ["UNK", "HOH", "NA", "CL"]
+            ]
 
-            reference_dict = {}
-            for residue in ref_residues:
-                for atom in residue.atoms():
-                    if not atom.name.startswith("H"):
-                        reference_dict[atom.index] = (
-                            reference_positions[atom.index] / openmmunit.nanometers
-                        )
-
-            logging.info(
-                f"Matched {len(reference_dict)} heavy atoms from the reference"
-            )
-
-            n_atoms = self.topology.getNumAtoms()
-
-            system_residues = [r for r in self.topology.residues() if r.name == "UNK"]
-            logging.info([f"SYSTEM {r.name}_{r.index}" for r in system_residues])
-
-            system_atoms = []
+            atom_indexes_to_match = []
             for residue in system_residues:
                 for atom in residue.atoms():
-                    if not atom.name.startswith("H"):
-                        system_atoms.append(atom.index)
+                    if atom.name in atom_names_to_match:
+                        atom_indexes_to_match.append(atom.index)
 
-            logging.info(f"Matched {len(system_atoms)} heavy atoms from the system")
-
-            # changing keys of reference dictionary to match system's atom names
-            reference_dict = dict(zip(system_atoms, list(reference_dict.values())))
+            states_pdbs = glob("input/milestone_*.pdb")
+            milestones_dicts = [
+                self._get_reference_dict(
+                    pdb, atom_names_to_match, atom_indexes_to_match
+                )
+                for pdb in states_pdbs
+            ]
 
             cv = cvpack.PathInRMSDSpace(
                 metric=cvpack.path.progress,
-                milestones=[reference_dict, reference_dict],
+                milestones=milestones_dicts,
                 sigma=0.01 * openmmunit.nanometers,
-                numAtoms=n_atoms,
+                numAtoms=num_atoms,
             )
 
         elif mMD_CV == "nc":
@@ -303,6 +323,8 @@ class MetadynamicsMD:
         plot_colvar(self.out_dir, mMD_CV)
         plot_bias(self.out_dir, grid_min, grid_max, grid, mMD_CV)
         plot_FE(self.out_dir, grid_min, grid_max, grid, mMD_CV)
+        plot_bias(self.out_dir, grid_min, grid_max, grid, mMD_CV)
+        plot_FE(self.out_dir, grid_min, grid_max, grid, mMD_CV)
 
         # Save everything
         final_positions = simulation.context.getState(getPositions=True).getPositions()
@@ -319,7 +341,7 @@ class MetadynamicsMD:
     def run2D(
         self,
         pdb_file: str = None,
-        ref_ligand: str = None,
+        # ref_ligand: str = None,
         system: str = None,
         checkpoint_file: str = None,
         run_id: str = None,
@@ -375,7 +397,7 @@ class MetadynamicsMD:
                     f"Either a PDB or a checkpoint file must be provided to get coordinates from"
                 )
                 exit(1)
-                
+
         # Add harmonic positional restraints to protein CA
         input_positions = simulation.context.getState(getPositions=True).getPositions()
 
@@ -474,56 +496,18 @@ class MetadynamicsMD:
             gridWidth=grid_A,
         )
 
-        ##################### RMSD CV #################################
-        input_positions = simulation.context.getState(getPositions=True).getPositions()
-        n_atoms = self.topology.getNumAtoms()
-
-        ref_pdb = PDBFile(ref_ligand)
-        reference_positions = ref_pdb.positions
-        reference_atoms = ref_pdb.topology.atoms()
-
-        reference_dict_B = {}
-        reference_dict = {}
-        for atom in reference_atoms:
-            if not atom.name.startswith("H"):
-                reference_dict[atom.index] = (
-                    reference_positions[atom.index] / openmmunit.nanometers
-                )
-                reference_dict_B[atom.index] = (atom.name, reference_positions[atom.index])
-        print(f"Matched {len(reference_dict)} heavy atoms from the reference")
-        
-        print('reference_dict')
-        print(reference_dict_B)
-
-        system_residues = [r for r in self.topology.residues() if r.name == "UNK"]
-        print([f"SYSTEM {r.name}_{r.index}" for r in system_residues])
-
-        system_atoms = []
-        system_dict_B = {}
-        for residue in system_residues:
-            for atom in residue.atoms():
-                if not atom.name.startswith("H"):
-                    system_atoms.append(atom.index)
-                    system_dict_B[atom.index] = (atom.name, input_positions[atom.index])
-        print(f"Matched {len(system_atoms)} heavy atoms from the system")
-
-        print('system_dict')
-        print(system_dict_B)
-
-        # # changing keys of reference dictionary to match system's atom names
-        reference_dict = dict(zip(system_atoms, list(reference_dict.values())))
-
-        print('system_dict')
-        print(reference_dict)
-
-        rmsd = cvpack.RMSD(input_positions, self.ligand_atoms, n_atoms)
+        rmsd_6hdh = cvpack.RMSD(
+            referencePositions=reference_dict_6hdh,
+            group=atom_indexes_to_match,
+            numAtoms=n_atoms,
+        )
 
         grid_width_B = hill_width_B / 5
         grid_min_B, grid_max_B = grid_dimensions_B
         grid_B = int(abs(grid_min_B - grid_max_B) / grid_width_B)
 
-        rmsd_cv = BiasVariable(
-            rmsd,
+        rmsd_6hdh_cv = BiasVariable(
+            rmsd_6hdh,
             minValue=grid_min_B,
             maxValue=grid_max_B,
             biasWidth=hill_width_B,
@@ -570,9 +554,10 @@ class MetadynamicsMD:
         # )
 
         ##############################################################
+
         meta = Metadynamics(
             system,
-            [com_cv, rmsd_cv],
+            [rmsd_6ydj_cv, rmsd_6hdh_cv],
             self.temperature,
             bias_factor,
             hill_height,
@@ -613,17 +598,17 @@ class MetadynamicsMD:
         np.save(os.path.join(self.out_dir, f"FE_{run_id}.npy"), meta.getFreeEnergy())
 
         # Create plots for all current runs
-        plot_colvar_2D(self.out_dir, "COM", "RMSD")
+        plot_colvar_2D(self.out_dir, "RMSD_A", "RMSD_B")
         plot_FE_2D(
             self.out_dir,
             grid_min_A,
             grid_max_A,
             grid_A,
-            "COM",
+            "rmsd_6ydj",
             grid_min_B,
             grid_max_B,
             grid_B,
-            "RMSD",
+            "rmsd_6hdh",
         )
 
         final_positions = simulation.context.getState(getPositions=True).getPositions()
@@ -635,3 +620,4 @@ class MetadynamicsMD:
         logging.info(f"Finished {run_id} metadynamics in {simulation_time/60:.2f} min.")
 
         return
+

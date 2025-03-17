@@ -4,6 +4,7 @@ import logging
 import numpy as np
 import pandas as pd
 from sys import stdout, exit
+from glob import glob
 
 from typing import Union, Tuple, Optional, List
 from collections import defaultdict
@@ -16,36 +17,54 @@ from pdbfixer.pdbfixer import PDBFixer
 from openmmtools.utils import get_fastest_platform
 
 import parmed
+import pickle
 
 import MDAnalysis as mda
 from MDAnalysis.analysis import align
 from MDAnalysis.transformations import wrap
 from MDAnalysis.core.universe import Universe
 from MDAnalysis.analysis.rms import RMSD, RMSF
+from scipy.spatial.distance import cdist
+
+import seaborn as sns
+import matplotlib.pyplot as plt
+import matplotlib.style as style
+style.use("fivethirtyeight")
 
 import pytraj as pt
 
-from sklearn.cluster import KMeans
+from rdkit import Chem
+from rdkit.Chem.Draw import SimilarityMaps
 
-from autopath.analysis import plot_clusters
 
+def save_model(model, filename):
+    with open(filename, 'wb') as file:
+        pickle.dump(model, file)
+    return None
+
+def load_model(filename):
+    with open(filename, 'rb') as file:
+        model = pickle.load(file)
+    return model
 
 def align_trajectory(
     prmtop_file: str = None,
     traj_file: Union[str, list] = None,
-    out_fname: str = None,
+    stride: int = None,
+    super_mask: str = "@CA,C,N",
     strip_mask: str = None,  #':HOH,NA,CL,K,POP'
+    out_fname: str = None,
 ) -> None:
 
-    ptraj = pt.iterload(traj_file, prmtop_file)
+    ptraj = pt.iterload(traj_file, prmtop_file, stride=stride)
     ptraj = ptraj.autoimage()
     ptraj = ptraj.center()
-    ptraj = ptraj.superpose(ref=0, mask="@CA,C,N")
+    ptraj = ptraj.superpose(ref=0, mask=super_mask)
 
     if strip_mask is not None:
         ptraj = ptraj.strip(strip_mask)
-        pt.save(f"{out_fname}_dry.prmtop", ptraj.top, overwrite=True)
-    ptraj.save(f"{out_fname}.dcd")
+        pt.save(out_fname.replace('.dcd','_dry.prmtop'), ptraj.top, overwrite=True)
+    ptraj.save(out_fname)
 
     return
 
@@ -150,14 +169,7 @@ def save_amber_topology(
     forcefield: app.ForceField = None,
     out_path: str = None,
 ) -> None:
-    """Save the topology files necessary for MD simulations according to the simulation engine specified.
 
-    Args:
-        topology (app.Topology): openmm topology
-        positions (list): list of 3D coordinates of the topology
-        forcefield (app.Forcefield): openmm forcefield
-        out_path (str): output path to where to save the topology files
-    """
     os.makedirs(out_path, exist_ok=True)
     new_system = forcefield.createSystem(
         topology,
@@ -206,24 +218,20 @@ def add_reporters(
     suffix: str = None,
     total_steps: int = 250000,
     logperiod: int = 2500,
+    verbose: int = 2,
 ) -> None:
     """Set up the reporters"""
 
+    logging.debug(f"Adding reporters to the simulation")
     simulation.reporters = []  # Delete all current reporters
-
+    
     simulation.reporters.append(
         StateDataReporter(
             stdout,
             logperiod,
             step=True,
             time=True,
-            potentialEnergy=True,
-            kineticEnergy=True,
-            totalEnergy=True,
-            temperature=True,
             progress=True,
-            volume=True,
-            density=True,
             remainingTime=True,
             speed=True,
             totalSteps=total_steps,
@@ -232,36 +240,37 @@ def add_reporters(
     )
 
     simulation.reporters.append(
-        StateDataReporter(
-            f"{out_dir}/statistics_{suffix}.csv",
-            logperiod,
-            step=True,
-            time=True,
-            potentialEnergy=True,
-            kineticEnergy=True,
-            totalEnergy=True,
-            temperature=True,
-            progress=True,
-            volume=True,
-            density=True,
-            remainingTime=True,
-            speed=True,
-            totalSteps=total_steps,
-        )
-    )
-
-    # Save coordinates every N logperiods
-    simulation.reporters.append(
         DCDReporter(
             f"{out_dir}/trajectory_{suffix}.dcd",
             reportInterval=logperiod,
             enforcePeriodicBox=False,  # WARNING this compromises autoimaging afterwards in some cases
         )
     )
+
+    if verbose > 0:
+
+        simulation.reporters.append(
+            StateDataReporter(
+                f"{out_dir}/statistics_{suffix}.csv",
+                logperiod,
+                step=True,
+                time=True,
+                potentialEnergy=True if verbose > 1 else False,
+                kineticEnergy=True if verbose > 1 else False,
+                totalEnergy=True if verbose > 1 else False, 
+                temperature=True if verbose > 1 else False,
+                progress=True,
+                volume=True if verbose > 1 else False,
+                density=True if verbose > 1 else False,
+                remainingTime=True,
+                speed=True,
+                totalSteps=total_steps,
+            )
+        )
+
     return
 
-
-def add_barostat(system, temp: float=298.15, is_membrane: bool=False) -> None:
+def add_barostat(system: System=None, temp: float=300, is_membrane: bool=False) -> System:
     """Add an appropriate barostat to the system.
     Simulation for membrane proteins are run at 0 surface tension and semiisotropic pressure
     """
@@ -282,16 +291,36 @@ def add_barostat(system, temp: float=298.15, is_membrane: bool=False) -> None:
 
     system.addForce(barostat)
 
-    return
+    return system
 
+def add_variants(modeller: Modeller, variants_dict: dict = None) -> Modeller:
+    """Adds variants for specific protonation states.
 
-def _print_current_forces(system: System = None) -> None:
-    for index, fc in enumerate(system.getForces()):
-        logging.info(
-            f"Force Index:{index} | Name: {fc.getName()} | Group: {fc.getForceGroup()}"
-        )
-    return
+    :param modeller: OpenMM Modeller
+    :type Modeller: Modeller
+    :param variants_dict: dict of variants to apply for the protonation states
+    :type variants: dict
+    :return: Modeller object with added protonation states
+    :rtype: Modeller
+    """
 
+    variants = list()
+    residues = list(modeller.topology.residues())
+    mapping = defaultdict(list)
+    for r in residues:
+        mapping[r.chain.id].append(int(r.id))
+
+    for chain in mapping:
+        for res_number in mapping[chain]:
+            key = f"{chain}:{res_number}"
+            if key in variants_dict:
+                variants.append(variants_dict[key])
+            else:
+                variants.append(None)
+
+    modeller.addHydrogens(variants=variants)
+
+    return modeller 
 
 def get_protein_ha(topology: app.Topology, lig_name: str = "UNK") -> Tuple[list, list]:
 
@@ -351,25 +380,36 @@ def get_pocket_ha(topology: app.Topology, pocket_resid: list[int] = None) -> lis
 
     return pocket_ha_idx
 
+def get_COM_dist(simulation, groupA:list[int]=None, groupB:list[int]=None, weighByMass:bool=True) -> float:
+    
+    # Get positions
+    state = simulation.context.getState(getPositions=True, getVelocities=False)
+    positions = state.getPositions(asNumpy=True) / openmmunit.nanometers
+    atoms = [atom for atom in simulation.topology.atoms()]
 
-def get_COG_dist(simulation, groupA, groupB) -> float:
+    # Function to calculate center (COM or COG)
+    def _get_center(group, weighByMass):
+        group_positions = positions[group]  # Get positions for the group
 
-    # Get COM distance between two groups of atoms
-    positions = simulation.context.getState(getPositions=True).getPositions()
-    g1_positions = [positions[index] / openmmunit.nanometers for index in groupA]
-    g2_positions = [positions[index] / openmmunit.nanometers for index in groupB]
-    dist = np.linalg.norm(
-        np.mean(np.asarray(g1_positions), axis=0)
-        - np.mean(np.asarray(g2_positions), axis=0)
-    )
+        if weighByMass:
+            masses = np.array([atom.element.mass.value_in_unit(openmmunit.dalton) for atom in atoms if atom.index in group])
+            center = np.average(group_positions, axis=0, weights=masses)  # Weighted average for COM
+        else:
+            center = np.mean(group_positions, axis=0)  # Simple mean for COG
+        return center
 
-    return dist  # This is unitless but its nm because of OpenMM
+    # Calculate centers for both groups and their distance
+    centerA = _get_center(groupA, weighByMass)
+    centerB = _get_center(groupB, weighByMass)
+    dist = np.linalg.norm(centerA - centerB)
+
+    return dist  # Unitless, but effectively in nanometers because.... openMM
 
 
 def calculate_com_distance(
-    u, ligand_atoms=None, pocket_atoms=None, weighByMass: bool = False
+    u, ligand_atoms=None, pocket_atoms=None, weighByMass: bool = True
 ) -> pd.DataFrame:
-
+    # Distance will be in Angstroms because of MDanalysis
     distances = []
     for ts in u.trajectory:
         if weighByMass:
@@ -383,51 +423,83 @@ def calculate_com_distance(
 
     return pd.DataFrame(distances, columns=["com_d"], index=range(len(distances)))
 
+def compute_rmsd(u, u_ref,
+                    alig_select:str='backbone', 
+                    groupselections={}, 
+                    save_aligned=False,
+                    aligned_filename='aligned_trajectory.dcd',
+                    do_plot=True,
+                    out_dir=None
+                    ) -> pd.DataFrame:
+    r = RMSD(u, 
+             u_ref,
+             select=alig_select,
+             groupselections=list(groupselections.values()),
+             ref_frame=0).run()
 
-def get_ligand_rmsd(
-    u: Universe = None,
-    u_ref: Universe = None,
-    lig_resname: str = "UNK",
-    alig_select: str = "ligand",
-):
-    """A function to calculate the ligand RMSD from a trajectory.
+    rmsd_results = r.results.rmsd  # Do not skip any columns
+    columns = ['frame','time (ps)', f'RMSD_selected_alignment'] + [f'RMSD_{group}' for group in groupselections.keys()]
+    rmsd_df = pd.DataFrame(rmsd_results, columns=columns)
 
-    Parameters
-    ----------
-    'u : Universe
-        MDAnalysis Universe
-    lig_resname : str
-        Residue name of the ligand that was biased.
-    alig_select : str
-        Selection to be considered in the alignment.
-    Returns
-    -------
-    rmsds : np.array
-        ligand rmsd for every frame of the trajectory.
+    if save_aligned:
+        with mda.Writer(aligned_filename, n_atoms=u.atoms.n_atoms) as W:
+            for ts in u.trajectory:
+                W.write(u.atoms)
+
+    if do_plot:
+        
+        plt.figure(figsize=(10, 5))
+        for col in columns[3:]:
+            sns.lineplot(x='frame', y=col, data=rmsd_df)
+            plt.xlabel('Frame');            plt.ylabel(f'RMSD (A)')
+            plt.title(f'{col} RMSD')
+            plt.tight_layout()
+            plt.savefig(f'{out_dir}/{col}.png')
+            plt.close()
+
+    return rmsd_df
+
+def plot_atomic_rmsf(u, lig_resname:str='UNK', outname:str='rmsf.png', log_rmsf:bool=False):
     """
-    if alig_select == "ligand":
-        alig_select = f"resname {lig_resname} and not name H*"
+    Draws a RMSF (Root Mean Square Fluctuation) plot for a specified ligand and saves it as an image file.
+    Parameters:
+    -----------
+    u : MDAnalysis.Universe
+        The MDAnalysis universe object containing the molecular dynamics trajectory and topology.
+    lig_resname : str, optional
+        The residue name of the ligand to analyze (default is 'UNK').
+    outname : str, optional
+        The name of the output image file where the RMSF plot will be saved (default is 'rmsf.png').
+    log_rmsf : bool, optional
+        If True, logs the RMSF values to a CSV file with the same name as the output image (default is False).
+    Returns:
+    --------
+    None
+        This function does not return any value. It saves the RMSF plot and optionally logs the RMSF values.
+    """
 
-    # Make sure molecules are whole before rmsd calculation
-    # transform = wrap(u.atoms)
-    # u.trajectory.add_transformations(transform)
+    lig_select = u.select_atoms(f'resname {lig_resname}')
+    r = RMSF(atomgroup=lig_select).run()
+    probe_mol = lig_select.convert_to('RDKIT')
+    probe_mol.Compute2DCoords()
+    probe_mol = Chem.RemoveHs(probe_mol)
+    fig = SimilarityMaps.GetSimilarityMapFromWeights(probe_mol, r.rmsf, step=0.01, alpha=0.3, contourLines=5) 
+    fig.savefig(outname, bbox_inches='tight')
+    
+    # Optionally, log the RMSF values for further analysis
+    if log_rmsf:
+        log_fname = os.path.splitext(outname)[0]
+        with open(f'{log_fname}.csv', 'w') as f:
+            for res_id, rmsf_value in enumerate(r.rmsf):
+                f.write(f'{res_id},{rmsf_value:.3f}\n')
+    return
 
-    # Align each frame using the backbone as reference
-    # Calculate the RMSD of ligand heavy atoms
-
-    r = RMSD(
-        atomgroup=u,
-        reference=u_ref,
-        select=alig_select,
-        groupselections=[f"resname {lig_resname} and not name H*"],
-        ref_frame=0,
-    ).run()
-
-    rmsds = r.results.rmsd[1:, -1]
-    rmsds = rmsds / 10  # angstroms to nm
-
-    return pd.DataFrame(rmsds, columns=["rmsd"], index=range(len(rmsds)))
-
+def _print_current_forces(system: System = None) -> None:
+    for index, fc in enumerate(system.getForces()):
+        logging.info(
+            f"Force Index:{index} | Name: {fc.getName()} | Group: {fc.getForceGroup()}"
+        )
+    return
 
 def _remove_force(force_name: str = None, system: System = None, simulation=None):
     """Remove a force from an OpenMM system based on its name."""
@@ -646,247 +718,62 @@ def add_cylindrical_restraints(
 
     return
 
-def extract_sMD_statistics(files: list = None) -> pd.DataFrame:
-    data = []
-    for f in files:
-        run_n = os.path.splitext(os.path.basename(f))[0].split("_")[2]
-
-        df = pd.read_csv(f, names=["r0", "COMDist", "force", "work"])  # [:500]
-        df["replica"] = f"rep_{run_n}"
-        df.reset_index(inplace=True, drop=False)
-        data.append(df)
-
-    data = pd.concat(data, axis=0)
-    data["time"] = data["index"] / 1000  # ps to ns
-    data.reset_index(inplace=True, drop=True)
-
-    return data
-
-
-# Find the closest points to the centroids
-def find_closest_points(X, centroids):
-    closest_points = []
-    for centroid in centroids:
-        distances = np.linalg.norm(X - centroid, axis=1)
-        closest_point_index = np.argmin(distances)
-        closest_points.append(closest_point_index)
-    return closest_points
-
-
-def cluster_data(
-    data: pd.DataFrame = None,
-    var_names: list = None,
-    n_clust: int = 10,
-    weight_by_dist: bool = False,
+def find_closest_points(
+    out_dir, x_min, x_max, x_grid_points, x_name, 
+    y_min, y_max, y_grid_points, y_name, ref_point, num_neighbors=5
 ):
-
-    if weight_by_dist:
-        kmeans_weights = 1 / np.array(data["cog_d"].values)
-    else:
-        kmeans_weights = None
-
-    X = data[var_names].values
-    kmeans = KMeans(n_clusters=n_clust, random_state=42, n_init="auto").fit(
-        X, sample_weight=kmeans_weights
-    )
-    data["cluster"] = kmeans.labels_
-    centroids = kmeans.cluster_centers_
-
-    # This is to order cluster centroids or milestones by distance
-    cluster_means = data.groupby("cluster")[var_names].mean().reset_index()
-    sorted_clusters = cluster_means.sort_values(by="cog_d").reset_index(drop=True)
-    sorted_clusters["new_cluster"] = range(len(sorted_clusters))
-    cluster_mapping = sorted_clusters.set_index("cluster")["new_cluster"].to_dict()
-    data["cluster"] = data["cluster"].map(cluster_mapping)
-
-    closest_points_indices = find_closest_points(X, centroids)
-    closest_points_df = data.iloc[closest_points_indices]
-
-    return data, closest_points_df
-
-
-def cluster_pulling_MD(
-    traj_files: list = None,
-    equilibrated_pdb: str = None,
-    prmtop_file: str = None,
-    lig_resname: str = "UNK",
-    pocket_selection: str = None,
-    n_clusters: int = 10,
-    sys_name: str = None,
-    out_dir: str = None,
-) -> None:
-
-    os.makedirs(out_dir, exist_ok=True)
-
-    distances = []
-
-    u_ref = mda.Universe(equilibrated_pdb)
-    reference = u_ref.select_atoms("protein and name CA")
-
-    for traj in traj_files:
-
-        run_n = os.path.splitext(os.path.basename(traj))[0].split("_")[2]
-
-        u = mda.Universe(prmtop_file, traj, in_memory=True)
-        ligand_atoms = u.select_atoms(f"resname {lig_resname} and (not name H*)")
-
-        aligner = align.AlignTraj(
-            u, reference=reference, select="protein and name CA", in_memory=True
-        ).run()
-
-        pocket_atoms = u.select_atoms(pocket_selection)
-
-        cog_d = calculate_com_distance(u, ligand_atoms, pocket_atoms)
-        rmsd = get_ligand_rmsd(u, u_ref, lig_resname, alig_select="ligand")
-
-        dat = pd.concat([cog_d, rmsd], axis=1)
-        dat["replica"] = f"rep_{run_n}"
-        distances.append(dat)
-
-    df = pd.concat(distances, axis=0)
-    df.reset_index(inplace=True, drop=False)
-    df.dropna(inplace=True)
-
-    # df = df[df['cog_d'] <= 1.5]
-
-    df_clustered, closest_points = cluster_data(df, ["rmsd", "cog_d"], n_clusters)
-
-    plot_clusters(df_clustered, closest_points, sys_name, out_dir)
-
-    write_centroids_pdb(closest_points, prmtop_file, sys_name, out_dir)
-
-    return
-
-
-def cluster_milestone_pdbs(
-    files: list = None,
-    lig_resname: str = "UNK",
-    pocket_selection: str = None,
-    n_clust: int = 10,
-):
-    distances = []
-    for f in files:
-        u = mda.Universe(f, in_memory=True)
-        pocket_atoms = u.select_atoms(pocket_selection)
-        ligand_atoms = u.select_atoms(f"resname {lig_resname} and (not name H*)")
-        cog_dist = calculate_com_distance(u, ligand_atoms, pocket_atoms)
-        # rmsd = get_ligand_rmsd(u, lig_resname, alig_select='ligand')
-        # data = pd.concat([cog_dist, rmsd], axis=1)
-        cog_dist["fname"] = f
-        distances.append(cog_dist)
-
-    df_dist = pd.concat(distances, axis=0)
-    clustered_data, milestones = cluster_data(df_dist, ["cog_d"], n_clust)
-    milestones.sort_values(by="cog_d", ascending=False, inplace=True)
-
-    return clustered_data, milestones
-
-
-def get_most_diverse_points(
-    centroids_df: pd.DataFrame, var: str = "final_dist", n_points: int = 5
-):
-
-    points = centroids_df[var]
-
-    # Ensure n is less than the total number of points
-    assert n_points < len(
-        centroids_df
-    ), "n must be less than the total number of points"
-
-    selected_indices = []
-
-    # Randomly select the first point and add it to the list
-    selected_indices.append(np.random.choice(len(points)))
-
-    # Loop until we have selected n points
-    while len(selected_indices) < n_points:
-        # Calculate the distances between each point and the set of selected points
-        distances = np.array(
-            [
-                min([np.linalg.norm(points[i] - points[j]) for j in selected_indices])
-                for i in range(len(points))
-            ]
-        )
-
-        # Exclude already selected points by setting their distances to -1
-        distances[selected_indices] = -1
-
-        # Select the point with the maximum distance to the selected points
-        next_point_index = np.argmax(distances)
-        selected_indices.append(next_point_index)
-
-    return centroids_df.iloc[selected_indices]
-
-
-def write_centroids_pdb(
-    closest_points_df: pd.DataFrame = None,
-    prmtop_file: str = None,
-    sys_name: str = None,
-    out_dir: str = None,
-):
-
-    os.makedirs(f"{sys_name}/milestones", exist_ok=True)
-
-    for idx, row in closest_points_df.iterrows():
-
-        replica = row["replica"].split("_")[1]
-        milestone = row["cluster"] + 1  # starts from 1
-        frame = row["index"]
-
-        traj_file = f"{sys_name}/sMD/trajectory_sMD_{replica}.dcd"
-        u = mda.Universe(prmtop_file, traj_file, in_memory=True)
-
-        # Get the frame and write a pdb
-        u.trajectory[frame]
-        u.atoms.write(f"{out_dir}/milestone_{milestone}.pdb")
-
-    return
-
-
-def add_variants(modeller: Modeller, variants_dict: dict = None) -> Modeller:
-    """Adds variants for specific protonation states.
-
-    :param modeller: OpenMM Modeller
-    :type Modeller: Modeller
-    :param variants_dict: dict of variants to apply for the protonation states
-    :type variants: dict
-    :return: Modeller object with added protonation states
-    :rtype: Modeller
     """
+    This function finds the closest grid points in the heatmap data to a given reference point.
+    
+    Parameters:
+    - out_dir: Directory containing the heatmap .npy files.
+    - x_min, x_max: Min and max values of the x axis in the plot.
+    - x_grid_points: Number of grid points along the x axis.
+    - x_name: Label name for the x axis.
+    - y_min, y_max: Min and max values of the y axis in the plot.
+    - y_grid_points: Number of grid points along the y axis.
+    - y_name: Label name for the y axis.
+    - ref_point: The reference point on the plot (x_ref, y_ref) whose neighbors you want to find.
+    - num_neighbors: Number of closest points to retrieve.
+    
+    Returns:
+    A DataFrame of the closest points and their coordinates (x, y) in plot units.
+    """
+    
+    # Extract system name from directory
+    sys_name = out_dir.split("/")[0]
 
-    variants = list()
-    residues = list(modeller.topology.residues())
-    mapping = defaultdict(list)
-    for r in residues:
-        mapping[r.chain.id].append(int(r.id))
+    # Generate the x and y axis values (matching the plot)
+    x_values = np.linspace(x_min, x_max, x_grid_points)
+    y_values = np.linspace(y_min, y_max, y_grid_points)
 
-    for chain in mapping:
-        for res_number in mapping[chain]:
-            key = f"{chain}:{res_number}"
-            if key in variants_dict:
-                variants.append(variants_dict[key])
-            else:
-                variants.append(None)
+    # Load the first FE data file (assuming there's one file per walker)
+    file_fe = glob(f"{out_dir}/FE_*.npy")[0]
+    np_data = np.load(file_fe)
+    np_data = np_data * 0.239006  # Convert from KJ to Kcal
 
-    modeller.addHydrogens(variants=variants)
+    # Reshape np_data into a list of points with (x, y) coordinates
+    grid_x, grid_y = np.meshgrid(x_values, y_values)
+    grid_points = np.column_stack((grid_x.ravel(), grid_y.ravel()))
+    
+    # Reference point provided in plot axis units
+    ref_point = np.array([ref_point])  # Ensure it's in the correct shape for cdist
 
-    return modeller
+    # Use scipy to calculate the Euclidean distance from each grid point to the reference point
+    distances = cdist(grid_points, ref_point, metric='euclidean').ravel()
 
+    # Find the indices of the closest points
+    closest_indices = np.argsort(distances)[:num_neighbors]
 
-# from scipy.optimize import fsolve
-# from scipy.interpolate import CubicSpline
+    # Retrieve the closest points in grid coordinates and their corresponding values in np_data
+    closest_points = grid_points[closest_indices]
+    closest_values = np_data.ravel()[closest_indices]
 
-# def find_inflexion_points(X, Y):
-
-#         # Fit a cubic spline to the data
-#         cs = CubicSpline(X, Y)
-
-#         # Define the second derivative of the spline
-#         def second_derivative(x):
-#             return cs(x, 2)  # 2 indicates the second derivative
-
-#         # Find potential inflection points by solving second_derivative(x) = 0
-#         initial_guesses = np.linspace(X.min(), X.max(), num=3)
-#         inflexion_points = fsolve(second_derivative, initial_guesses)
-
-#         return inflexion_points
+    # Prepare a DataFrame with the results
+    closest_df = pd.DataFrame({
+        'x_value': closest_points[:, 0],
+        'y_value': closest_points[:, 1],
+        'FE_value': closest_values
+    })
+    
+    return closest_df

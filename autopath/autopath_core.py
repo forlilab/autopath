@@ -15,6 +15,7 @@ from openmm.unit import *
 # AutoPath imports
 from autopath.utils import *
 from autopath.analysis import *
+import warnings
 from autopath import (
     SystemPreparation,
     Equilibration,
@@ -23,6 +24,12 @@ from autopath import (
     MetadynamicsMD,
 )
 
+# THIS CLASS IS NOT USED ANYMORE
+warnings.warn(
+    "The AutoPath class is not functional and has to be updated.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 class AutoPath:
     def __init__(

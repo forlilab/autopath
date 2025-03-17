@@ -4,6 +4,7 @@ import time
 import logging
 import numpy as np
 from sys import exit
+from typing import Union, List
 
 # OpenMM imports
 from openmm import *
@@ -40,9 +41,11 @@ class SystemPreparation:
         hydrogenMass: float = 3,
         boxShape: str = "dodecahedron",
         padding: float = 1.0,
+        num_solvent: int = None,
         ionicStrength: float = 0.0,
         is_membrane: bool = False,
         lipid_type: str = None,
+        out_dir: str = ".",
     ) -> None:
 
         if lig_ff.upper() in ["ESPALOMA", "SMIRNOFF", "GAFF"]:
@@ -53,12 +56,24 @@ class SystemPreparation:
             )
             exit(1)
 
+        self.out_dir = out_dir
+        os.makedirs(out_dir, exist_ok=True)
+
         self.forcefield = ForceField(*forcefield)
         self.allow_undefined_stereo = allow_undefined_stereo
 
         self.hydrogenMass = hydrogenMass * openmmunit.amu  # Use HMR
         self.boxShape = boxShape  # cube, dodecahedron
-        self.padding = padding * openmmunit.nanometers
+
+        if num_solvent is not None and padding is not None:
+            logging.error(
+                "The arguments 'num_solvent' and 'padding' are incompatible. Please specify only one."
+            )
+            exit(1)
+        if padding is not None:
+            self.padding = padding * openmmunit.nanometers
+        self.num_solvent = num_solvent
+
         self.ionicStrength = ionicStrength * openmmunit.molar
 
         self.is_membrane = is_membrane
@@ -128,30 +143,36 @@ class SystemPreparation:
 
         return ligand_omm_topology, ligand_positions
 
-    def run(
-        self, prot_path: str = None, variants: dict = None, lig_path: str = None
-    ) -> tuple[System, Topology]:
+    def run(self, 
+            protein: str = None, 
+            variants: dict = None, 
+            ligands: Union[str,dict] = None
+            ) -> tuple[System, Topology]:
 
         start_time = time.monotonic()
 
-        if lig_path is not None:
-            lig_name = os.path.splitext(os.path.basename(lig_path))[0]
-            out_dir = lig_name
+        # if ligands is not None and protein is None:
+        #     if isinstance(ligands, str):
+        #         logging.info(f"Parametrizing ligand {os.path.basename(ligands)}..")
+        #         lig = self._sdf_to_mol(ligands)
+        #         ligand_topology, ligand_positions = self._parametrize_ligand(lig)
+        #         for res in ligand_topology.residues():
+        #             res.name ='UNK'
+        #         modeller = Modeller(ligand_topology, ligand_positions)
 
-            logging.info(f"Parametrizing ligand {lig_name}..")
+        #     elif isinstance(ligands, dict):
+        #         for lig_name, lig_path in ligands.items():
+        #             logging.info(f"Parametrizing ligand {lig_name}..")
+        #             lig = self._sdf_to_mol(lig_path)
+        #             ligand_topology, ligand_positions = self._parametrize_ligand(lig)
+        #             for res in ligand_topology.residues():
+        #                 res.name = lig_name
+        #             modeller = Modeller(ligand_topology, ligand_positions)
 
-            lig = self._sdf_to_mol(lig_path)
-            ligand_topology, ligand_positions = self._parametrize_ligand(lig)
-
-            modeller = Modeller(ligand_topology, ligand_positions)
-
-        if prot_path is not None:
-            rec_name = os.path.splitext(os.path.basename(prot_path))[0]
-            if lig_path is None:
-                out_dir = rec_name
-
+        if protein is not None:
+            rec_name = os.path.splitext(os.path.basename(protein))[0]
             try:
-                protein_pdb = PDBFile(prot_path)
+                protein_pdb = PDBFile(protein)
                 logging.info(f"Loaded {rec_name} PDB..")
             except Exception as e:
                 logging.error(f"Something went wrong loading {rec_name} PDB..\n{e}")
@@ -165,11 +186,26 @@ class SystemPreparation:
                 modeller = add_variants(modeller, variants)
 
             # Add the ligand to the Modeller built from the protein structure
-            if lig_path is not None:
-                modeller.add(ligand_topology, ligand_positions)
+            if ligands is not None:
+                if isinstance(ligands, str):
+                    logging.info(f"Parametrizing ligand {os.path.basename(ligands)}..")
+                    lig = self._sdf_to_mol(ligands)
+                    ligand_topology, ligand_positions = self._parametrize_ligand(lig)
+                    for res in ligand_topology.residues():
+                        res.name ='UNK'
+                    modeller.add(ligand_topology, ligand_positions)
+
+                elif isinstance(ligands, dict):
+                    for lig_name, lig_path in ligands.items():
+                        logging.info(f"Parametrizing ligand {lig_name}..")
+                        lig = self._sdf_to_mol(lig_path)
+                        ligand_topology, ligand_positions = self._parametrize_ligand(lig)
+                        for res in ligand_topology.residues():
+                            res.name = lig_name
+                        modeller.add(ligand_topology, ligand_positions)
 
         # CASE: Ligand and membrane only
-        if prot_path is None and self.is_membrane:
+        if protein is None and self.is_membrane:
 
             # Center ligand at 0,0,0
             lig_com = np.mean(ligand_positions, axis=0)
@@ -252,6 +288,7 @@ class SystemPreparation:
             modeller.addSolvent(
                 self.forcefield,
                 neutralize=True,
+                numAdded=self.num_solvent,
                 ionicStrength=self.ionicStrength,
                 boxShape=self.boxShape,
                 padding=self.padding,
