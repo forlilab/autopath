@@ -216,6 +216,14 @@ class MetadynamicsMD:
                 weighByMass=False,
                 pbc=False,
             )
+            # z_distance_force = openmm.CustomCentroidBondForce(2, "z1-z2")
+            # z_distance_force.addGroup(self.ligand_atoms)  # COM of ligand
+            # z_distance_force.addGroup(dummy_atom)  # Single dummy atom
+            # z_distance_force.addBond([0, 1])
+
+
+            # # Wrap the force as a collective variable
+            # cv = cvpack.OpenMMForceWrapper(z_distance_force, unit.nanometer)
 
         elif mMD_CV == "LM_angle_with_z":
             
@@ -282,6 +290,7 @@ class MetadynamicsMD:
                                         # openmmunit.nanometer,
                                     self.ligand_atoms)
 
+
         elif mMD_CV == "LM_z_component":
             
             #get crippen contribution list
@@ -289,6 +298,11 @@ class MetadynamicsMD:
             atom_contribs = rdMolDescriptors._CalcCrippenContribs(ligand_mol)
             clogp_contributions = [contrib[0] for contrib in atom_contribs]
 
+            num_clogp_contributions = len(clogp_contributions)
+            num_ligand_atoms = len(self.ligand_atoms)
+
+            print(f"Number of clogP contributions: {num_clogp_contributions}")
+            print(f"Number of ligand atoms: {len(self.ligand_atoms)}")
             # Get the centroid (x, y, z) of the molecule "
             
             for i in self.ligand_atoms:
@@ -323,11 +337,13 @@ class MetadynamicsMD:
                     delta_lipophilicity_z += f" + (((10 *z{i+1}) - ({centroid_z})) * {clogp_contributions[i]})"   
 
 
-            #now we want the -magnitude of the LM in the z direction (delta_lipophilicity_x, delta_lipophilicity_y, delta_lipophilicity_z)
-            #((delta_lipophilicity_x, delta_lipophilicity_y, delta_lipophilicity_z) dot (0, 0, -1)/|(delta_lipophilicity_x, delta_lipophilicity_y, delta_lipophilicity_z)||(0, 0, -1)|)
-            #(0*delta_lipophilicity_x + 0*delta_lipophilicity_y+ -1*delta_lipophilicity_z) / ((sqrt(0^2+0^2+(-1)^2)) * sqrt(delta_lipophilicity_x^2 + delta_lipophilicity_y^2 +delta_lipophilicity_z^2)))
-            #((-delta_lipophilicity_z) / (sqrt(delta_lipophilicity_x^2 + delta_lipophilicity_y^2 +delta_lipophilicity_z^2))
+            #now we want the angle between (delta_lipophilicity_x, delta_lipophilicity_y, delta_lipophilicity_z) and the negative z-axis (0, 0, -1)
+            #arccos((delta_lipophilicity_x, delta_lipophilicity_y, delta_lipophilicity_z) dot (0, 0, -1)/|(delta_lipophilicity_x, delta_lipophilicity_y, delta_lipophilicity_z)||(0, 0, -1)|)
+            #arccos(0*delta_lipophilicity_x + 0*delta_lipophilicity_y+ -1*delta_lipophilicity_z) / ((sqrt(0^2+0^2+(-1)^2)) * sqrt(delta_lipophilicity_x^2 + delta_lipophilicity_y^2 +delta_lipophilicity_z^2)))
+            #arccos((-delta_lipophilicity_z) / (sqrt(delta_lipophilicity_x^2 + delta_lipophilicity_y^2 +delta_lipophilicity_z^2))
             
+
+
             lm_num = f"-({delta_lipophilicity_z})"
             lm_denom = f"sqrt((({delta_lipophilicity_x})^2) + (({delta_lipophilicity_y})^2) + (({delta_lipophilicity_z})^2))"
             lipophilicity_moment_z = f"({lm_num})/({lm_denom})"
