@@ -19,6 +19,9 @@ from autopath.analysis import (
     plot_colvar_2D,
 )
 
+from rdkit.Chem import rdMolDescriptors
+from rdkit.Chem import SDMolSupplier
+
 
 class MetadynamicsMD:
 
@@ -48,7 +51,6 @@ class MetadynamicsMD:
         self.ligand_atoms = ligand_atoms
         self.pocket_atoms = pocket_atoms
         
-        # Im not exposing all options here because I want to keep it simple
         self.restrained_atoms = restrained_atoms
 
         self.platform = select_platform("fastest")
@@ -59,30 +61,6 @@ class MetadynamicsMD:
         self.store_CV = 25000  # log the stored COLVAR every 100ps
 
         return
-
-    def _get_reference_dict(
-        self,
-        pdb_file,
-        atoms_names: list[str] = ["CA"],
-        system_atom_indexes: list[int] = None,
-    ) -> dict[int, tuple[float, float, float]]:
-        """
-        Get the reference dictionary for the RMSD CV
-        """
-        pdb = PDBFile(pdb_file)
-        reference_positions = pdb.positions
-        reference_atoms = pdb.topology.atoms()
-
-        reference_dict = {}
-        for atom in reference_atoms:
-            if atom.name in atoms_names:
-                reference_dict[atom.index] = (
-                    reference_positions[atom.index] / openmmunit.nanometers
-                )
-
-        reference_dict = dict(zip(system_atom_indexes, list(reference_dict.values())))
-
-        return reference_dict
 
     def run(
         self,
@@ -188,18 +166,6 @@ class MetadynamicsMD:
             total_steps,
             saveFrequency,
         )
-
-        # if mMD_CV == "com":
-
-        #     groups = [self.pocket_atoms] + [self.ligand_atoms]
-
-        #     cv = cvpack.CentroidFunction(
-        #         f"sqrt(distance(g1,g2)^2)",
-        #         openmmunit.nanometers,
-        #         groups,
-        #         weighByMass=False,
-        #         pbc=True,
-        #     )
 
         if mMD_CV == "com":
 
@@ -323,8 +289,6 @@ class MetadynamicsMD:
         plot_colvar(self.out_dir, mMD_CV)
         plot_bias(self.out_dir, grid_min, grid_max, grid, mMD_CV)
         plot_FE(self.out_dir, grid_min, grid_max, grid, mMD_CV)
-        plot_bias(self.out_dir, grid_min, grid_max, grid, mMD_CV)
-        plot_FE(self.out_dir, grid_min, grid_max, grid, mMD_CV)
 
         # Save everything
         final_positions = simulation.context.getState(getPositions=True).getPositions()
@@ -341,7 +305,7 @@ class MetadynamicsMD:
     def run2D(
         self,
         pdb_file: str = None,
-        # ref_ligand: str = None,
+        ligand_sdf: str = None,
         system: str = None,
         checkpoint_file: str = None,
         run_id: str = None,
@@ -379,8 +343,7 @@ class MetadynamicsMD:
                 )
                 exit(1)
             else:
-                pdb = PDBFile(pdb_file)
-                self.topology = pdb.topology
+                self.topology = PDBFile(pdb_file).topology
 
         logging.debug(f"Creating the simulation for {run_id}")
         simulation = Simulation(self.topology, system, integrator, self.platform)
@@ -391,7 +354,7 @@ class MetadynamicsMD:
         else:
             if pdb_file is not None:
                 logging.debug(f"Setting positions from PDB file {pdb_file}")
-                simulation.context.setPositions(pdb.positions)
+                simulation.context.setPositions(PDBFile(pdb_file).positions)
             else:
                 logging.error(
                     f"Either a PDB or a checkpoint file must be provided to get coordinates from"
@@ -412,75 +375,23 @@ class MetadynamicsMD:
                 14,
             )
 
-        lig_name = "UNK"
-        ligand_atoms = [a.index for a in self.topology.atoms() if a.residue.name == lig_name]
-        add_cylindrical_restraints(system, host_index=self.pocket_atoms, guest_index=ligand_atoms, R_cylinder=1.5 * openmmunit.nanometers, force_group=31)
+        #FIXME thi is a mess I know 
+        # ligand_atoms = [a.index for a in self.topology.atoms() if a.residue.name == 'UNK']
+        # add_cylindrical_restraints(system, host_index=self.pocket_atoms, guest_index=ligand_atoms, R_cylinder=1.5 * openmmunit.nanometers, force_group=31)
 
-        ##################### Number of contacts CV #################################
+        ##################### Z depth CV #################################
 
-        # forces = {f.getName(): f for f in system.getForces()}
-        # nc_cv = cvpack.NumberOfContacts(
-        #     self.pocket_atoms,
-        #     self.ligand_atoms,
-        #     forces["NonbondedForce"],
-        #     stepFunction="1/(1+x^6)",
-        #     thresholdDistance=0.35,
-        #     cutoffFactor=2.0,
-        #     switchFactor=1.5,
-        #     reference=50,
-        # )
+        dummy_atom = [atom.index for atom in self.topology.atoms() if atom.residue.name == "DUM"]
+        if not dummy_atom:
+            raise ValueError("Could not find ligand (UNK) or dummy atom (DUM) in the topology.")
 
-        # grid_width_A = hill_width_A / 5
-        # grid_min_A, grid_max_A = grid_dimensions_A
-        # grid_A = int(abs(grid_min_A - grid_max_A) / grid_width_A)
-        # nc_variable = BiasVariable(
-        #     nc_cv,
-        #     minValue=grid_min_A,
-        #     maxValue=grid_max_A,
-        #     biasWidth=hill_width_A,
-        #     periodic=False,
-        #     gridWidth=grid_A,
-        # )
-
-        # logging.info(
-        #     f"COM boundaries are min={grid_min_A:.3f} nM - max={grid_max_A:.3f} nM"
-        # )
-        # logging.info(f"Sigma is {hill_width_A} nm and there are {grid_A} grid points ")
-
-        ##################### COM CV #################################
-
-        # groups = [self.pocket_atoms] + [self.ligand_atoms]
-
-        # fb_eq = f"sqrt(distance(g1,g2)^2)"
-
-        # COM = cvpack.CentroidFunction(
-        #     fb_eq, openmmunit.nanometers, groups, weighByMass=False, pbc=True
-        # )
-
-        # grid_width_A = hill_width_A / 5
-        # grid_min_A, grid_max_A = grid_dimensions_A
-        # grid_A = int(abs(grid_min_A - grid_max_A) / grid_width_A)
-
-        # com_cv = BiasVariable(
-        #     COM,
-        #     minValue=grid_min_A,
-        #     maxValue=grid_max_A,
-        #     biasWidth=hill_width_A,
-        #     periodic=False,
-        #     gridWidth=grid_A,
-        # )
-
-        ##################### COM CV #################################
-
-        groups = [self.pocket_atoms] + [self.ligand_atoms]
-
-        # fb_eq = f"sqrt(distance(g1,g2)^2)"
-        fb_eq = f"sqrt(pointdistance(0,0,z1,0,0,z2)^2)"
-
-        # fb_eq = f"pointdistance(x1, y1, z1, (x2+x3)/2, (y2+y3)/2, (z2+z3)/2)"
-
+        groups = [self.ligand_atoms] + [dummy_atom]
         COM_Z = cvpack.CentroidFunction(
-            fb_eq, openmmunit.nanometers, groups, weighByMass=False, pbc=True
+            f"z1-z2",
+            openmmunit.nanometers,
+            groups,
+            weighByMass=False,
+            pbc=False,
         )
 
         grid_width_A = hill_width_A / 5
@@ -496,18 +407,69 @@ class MetadynamicsMD:
             gridWidth=grid_A,
         )
 
-        rmsd_6hdh = cvpack.RMSD(
-            referencePositions=reference_dict_6hdh,
-            group=atom_indexes_to_match,
-            numAtoms=n_atoms,
-        )
+        ##################### Lipophilicity moment CV #################################
 
+        #get crippen contribution list
+        logging.info(f"Calculating Crippen contributions for the ligand")
+        ligand_mol = SDMolSupplier(ligand_sdf, removeHs=False)[0]
+        atom_contribs = rdMolDescriptors._CalcCrippenContribs(ligand_mol)
+        clogp_contributions = [contrib[0] for contrib in atom_contribs]
+
+        # Get the centroid (x, y, z) of the molecule "
+        
+        for i in self.ligand_atoms:
+            if i == 0:
+                centroid_x = f"(10 *x{i+1})"
+                centroid_y = f"(10 *y{i+1})"
+                centroid_z = f"(10 *z{i+1})"
+
+            else:
+                centroid_x += f" + (10 *x{i+1})"
+                centroid_y += f" + (10 *y{i+1})"
+                centroid_z += f" + (10 *z{i+1})"
+
+        N = len(self.ligand_atoms)
+        centroid_x = f"(({centroid_x}) / {N})"
+        centroid_y = f"(({centroid_y}) / {N})"
+        centroid_z = f"(({centroid_z}) / {N})"
+
+        #get:
+        #delta_lipophilicity_x = sum ((atom_i_x-centroid_x)*crippen_contribution_i),
+        #delta_lipophilicity_y  sum ((atom_i_y-centroid_y)*crippen_contribution_i),
+        #delta_lipophilicity_z  sum ((atom_i_z-centroid_z)*crippen_contribution_i)
+        
+        for i in self.ligand_atoms:
+            if i == 0:
+                delta_lipophilicity_x = f"(((10 *x{i+1}) - ({centroid_x})) * {clogp_contributions[i]})"
+                delta_lipophilicity_y = f"(((10 *y{i+1}) - ({centroid_y})) * {clogp_contributions[i]})"
+                delta_lipophilicity_z = f"(((10 *z{i+1}) - ({centroid_z})) * {clogp_contributions[i]})"                 
+            else:
+                delta_lipophilicity_x += f" + (((10 *x{i+1}) - ({centroid_x})) * {clogp_contributions[i]})"
+                delta_lipophilicity_y += f" + (((10 *y{i+1}) - ({centroid_y})) * {clogp_contributions[i]})"
+                delta_lipophilicity_z += f" + (((10 *z{i+1}) - ({centroid_z})) * {clogp_contributions[i]})"   
+
+
+        #now we want the -magnitude of the LM in the z direction (delta_lipophilicity_x, delta_lipophilicity_y, delta_lipophilicity_z)
+        #((delta_lipophilicity_x, delta_lipophilicity_y, delta_lipophilicity_z) dot (0, 0, -1)/|(delta_lipophilicity_x, delta_lipophilicity_y, delta_lipophilicity_z)||(0, 0, -1)|)
+        #(0*delta_lipophilicity_x + 0*delta_lipophilicity_y+ -1*delta_lipophilicity_z) / ((sqrt(0^2+0^2+(-1)^2)) * sqrt(delta_lipophilicity_x^2 + delta_lipophilicity_y^2 +delta_lipophilicity_z^2)))
+        #((-delta_lipophilicity_z) / (sqrt(delta_lipophilicity_x^2 + delta_lipophilicity_y^2 +delta_lipophilicity_z^2))
+        
+        lm_num = f"-({delta_lipophilicity_z})"
+        lm_denom = f"sqrt((({delta_lipophilicity_x})^2) + (({delta_lipophilicity_y})^2) + (({delta_lipophilicity_z})^2))"
+        lipophilicity_moment_z = f"({lm_num})/({lm_denom})"
+
+        logging.debug(f'lipophilicity_moment z component: {lipophilicity_moment_z}')
+
+        LM = cvpack.AtomicFunction(lipophilicity_moment_z,
+                                    openmmunit.nanometer,
+                                    self.ligand_atoms)
+    
         grid_width_B = hill_width_B / 5
         grid_min_B, grid_max_B = grid_dimensions_B
         grid_B = int(abs(grid_min_B - grid_max_B) / grid_width_B)
 
-        rmsd_6hdh_cv = BiasVariable(
-            rmsd_6hdh,
+        lm_cv = BiasVariable(
+            LM,
             minValue=grid_min_B,
             maxValue=grid_max_B,
             biasWidth=hill_width_B,
@@ -515,49 +477,11 @@ class MetadynamicsMD:
             gridWidth=grid_B,
         )
 
-        ##################### RMSD STATES CV #################################
-
-        # ref_pdb = PDBFile(ref_ligand)
-        # reference_positions = ref_pdb.positions
-        # reference_atoms = ref_pdb.topology.atoms()
-
-        # reference_dict = {}
-        # for atom in reference_atoms:
-        #     if not atom.name.startswith("H"):
-        #         reference_dict[atom.index] = (
-        #             reference_positions[atom.index] / openmmunit.nanometers
-        #         )
-
-        # print(f"Matched {len(reference_dict)} heavy atoms from the reference")
-
-        # n_atoms = self.topology.getNumAtoms()
-
-        # system_residues = [r for r in self.topology.residues() if r.name == "UNK"]
-        # logging.info([f"SYSTEM {r.name}_{r.index}" for r in system_residues])
-
-        # system_atoms = []
-        # for residue in system_residues:
-        #     for atom in residue.atoms():
-        #         if not atom.name.startswith("H"):
-        #             system_atoms.append(atom.index)
-
-        # logging.info(f"Matched {len(system_atoms)} heavy atoms from the system")
-
-        # # changing keys of reference dictionary to match system's atom names
-        # reference_dict = dict(zip(system_atoms, list(reference_dict.values())))
-
-        # rmsd_cv = cvpack.PathInRMSDSpace(
-        #     metric=cvpack.path.progress,
-        #     milestones=[reference_dict],
-        #     sigma=0.01 * openmmunit.nanometers,
-        #     numAtoms=n_atoms,
-        # )
-
         ##############################################################
 
         meta = Metadynamics(
             system,
-            [rmsd_6ydj_cv, rmsd_6hdh_cv],
+            [com_cv, lm_cv],
             self.temperature,
             bias_factor,
             hill_height,
@@ -598,17 +522,17 @@ class MetadynamicsMD:
         np.save(os.path.join(self.out_dir, f"FE_{run_id}.npy"), meta.getFreeEnergy())
 
         # Create plots for all current runs
-        plot_colvar_2D(self.out_dir, "RMSD_A", "RMSD_B")
+        plot_colvar_2D(self.out_dir, "com_z", "lm_cv")
         plot_FE_2D(
             self.out_dir,
             grid_min_A,
             grid_max_A,
             grid_A,
-            "rmsd_6ydj",
+            "com_z",
             grid_min_B,
             grid_max_B,
             grid_B,
-            "rmsd_6hdh",
+            "lm_cv",
         )
 
         final_positions = simulation.context.getState(getPositions=True).getPositions()
