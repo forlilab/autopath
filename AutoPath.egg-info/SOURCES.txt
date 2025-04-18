@@ -5,7 +5,6 @@ AutoPath.egg-info/PKG-INFO
 AutoPath.egg-info/SOURCES.txt
 AutoPath.egg-info/dependency_links.txt
 AutoPath.egg-info/not-zip-safe
-AutoPath.egg-info/requires.txt
 AutoPath.egg-info/top_level.txt
 autopath/__init__.py
 autopath/analysis.py

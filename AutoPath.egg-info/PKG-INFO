@@ -1,4 +1,4 @@
-Metadata-Version: 2.1
+Metadata-Version: 2.2
 Name: AutoPath
 Version: 0.1.0
 Summary: A Python package for performing path metadynamics simulations
@@ -7,27 +7,37 @@ Author: Manuel A. Llanos
 Author-email: mllanos@scripps.edu
 License: LGPL-2.1
 Keywords: drug design,molecular dynamics,free energy,medicinal chemistry
-Classifier: Environment :: Console
-Classifier: Environment :: Other Environment
 Classifier: Intended Audience :: Education
 Classifier: Intended Audience :: Science/Research
 Classifier: License :: OSI Approved :: Apache Software License
 Classifier: Natural Language :: English
 Classifier: Operating System :: MacOS :: MacOS X
-Classifier: Operating System :: OS Independent
 Classifier: Operating System :: POSIX :: Linux
-Classifier: Programming Language :: C++
-Classifier: Programming Language :: Python :: 3.5
-Classifier: Programming Language :: Python :: 3.6
-Classifier: Programming Language :: Python :: 3.7
-Classifier: Programming Language :: Python :: 3.8
-Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python
 Classifier: Topic :: Scientific/Engineering :: Bio-Informatics
 Classifier: Topic :: Scientific/Engineering :: Chemistry
 Classifier: Topic :: Software Development :: Libraries
 Requires-Python: >=3.5
 Description-Content-Type: text/markdown
 License-File: LICENSE
-Requires-Dist: openmm
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: keywords
+Dynamic: license
+Dynamic: requires-python
+Dynamic: summary
 
 # AutoPath
+
+## Installation
+Create a clean environment and install the requiered dependencies:
+```bash
+$ micromamba create -n autopath
+$ micromamba activate autopath 
+$ micromamba install -c conda-forge openmm openmmtools openff-toolkit openmmforcefields espaloma pdbfixer parmed mdanalysis ambertools rdkit pandas deeptime pyemma 
+$ micromamba install -c conda-forge -c mdtools cvpack
+```
