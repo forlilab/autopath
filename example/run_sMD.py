@@ -105,10 +105,9 @@ def main():
     equilibration = Equilibration(
         system=system,
         topology=topo,
-        equilibration_fname=equilibration_scheme,
+        protocol_fname=equilibration_scheme,
         is_membrane=False,
         out_dir=f"{sys_name}/equilibration",
-        lig_name = lig_resname
         )
     
     # If you re-run the script and the system is equilibrated prepared comment the following line
@@ -172,6 +171,7 @@ def main():
         ligand_atoms=ligand_atoms_indices,
         pocket_atoms=pocket_atom_indices,
         restrained_atoms=restrained_atoms_indices,
+        restart_velocities=True,
         out_dir=f"{sys_name}/sMD",
     )
 
