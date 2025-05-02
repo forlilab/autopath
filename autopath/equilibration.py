@@ -333,14 +333,6 @@ class Equilibration:
             self.is_membrane,
         )
 
-        # TODO forces should be removed by name. OpenMM behavior is weird with that
-        # Remove protein and ligand force restraints
-        simulation.context.getSystem().removeForce(
-            simulation.context.getSystem().getNumForces() - 3
-        )
-        simulation.context.getSystem().removeForce(
-            simulation.context.getSystem().getNumForces() - 2
-        )
         # _print_current_forces(self.system)
 
         final_positions = simulation.context.getState(getPositions=True).getPositions()
@@ -348,7 +340,6 @@ class Equilibration:
         save_system(self.system, f"{self.out_dir}/system_equil_{run_id}.xml")
         save_simulation(simulation, f"{self.out_dir}/checkpoint_equil_{run_id}")
         save_pdb(self.topology, final_positions, f"{self.out_dir}/{run_id}_equilibrated.pdb")
-
 
         self.simulation_time = (time.monotonic() - start_time) / 60 
         logging.info(
