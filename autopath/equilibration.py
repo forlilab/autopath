@@ -1,7 +1,7 @@
 import time
 import json
 import logging
-
+import os
 from dataclasses import dataclass
 from typing import List, Dict, Any
 
@@ -10,6 +10,7 @@ from openmm.app import *
 import openmm.unit as openmmunit
 
 from autopath.utils import *
+from autopath.utils import _print_current_forces
 import datetime
 
 @dataclass
@@ -164,7 +165,7 @@ class Equilibration:
         topology: str = None,
         system: str = None,
         out_dir: str = "equilibration",
-        restrained_minimization: bool = True,
+        restrained_minimization: bool = False,
         protocol_fname: str = "autopath/data/equilibration.json",
         timestep: float = 0.004,
         save_freq: int = 12500, # 12500 is 0.05ns at 4fs timestep
@@ -355,9 +356,7 @@ class Equilibration:
         self.topology.setPeriodicBoxVectors(simulation.context.getState(getPositions=True).getPeriodicBoxVectors())#saves correct box vectors to the pdb
         save_system(self.system, f"{self.out_dir}/system_equil_{run_id}.xml")
         save_simulation(simulation, f"{self.out_dir}/checkpoint_equil_{run_id}")
-        save_pdb(
-            self.topology, final_positions, f"{self.out_dir}/{run_id}_equilibrated.pdb"
-        )
+        save_pdb(self.topology, final_positions, f"{self.out_dir}/{run_id}_equilibrated.pdb")
 
         self.simulation_time = (time.monotonic() - start_time) / 60 
         logging.info(
