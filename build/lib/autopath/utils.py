@@ -674,6 +674,59 @@ def add_funnel_restraints(
 
     return
 
+
+def add_flatbottom_centroid_Z_restraint(
+    system,
+    group1_atoms: List[int],
+    group2_atoms: List[int],
+    upper_wall: Optional[openmmunit.Quantity] = 40.0 * openmmunit.angstrom,
+    k_flat:  Optional[openmmunit.Quantity] = 10.0
+    * openmmunit.kilocalorie_per_mole
+    / openmmunit.angstrom**2,
+    force_group: Optional[int] = 31
+):
+    """
+    Add a flat-bottom restraint along Z between centroids of two atom groups.
+    
+    Parameters:
+    - system: OpenMM System object
+    - group1_atoms: list of atom indices for the first group
+    - group2_atoms: list of atom indices for the second group
+    - upper_wall: radius (in nm) within which no force is applied
+    - k_flat: force constant (in kJ/mol/nm^2)
+    - force_group: OpenMM force group to assign this force to
+    """
+    # Define the flat-bottom potential along Z
+    restraint = CustomCentroidBondForce(2, """
+        step(d - upper_wall) * 0.5 * k_flat * (d - upper_wall)^2;
+        d = pointdistance(0, 0, z1, 0, 0, z2)
+    """)
+    
+    # Add global parameters
+    restraint.addGlobalParameter("upper_wall", upper_wall)
+    restraint.addGlobalParameter("k_flat", k_flat)
+    
+
+    
+    # Add the groups
+    g1 = restraint.addGroup(group1_atoms, [1.0 for i in range(len(group1_atoms))])
+    g2 = restraint.addGroup(group2_atoms, [1.0 for i in range(len(group2_atoms))])
+
+    # Add the restraint between the centroids
+    restraint.addBond([g1, g2], []) 
+    
+    # Set force group
+    if force_group is not None:
+        restraint.setForceGroup(force_group)
+    
+    # Enable periodic boundary conditions
+    restraint.setUsesPeriodicBoundaryConditions(False)
+    
+    # Add force to the system
+    system.addForce(restraint)
+
+
+
 def add_cylindrical_restraints(
     system: System,
     host_index: List[int],
@@ -696,7 +749,7 @@ def add_cylindrical_restraints(
         2,
         "U_cylinder;"
         "U_cylinder = step(r_xy - R_cylinder) * 0.5 * k_xy * (r_xy - R_cylinder)^2;"
-        "r_xy = sqrt((x2 - x1)^2 + (y2 - y1)^2);"
+        "r_xy = pointdistance(x1, y1, 0, x2, y2, 0);"
     )
     cylindrical_restraint.setUsesPeriodicBoundaryConditions(False)
     cylindrical_restraint.setForceGroup(force_group)

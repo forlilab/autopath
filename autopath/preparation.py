@@ -10,6 +10,7 @@ from typing import Union, List
 from openmm import *
 from openmm.app import *
 import openmm.unit as openmmunit
+from autopath.utils import *
 
 # OpenFF-toolkit imports
 from openff.toolkit import Molecule
@@ -45,6 +46,8 @@ class SystemPreparation:
         ionicStrength: float = 0.0,
         is_membrane: bool = False,
         lipid_type: str = None,
+        ligand_com_z: float = 2.5, #nm
+        add_cylindrical_restraint: bool = False,
         out_dir: str = ".",
     ) -> None:
 
@@ -78,7 +81,10 @@ class SystemPreparation:
 
         self.is_membrane = is_membrane
         self.lipid_type = lipid_type
+        self.ligand_com_z = ligand_com_z
+        self.add_cylindrical_restraint = add_cylindrical_restraint
         self._available_lipids = [
+            # Original lipids
             "POPC",
             "POPE",
             "DLPC",
@@ -86,6 +92,15 @@ class SystemPreparation:
             "DMPC",
             "DOPC",
             "DPPC",
+
+            # Complex membrane descriptions, i made these with charmm gui, maybe a better way to handle this
+            "120_lip_per_leaf_100_percent_POPC_20A_wat",
+            "120_lip_per_leaf_70_percent_POPC_30_percent_CLR_20A_wat",
+            "15A_wat",
+            "50_lip_per_leaf_100_percent_POPC_20A_wat",
+            "50_lip_per_leaf_70_percent_POPC_30_percent_CLR_20A_wat",
+            "80_lip_per_leaf_100_percent_POPC_20A_wat",
+            "80_lip_per_leaf_70_percent_POPC_30_percent_CLR_20A_wat",
         ]
 
         if is_membrane and self.lipid_type is not None:
@@ -226,20 +241,19 @@ class SystemPreparation:
             )
 
             # # Create a new topology for the dummy atom
-            # dummy_topology = app.Topology()
-            # dummy_chain = dummy_topology.addChain()
-            # dummy_residue = dummy_topology.addResidue("DUM", dummy_chain)
-            # dummy_atom = dummy_topology.addAtom("C", element.carbon, dummy_residue)
+            dummy_topology = app.Topology()
+            dummy_chain = dummy_topology.addChain()
+            dummy_residue = dummy_topology.addResidue("DUM", dummy_chain)
+            dummy_atom = dummy_topology.addAtom("DUM", element.sodium, dummy_residue)
 
             # Calculate the maximum distance between any two atoms in the molecule
-            pairwise_distances = np.linalg.norm(
-                ligand_positions[:, None] - ligand_positions, axis=2
-            )
-            max_length = np.max(pairwise_distances) * openmmunit.angstroms
+            # pairwise_distances = np.linalg.norm(
+            #     ligand_positions[:, None] - ligand_positions, axis=2
+            # )
+            # max_length = np.max(pairwise_distances) * openmmunit.angstroms
 
-            translation_distance = 3.0
 
-            translation_vector = np.array([0, 0, translation_distance])
+            translation_vector = np.array([0, 0, self.ligand_com_z])
 
             # Apply translation to coordinates and update positions
             ligand_positions += translation_vector * openmmunit.nanometers
@@ -250,15 +264,40 @@ class SystemPreparation:
 
         if self.is_membrane:
 
-            logging.info(f"Adding a {self.lipid_type} membrane to the system..")
+            
+            complex_membranes = {
+                    "120_lip_per_leaf_100_percent_POPC_20A_wat",
+                    "120_lip_per_leaf_70_percent_POPC_30_percent_CLR_20A_wat",
+                    "15A_wat",
+                    "50_lip_per_leaf_100_percent_POPC_20A_wat",
+                    "50_lip_per_leaf_70_percent_POPC_30_percent_CLR_20A_wat",
+                    "80_lip_per_leaf_100_percent_POPC_20A_wat",
+                    "80_lip_per_leaf_70_percent_POPC_30_percent_CLR_20A_wat",
+                }
             try:
-                modeller.addMembrane(
-                    forcefield=self.forcefield,
-                    lipidType=self.lipid_type,
-                    neutralize=True,
-                    ionicStrength=self.ionicStrength,
-                    minimumPadding=self.padding + max_length,
-                )
+                if self.lipid_type in complex_membranes:
+                    logging.info(f"Adding a {self.lipid_type} (complex lipid) membrane to the system..")
+                    lipid_patch_path = f"/mnt/forli/group/abarkdull/Ligand_Bilayer_MD/lipid_patches/{self.lipid_type}/{self.lipid_type}.pdb"
+                    if not os.path.isfile(lipid_patch_path):
+                        raise FileNotFoundError(f"Lipid patch PDB file not found at: {lipid_patch_path}")
+
+                    lipid_patch = PDBFile(lipid_patch_path)
+                    modeller.addMembrane(
+                        forcefield=self.forcefield,
+                        lipidType=lipid_patch,
+                        neutralize=True,
+                        ionicStrength=self.ionicStrength,
+                        minimumPadding=self.padding,
+                    )               
+                else:
+                    logging.info(f"Adding a {self.lipid_type} membrane to the system..")
+                    modeller.addMembrane(
+                        forcefield=self.forcefield,
+                        lipidType=self.lipid_type,
+                        neutralize=True,
+                        ionicStrength=self.ionicStrength,
+                        minimumPadding=self.padding,
+                    )
                
                 # # Get the periodic box vectors
                 # vectors = modeller.topology.getPeriodicBoxVectors().value_in_unit(openmmunit.nanometer)
@@ -307,37 +346,57 @@ class SystemPreparation:
         )
        
         # # Add the dummy atom to the modeller
-        # modeller.add(dummy_topology, [dummy_position_quantity])
+        modeller.add(dummy_topology, [dummy_position_quantity])
 
-        # unmatched_residues = self.forcefield.getUnmatchedResidues(modeller.topology)
-        # print(
-        #     f"unmatched residues:{[unmatched_residue.name for unmatched_residue in unmatched_residues]}"
-        # )
-        # [templates, residues] = self.forcefield.generateTemplatesForUnmatchedResidues(
-        #     modeller.topology
-        # )
+        unmatched_residues = self.forcefield.getUnmatchedResidues(modeller.topology)
+        print(
+            f"unmatched residues:{[unmatched_residue.name for unmatched_residue in unmatched_residues]}"
+        )
+        [templates, residues] = self.forcefield.generateTemplatesForUnmatchedResidues(
+            modeller.topology
+        )
 
-        # # reduce residues to uniquely named
-        # residues = list(dict.values({r.name: r for r in residues}))
-        # templates = {t.name: t for t in templates}
-        # for residue in residues:
-        #     print(f"creating template for residue {residue.name}")
-        #     template = templates[residue.name]
-        #     for atom in template.atoms:
-        #         atom.type = "protein-C"
-        #     self.forcefield.registerResidueTemplate(template)
+        # reduce residues to uniquely named
+        residues = list(dict.values({r.name: r for r in residues}))
+        templates = {t.name: t for t in templates}
+        for residue in residues:
+            print(
+                "creating template for residue",
+                residue.name,
+                "(MDSimulationProcess::172)",
+            )
+            template = templates[residue.name]
+            forcefield.registerResidueTemplate(template)
 
-        # unmatched_residues = self.forcefield.getUnmatchedResidues(modeller.topology)
-        # print(
-        #     f"unmatched residues:{[unmatched_residue.name for unmatched_residue in unmatched_residues]}"
-        # )
+        nonbonded = [f for f in system.getForces() if isinstance(f, NonbondedForce)][0]
+        # Add a single dummy particle
+        dummyIndex = system.addParticle(0)  # 0 mass
+        nonbonded.addParticle(
+            0, 0, 0
+        )  # 0 charge, 0 sigma (VDWR), 0 epsilon (interaction strength)
 
-        # nonbonded = [f for f in system.getForces() if isinstance(f, NonbondedForce)][0]
-        # # Add a single dummy particle
-        # dummyIndex = system.addParticle(0)  # 0 mass
-        # nonbonded.addParticle(
-        #     0, 0, 0
-        # )  # 0 charge, 0 sigma (VDWR), 0 epsilon (interaction strength)
+        #translating the system up so that all coords are positve in the z-dimension to avoid some weird metadynamics behavior 
+        # box_vectors = modeller.topology.getPeriodicBoxVectors()
+        # dimensions = modeller.topology.getUnitCellDimensions()
+        # z_dimension = dimensions[2]
+        # z_dimension_value = z_dimension.value_in_unit(openmm.unit.nanometer)
+        # half_z_nm = z_dimension_value/2
+        # print(f'translating the system up by {half_z_nm}')
+        # positions_np = modeller.positions.value_in_unit(unit.nanometer)
+        # translated_positions_vec3 = [Vec3(pos[0], pos[1], pos[2] + half_z_nm) for pos in positions_np]
+        # modeller.positions = translated_positions_vec3 * unit.nanometer
+        
+
+        if self.add_cylindrical_restraint:
+            print("Applying cylindrical restraint to ligand...")
+            add_cylindrical_restraints(
+                system=system,
+                guest_index=[atom.index for atom in modeller.topology.atoms() if atom.residue.name == "UNK"],
+                host_index=[atom.index for atom in modeller.topology.atoms() if atom.residue.name == "DUM"],
+                k_xy=10 * openmmunit.kilocalorie_per_mole / openmmunit.angstrom**2,
+                R_cylinder=10 * openmmunit.angstrom #to do: pick this better
+            )
+               
 
         os.makedirs(self.out_dir, exist_ok=True)
         save_system(system, f"{self.out_dir}/system.xml")

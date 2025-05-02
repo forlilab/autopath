@@ -156,7 +156,7 @@ class MetadynamicsMD:
             
         lig_name = "UNK"
         ligand_atoms = [a.index for a in self.topology.atoms() if a.residue.name == lig_name]
-        add_cylindrical_restraints(system, host_index=self.pocket_atoms, guest_index=ligand_atoms, R_cylinder=1.5 * openmmunit.nanometers, force_group=31)
+        # add_cylindrical_restraints(system, host_index=self.pocket_atoms, guest_index=ligand_atoms, R_cylinder=1.5 * openmmunit.nanometers, force_group=31)
 
         logging.debug(f"Setting up reporters for {run_id}..")
         add_reporters(
@@ -348,6 +348,7 @@ class MetadynamicsMD:
 
         logging.debug(f"Creating the simulation for {run_id}")
         simulation = Simulation(self.topology, system, integrator, self.platform)
+        simulation.context.setPeriodicBoxVectors(*self.topology.getPeriodicBoxVectors()) #added this in metadynmaics.py
 
         if checkpoint_file is not None:
             logging.debug(f"Loading simulation checkpoint {checkpoint_file}")
@@ -382,23 +383,34 @@ class MetadynamicsMD:
 
         ##################### Z depth CV #################################
 
-        # dummy_atom = [atom.index for atom in self.topology.atoms() if atom.residue.name == "DUM"]
-        # if not dummy_atom:
-        #     raise ValueError("Could not find ligand (UNK) or dummy atom (DUM) in the topology.")
+        dummy_atom = [atom.index for atom in self.topology.atoms() if atom.residue.name == "DUM"]
+        if not dummy_atom:
+            raise ValueError("Could not find ligand (UNK) or dummy atom (DUM) in the topology.")
 
-        groups = [self.ligand_atoms]# + [dummy_atom]
+        #add z size parameter
+        _, _, c = simulation.context.getState(getPositions=False, getVelocities=False, getEnergy=False).getPeriodicBoxVectors()
+        zsize = c[2].value_in_unit(openmmunit.nanometers)
+
+
+        groups = [self.ligand_atoms] + [dummy_atom]
         COM_Z = cvpack.CentroidFunction(
             # f"z1-z2",
-            f"z1",
+            # f"z1",
+            # f"pointdistance(0, 0, z1, 0, 0, z2)",
+            # f"(step(z1 - z2) * 2 - 1) * pointdistance(0, 0, z1, 0, 0, z2)",
+            "select(step((z1 - z2)/zsize - floor((z1 - z2)/zsize) - 0.5), -1, 1) * pointdistance(0, 0, z1, 0, 0, z2)",
             openmmunit.nanometers,
             groups,
             weighByMass=False,
             pbc=True,
+            zsize = zsize
         )
+
+
 
         grid_width_A = hill_width_A / 5
         grid_min_A, grid_max_A = grid_dimensions_A
-        grid_A = int(abs(grid_min_A - grid_max_A) / grid_width_A)
+        grid_A = round(abs(grid_min_A - grid_max_A) / grid_width_A)
 
         com_cv = BiasVariable(
             COM_Z,
@@ -472,7 +484,7 @@ class MetadynamicsMD:
     
         grid_width_B = hill_width_B / 5
         grid_min_B, grid_max_B = grid_dimensions_B
-        grid_B = int(abs(grid_min_B - grid_max_B) / grid_width_B)
+        grid_B = round(abs(grid_min_B - grid_max_B) / grid_width_B)
 
         lm_cv = BiasVariable(
             LM,
@@ -482,7 +494,6 @@ class MetadynamicsMD:
             periodic=False,
             gridWidth=grid_B,
         )
-
 
         ##############################################################
 
@@ -497,7 +508,6 @@ class MetadynamicsMD:
             biasDir=self.out_dir,
         )
 
-        simulation.context.reinitialize(preserveState=True)
 
         logging.debug(f"Setting up reporters for {run_id}..")
         add_reporters(
@@ -508,28 +518,31 @@ class MetadynamicsMD:
             bias_frequency,
         )
 
-        if not self.verbose:
-            # # Advance all steps at once do not record CVs
-            meta.step(simulation, mMD_steps)
-        else:
+        # if not self.verbose:
+        #     # # Advance all steps at once do not record CVs
+        #     meta.step(simulation, mMD_steps)
+        # else:
             # Record CVs along the way, might be usefull for debugging
-            colvar_array = np.array([meta.getCollectiveVariables(simulation)])
-            for i in range(0, int(mMD_steps), self.record_CV):
-                if i % self.store_CV == 0:
-                    np.save(
-                        os.path.join(self.out_dir, f"COLVAR_{run_id}.npy"),
-                        colvar_array,
-                    )
+        colvar_array = np.array([meta.getCollectiveVariables(simulation)])
+        for i in range(0, int(mMD_steps), self.record_CV):
+            if i % self.store_CV == 0:
+                np.save(
+                    os.path.join(self.out_dir, f"COLVAR_{run_id}.npy"),
+                    colvar_array,
+                )
 
 
-                # Print cylindrical restraint energy (force group 10)
-                # state = simulation.context.getState(getEnergy=True, groups={10})
-                # cylinder_energy = state.getPotentialEnergy()
-                # print(f'cylindrical restraint energy: {cylinder_energy}') 
-                print(f'current CV: {meta.getCollectiveVariables(simulation)}')
-                meta.step(simulation, self.record_CV)
-                current_cvs = meta.getCollectiveVariables(simulation)
-                colvar_array = np.append(colvar_array, [current_cvs], axis=0)
+            # Print cylindrical restraint energy (force group 10)
+            # state = simulation.context.getState(getEnergy=True, groups={10})
+            # cylinder_energy = state.getPotentialEnergy()
+            # print(f'cylindrical restraint energy: {cylinder_energy}') 
+            print(f'current CV: {meta.getCollectiveVariables(simulation)}')
+            meta.step(simulation, self.record_CV)
+            _, _, c = simulation.context.getState(getPositions=False, getVelocities=False, getEnergy=False).getPeriodicBoxVectors()
+            zsize = c[2].value_in_unit(openmmunit.nanometers)
+            simulation.context.setParameter('zsize', zsize)
+            current_cvs = meta.getCollectiveVariables(simulation)
+            colvar_array = np.append(colvar_array, [current_cvs], axis=0)
 
         np.save(os.path.join(self.out_dir, f"COLVAR_{run_id}.npy"), colvar_array)
         np.save(os.path.join(self.out_dir, f"FE_{run_id}.npy"), meta.getFreeEnergy())
@@ -548,7 +561,7 @@ class MetadynamicsMD:
             "lm_cv",
         )
 
-        final_positions = simulation.context.getState(getPositions=True).getPositions()
+        final_positions = simulation.context.getState(getPositions=True, enforcePeriodicBox=True).getPositions() #I added  enforcePeriodicBox=True
         save_system(system, f"{self.out_dir}/system_mMD_{run_id}.xml")
         save_simulation(simulation, f"{self.out_dir}/mMD_checkpoint_{run_id}")
         save_pdb(self.topology, final_positions, f"{self.out_dir}/mMD_{run_id}.pdb")

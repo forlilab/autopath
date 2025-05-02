@@ -49,7 +49,7 @@ def warm_up_system(
     simulation,
     integrator,
     Tstart: int = 100,
-    Tend: int = 300,
+    Tend: int = 310,
     Tstep: int = 5,
     timestep: float = 0.001,
     warming_steps: int = 100000,
@@ -123,7 +123,7 @@ def run_restrained_md(
     integrator,
     components: List[str],
     equil_scheme: List[Dict[str, Any]],
-    temp: int = 300,
+    temp: int = 310,
     is_membrane: bool = False,
 ) -> None:
     """Perform restrained equilibration, adjusting force constants, timestep, and barostat as needed."""
@@ -332,18 +332,28 @@ class Equilibration:
             self.is_membrane,
         )
 
-        # TODO forces should be removed by name. OpenMM behavior is weird with that
-        # Remove protein and ligand force restraints
-        simulation.context.getSystem().removeForce(
-            simulation.context.getSystem().getNumForces() - 3
-        )
-        simulation.context.getSystem().removeForce(
-            simulation.context.getSystem().getNumForces() - 2
-        )
-        # print_current_forces(self.system)
+        # # TODO forces should be removed by name. OpenMM behavior is weird with that
+        num_components = len(self.components_lookup)
+        print(f'num_components: {num_components}')
+        for i in range(num_components):
+            print(f'i: {simulation.context.getSystem().getNumForces()}')
+            index_to_remove = simulation.context.getSystem().getNumForces() - 2
+            print(f'index_to_remove: {index_to_remove}')
+            force = simulation.context.getSystem().getForce(index_to_remove)
+            print(f'Force type to remove: {force.__class__.__name__}')
+            
+            simulation.context.getSystem().removeForce(index_to_remove)
+
+        # simulation.context.getSystem().removeForce(
+        #     simulation.context.getSystem().getNumForces() - 3
+        # )
+        # simulation.context.getSystem().removeForce(
+        #     simulation.context.getSystem().getNumForces() - 2
+        # )
 
         final_positions = simulation.context.getState(getPositions=True).getPositions()
-
+        final_box_vectors = simulation.context.getState(getPositions=True).getPeriodicBoxVectors()
+        self.topology.setPeriodicBoxVectors(final_box_vectors)
         save_system(self.system, f"{self.out_dir}/system_equil_{run_id}.xml")
         save_simulation(simulation, f"{self.out_dir}/checkpoint_equil_{run_id}")
         save_pdb(
