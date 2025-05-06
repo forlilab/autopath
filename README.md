@@ -1,7 +1,7 @@
 # AutoPath
 
 ## Installation
-Create a clean environment and install the requiered dependencies:
+Create a clean environment and install the required dependencies:
 ```bash
 $ micromamba create -n autopath
 $ micromamba activate autopath 
