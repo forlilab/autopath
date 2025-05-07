@@ -6,7 +6,7 @@ import MDAnalysis as mda
 
 from autopath import SystemPreparation, Equilibration, SteeredMD
 from autopath.analysis import plot_rmsd, plot_atomic_rmsf
-from autopath.utils import fix_pdb, save_pdb, load_system, align_trajectory, get_ligand_rmsd, calculate_com_distance
+from autopath.utils import fix_pdb, save_pdb, load_system, align_trajectory, calculate_com_distance, compute_rmsd#, get_ligand_rmsd
 from openmm.app import PDBFile
 
 def cmd_lineparser():
@@ -68,7 +68,7 @@ def main():
     # Fix/prepare the receptor
     protein_pdb = fix_pdb(pdbfile=receptor, keep_heterogens=True, pH=7.4)
     pdb_name = os.path.splitext(os.path.basename(receptor))[0]
-    prot_path=f"input/{pdb_name}_fixed.pdb"
+    prot_path=f"{pdb_name}_fixed.pdb"
     save_pdb(protein_pdb.topology, protein_pdb.positions, prot_path)
 
     ########################################################################################
@@ -91,7 +91,7 @@ def main():
 
     # Variants is a dictionary which specifies the chain:resid for the variant e.g. {"A:123": "CYX"}
     # If you re-run the script and the system is already prepared comment the following line
-    system, topo = prepare_system.run(prot_path=prot_path, variants=None, lig_path=ligand)
+    system, topo = prepare_system.run(protein=prot_path, variants=None, ligands=ligand)
 
     ########################################################################################
     ###################################### Equilibration ###################################
@@ -125,7 +125,7 @@ def main():
     equilibrated_traj = f"{sys_name}/equilibration/{sys_name}_aligned.dcd"
     # Calculate RMSD and RMSF of the ligand
     u_eq = mda.Universe(system_prmtop, equilibrated_traj, in_memory=True)
-    lig_rmsd_equilibration = get_ligand_rmsd(u_eq, alig_select="backbone", lig_resname=lig_resname)
+    lig_rmsd_equilibration = compute_rmsd(u_eq, alig_select="backbone", lig_resname=lig_resname)
     plot_rmsd(lig_rmsd_equilibration, sys_name, f"{sys_name}/equilibration")
     plot_atomic_rmsf(u_eq, outname=f"{sys_name}/equilibration/{sys_name}_RMSF.png", log_rmsf=False)
 
