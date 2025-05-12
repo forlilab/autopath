@@ -215,7 +215,7 @@ def plot_colvar_2D(out_dir, xCV_name, yCV_name):
 def _extract_sMD_statistics(files: list = None) -> pd.DataFrame:
     data = []
     for f in files:
-        run_n = os.path.splitext(os.path.basename(f))[0].split("_")[2]
+        run_n = os.path.splitext(os.path.basename(f))[0].split("_")[-2]
 
         df = pd.read_csv(f, names=["r0", "com_dist", "force", "work"])  # [:500]
         df["replica"] = f"rep_{run_n}"
