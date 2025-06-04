@@ -361,11 +361,11 @@ class MetadynamicsMD:
                 )
                 exit(1)
             else:
-                pdb = PDBFile(pdb_file)
-                self.topology = pdb.topology
+                self.topology = PDBFile(pdb_file).topology
 
         logging.debug(f"Creating the simulation for {run_id}")
         simulation = Simulation(self.topology, system, integrator, self.platform)
+        simulation.context.setPeriodicBoxVectors(*self.topology.getPeriodicBoxVectors()) #loads the correct box vectors
 
         if checkpoint_file is not None:
             logging.debug(f"Loading simulation checkpoint {checkpoint_file}")
