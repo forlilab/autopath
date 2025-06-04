@@ -107,6 +107,7 @@ def main():
         topology=topo,
         protocol_fname=equilibration_scheme,
         is_membrane=False,
+        restrained_minimization=False,
         out_dir=f"{sys_name}/equilibration",
         )
     
@@ -114,19 +115,25 @@ def main():
     system_eq = equilibration.run(pdb_file=system_pdb_file, run_id=sys_name)
 
     system_prmtop = f"{sys_name}/system.prmtop"
-    equilibrated_traj = f"{sys_name}/equilibration/trajectory_equil_{sys_name}.dcd"
+    equilibrated_traj = f"{sys_name}/equilibration/trajectory_equilibration_{sys_name}.dcd"
     # Wrap, align and save the clean trajectory
     align_trajectory(
         system_prmtop,
         equilibrated_traj,
-        f"{sys_name}/equilibration/{sys_name}_aligned",
+        out_fname=f"{sys_name}/equilibration/{sys_name}_aligned.dcd",
         strip_mask=None #you can dry the traj or remove garbage
     )
     equilibrated_traj = f"{sys_name}/equilibration/{sys_name}_aligned.dcd"
     # Calculate RMSD and RMSF of the ligand
     u_eq = mda.Universe(system_prmtop, equilibrated_traj, in_memory=True)
-    lig_rmsd_equilibration = compute_rmsd(u_eq, alig_select="backbone", lig_resname=lig_resname)
-    plot_rmsd(lig_rmsd_equilibration, sys_name, f"{sys_name}/equilibration")
+    
+    lig_rmsd_equilibration = compute_rmsd(u_eq, u_eq,
+                                          alig_select="backbone", 
+                                          groupselections={"ligand":f"resname {lig_resname} and not name H*", 
+                                                           "protein":'protein and not name H*'},
+                                          out_dir=f"{sys_name}/equilibration"
+                                          )
+    lig_rmsd_equilibration.to_csv(f"{sys_name}/equilibration/{sys_name}_ligand_rmsd.csv", index=False)
     plot_atomic_rmsf(u_eq, outname=f"{sys_name}/equilibration/{sys_name}_RMSF.png", log_rmsf=False)
 
     ########################################################################################
@@ -150,9 +157,7 @@ def main():
     restrained_atoms_indices = [atom.index for atom in restrained_atoms]
     ligand_atoms_indices = [atom.index for atom in ligand_atoms]
     pocket_atom_indices = [atom.index for atom in pocket_atoms]
-    pocket_full_names = [
-        f"{atom.resname}_{atom.resid}_{atom.index}" for atom in pocket_atoms
-    ]
+    pocket_full_names = [f"{atom.resname}_{atom.resid}_{atom.index}" for atom in pocket_atoms]
     # This is to check that the selection is correct
     # PLEASE debug your own selection 
     logging.info(f"Pocket atoms are: {', '.join(set(pocket_full_names))}")
