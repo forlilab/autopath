@@ -563,13 +563,14 @@ def add_harmonic_restraints(
     force.addPerParticleParameter("x0")
     force.addPerParticleParameter("y0")
     force.addPerParticleParameter("z0")
+    force.setName(force_name)
 
     counter = 0
     for i, (atom_crd, atom) in enumerate(zip(positions, atoms)):
         if atom.index in atom_idx_list:
             force.addParticle(i, atom_crd.value_in_unit(openmmunit.nanometers))
             counter += 1
-    logging.info(f"{counter} atoms will be restrained")
+    # logging.info(f"{counter} atoms will be restrained")
 
     force.setForceGroup(force_group)
     system.addForce(force)
