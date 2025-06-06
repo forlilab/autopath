@@ -62,13 +62,13 @@ def main():
     )
 
     # Make sure to customize the equilibration scheme as needed
-    equilibration_scheme = "equilibration_lig_prot.json"
+    equilibration_scheme = "equilibration_lig_prot_memb.json"
     lig_resname = "UNK"
 
     # Fix/prepare the receptor
     protein_pdb = fix_pdb(pdbfile=receptor, keep_heterogens=True, pH=7.4)
     pdb_name = os.path.splitext(os.path.basename(receptor))[0]
-    prot_path=f"{pdb_name}_fixed.pdb"
+    prot_path=f"{sys_name}/{pdb_name}_fixed.pdb"
     save_pdb(protein_pdb.topology, protein_pdb.positions, prot_path)
 
     ########################################################################################
@@ -107,7 +107,7 @@ def main():
         topology=topo,
         protocol_fname=equilibration_scheme,
         is_membrane=False,
-        restrained_minimization=False,
+        restrained_minimization=True,
         out_dir=f"{sys_name}/equilibration",
         )
     
