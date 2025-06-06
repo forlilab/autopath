@@ -82,8 +82,10 @@ def main():
             padding=1.0,
             lig_ff="espaloma",
             ionicStrength=0.15,
+            is_membrane=False,
+            lipid_type="POPC",
             forcefield = [
-            'amber/ff14SB.xml',
+            'amber14-all.xml',
             "amber14/tip3pfb.xml",
             "amber/tip3pfb_HFE_multivalent.xml"   
             ]
