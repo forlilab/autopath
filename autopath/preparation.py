@@ -205,6 +205,7 @@ class SystemPreparation:
                         modeller.add(ligand_topology, ligand_positions)
 
         # CASE: Ligand and membrane only
+        max_length = 0.0 * openmmunit.angstroms
         if protein is None and self.is_membrane:
 
             # Center ligand at 0,0,0
