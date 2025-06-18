@@ -407,21 +407,21 @@ def get_COM_dist(simulation, groupA:list[int]=None, groupB:list[int]=None, weigh
 
 
 def calculate_com_distance(
-    u, ligand_atoms=None, pocket_atoms=None, weighByMass: bool = True
-) -> pd.DataFrame:
+    u, ligand_atoms=None, pocket_atoms=None, weighByMass: bool = True, wrap: bool = True
+    ) -> np.ndarray:
     # Distance will be in Angstroms because of MDanalysis
     distances = []
     for ts in u.trajectory:
         if weighByMass:
-            lig_com = ligand_atoms.center_of_mass(wrap=True)
-            prot_com = pocket_atoms.center_of_mass(wrap=True)
+            lig_com = ligand_atoms.center_of_mass(wrap=wrap)
+            prot_com = pocket_atoms.center_of_mass(wrap=wrap)
         else:
-            lig_com = ligand_atoms.center_of_geometry(wrap=True)
-            prot_com = pocket_atoms.center_of_geometry(wrap=True)
+            lig_com = ligand_atoms.center_of_geometry(wrap=wrap)
+            prot_com = pocket_atoms.center_of_geometry(wrap=wrap)
 
         distances.append(np.linalg.norm(prot_com - lig_com))
 
-    return pd.DataFrame(distances, columns=["com_d"], index=range(len(distances)))
+    return np.array(distances)
 
 def compute_rmsd(u, u_ref,
                     alig_select:str='backbone', 
