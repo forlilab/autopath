@@ -3,9 +3,12 @@ import os
 import time
 import logging
 import pandas as pd
+import warnings
+import shutil
 from sys import exit
 from glob import glob
 import MDAnalysis as mda
+from MDAnalysis.analysis.distances import distance_array
 
 # OpenMM imports
 from openmm import *
@@ -15,7 +18,6 @@ from openmm.unit import *
 # AutoPath imports
 from autopath.utils import *
 from autopath.analysis import *
-import warnings
 from autopath import (
     SystemPreparation,
     Equilibration,
@@ -24,20 +26,13 @@ from autopath import (
     MetadynamicsMD,
 )
 
-# THIS CLASS IS NOT USED ANYMORE
-warnings.warn(
-    "The AutoPath class is not functional and has to be updated.",
-    DeprecationWarning,
-    stacklevel=2,
-)
-
 class AutoPath:
     def __init__(
         self,
         VS_mode: bool = False,
         pdb_path: str = None,
         do_fix_pdb: bool = True,
-        pocket_selection: str = "protein and (around 5 resname UNK) and name CA",
+        pocket_selection: str = None,
         temperature: float = 300,
         random_state: int = 42,
         run_preparation: bool = True,
@@ -54,24 +49,23 @@ class AutoPath:
         is_membrane: bool = False,
         lipid_type: str = None,
         run_equilibration: bool = True,
-        equilibration_scheme: str = "autopath/data/equilibration.json",
+        protocol_fname: str = None,
         run_sMDpulling: bool = True,
         sMD_pulling_dist: float = 1.5,  # nm
         sMD_time: int = 1,  # ns
         sMD_steps_per_move: int = 250,  # 1 ps
-        sMD_pulling_force: float = 20000,  # KJ/mol/nm2
-        sMD_replicas: int = 5,
+        sMD_pulling_force: float = 1000,  # KJ/mol/nm2
+        sMD_replicas: int = 3,
         sMD_autostop: bool = False,
         extract_milestones: bool = True,
         n_milestones: int = 10,
         run_relax: bool = True,
         relax_steps: int = 25000,
         run_metadynamics: bool = True,
-        mMD_CV: str = "cog",
         mMD_walkers: int = 5,
-        mMD_bias_factor: int = 5,
+        mMD_bias_factor: int = 15,
         mMD_hill_height: float = 0.3,  # Kcal/mol approx 0.5KT
-        mMD_hill_width: float = 0.05,
+        mMD_hill_width: float = 0.01,
         mMD_time: int = 2,  # ns
     ):
         # General
@@ -90,7 +84,7 @@ class AutoPath:
         self.lipid_type = lipid_type
         # Equilibration
         self.run_equilibration = run_equilibration
-        self.equilibration_scheme = equilibration_scheme
+        self.protocol_fname = protocol_fname
         # Steered MD
         self.run_sMDpulling = run_sMDpulling
         self.sMD_pulling_dist = sMD_pulling_dist
@@ -106,7 +100,6 @@ class AutoPath:
         self.relax_steps = relax_steps
         # Metadynamics
         self.run_metadynamics = run_metadynamics
-        self.mMD_CV = mMD_CV
         self.mMD_walkers = mMD_walkers
         self.mMD_bias_factor = mMD_bias_factor
         self.mMD_hill_height = mMD_hill_height
@@ -123,8 +116,7 @@ class AutoPath:
         # Process the input PDB
         if do_fix_pdb:
             protein_pdb = fix_pdb(pdbfile=pdb_path, keep_heterogens=True, pH=7.4)
-            pdb_name = os.path.splitext(os.path.basename(pdb_path))[0]
-            self.protein_file = f"input/{pdb_name}_fixed.pdb"
+            self.protein_file = pdb_path.replace(".pdb", "_fixed.pdb")
             save_pdb(protein_pdb.topology, protein_pdb.positions, self.protein_file)
         else:
             self.protein_file = pdb_path
@@ -153,23 +145,16 @@ class AutoPath:
 
         logging.info(f"Processing system {sys_name}")
 
-        prmtop_file = f"{sys_name}/system.prmtop"
-        topology = AmberPrmtopFile(prmtop_file).topology
-
-        system = load_system(f"{sys_name}/system.xml")
-
-        solvated_system_pdb = f"{sys_name}/system.pdb"
-        equilibrated_system = f"{sys_name}/equilibration/system_equilibrated.xml"
-        equilibrated_pdb = f"{sys_name}/equilibration/system_equilibrated.pdb"
-        equilibrated_traj = f"{sys_name}/equilibration/trajectory_equilibration.dcd"
-        equilibrated_chk = f"{sys_name}/equilibration/equilibration_checkpoint.chk"
-
         ##############################################################################################
         ####################################### System preparation ###################################
         ##############################################################################################
 
+        prmtop_file = f"{sys_name}/system.prmtop"
+        solvated_system_pdb = f"{sys_name}/system.pdb"
+
         if self.run_preparation:
             prepare_system = SystemPreparation(
+                out_dir=sys_name,
                 forcefield=self.forcefield,
                 lig_ff=self.lig_ff,
                 boxShape=self.boxShape,
@@ -178,101 +163,94 @@ class AutoPath:
                 is_membrane=self.is_membrane,
                 lipid_type=self.lipid_type,
             )
-            system, topology = prepare_system.run(
-                self.protein_file, self.variants, ligand_file
-            )
+            system, topology = prepare_system.run(self.protein_file, self.variants, ligand_file)
+
+        system = load_system(f"{sys_name}/system.xml")
+        topology = AmberPrmtopFile(prmtop_file).topology
 
         ##############################################################################################
         ##################################### System equilibration ###################################
         ##############################################################################################
 
+        equilibrated_traj = f"{sys_name}/equilibration/trajectory_equilibration_{sys_name}.dcd"
+        equilibrated_chk = f"{sys_name}/equilibration/checkpoint_equil_{sys_name}.chk"
+
         if self.run_equilibration:
             equilibration = Equilibration(
-                system=system,
-                topology=topology,
-                out_dir=f"{sys_name}/equilibration",
-                equilibration_scheme=self.equilibration_scheme,
-            )
-
-            system = equilibration.run(solvated_system_pdb)
-
+                                topology=topology,
+                                system=system,
+                                out_dir=f"{sys_name}/equilibration",
+                                restrained_minimization=False,
+                                is_membrane=self.is_membrane,
+                                protocol_fname=self.protocol_fname,
+                                )
+            equilibrated_system = equilibration.run(solvated_system_pdb, run_id=sys_name)
+        
             # Wrap, align and save the clean trajectory
-            align_trajectory(
-                prmtop_file,
-                equilibrated_traj,
-                out_fname=f"{sys_name}/equilibration/{sys_name}_equi_aligned",
-                strip_mask=None,
-                #  strip_mask=':HOH,NA,CL,K,POP'
-            )
-
-        # TODO move the rmsd plot inside along with other interaction analysis
+            align_trajectory(prmtop_file=prmtop_file,
+                            traj_file=equilibrated_traj,
+                            out_fname=equilibrated_traj.replace(".dcd", "_aligned.dcd"))
+            os.remove(equilibrated_traj)
+            
         # Equilibration VS checkpoint
+        equilibrated_traj = equilibrated_traj.replace(".dcd", "_aligned.dcd")
         u_eq = mda.Universe(prmtop_file, equilibrated_traj, in_memory=True)
-        eq_rmsd = get_ligand_rmsd(
-            u_eq, None, alig_select="backbone", lig_resname=lig_resname
-        )
-        plot_rmsd(eq_rmsd, sys_name, f"{sys_name}/equilibration")
+        lig_rmsd_equilibration = compute_rmsd(u_eq, u_eq,
+                                            alig_select="backbone", 
+                                            groupselections={"ligand":f"resname {lig_resname} and not name H*", 
+                                                            "protein":'protein and not name H*'},
+                                            out_dir=f"{sys_name}/equilibration"
+                                            )
+        lig_rmsd_equilibration.to_csv(f"{sys_name}/equilibration/{sys_name}_ligand_rmsd.csv", index=False)
+        plot_atomic_rmsf(u_eq, outname=f"{sys_name}/equilibration/{sys_name}_RMSF.png", log_rmsf=True)
 
-        if self.equilibration_checkpoint:
-            final_rmsd = eq_rmsd[-1:].values
-            if final_rmsd > self.eq_checkpoint_cutoff * 10:  # to Angs
-                logging.error(
-                    f"Simulation for ligand {sys_name} terminated because ligand RMSD={final_rmsd:.2f} > {self.eq_checkpoint_cutoff}"
-                )
-                exit(1)
+        # if self.equilibration_checkpoint:
+        #     final_rmsd = lig_rmsd_equilibration[-1:].values
+        #     if final_rmsd > self.eq_checkpoint_cutoff * 10:  # to Angs
+        #         logging.warning(f"Simulation for ligand {sys_name} terminated because ligand RMSD={final_rmsd:.2f} > {self.eq_checkpoint_cutoff}")
+        #         exit(1)
 
         # Get pocket atoms
         u_eq.trajectory[-1]  # set pointer to last frame
         pocket_atoms = u_eq.select_atoms(self.pocket_selection)
-        ligand_atoms = u_eq.select_atoms(f"resname {lig_resname} and (not name H*)")
-        ligand_atoms_indexes = [atom.index for atom in ligand_atoms]
+        ligand_atoms = u_eq.select_atoms(f"resname {lig_resname} and not name H*")
+        ligand_atoms_indices = [atom.index for atom in ligand_atoms]
 
-        pocket_atom_indexes = [atom.index for atom in pocket_atoms]
+        pocket_atom_indices = [atom.index for atom in pocket_atoms]
         pocket_residues = [f"{atom.resname}_{atom.resid}" for atom in pocket_atoms]
-        pocket_full_names = [
-            f"{atom.resname}_{atom.resid}_{atom.index}" for atom in pocket_atoms
-        ]
+        # pocket_full_names = [f"{atom.resname}_{atom.resid}_{atom.index}" for atom in pocket_atoms]
 
-        eq_cog = calculate_com_distance(u_eq, ligand_atoms, pocket_atoms)
-        final_cog = eq_cog.values[-1][0]
+        eq_com = calculate_com_distance(u_eq, ligand_atoms, pocket_atoms)[-1] /10 # convert to nm
 
         logging.info(f"Pocket residues are: {', '.join(set(pocket_residues))}")
-        logging.info(f"Pocket atoms are: {', '.join(set(pocket_full_names))}")
-        print(f"Pocket atoms are: {', '.join(set(pocket_full_names))}")
 
-        logging.info(f"COG distance after equilibration is: {final_cog:.2f} nm")
+        logging.info(f"COM distance after equilibration is: {eq_com:.2f} nm")
 
-        # Select all protein CA atoms > 10 Å of the ligand
         u_eq.trajectory[-1]  # set pointer to last frame
-        protein_ca_far_from_ligand = u_eq.select_atoms(
-            "protein and (name CA) and not (around 10 group ligand)",
-            ligand=ligand_atoms,
-        )
-        protein_ca_far_from_ligand_indexes = [
-            atom.index for atom in protein_ca_far_from_ligand
-        ]
-        # protein_ca_far_from_ligand_full_names = [
-        #     f"{atom.resname}_{atom.resid}_{atom.index}"
-        #     for atom in protein_ca_far_from_ligand
-        # ]
-        # print(protein_ca_far_from_ligand_full_names)
+        restrained_atoms = u_eq.select_atoms("group pocket_atoms and name CA", pocket_atoms=pocket_atoms)
+        restrained_atoms_indices = [atom.index for atom in restrained_atoms]
+        # restrained_atoms_full_names = [f"{atom.resname}_{atom.resid}_{atom.index}" for atom in restrained_atoms]
+        # print(restrained_atoms_full_names)
 
         ##############################################################################################
         ##################################### Steered MD simulations #################################
         ##############################################################################################
 
         if self.run_sMDpulling:
+            
+            equilibrated_system = load_system(f"{sys_name}/equilibration/system_equil_{sys_name}.xml")
 
-            steered_MD = SteeredMD(
-                system=system,
+            sMD = SteeredMD(
+                system=equilibrated_system,
                 topology=topology,
-                ligand_atoms=ligand_atoms_indexes,
-                pocket_atoms=pocket_atom_indexes,
-                restrained_atoms=protein_ca_far_from_ligand_indexes,
+                ligand_atoms=ligand_atoms_indices,
+                pocket_atoms=pocket_atom_indices,
+                restrained_atoms=restrained_atoms_indices,
+                restart_velocities=True,
                 out_dir=f"{sys_name}/sMD",
             )
 
-            steered_MD.run(
+            sMD.run(
                 checkpoint_file=equilibrated_chk,
                 sMD_time=self.sMD_time,
                 displacement=self.sMD_pulling_dist,
@@ -281,140 +259,156 @@ class AutoPath:
                 replicas=self.sMD_replicas,
             )
 
-        # Wrap, align and save the clean trajectory
-        sMD_trajs = glob(f"{sys_name}/sMD/trajectory_sMD*")
-        align_trajectory(
-            prmtop_file,
-            sMD_trajs,
-            f"{sys_name}/sMD/{sys_name}_sMD_all",
-            strip_mask=":HOH,NA,CL,K,POP",
-        )
+            # Load and align the sMD trajectories
+            sMD_trajs = glob(f"{sys_name}/sMD/trajectory_sMD*")
+            for traj_file in sMD_trajs:
+                align_trajectory(
+                                prmtop_file=prmtop_file,
+                                traj_file=traj_file,
+                                out_fname=traj_file.replace(".dcd", "_aligned.dcd"),
+                            )
+                os.remove(traj_file) # remove the dcd
 
         ##############################################################################################
         ###################################### Extract Milestones ####################################
         ##############################################################################################
+        from scipy.spatial import KDTree
+        from sklearn.decomposition import PCA
+        from deeptime.clustering import KMeans
+        
+        def _match_cluster_centroids(X, centroids, N=1):
+            """A function to find the N closest points to each centroid in the dataset X.
+            Centroids may not be real data points, so we need to find the closest real data points to them.
+            """
+            kdtree = KDTree(X)
+            closest_points = []
+            for centroid in centroids:
+                _, indices = kdtree.query(centroid, k=N)
+                closest_points.append(indices)
+
+            return closest_points
 
         if self.extract_milestones:
 
-            sMD_trajs = glob(f"{sys_name}/sMD/trajectory_sMD*")
+            sMD_trajs = glob(f"{sys_name}/sMD/*_aligned.dcd")
+            u_all = mda.Universe(prmtop_file, sMD_trajs)
+            u_all.trajectory[0]  # set pointer to first frame
 
-            # TODO try Fraction of native contacts vs rmsd
-            cluster_pulling_MD(
-                sMD_trajs,
-                equilibrated_pdb,
-                prmtop_file,
-                lig_resname,
-                self.pocket_selection,
-                n_clusters=self.n_milestones,
-                sys_name=sys_name,
-                out_dir=f"{sys_name}/milestones",
-            )
+            pocket_atoms = u_all.select_atoms(f"protein and (around 4 resname {lig_resname}) and not name H*")
+            pocket_atom_indices = [atom.index for atom in pocket_atoms]
+            # pocket_full_names = [f"{atom.resname}_{atom.resid}_{atom.index}" for atom in pocket_atoms]
+            # logging.info(f"Pocket atoms are: {', '.join(set(pocket_full_names))}")
 
-            initial_cluster_centroids = sorted(
-                glob(f"{sys_name}/milestones/milestone_*.pdb", recursive=True)
-            )
+            ligand_atoms = u_all.select_atoms(f"resname {lig_resname} and not name H*")
+            ligand_atoms_indices = [atom.index for atom in ligand_atoms]
 
-            relaxMD = RelaxMD(
-                system=system,
-                topology=topology,
-                lig_name=lig_resname,
-                out_dir=f"{sys_name}/milestones",
-                pocket_atoms=pocket_atom_indexes,
-            )
+            # Calculate distance matrix for all frames
+            # Each frame is represented by a vector of distances between all pocket atoms and all ligand atoms
+            data_array = np.zeros((len(u_all.trajectory) ,(len(pocket_atoms)*len(ligand_atoms))))
+            for i, ts in enumerate(u_all.trajectory):
+                distances = distance_array(pocket_atoms, ligand_atoms, 
+                                            result=np.ndarray((len(pocket_atoms), len(ligand_atoms))))
+                data_array[i] = distances.flatten()
+            data_array = np.array(data_array)
 
-            milestones_data = []
-            for centroid_fname in initial_cluster_centroids:
-                try:
-                    centroid_idx = os.path.splitext(os.path.basename(centroid_fname))[0]
-                    logging.info(f"Relaxing {centroid_idx}")
-                    initial_dist, final_dist = relaxMD.run(
-                        pdb_file=centroid_fname,
-                        run_id=centroid_idx,
-                        md_steps=self.relax_steps,
-                    )
-                    milestones_data.append([centroid_fname, initial_dist, final_dist])
-                except:
-                    logging.error(f"Relaxing failed for {centroid_idx}")
-                    pass
+            # do pca reduction
+            pca = PCA(n_components=0.95)
+            data_array_reduced = pca.fit_transform(data_array)
+            logging.info(f'Variance explained by PCA: {np.sum(pca.explained_variance_ratio_):.2f}')
 
-            milestones_df = pd.DataFrame(
-                milestones_data,
-                columns=["milestone_fname", "inital_dist", "final_dist"],
-            )
-            milestones_df.to_csv(f"{sys_name}/milestones/{sys_name}_milestones.csv")
+            # cluster_estimator = RegularSpace(dmin=1.0, max_centers=10)
+            cluster_estimator = KMeans(n_clusters=self.n_milestones-1) # -1 because we will add the equilibrated system as cluster 0
+            fitted_model = cluster_estimator.fit(data_array).fetch_model()
+            cluster_centers = fitted_model.cluster_centers
+
+            closest_frames = _match_cluster_centroids(data_array, cluster_centers) 
+
+            for i, idx in enumerate(closest_frames):
+                dist = np.linalg.norm(data_array[idx] - cluster_centers[i])
+                logging.info(f"Cluster {i}: Closest frame is {idx} (distance = {dist:.6f})")
+
+            # Write each representative frame to a PDB
+            os.makedirs(f"{sys_name}/milestones/pdbs", exist_ok=True)
+            u_all.trajectory[0]  # reset
+            for i, frame_index in enumerate(closest_frames):
+                u_all.trajectory[frame_index]
+                with mda.Writer(os.path.join(f"{sys_name}/milestones/pdbs", f"milestone_{i+1}_frame_{frame_index}.pdb"), u_all.atoms.n_atoms) as W:
+                    W.write(u_all.atoms)
+
+            #make sure the equilibrated system is in the milestones folder
+            u_eq.trajectory[-1] 
+            with mda.Writer(os.path.join(f"{sys_name}/milestones/pdbs", f"cluster_0_frame_0.pdb"), u_eq.atoms.n_atoms) as W:
+                W.write(u_eq.atoms)
 
         ##############################################################################################
         ##################################### Metadynamics simulations ###############################
         ##############################################################################################
 
         if self.run_metadynamics:
-            milestones_df = pd.read_csv(
-                f"{sys_name}/milestones/{sys_name}_milestones.csv", index_col=0
-            )
 
-            # Get the most diverse set of milestones based on cog distance
-            # substract one to include equilibration frame
-            walkers_df = get_most_diverse_points(
-                milestones_df, n_points=self.mMD_walkers - 1
-            )
+            milestones = glob(f'{sys_name}/milestones/pdbs/milestone_*.pdb')
 
-            # Include the equilibrated initial pose as milestone 0
-            walkers_df.loc[-1] = [f"{sys_name}/milestones/milestone_0.pdb", 0, 0]
-            walkers_df.sort_values(by="final_dist", ascending=True, inplace=True)
-            walkers_df.to_csv(f"{sys_name}/milestones/{sys_name}_walkers.csv")
+            # Run restrained equilibration
+            mileston_equil = Equilibration(
+                                        system=system,
+                                        topology=topology,
+                                        protocol_fname="equilibration_milestone.json",
+                                        is_membrane=False,
+                                        restrained_minimization=False,
+                                        out_dir=f"{sys_name}/milestones",
+                                        verbose=2
+                                        )
 
-            shutil.copyfile(
-                equilibrated_pdb, f"{sys_name}/milestones/milestone_0_relax.pdb"
-            )
-            shutil.copyfile(
-                equilibrated_system,
-                f"{sys_name}/milestones/milestone_0_relax_system.xml",
-            )
-            shutil.copyfile(
-                equilibrated_chk,
-                f"{sys_name}/milestones/milestone_0_relax_checkpoint.chk",
-            )
+            min_com = eq_com * 0.75
+            max_com = eq_com + self.sMD_pulling_dist
 
-            min_cog = final_cog * 0.75
-            max_cog = final_cog + self.sMD_pulling_dist
-
-            metadynamics_MD = MetadynamicsMD(
-                prmtop_file=prmtop_file,
-                ligand_atoms=ligand_atoms_indexes,
-                pocket_atoms=pocket_atom_indexes,
+            WTMetaD = MetadynamicsMD(
+                topology=topology,
+                ligand_atoms=ligand_atoms_indices,
+                pocket_atoms=pocket_atom_indices,
+                # restrained_atoms=restrained_atoms_indices,
                 out_dir=f"{sys_name}/metadynamics",
             )
 
-            for walker_fname in walkers_df["milestone_fname"]:
-                basename = os.path.splitext(os.path.basename(walker_fname))[0]
-                system_file = f"{sys_name}/milestones/{basename}_relax_system.xml"
-                system = load_system(system_file)
-                checkpoint_file = (
-                    f"{sys_name}/milestones/{basename}_relax_checkpoint.chk"
-                )
+            for milestone in milestones:
+                milestone_name = os.path.basename(milestone).split('.')[0]
 
-                logging.info(f"Running metadynamics for {basename}/{len(walkers_df)}")
+                # COMMENT THIS IF YOU HAVE ALREADY EQUILIBRATED THE MILESTONES
+                logging.info(f'Equilibrating milestone {milestone_name}')
+                milestone_eq_system = mileston_equil.run(pdb_file=milestone, run_id=milestone_name)
 
-                metadynamics_MD.run(
-                    system=system,
-                    checkpoint_file=checkpoint_file,
-                    run_id=basename,
-                    mMD_CV=self.mMD_CV,
-                    mMD_time=self.mMD_time,
+                milestone_eq_system = load_system(f"{sys_name}/milestones/system_equil_{milestone_name}.xml")
+                milestone_chk = f"{sys_name}/milestones/checkpoint_equil_{milestone_name}.chk"
+
+                logging.info(f"Running metadynamics for milestone {milestone_name}")
+                WTMetaD.run(
+                    checkpoint_file=milestone_chk,
+                    system=milestone_eq_system,
+                    run_id=milestone_name,
+                    mMD_CV='com',
+                    mMD_time=self.mMD_time, #ns
                     bias_factor=self.mMD_bias_factor,
-                    hill_height=self.mMD_hill_height,
-                    hill_width=self.mMD_hill_width,
-                    grid_dimensions=(min_cog, max_cog),
+                    hill_height=self.mMD_hill_height, #kJ/mol
+                    hill_width=self.mMD_hill_width, #nm
+                    bias_frequency=2, #ps
+                    grid_dimensions=(min_com, max_com),
                 )
 
-            # Wrap, align and save the clean trajectory
-            mMD_trajs = glob(f"{sys_name}/metadynamics/*.dcd")
-            align_trajectory(
-                prmtop_file,
-                mMD_trajs,
-                f"{sys_name}/metadynamics/{sys_name}_mMD_all",
-                strip_mask=":HOH,NA,CL,K,POP",
-            )
+        # Load and align the WTMetaD trajectories
+        WTMetaD_trajs = glob(f"{sys_name}/metadynamics/trajectory_metadynamics*")
+        for traj_file in WTMetaD_trajs:
+            align_trajectory(prmtop_file=prmtop_file,
+                            traj_file=traj_file,
+                            out_fname=traj_file.replace(".dcd", "_aligned.dcd"),
+                            )
+            # os.remove(traj_file) # remove the dcd
+
+        align_trajectory(prmtop_file=prmtop_file,
+                        traj_file=WTMetaD_trajs,
+                        out_fname=f"{sys_name}/metadynamics/{sys_name}_WTMetaD_all.dcd",
+                    )
 
         simulation_time = time.monotonic() - start_time
         logging.info(f"Finished AutoPath simulation in {simulation_time/60:.2f} min.")
+
+        return
