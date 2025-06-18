@@ -4,21 +4,21 @@ import argparse
 
 import MDAnalysis as mda
 
-from autopath import SystemPreparation, Equilibration, SteeredMD
-from autopath.analysis import plot_rmsd, plot_atomic_rmsf
-from autopath.utils import fix_pdb, save_pdb, load_system, align_trajectory, calculate_com_distance, compute_rmsd#, get_ligand_rmsd
+from autopath import SystemPreparation, Equilibration, MetadynamicsMD
+from autopath.analysis import plot_atomic_rmsf
+from autopath.utils import fix_pdb, save_pdb, load_system, align_trajectory, calculate_com_distance, compute_rmsd
 from openmm.app import PDBFile
 
 def cmd_lineparser():
     parser = argparse.ArgumentParser(
-        description="Runs steered molecular dynamics simulation (sMD) for a protein-ligand complex.",
+        description="Runs Well-Tempered Metadynamics MD simulation (WTmetaD) for a protein-ligand complex.",
         epilog="""
         REPORTING BUGS
                 Please report bugs to:
                 AutoDock mailing list   http://autodock.scripps.edu/mailing_list\n
 
         COPYRIGHT
-                Copyright (C) 2023 Forli Lab, Center for Computational Structural Biology,
+                Copyright (C) 2025 Forli Lab, Center for Computational Structural Biology,
                              Scripps Research.""",
     )
 
@@ -49,7 +49,7 @@ def main():
     receptor = args.rec
     ligand = args.lig
 
-    sys_name = os.path.splitext(os.path.basename(receptor))[0]
+    sys_name = os.path.splitext(os.path.basename(ligand))[0]
     os.makedirs(sys_name, exist_ok=True)
 
     logging.basicConfig(
@@ -93,7 +93,7 @@ def main():
 
     # Variants is a dictionary which specifies the chain:resid for the variant e.g. {"A:123": "CYX"}
     # If you re-run the script and the system is already prepared comment the following line
-    system, topo = prepare_system.run(protein=prot_path, variants=None, ligands=ligand)
+    # system, topo = prepare_system.run(protein=prot_path, variants=None, ligands=ligand)
 
     ########################################################################################
     ###################################### Equilibration ###################################
@@ -114,32 +114,32 @@ def main():
         )
     
     # If you re-run the script and the system is equilibrated prepared comment the following line
-    system_eq = equilibration.run(pdb_file=system_pdb_file, run_id=sys_name)
+    # system_eq = equilibration.run(pdb_file=system_pdb_file, run_id=sys_name)
 
     system_prmtop = f"{sys_name}/system.prmtop"
     equilibrated_traj = f"{sys_name}/equilibration/trajectory_equilibration_{sys_name}.dcd"
     # Wrap, align and save the clean trajectory
-    align_trajectory(
-        system_prmtop,
-        equilibrated_traj,
-        out_fname=f"{sys_name}/equilibration/{sys_name}_aligned.dcd",
-        strip_mask=None #you can dry the traj or remove garbage
-    )
+    # align_trajectory(
+    #     system_prmtop,
+    #     equilibrated_traj,
+    #     out_fname=f"{sys_name}/equilibration/{sys_name}_aligned.dcd",
+    #     strip_mask=None #you can dry the traj or remove garbage
+    # )
     equilibrated_traj = f"{sys_name}/equilibration/{sys_name}_aligned.dcd"
     # Calculate RMSD and RMSF of the ligand
     u_eq = mda.Universe(system_prmtop, equilibrated_traj, in_memory=True)
     
-    lig_rmsd_equilibration = compute_rmsd(u_eq, u_eq,
-                                          alig_select="backbone", 
-                                          groupselections={"ligand":f"resname {lig_resname} and not name H*", 
-                                                           "protein":'protein and not name H*'},
-                                          out_dir=f"{sys_name}/equilibration"
-                                          )
-    lig_rmsd_equilibration.to_csv(f"{sys_name}/equilibration/{sys_name}_ligand_rmsd.csv", index=False)
-    plot_atomic_rmsf(u_eq, outname=f"{sys_name}/equilibration/{sys_name}_RMSF.png", log_rmsf=False)
+    # lig_rmsd_equilibration = compute_rmsd(u_eq, u_eq,
+    #                                       alig_select="backbone", 
+    #                                       groupselections={"ligand":f"resname {lig_resname} and not name H*", 
+    #                                                        "protein":'protein and not name H*'},
+    #                                       out_dir=f"{sys_name}/equilibration"
+    #                                       )
+    # lig_rmsd_equilibration.to_csv(f"{sys_name}/equilibration/{sys_name}_ligand_rmsd.csv", index=False)
+    # plot_atomic_rmsf(u_eq, outname=f"{sys_name}/equilibration/{sys_name}_RMSF.png", log_rmsf=False)
 
     ########################################################################################
-    ###################################### Steered MD ######################################
+    ############################# Well-tempered MD - RMSD CV ###############################
     ########################################################################################
 
     # equilibrated_pdb = f"{sys_name}/equilibration/{sys_name}_equilibrated.pdb"
@@ -151,44 +151,47 @@ def main():
     u_eq = mda.Universe(system_prmtop, equilibrated_traj)
     u_eq.trajectory[-1]  # set pointer to last frame
 
-    # Get pocket atoms
-    pocket_atoms = u_eq.select_atoms("same residue as protein and (around 5 resname UNK) and (name CA C N)")
+    # Get ligand atoms
     ligand_atoms = u_eq.select_atoms(f"resname {lig_resname} and (not name H*)")
-    restrained_atoms = u_eq.select_atoms("same residue as (protein and around 6 resname UNK) and name CA")
-    
-    restrained_atoms_indices = [atom.index for atom in restrained_atoms]
     ligand_atoms_indices = [atom.index for atom in ligand_atoms]
-    pocket_atom_indices = [atom.index for atom in pocket_atoms]
-    pocket_full_names = [f"{atom.resname}_{atom.resid}_{atom.index}" for atom in pocket_atoms]
-    # This is to check that the selection is correct
-    # PLEASE debug your own selection 
-    logging.info(f"Pocket atoms are: {', '.join(set(pocket_full_names))}")
 
-    # Calculate COM distance after equilibration
-    # You can use this to approximate the pulling distance
-    # Additionally, you could use this as a checkpoint and stop here if the ligand has drifted too far
-    eq_com = calculate_com_distance(u_eq, ligand_atoms, pocket_atoms, weighByMass=True)
-    final_com = eq_com.values[-1][0]
-    logging.info(f"COM distance after equilibration is: {final_com:.2f} A")       
-
-    # Run steered MD
-    sMD = SteeredMD(
-        system=system_eq,
-        topology=topo,
+    metad =  MetadynamicsMD(
         ligand_atoms=ligand_atoms_indices,
-        pocket_atoms=pocket_atom_indices,
-        restrained_atoms=restrained_atoms_indices,
-        restart_velocities=True,
-        out_dir=f"{sys_name}/sMD",
+        topology=topo,
+        out_dir=f"{sys_name}/WTmetaD",
+        is_membrane=False
     )
 
-    sMD.run(sMD_time=1, #ns
-            displacement=1.5, #nm 
-            pulling_force=1000, #KJ/mol/nm^2
-            replicas=3, 
+    # Run multiple walkers WTmetaD
+    n_walkers = 3
+
+    for walker in range(n_walkers):
+        metad.run(
+            system=system_eq,
             checkpoint_file=equilibrated_chk,
-            do_backwards=False # this is for the reverse pulling
-            )
+            run_id=f'W{walker+1}',
+            mMD_CV='rmsd',
+            mMD_time=1, #ns
+            bias_factor=10,
+            hill_height=0.3, #kJ/mol
+            hill_width=0.005, #nm
+            bias_frequency=2, #ps
+            grid_dimensions=(0.0, 0.5),
+        )
+
+
+
+
+    # u_eq = mda.Universe(system_prmtop, equilibrated_traj, in_memory=True)
+    
+    # lig_rmsd_equilibration = compute_rmsd(u_eq, u_eq,
+    #                                       alig_select="backbone", 
+    #                                       groupselections={"ligand":f"resname {lig_resname} and not name H*", 
+    #                                                        "protein":'protein and not name H*'},
+    #                                       out_dir=f"{sys_name}/equilibration"
+    #                                       )
+    # lig_rmsd_equilibration.to_csv(f"{sys_name}/equilibration/{sys_name}_ligand_rmsd.csv", index=False)
+    # plot_atomic_rmsf(u_eq, outname=f"{sys_name}/equilibration/{sys_name}_RMSF.png", log_rmsf=False)
 
     return
 
