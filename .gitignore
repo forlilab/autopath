@@ -1,6 +1,6 @@
 example/*/2hu4
 scratch/*
-example/2hu4
+example/*/2hu4
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
