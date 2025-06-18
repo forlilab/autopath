@@ -130,16 +130,12 @@ class MetadynamicsMD:
         logging.info(f"Sigma is {hill_width} nm and there are {grid} grid points ")
 
         logging.debug("Setting up the integrator")
-        integrator = LangevinMiddleIntegrator(
-            self.temperature, 1 / openmmunit.picoseconds, self.timestep
-        )
+        integrator = LangevinMiddleIntegrator(self.temperature, 1 / openmmunit.picoseconds, self.timestep)
         # integrator.setRandomNumberSeed(int(rep_idx))
 
         if self.topology is None:
             if pdb_file is None:
-                logging.error(
-                    f"Either a PDB or a prmtop file must be provided to get the topology from"
-                )
+                logging.error(f"Either a PDB or a prmtop file must be provided to get the topology from")
                 exit(1)
             else:
                 pdb = PDBFile(pdb_file)
@@ -154,11 +150,9 @@ class MetadynamicsMD:
         else:
             if pdb_file is not None:
                 logging.debug(f"Setting positions from PDB file {pdb_file}")
-                simulation.context.setPositions(pdb.positions)
+                simulation.context.setPositions(PDBFile(pdb_file).positions)
             else:
-                logging.error(
-                    f"Either a PDB or a checkpoint file must be provided to get coordinates from"
-                )
+                logging.error(f"Either a PDB or a checkpoint file must be provided to get coordinates from")
                 exit(1)
 
         # Add harmonic positional restraints to protein CA

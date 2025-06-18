@@ -108,7 +108,6 @@ def run_restrained_minimization(
                     ) -> None:
     """Perform restrained minimization, progressively releasing constraints."""
     
-    logging.info(f"Current system's energy: {simulation.context.getState(getEnergy=True).getPotentialEnergy()}")
     for stage in minim_scheme:
         logging.info(f"Minimization stage {stage['name']}")
         force_constants = stage['forces']
