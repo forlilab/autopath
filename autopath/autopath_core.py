@@ -337,7 +337,7 @@ class AutoPath:
 
             #make sure the equilibrated system is in the milestones folder
             u_eq.trajectory[-1] 
-            with mda.Writer(os.path.join(f"{sys_name}/milestones/pdbs", f"cluster_0_frame_0.pdb"), u_eq.atoms.n_atoms) as W:
+            with mda.Writer(os.path.join(f"{sys_name}/milestones/pdbs", f"milestone_0_frame_0.pdb"), u_eq.atoms.n_atoms) as W:
                 W.write(u_eq.atoms)
 
         ##############################################################################################
