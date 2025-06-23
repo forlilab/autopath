@@ -59,7 +59,6 @@ class AutoPath:
         sMD_autostop: bool = False,
         extract_milestones: bool = True,
         n_milestones: int = 5,
-        run_relax: bool = True,
         relax_steps: int = 25000,
         run_metadynamics: bool = True,
         mMD_bias_factor: int = 15,
@@ -95,7 +94,6 @@ class AutoPath:
         # Milestones
         self.extract_milestones = extract_milestones
         self.n_milestones = n_milestones
-        self.run_relax = run_relax
         self.relax_steps = relax_steps
         # Metadynamics
         self.run_metadynamics = run_metadynamics

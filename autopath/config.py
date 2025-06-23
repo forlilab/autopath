@@ -28,28 +28,26 @@ class Config(object):
         lig_ff: str = "espaloma",
         boxShape: str = "dodecahedron",
         padding: float = 1.0,
-        ionicStrength: float = 0.0,
+        ionicStrength: float = 0.15,
         is_membrane: bool = False,
         lipid_type: str = None,
         variants: dict = None,
         run_equilibration: bool = True,
         equilibration_scheme: str = "autopath/data/equilibration.json",
         run_sMDpulling: bool = True,
-        sMD_pulling_dist: float = 0.5,  # nm
+        sMD_pulling_dist: float = 2.0,  # nm
         sMD_time: int = 1,  # ns
         sMD_steps_per_move: int = 250,  # 1 ps
-        sMD_pulling_force: float = 20000,  # KJ/mol/nm2
+        sMD_pulling_force: float = 2000,  # KJ/mol/nm2
         sMD_replicas: int = 5,
         sMD_autostop: bool = False,
         extract_milestones: bool = True,
-        n_milestones: int = 10,
-        run_relax: bool = True,
-        relax_steps: int = 25000,
+        n_milestones: int = 5,
         run_metadynamics: bool = True,
-        mMD_time: int = 1,  # ns
-        mMD_bias_factor: int = 3,
+        mMD_time: int = 2,  # ns
+        mMD_bias_factor: int = 15,
         mMD_hill_height: float = 0.3,  # Kcal/mol
-        mMD_hill_width: float = 0.05,
+        mMD_hill_width: float = 0.01,
     ):
 
         # General
@@ -87,8 +85,6 @@ class Config(object):
         # Milestones
         self.extract_milestones = extract_milestones
         self.n_milestones = n_milestones
-        self.run_relax = run_relax
-        self.relax_steps = relax_steps
 
         # Metadynamics
         self.run_metadynamics = run_metadynamics
