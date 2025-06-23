@@ -229,8 +229,8 @@ class AutoPath:
         u_eq.trajectory[-1]  # set pointer to last frame
         restrained_atoms = u_eq.select_atoms("group pocket_atoms and name CA", pocket_atoms=pocket_atoms)
         restrained_atoms_indices = [atom.index for atom in restrained_atoms]
-        # restrained_atoms_full_names = [f"{atom.resname}_{atom.resid}_{atom.index}" for atom in restrained_atoms]
-        # print(restrained_atoms_full_names)
+        restrained_atoms_full_names = [f"{atom.resname}_{atom.resid}_{atom.index}" for atom in restrained_atoms]
+        logging.info(f"Restrained atoms are: {', '.join(set(restrained_atoms_full_names))}")
 
         ##############################################################################################
         ##################################### Steered MD simulations #################################

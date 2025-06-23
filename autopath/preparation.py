@@ -99,8 +99,8 @@ class SystemPreparation:
             exit(1)
 
         # you proabably dont want to change this
-        self.nb_cutoff = 1.0 * openmmunit.nanometers
-        self.switchDistance = 0.9 * openmmunit.nanometers
+        self.nb_cutoff = 1.2 * openmmunit.nanometers
+        self.switchDistance = 1.1 * openmmunit.nanometers
 
     def _sdf_to_mol(self, lig_sdf: str = None):
         """Load ligand SDF and transform to OpenMM molecule"""
