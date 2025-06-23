@@ -25,6 +25,7 @@ from MDAnalysis.transformations import wrap
 from MDAnalysis.core.universe import Universe
 from MDAnalysis.analysis.rms import RMSD, RMSF
 from scipy.spatial.distance import cdist
+from scipy.spatial import KDTree
 
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -35,6 +36,7 @@ import pytraj as pt
 
 from rdkit import Chem
 from rdkit.Chem.Draw import SimilarityMaps
+
 
 
 def save_model(model, filename):
@@ -520,8 +522,8 @@ def add_COM_force(
     system: System = None,
     group_A: list = None,
     group_B: list = None,
-    fc_pull=None,
-    r0=None,
+    fc_pull: float = None,
+    r0: float = None,
     force_group: int = 15,
 ):
 
@@ -573,7 +575,7 @@ def add_harmonic_restraints(
 
     force.setName(force_name)
     force.setForceGroup(force_group)
-    
+
     system.addForce(force)
 
     return
@@ -594,9 +596,7 @@ def add_flatbottom_COM_restraints(
     upper_wall_rest.addGroup(groupA)
     upper_wall_rest.addGroup(groupB)
     upper_wall_rest.addBond([0, 1])
-    upper_wall_rest.addGlobalParameter(
-        "k_flat", K_flat * openmmunit.kilojoules_per_mole
-    )
+    upper_wall_rest.addGlobalParameter("k_flat", K_flat * openmmunit.kilojoules_per_mole)
     upper_wall_rest.addGlobalParameter("upper_wall", upper_wall * openmmunit.nanometer)
     upper_wall_rest.addGlobalParameter("r0", r0 * openmmunit.nanometer)
 
@@ -755,6 +755,18 @@ def add_cylindrical_restraints(
     system.addForce(cylindrical_restraint)
 
     return
+
+def match_cluster_centroids(X:np.ndarray, centroids:np.ndarray, N:int=1):
+    """A function to find the N closest points to each centroid in the dataset X.
+    Centroids may not be real data points, so we need to find the closest real data points to them.
+    """
+    kdtree = KDTree(X)
+    closest_points = []
+    for centroid in centroids:
+        _, indices = kdtree.query(centroid, k=N)
+        closest_points.append(indices)
+
+    return closest_points
 
 def find_closest_points(
     out_dir, x_min, x_max, x_grid_points, x_name, 
