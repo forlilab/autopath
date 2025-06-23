@@ -563,7 +563,6 @@ def add_harmonic_restraints(
     force.addPerParticleParameter("x0")
     force.addPerParticleParameter("y0")
     force.addPerParticleParameter("z0")
-    force.setName(force_name)
 
     counter = 0
     for i, (atom_crd, atom) in enumerate(zip(positions, atoms)):
@@ -572,7 +571,9 @@ def add_harmonic_restraints(
             counter += 1
     # logging.info(f"{counter} atoms will be restrained")
 
+    force.setName(force_name)
     force.setForceGroup(force_group)
+    
     system.addForce(force)
 
     return
@@ -584,6 +585,7 @@ def add_flatbottom_COM_restraints(
     r0: float = None,
     upper_wall: int = 0.1,
     K_flat: float = 200,
+    force_name: str = "k_flat_com",
     force_group: int = 30,
 ):
 
@@ -601,6 +603,7 @@ def add_flatbottom_COM_restraints(
     upper_wall_rest.setUsesPeriodicBoundaryConditions(True)
 
     upper_wall_rest.setForceGroup(force_group)
+    upper_wall_rest.setName(force_name)
 
     system.addForce(upper_wall_rest)
 
@@ -613,6 +616,7 @@ def add_flatbottom_XY_restraints(
     r0: float = None,
     upper_wall: float = 0.1,
     K_flat: float = 200,
+    force_name: str = "k_flat_xy",
     force_group: Optional[int] = 31,
 ):
     
@@ -647,6 +651,7 @@ def add_flatbottom_XY_restraints(
 
     # Set the force group
     upper_wall_rest.setForceGroup(force_group)
+    upper_wall_rest.setName(force_name)
 
     # Add the force to the system
     system.addForce(upper_wall_rest)
@@ -663,6 +668,7 @@ def add_funnel_restraints(
     z_cc: Optional[openmmunit.Quantity] = 11.0 * openmmunit.angstrom,
     alpha: Optional[openmmunit.Quantity] = 35.0 * openmmunit.degrees,
     R_cylinder: Optional[openmmunit.Quantity] = 1.0 * openmmunit.angstrom,
+    force_name: str = "k_funnel",
     force_group: Optional[int] = 10,
 ):
     """
@@ -698,6 +704,8 @@ def add_funnel_restraints(
 
     # Add bond
     funnel.addBond([g1, g2], [])
+
+    funnel.setName(force_name)
 
     # Add force to system
     system.addForce(funnel)
