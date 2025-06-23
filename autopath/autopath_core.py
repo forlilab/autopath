@@ -229,8 +229,8 @@ class AutoPath:
         u_eq.trajectory[-1]  # set pointer to last frame
         restrained_atoms = u_eq.select_atoms("group pocket_atoms and name CA", pocket_atoms=pocket_atoms)
         restrained_atoms_indices = [atom.index for atom in restrained_atoms]
-        # restrained_atoms_full_names = [f"{atom.resname}_{atom.resid}_{atom.index}" for atom in restrained_atoms]
-        # print(restrained_atoms_full_names)
+        restrained_atoms_full_names = [f"{atom.resname}_{atom.resid}_{atom.index}" for atom in restrained_atoms]
+        logging.info(f"Restrained atoms are: {', '.join(set(restrained_atoms_full_names))}")
 
         ##############################################################################################
         ##################################### Steered MD simulations #################################
@@ -372,27 +372,38 @@ class AutoPath:
 
             for milestone in milestones:
                 milestone_name = os.path.basename(milestone).split('.')[0]
-
-                # COMMENT THIS IF YOU HAVE ALREADY EQUILIBRATED THE MILESTONES
-                logging.info(f'Equilibrating milestone {milestone_name}')
-                milestone_eq_system = mileston_equil.run(pdb_file=milestone, run_id=milestone_name)
-
-                milestone_eq_system = load_system(f"{sys_name}/milestones/system_equil_{milestone_name}.xml")
+                try:
+                    # Check if the system has already been equilibrated
+                    logging.info(f"Loading equilibrated {milestone_name}")
+                    milestone_eq_system = load_system(f"{sys_name}/milestones/system_equil_{milestone_name}.xml")
+                except FileNotFoundError:
+                    # If not, run equilibration
+                    logging.info(f'Equilibrating milestone {milestone_name}')
+                    try:
+                        milestone_eq_system = mileston_equil.run(pdb_file=milestone, run_id=milestone_name)
+                    except Exception as e:
+                        logging.error(f"Error during equilibration of {milestone_name}: {e}")
+                        continue
+                
                 milestone_chk = f"{sys_name}/milestones/checkpoint_equil_{milestone_name}.chk"
 
-                logging.info(f"Running metadynamics for milestone {milestone_name}")
-                WTMetaD.run(
-                    checkpoint_file=milestone_chk,
-                    system=milestone_eq_system,
-                    run_id=milestone_name,
-                    mMD_CV='com',
-                    mMD_time=self.mMD_time, #ns
-                    bias_factor=self.mMD_bias_factor,
-                    hill_height=self.mMD_hill_height, #kJ/mol
-                    hill_width=self.mMD_hill_width, #nm
-                    bias_frequency=2, #ps
-                    grid_dimensions=(min_com, max_com),
-                )
+                logging.info(f"Running WTMetaD for milestone {milestone_name}")
+                try:
+                    WTMetaD.run(
+                        checkpoint_file=milestone_chk,
+                        system=milestone_eq_system,
+                        run_id=milestone_name,
+                        mMD_CV='com',
+                        mMD_time=self.mMD_time, #ns
+                        bias_factor=self.mMD_bias_factor,
+                        hill_height=self.mMD_hill_height, #kJ/mol
+                        hill_width=self.mMD_hill_width, #nm
+                        bias_frequency=2, #ps
+                        grid_dimensions=(min_com, max_com),
+                    )
+                except Exception as e:
+                    logging.error(f"Error during WTMetaD for {milestone_name}: {e}")
+                    continue
 
         # Load and align the WTMetaD trajectories
         WTMetaD_trajs = glob(f"{sys_name}/metadynamics/trajectory_metadynamics*")
@@ -403,10 +414,10 @@ class AutoPath:
                             )
             # os.remove(traj_file) # remove the dcd
 
-        align_trajectory(prmtop_file=prmtop_file,
-                        traj_file=WTMetaD_trajs,
-                        out_fname=f"{sys_name}/metadynamics/{sys_name}_WTMetaD_all.dcd",
-                    )
+        # align_trajectory(prmtop_file=prmtop_file,
+        #                 traj_file=WTMetaD_trajs,
+        #                 out_fname=f"{sys_name}/metadynamics/{sys_name}_WTMetaD_all.dcd",
+        #             )
 
         simulation_time = time.monotonic() - start_time
         logging.info(f"Finished AutoPath simulation in {simulation_time/60:.2f} min.")
