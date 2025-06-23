@@ -380,36 +380,36 @@ def get_pocket_ha(topology: app.Topology, pocket_resid: list[int] = None) -> lis
 
     return pocket_ha_idx
 
+def _get_center(positions, atoms, group, weighByMass):
+    """Calculate the center of mass (COM) or center of geometry (COG) for a group of atoms in OpenMM."""
+
+    group_positions = positions[group]  # Get positions for the group
+
+    if weighByMass:
+        masses = np.array([atom.element.mass.value_in_unit(openmmunit.dalton) for atom in atoms if atom.index in group])
+        center = np.average(group_positions, axis=0, weights=masses)  # Weighted average for COM
+    else:
+        center = np.mean(group_positions, axis=0)  # Simple mean for COG
+    return center
+    
 def get_COM_dist(simulation, groupA:list[int]=None, groupB:list[int]=None, weighByMass:bool=True) -> float:
+    """Calculate the distance between the centers of mass (COM) or centers of geometry (COG) of two groups of atoms in OpenMM."""
     
     # Get positions
     state = simulation.context.getState(getPositions=True, getVelocities=False)
     positions = state.getPositions(asNumpy=True) / openmmunit.nanometers
     atoms = [atom for atom in simulation.topology.atoms()]
 
-    # Function to calculate center (COM or COG)
-    def _get_center(group, weighByMass):
-        group_positions = positions[group]  # Get positions for the group
-
-        if weighByMass:
-            masses = np.array([atom.element.mass.value_in_unit(openmmunit.dalton) for atom in atoms if atom.index in group])
-            center = np.average(group_positions, axis=0, weights=masses)  # Weighted average for COM
-        else:
-            center = np.mean(group_positions, axis=0)  # Simple mean for COG
-        return center
-
     # Calculate centers for both groups and their distance
-    centerA = _get_center(groupA, weighByMass)
-    centerB = _get_center(groupB, weighByMass)
+    centerA = _get_center(positions, atoms, groupA, weighByMass)
+    centerB = _get_center(positions, atoms, groupB, weighByMass)
     dist = np.linalg.norm(centerA - centerB)
 
     return dist  # Unitless, but effectively in nanometers because.... openMM
 
 
-def calculate_com_distance(
-    u, ligand_atoms=None, pocket_atoms=None, weighByMass: bool = True, wrap: bool = True
-    ) -> np.ndarray:
-    # Distance will be in Angstroms because of MDanalysis
+def calculate_com_distance(u, ligand_atoms=None, pocket_atoms=None, weighByMass: bool = True, wrap: bool = True) -> np.ndarray:
+    """ Calculate the distance between the center of mass (COM) or center of geometry (COG) between two atom groups in an MDAnalysis Universe."""
     distances = []
     for ts in u.trajectory:
         if weighByMass:
@@ -421,7 +421,7 @@ def calculate_com_distance(
 
         distances.append(np.linalg.norm(prot_com - lig_com))
 
-    return np.array(distances)
+    return np.array(distances) # Distance will be in Angstroms because of MDanalysis
 
 def compute_rmsd(u, u_ref,
                     alig_select:str='backbone', 
