@@ -46,7 +46,6 @@ class Config(object):
         run_relax: bool = True,
         relax_steps: int = 25000,
         run_metadynamics: bool = True,
-        mMD_walkers: int = 10,
         mMD_time: int = 1,  # ns
         mMD_bias_factor: int = 3,
         mMD_hill_height: float = 0.3,  # Kcal/mol
@@ -93,7 +92,6 @@ class Config(object):
 
         # Metadynamics
         self.run_metadynamics = run_metadynamics
-        self.mMD_walkers = mMD_walkers
         self.mMD_time = mMD_time
         self.mMD_bias_factor = mMD_bias_factor
         self.mMD_hill_height = mMD_hill_height

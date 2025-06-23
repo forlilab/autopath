@@ -58,11 +58,10 @@ class AutoPath:
         sMD_replicas: int = 3,
         sMD_autostop: bool = False,
         extract_milestones: bool = True,
-        n_milestones: int = 10,
+        n_milestones: int = 5,
         run_relax: bool = True,
         relax_steps: int = 25000,
         run_metadynamics: bool = True,
-        mMD_walkers: int = 5,
         mMD_bias_factor: int = 15,
         mMD_hill_height: float = 0.3,  # Kcal/mol approx 0.5KT
         mMD_hill_width: float = 0.01,
@@ -100,7 +99,6 @@ class AutoPath:
         self.relax_steps = relax_steps
         # Metadynamics
         self.run_metadynamics = run_metadynamics
-        self.mMD_walkers = mMD_walkers
         self.mMD_bias_factor = mMD_bias_factor
         self.mMD_hill_height = mMD_hill_height
         self.mMD_hill_width = mMD_hill_width
@@ -314,17 +312,18 @@ class AutoPath:
             # do pca reduction
             pca = PCA(n_components=0.95)
             data_array_reduced = pca.fit_transform(data_array)
+            logging.info(f'Number of PCA components: {pca.n_components_}')
             logging.info(f'Variance explained by PCA: {np.sum(pca.explained_variance_ratio_):.2f}')
-
+           
             # cluster_estimator = RegularSpace(dmin=1.0, max_centers=10)
             cluster_estimator = KMeans(n_clusters=self.n_milestones-1) # -1 because we will add the equilibrated system as cluster 0
-            fitted_model = cluster_estimator.fit(data_array).fetch_model()
+            fitted_model = cluster_estimator.fit(data_array_reduced).fetch_model()
             cluster_centers = fitted_model.cluster_centers
 
-            closest_frames = _match_cluster_centroids(data_array, cluster_centers) 
+            closest_frames = _match_cluster_centroids(data_array_reduced, cluster_centers) 
 
             for i, idx in enumerate(closest_frames):
-                dist = np.linalg.norm(data_array[idx] - cluster_centers[i])
+                dist = np.linalg.norm(data_array_reduced[idx] - cluster_centers[i])
                 logging.info(f"Cluster {i}: Closest frame is {idx} (distance = {dist:.6f})")
 
             # Write each representative frame to a PDB
@@ -356,7 +355,7 @@ class AutoPath:
                                         is_membrane=False,
                                         restrained_minimization=False,
                                         out_dir=f"{sys_name}/milestones",
-                                        verbose=2
+                                        verbose=0
                                         )
 
             min_com = eq_com * 0.75
@@ -366,7 +365,7 @@ class AutoPath:
                 topology=topology,
                 ligand_atoms=ligand_atoms_indices,
                 pocket_atoms=pocket_atom_indices,
-                # restrained_atoms=restrained_atoms_indices,
+                restrained_atoms=restrained_atoms_indices,
                 out_dir=f"{sys_name}/metadynamics",
             )
 
@@ -376,7 +375,7 @@ class AutoPath:
                     # Check if the system has already been equilibrated
                     logging.info(f"Loading equilibrated {milestone_name}")
                     milestone_eq_system = load_system(f"{sys_name}/milestones/system_equil_{milestone_name}.xml")
-                except FileNotFoundError:
+                except:
                     # If not, run equilibration
                     logging.info(f'Equilibrating milestone {milestone_name}')
                     try:
