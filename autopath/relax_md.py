@@ -48,12 +48,10 @@ class RelaxMD:
         checkpoint_file: str = None,
         pdb_file: str = None,
         run_id: str = None,
-        md_steps: int = 25000,
+        npt_steps: int = 25000,
     ) -> Tuple[float, float]:
 
         start_time = time.monotonic()
-
-        _print_current_forces(system)
 
         logging.debug("Setting up the integrator..")
         integrator = LangevinMiddleIntegrator(self.temperature, 1 / openmmunit.picoseconds, self.timestep)
@@ -78,17 +76,29 @@ class RelaxMD:
         simulation.minimizeEnergy()
 
         logging.info("Warming up the system..")
-        warm_up_system(simulation, integrator, warming_steps=md_steps, timestep=self.timestep)
+        warm_up_system(simulation, integrator, 
+                       warming_steps=npt_steps*2, 
+                       timestep=0.002,# * openmmunit.picoseconds, # lower timestep for warming
+                       Tend=self.temperature.value_in_unit(openmmunit.kelvin))
 
-        logging.info("Minimizing..")
-        simulation.minimizeEnergy()
+        # logging.info("Minimizing..")
+        # simulation.minimizeEnergy()
+
+        logging.info("Running short NPT..")
 
         # Add barostat to the system
         system = add_barostat(system, self.temperature, is_membrane=self.is_membrane)
-        simulation.context.reinitialize(preserveState=True)
 
-        logging.info("Running short NPT..")
-        simulation.step(25000)
+        # adjust timestep if needed
+        if self.timestep != integrator.getStepSize():
+            logging.info(f"Adjusting timestep from {integrator.getStepSize()} to {self.timestep} ps.")
+            integrator.setStepSize(self.timestep * openmmunit.picoseconds)
+    
+        simulation.context.reinitialize(preserveState=True)
+        logging.debug(f"Stepsize set to {integrator.getStepSize()}")
+
+        # run npt simulation
+        simulation.step(npt_steps) #0.1 ns
 
         # remove existing restraint forces
         forces_to_remove = []
@@ -116,6 +126,4 @@ class RelaxMD:
 
         simulation_time = time.monotonic() - start_time
         logging.info(f"Finished {run_id} relaxation in {simulation_time/60:.2f} min.")
-
-        # return startdist, finaldist
         return system
