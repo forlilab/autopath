@@ -17,6 +17,7 @@ class Config(object):
         pdb_path: str = None,
         do_fix_pdb: bool = True,
         pocket_selection: str = "protein and (around 3 resname UNK) and (not name H*)",
+        use_murcko_scaffold: bool = True,
         temperature: float = 300,
         random_state: int = 42,
         run_preparation: bool = True,
@@ -55,6 +56,7 @@ class Config(object):
         self.pdb_path = pdb_path
         self.do_fix_pdb = do_fix_pdb
         self.pocket_selection = pocket_selection
+        self.use_murcko_scaffold = use_murcko_scaffold
         self.temperature = temperature
         self.random_state = random_state
 

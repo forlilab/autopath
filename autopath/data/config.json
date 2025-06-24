@@ -4,6 +4,7 @@
         "pdb_path": null,
         "do_fix_pdb": true,
         "pocket_selection":"protein and (around 5 resname UNK) and name CA",
+        "use_murcko_scaffold": true,
         "temperature": 300,
         "random_state": 42
 },
@@ -13,7 +14,7 @@
         "lig_ff": "espaloma",
         "boxShape": "dodecahedron",
         "padding": 1.0,
-        "ionicStrength": 0.0
+        "ionicStrength": 0.15
     },
 
     "equilibration": {
@@ -35,7 +36,7 @@
     },
     "metadynamics": {
         "run_metadynamics": true,
-        "mMD_time": 2,
+        "mMD_time": 3,
         "mMD_bias_factor": 15,
         "mMD_hill_height": 0.3,
         "mMD_hill_width": 0.01

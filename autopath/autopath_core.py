@@ -32,7 +32,8 @@ class AutoPath:
         VS_mode: bool = False,
         pdb_path: str = None,
         do_fix_pdb: bool = True,
-        pocket_selection: str = None,
+        pocket_selection: str = "protein and (around 5 resname UNK) and name CA",
+        use_murcko_scaffold: bool = True,
         temperature: float = 300,
         random_state: int = 42,
         run_preparation: bool = True,
@@ -68,6 +69,7 @@ class AutoPath:
     ):
         # General
         self.pocket_selection = pocket_selection
+        self.use_murcko_scaffold = use_murcko_scaffold
         self.temperature = temperature
         self.random_state = random_state
         # Preparation
@@ -206,20 +208,44 @@ class AutoPath:
         #         logging.warning(f"Simulation for ligand {sys_name} terminated because ligand RMSD={final_rmsd:.2f} > {self.eq_checkpoint_cutoff}")
         #         exit(1)
 
-        # Get pocket atoms
-        u_eq.trajectory[-1]  # set pointer to last frame
-        pocket_atoms = u_eq.select_atoms(self.pocket_selection)
-        ligand_atoms = u_eq.select_atoms(f"resname {lig_resname} and not name H*")
-        ligand_atoms_indices = [atom.index for atom in ligand_atoms]
 
+        u_eq.trajectory[-1]  # set pointer to last frame
+
+        # Get pocket atoms
+        pocket_atoms = u_eq.select_atoms(self.pocket_selection)
         pocket_atom_indices = [atom.index for atom in pocket_atoms]
         pocket_residues = [f"{atom.resname}_{atom.resid}" for atom in pocket_atoms]
         # pocket_full_names = [f"{atom.resname}_{atom.resid}_{atom.index}" for atom in pocket_atoms]
-
-        eq_com = calculate_com_distance(u_eq, ligand_atoms, pocket_atoms)[-1] /10 # convert to nm
-
         logging.info(f"Pocket residues are: {', '.join(set(pocket_residues))}")
 
+        if use_murcko_scaffold:
+            from rdkit.Chem.Scaffolds import MurckoScaffold
+            from rdkit.Chem import rdDepictor, Draw
+
+            ligand_selection = u_eq.select_atoms(f'resname {lig_resname}')
+            mol = ligand_selection.convert_to('RDKIT')
+            sel_atoms = mol.GetAtoms()
+            # Get Murcko scaffold and match it to parent molecule
+            murcko = MurckoScaffold.GetScaffoldForMol(mol)
+            murcko_match = mol.GetSubstructMatch(murcko)
+            murcko_atom_names = [sel_atoms[i].GetProp('_MDAnalysis_name') for i in murcko_match]
+            # select the Murcko scaffold atoms in the MDAnalysis universe
+            ligand_atoms = u_eq.select_atoms(f'name {" ".join(map(str, murcko_atom_names))}')
+        
+            # save the Murcko scaffold image
+            rdDepictor.Compute2DCoords(mol)
+            mol = Chem.RemoveHs(mol)
+            img = Draw.MolToImage(mol, size=(300, 300), highlightAtoms=murcko_match)
+            img.save(f'{sys_name}/ligand_{lig_resname}_murcko.png')
+        else:
+            # If not using Murcko scaffold, select all non-hydrogen atoms in the ligand
+            # This is a fallback for cases where Murcko scaffold is not applicable
+            logging.warning("Using all non-hydrogen atoms in the ligand as ligand_atoms.")
+            ligand_atoms = u_eq.select_atoms(f"resname {lig_resname} and not name H*")
+
+        ligand_atoms_indices = [atom.index for atom in ligand_atoms]
+
+        eq_com = calculate_com_distance(u_eq, ligand_atoms, pocket_atoms)[-1] /10 # convert to nm
         logging.info(f"COM distance after equilibration is: {eq_com:.2f} nm")
 
         u_eq.trajectory[-1]  # set pointer to last frame
@@ -275,15 +301,15 @@ class AutoPath:
 
             sMD_trajs = glob(f"{sys_name}/sMD/*_aligned.dcd")
             u_all = mda.Universe(prmtop_file, sMD_trajs)
-            u_all.trajectory[0]  # set pointer to first frame
+            # use the same pocket selection as in the equilibration, but create a new atomgroup for this Universe
+            pocket_atoms = u_all.select_atoms(f'index {" ".join(map(str, pocket_atom_indices))}')
+            ligand_atoms = u_all.select_atoms(f'index {" ".join(map(str, ligand_atoms_indices))}')
 
-            pocket_atoms = u_all.select_atoms(f"protein and (around 4 resname {lig_resname}) and not name H*")
             pocket_atom_indices = [atom.index for atom in pocket_atoms]
-            # pocket_full_names = [f"{atom.resname}_{atom.resid}_{atom.index}" for atom in pocket_atoms]
+            pocket_residues = [f"{atom.resname}_{atom.resid}" for atom in pocket_atoms]
+            pocket_full_names = [f"{atom.resname}_{atom.resid}_{atom.index}" for atom in pocket_atoms]
             # logging.info(f"Pocket atoms are: {', '.join(set(pocket_full_names))}")
-
-            ligand_atoms = u_all.select_atoms(f"resname {lig_resname} and not name H*")
-            ligand_atoms_indices = [atom.index for atom in ligand_atoms]
+            logging.info(f"Pocket residues are: {', '.join(set(pocket_residues))}")
 
             # Calculate distance matrix for all frames
             # Each frame is represented by a vector of distances between all pocket atoms and all ligand atoms
@@ -295,7 +321,7 @@ class AutoPath:
             data_array = np.array(data_array)
 
             # do pca reduction
-            pca = PCA(n_components=0.95)
+            pca = PCA(n_components=2)  # retain 95% of variance
             data_array_reduced = pca.fit_transform(data_array)
             logging.info(f'Number of PCA components: {pca.n_components_}')
             logging.info(f'Variance explained by PCA: {np.sum(pca.explained_variance_ratio_):.2f}')
@@ -401,12 +427,7 @@ class AutoPath:
                             traj_file=traj_file,
                             out_fname=traj_file.replace(".dcd", "_aligned.dcd"),
                             )
-            # os.remove(traj_file) # remove the dcd
-
-        # align_trajectory(prmtop_file=prmtop_file,
-        #                 traj_file=WTMetaD_trajs,
-        #                 out_fname=f"{sys_name}/metadynamics/{sys_name}_WTMetaD_all.dcd",
-        #             )
+            os.remove(traj_file) # remove the dcd
 
         simulation_time = time.monotonic() - start_time
         logging.info(f"Finished AutoPath simulation in {simulation_time/60:.2f} min.")
