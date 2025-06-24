@@ -10,23 +10,22 @@ import openmm.unit as openmmunit
 
 # AutoPath imports
 from autopath.utils import *
+from autopath.utils import _print_current_forces
 from autopath.equilibration import warm_up_system
 
 
 class RelaxMD:
     def __init__(
         self,
-        system: str = None,
         topology: str = None,
-        lig_name: str = "UNK",
-        out_dir: str = "relax_md",
+        ligand_atoms: list[int] = None,
         pocket_atoms: list[int] = None,
-        use_flat_bottom_rest: bool = False,
+        out_dir: str = "relax_md",
+        is_membrane: bool = False,
         HMR: bool = True,
         temp: float = 300,
     ) -> None:
 
-        self.system = system
         self.topology = topology
 
         os.makedirs(out_dir, exist_ok=True)
@@ -35,9 +34,9 @@ class RelaxMD:
         self.timestep = 0.004 if HMR else 0.002
         self.temperature = temp * openmmunit.kelvin
 
-        self.ligand_ha_idx, self.lig_ha_names = get_ligand_ha(self.topology, lig_name)
+        self.ligand_atoms = ligand_atoms
         self.pocket_atoms = pocket_atoms
-        self.use_flat_bottom_rest = use_flat_bottom_rest
+        self.is_membrane = is_membrane
 
         self.platform = select_platform("fastest")
 
@@ -45,6 +44,7 @@ class RelaxMD:
 
     def run(
         self,
+        system: str = None,
         checkpoint_file: str = None,
         pdb_file: str = None,
         run_id: str = None,
@@ -53,14 +53,14 @@ class RelaxMD:
 
         start_time = time.monotonic()
 
+        _print_current_forces(system)
+
         logging.debug("Setting up the integrator..")
-        integrator = LangevinMiddleIntegrator(
-            self.temperature, 1 / openmmunit.picoseconds, self.timestep
-        )
+        integrator = LangevinMiddleIntegrator(self.temperature, 1 / openmmunit.picoseconds, self.timestep)
         # integrator.setRandomNumberSeed(int(rep_idx))
 
         # Setting Simulation object and loading the checkpoint
-        simulation = Simulation(self.topology, self.system, integrator, self.platform)
+        simulation = Simulation(self.topology, system, integrator, self.platform)
 
         if checkpoint_file is not None:
             logging.debug("Loading simulation checkpoint..")
@@ -69,48 +69,53 @@ class RelaxMD:
             initial_positions = PDBFile(pdb_file).positions
             simulation.context.setPositions(initial_positions)
 
-        startdist = get_COG_dist(simulation, self.ligand_ha_idx, self.pocket_atoms)
+        startdist = get_COM_dist(simulation, self.ligand_atoms, self.pocket_atoms)
+        # Add flat-bottom COM restraints to prevent ligand from drifting too far away
+        logging.info("Adding flat-bottom COM restraints..")
+        add_flatbottom_COM_restraints(system, self.ligand_atoms, self.pocket_atoms, r0=startdist)
 
-        if self.use_flat_bottom_rest:
-            add_flatbottom_COM_restraints(
-                self.system, self.ligand_ha_idx, self.pocket_atoms, startdist
-            )
-
-        logging.debug("Minimizing..")
+        logging.info("Minimizing..")
         simulation.minimizeEnergy()
 
-        logging.debug("Warming up the system..")
-        warm_up_system(
-            simulation, integrator, warming_steps=md_steps, timestep=self.timestep
-        )
+        logging.info("Warming up the system..")
+        warm_up_system(simulation, integrator, warming_steps=md_steps, timestep=self.timestep)
 
-        logging.debug("Minimizing..")
+        logging.info("Minimizing..")
         simulation.minimizeEnergy()
 
-        if self.use_flat_bottom_rest:
-            # Remove the force before saving
-            simulation.context.getSystem().removeForce(
-                simulation.context.getSystem().getNumForces() - 1
-            )
+        # Add barostat to the system
+        system = add_barostat(system, self.temperature, is_membrane=self.is_membrane)
+        simulation.context.reinitialize(preserveState=True)
+
+        logging.info("Running short NPT..")
+        simulation.step(25000)
+
+        # remove existing restraint forces
+        forces_to_remove = []
+        for f_idx in range(system.getNumForces()):
+            force = system.getForce(f_idx)
+            if force.getName().startswith("k_flat_com"):
+                logging.info(f"Removing force {force.getName()} at index {f_idx}.")
+                forces_to_remove.append(f_idx)
+
+        for f_idx in sorted(forces_to_remove, reverse=True):
+            system.removeForce(f_idx)
+
+        # _print_current_forces(system)
 
         # save stuff
         final_positions = simulation.context.getState(getPositions=True).getPositions()
         save_simulation(simulation, f"{self.out_dir}/{run_id}_relax_checkpoint")
-        save_system(self.system, f"{self.out_dir}/{run_id}_relax_system.xml")
-        save_pdb(
-            self.topology,
-            final_positions,
-            f"{self.out_dir}/{run_id}_relax.pdb",
-        )
+        save_system(system, f"{self.out_dir}/{run_id}_relax_system.xml")
+        save_pdb(self.topology, final_positions, f"{self.out_dir}/{run_id}_relax.pdb")
 
         # Get COM distance
-        finaldist = get_COG_dist(simulation, self.ligand_ha_idx, self.pocket_atoms)
+        finaldist = get_COM_dist(simulation, self.ligand_atoms, self.pocket_atoms)
 
-        logging.info(
-            f"{run_id} - Initial:{startdist:.3f} nm - Final:{finaldist:.3f} nm"
-        )
+        logging.info(f"{run_id} - Initial:{startdist:.3f} nm - Final:{finaldist:.3f} nm")
 
         simulation_time = time.monotonic() - start_time
         logging.info(f"Finished {run_id} relaxation in {simulation_time/60:.2f} min.")
 
-        return startdist, finaldist
+        # return startdist, finaldist
+        return system
