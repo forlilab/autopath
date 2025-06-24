@@ -187,8 +187,8 @@ class MetadynamicsMD:
                 f"sqrt(distance(g1,g2)^2)",
                 openmmunit.nanometers,
                 groups,
-                weighByMass=False,
-                pbc=True,
+                weighByMass=True,
+                pbc=False,
             )
 
         elif mMD_CV == "rmsd":
@@ -197,11 +197,7 @@ class MetadynamicsMD:
         elif mMD_CV == "rmsd_states":
 
             atom_names_to_match = ["CA"]
-            system_residues = [
-                r
-                for r in self.topology.residues()
-                if r.name not in ["UNK", "HOH", "NA", "CL"]
-            ]
+            system_residues = [r for r in self.topology.residues() if r.name not in ["UNK", "HOH", "NA", "CL", "K"]]
 
             atom_indexes_to_match = []
             for residue in system_residues:
@@ -210,12 +206,7 @@ class MetadynamicsMD:
                         atom_indexes_to_match.append(atom.index)
 
             states_pdbs = glob("input/milestone_*.pdb")
-            milestones_dicts = [
-                self._get_reference_dict(
-                    pdb, atom_names_to_match, atom_indexes_to_match
-                )
-                for pdb in states_pdbs
-            ]
+            milestones_dicts = [self._get_reference_dict(pdb, atom_names_to_match, atom_indexes_to_match) for pdb in states_pdbs]
 
             cv = cvpack.PathInRMSDSpace(
                 metric=cvpack.path.progress,
