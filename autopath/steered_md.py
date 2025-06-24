@@ -175,29 +175,33 @@ class SteeredMD:
                 steps_per_move=steps_per_move, initial_r0=initial_r0, final_r0=final_r0
                 )
 
-            # Generate statistics and plots for the forward direction
-            files_f = glob(f"{self.out_dir}/sMD_log_*_forward.dat")
-            plot_sMD_statistics(files_f, f'{rep_name}_forward', self.out_dir)
+            if self.verbose > 0:
+                plot_sMD_statistics(f"{self.out_dir}/sMD_log_{rep_idx}_forward.dat", f'{rep_name}_forward', self.out_dir)
 
             if do_backwards:
                 # Run backward direction
                 # Reset velocities to temperature after forward pulling
                 simulation.context.setVelocitiesToTemperature(self.temperature)
-                self.run_single_direction(
-                    simulation, rep_name, direction="backward", dx_per_move=-dx_per_move, sMD_moves=sMD_moves,
-                    steps_per_move=steps_per_move, initial_r0=initial_r0, final_r0=final_r0
-                )
+                self.run_single_direction(simulation, rep_name, direction="backward", dx_per_move=-dx_per_move, sMD_moves=sMD_moves,
+                                        steps_per_move=steps_per_move, initial_r0=initial_r0, final_r0=final_r0)
 
-                # Generate statistics and plots for the backward direction
-                files_b = glob(f"{self.out_dir}/sMD_log_*_backward.dat")
-                plot_sMD_statistics(files_b, f'{rep_name}_backward', self.out_dir)
+                if self.verbose > 0:
+                    plot_sMD_statistics(f"{self.out_dir}/sMD_log_{rep_idx}_backward.dat", f'{rep_name}_backward', self.out_dir)
 
             # Logging the time taken for each replica
             replica_time = time.monotonic() - replica_start_time
             logging.info(f"Finished replica {rep_idx}/{replicas} in {replica_time/60:.2f} min")
 
+
+        # Generate statistics and plots for the forward direction
+        files_f = glob(f"{self.out_dir}/sMD_log_*_forward.dat")
+        plot_sMD_statistics(files_f, f'{rep_name}_forward', self.out_dir)
+
+        if do_backwards:
+            # Generate statistics and plots for the backward direction
+            files_b = glob(f"{self.out_dir}/sMD_log_*_backward.dat")
+            plot_sMD_statistics(files_b, f'{rep_name}_backward', self.out_dir)
+
         # Logging the total time for all replicas
         simulation_time = time.monotonic() - simulation_start_time
-        logging.info(
-            f"Finished {replicas} replicas of sMD {'with backwards pulling' if do_backwards else ''} in {simulation_time/60:.2f} min."
-        )
+        logging.info(f"Finished {replicas} replicas of sMD {'with backwards pulling' if do_backwards else ''} in {simulation_time/60:.2f} min.")
