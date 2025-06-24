@@ -64,7 +64,7 @@ class AutoPath:
         mMD_bias_factor: int = 15,
         mMD_hill_height: float = 0.3,  # Kcal/mol approx 0.5KT
         mMD_hill_width: float = 0.01,
-        mMD_time: int = 2,  # ns
+        mMD_time: int = 3,  # ns
     ):
         # General
         self.pocket_selection = pocket_selection
@@ -268,22 +268,9 @@ class AutoPath:
         ##############################################################################################
         ###################################### Extract Milestones ####################################
         ##############################################################################################
-        from scipy.spatial import KDTree
         from sklearn.decomposition import PCA
         from deeptime.clustering import KMeans
         
-        def _match_cluster_centroids(X, centroids, N=1):
-            """A function to find the N closest points to each centroid in the dataset X.
-            Centroids may not be real data points, so we need to find the closest real data points to them.
-            """
-            kdtree = KDTree(X)
-            closest_points = []
-            for centroid in centroids:
-                _, indices = kdtree.query(centroid, k=N)
-                closest_points.append(indices)
-
-            return closest_points
-
         if self.extract_milestones:
 
             sMD_trajs = glob(f"{sys_name}/sMD/*_aligned.dcd")
@@ -318,7 +305,7 @@ class AutoPath:
             fitted_model = cluster_estimator.fit(data_array_reduced).fetch_model()
             cluster_centers = fitted_model.cluster_centers
 
-            closest_frames = _match_cluster_centroids(data_array_reduced, cluster_centers) 
+            closest_frames = match_cluster_centroids(data_array_reduced, cluster_centers) 
 
             for i, idx in enumerate(closest_frames):
                 dist = np.linalg.norm(data_array_reduced[idx] - cluster_centers[i])
@@ -343,21 +330,26 @@ class AutoPath:
 
         if self.run_metadynamics:
 
-            milestones = glob(f'{sys_name}/milestones/pdbs/milestone_*.pdb')
+            milestones = glob(f'{sys_name}/milestones/pdbs/milestone_*.pdb')           
+            if len(milestones) == 0:
+                logging.error("No milestones found. Please check the milestone extraction step.")
+                exit(1)
 
-            # Run restrained equilibration
-            mileston_equil = Equilibration(
-                                        system=system,
-                                        topology=topology,
-                                        protocol_fname="equilibration_milestone.json",
-                                        is_membrane=False,
-                                        restrained_minimization=False,
-                                        out_dir=f"{sys_name}/milestones",
-                                        verbose=0
-                                        )
+            #sort the milestones by their index
+            milestones.sort(key=lambda x: int(os.path.basename(x).split('_')[1]))
 
+            milestone_relax = RelaxMD(
+                topology=topology,
+                ligand_atoms=ligand_atoms_indices,
+                pocket_atoms=pocket_atom_indices,
+                out_dir=f"{sys_name}/milestones",
+                temp=self.temperature,
+            )
+
+            # Run relaxation for each milestone
             min_com = eq_com * 0.75
-            max_com = eq_com + self.sMD_pulling_dist
+            # max_com = eq_com + self.sMD_pulling_dist
+            max_com = self.sMD_pulling_dist
 
             WTMetaD = MetadynamicsMD(
                 topology=topology,
@@ -369,26 +361,26 @@ class AutoPath:
 
             for milestone in milestones:
                 milestone_name = os.path.basename(milestone).split('.')[0]
-                try:
-                    # Check if the system has already been equilibrated
-                    logging.info(f"Loading equilibrated {milestone_name}")
-                    milestone_eq_system = load_system(f"{sys_name}/milestones/system_equil_{milestone_name}.xml")
-                except:
-                    # If not, run equilibration
-                    logging.info(f'Equilibrating milestone {milestone_name}')
+                milestone_system = f"{sys_name}/milestones/{milestone_name}_relax_system.xml"
+                milestone_chk = f"{sys_name}/milestones/{milestone_name}_relax_checkpoint.chk"
+
+                if os.path.exists(milestone_system):
+                    milestone_system = load_system(milestone_system)
+                    logging.info(f"Loading relaxed milestone {milestone_name}")
+                else:
+                    logging.info(f'Relaxing milestone {milestone_name}')
                     try:
-                        milestone_eq_system = mileston_equil.run(pdb_file=milestone, run_id=milestone_name)
+                        system = load_system(f"{sys_name}/system.xml")
+                        milestone_system = milestone_relax.run(pdb_file=milestone, system=system, run_id=milestone_name)
                     except Exception as e:
-                        logging.error(f"Error during equilibration of {milestone_name}: {e}")
+                        logging.error(f"Error relaxing {milestone_name}: {e}")
                         continue
                 
-                milestone_chk = f"{sys_name}/milestones/checkpoint_equil_{milestone_name}.chk"
-
                 logging.info(f"Running WTMetaD for milestone {milestone_name}")
                 try:
                     WTMetaD.run(
                         checkpoint_file=milestone_chk,
-                        system=milestone_eq_system,
+                        system=milestone_system,
                         run_id=milestone_name,
                         mMD_CV='com',
                         mMD_time=self.mMD_time, #ns
