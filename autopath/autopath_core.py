@@ -44,8 +44,8 @@ class AutoPath:
         ],
         lig_ff: str = "espaloma",
         boxShape: str = "dodecahedron",
-        padding: float = 1.0,
-        ionicStrength: float = 0.0,
+        padding: float = 1.2,
+        ionicStrength: float = 0.15,
         variants: dict = None,
         is_membrane: bool = False,
         lipid_type: str = None,
@@ -62,9 +62,9 @@ class AutoPath:
         n_milestones: int = 5,
         relax_steps: int = 25000,
         run_metadynamics: bool = True,
-        mMD_bias_factor: int = 15,
+        mMD_bias_factor: int = 12,
         mMD_hill_height: float = 0.3,  # Kcal/mol approx 0.5KT
-        mMD_hill_width: float = 0.01,
+        mMD_hill_width: float = 0.02,
         mMD_time: int = 3,  # ns
     ):
         # General
@@ -217,29 +217,39 @@ class AutoPath:
         pocket_residues = [f"{atom.resname}_{atom.resid}" for atom in pocket_atoms]
         # pocket_full_names = [f"{atom.resname}_{atom.resid}_{atom.index}" for atom in pocket_atoms]
         logging.info(f"Pocket residues are: {', '.join(set(pocket_residues))}")
+        
+        #write out the pocket atoms to a pdb
+        with mda.Writer(f"{sys_name}/pocket_atoms.pdb", u_eq.atoms.n_atoms) as W:
+            W.write(pocket_atoms)
+        #write out the pocket atoms to a pdb
+        with mda.Writer(f"{sys_name}/equilib.pdb", u_eq.atoms.n_atoms) as W:
+            W.write(u_eq.atoms)
 
-        if use_murcko_scaffold:
+        if self.use_murcko_scaffold:
             from rdkit.Chem.Scaffolds import MurckoScaffold
             from rdkit.Chem import rdDepictor, Draw
-
-            ligand_selection = u_eq.select_atoms(f'resname {lig_resname}')
-            mol = ligand_selection.convert_to('RDKIT')
-            sel_atoms = mol.GetAtoms()
-            # Get Murcko scaffold and match it to parent molecule
-            murcko = MurckoScaffold.GetScaffoldForMol(mol)
-            murcko_match = mol.GetSubstructMatch(murcko)
-            murcko_atom_names = [sel_atoms[i].GetProp('_MDAnalysis_name') for i in murcko_match]
-            # select the Murcko scaffold atoms in the MDAnalysis universe
-            ligand_atoms = u_eq.select_atoms(f'name {" ".join(map(str, murcko_atom_names))}')
-        
-            # save the Murcko scaffold image
-            rdDepictor.Compute2DCoords(mol)
-            mol = Chem.RemoveHs(mol)
-            img = Draw.MolToImage(mol, size=(300, 300), highlightAtoms=murcko_match)
-            img.save(f'{sys_name}/ligand_{lig_resname}_murcko.png')
+            try:
+                ligand_selection = u_eq.select_atoms(f'resname {lig_resname}')
+                mol = ligand_selection.convert_to('RDKIT')
+                sel_atoms = mol.GetAtoms()
+                # Get Murcko scaffold and match it to parent molecule
+                murcko = MurckoScaffold.GetScaffoldForMol(mol)
+                murcko_match = mol.GetSubstructMatch(murcko)
+                murcko_atom_names = [sel_atoms[i].GetProp('_MDAnalysis_name') for i in murcko_match]
+                # select the Murcko scaffold atoms in the MDAnalysis universe
+                ligand_atoms = u_eq.select_atoms(f'name {" ".join(map(str, murcko_atom_names))}')
+                
+                # save the Murcko scaffold image
+                rdDepictor.Compute2DCoords(mol)
+                mol = Chem.RemoveHs(mol)
+                img = Draw.MolToImage(mol, size=(300, 300), highlightAtoms=murcko_match)
+                img.save(f'{sys_name}/ligand_{lig_resname}_murcko.png')
+            except Exception as e:
+                logging.error(f"Error processing Murcko scaffold: {e}")
+                logging.warning("Falling back to using all non-hydrogen atoms in the ligand.")
+                ligand_atoms = u_eq.select_atoms(f'resname {lig_resname} and not name H*')
         else:
             # If not using Murcko scaffold, select all non-hydrogen atoms in the ligand
-            # This is a fallback for cases where Murcko scaffold is not applicable
             logging.warning("Using all non-hydrogen atoms in the ligand as ligand_atoms.")
             ligand_atoms = u_eq.select_atoms(f"resname {lig_resname} and not name H*")
 
@@ -294,10 +304,11 @@ class AutoPath:
         ##############################################################################################
         ###################################### Extract Milestones ####################################
         ##############################################################################################
-        from sklearn.decomposition import PCA
-        from deeptime.clustering import KMeans
+
         
         if self.extract_milestones:
+            from sklearn.decomposition import PCA
+            from deeptime.clustering import KMeans
 
             sMD_trajs = glob(f"{sys_name}/sMD/*_aligned.dcd")
             u_all = mda.Universe(prmtop_file, sMD_trajs)
@@ -372,11 +383,9 @@ class AutoPath:
                 temp=self.temperature,
             )
 
-            # Run relaxation for each milestone
             min_com = eq_com * 0.75
-            # max_com = eq_com + self.sMD_pulling_dist
             max_com = self.sMD_pulling_dist
-
+            
             WTMetaD = MetadynamicsMD(
                 topology=topology,
                 ligand_atoms=ligand_atoms_indices,
@@ -415,6 +424,7 @@ class AutoPath:
                         hill_width=self.mMD_hill_width, #nm
                         bias_frequency=2, #ps
                         grid_dimensions=(min_com, max_com),
+                        # grid_dimensions=(0, 1),
                     )
                 except Exception as e:
                     logging.error(f"Error during WTMetaD for {milestone_name}: {e}")
