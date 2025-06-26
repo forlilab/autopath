@@ -34,7 +34,8 @@ import pytraj as pt
 from rdkit import Chem
 from rdkit.Chem.Draw import SimilarityMaps
 from rdkit.Chem.Scaffolds import MurckoScaffold
-# from rdkit.Chem import rdDepictor, Draw
+
+from deeptime.clustering import RegularSpace
 
 def save_model(model, filename):
     with open(filename, 'wb') as file:
@@ -567,6 +568,32 @@ def match_cluster_centroids(X:np.ndarray, centroids:np.ndarray, N:int=1):
         closest_points.append(indices)
 
     return closest_points
+
+def cluster_sMD_trajectories(u: mda.Universe, X:np.ndarray, n_clusters:int, out_dir:str):
+
+    # cluster_estimator = KMeans(n_clusters=5)
+    cluster_estimator = RegularSpace(dmin=4, max_centers=n_clusters)
+    fitted_model = cluster_estimator.fit(X).fetch_model()
+    cluster_centers = fitted_model.cluster_centers
+    labels = fitted_model.transform(X)
+
+    # sort the array by the second column (COM distance) so milestone 0 is the closest
+    sorted_indices = np.argsort(cluster_centers[:, 1])
+    sorted_cluster_centers = cluster_centers[sorted_indices]
+    closest_frames = match_cluster_centroids(X, sorted_cluster_centers) 
+
+    # for i, idx in enumerate(closest_frames):
+    #     dist = np.linalg.norm(X[idx] - cluster_centers[i])
+    #     logging.info(f"Cluster {i}: Closest frame is {idx} (distance = {dist:.3f})")
+
+    # Write each representative frame to a PDB
+    u.trajectory[0]  # reset
+    for i, frame_index in enumerate(closest_frames):
+        u.trajectory[frame_index]
+        with mda.Writer(os.path.join(f"{out_dir}", f"milestone_{i+1}_frame_{frame_index}.pdb"), u.atoms.n_atoms) as W:
+            W.write(u.atoms)
+
+    return labels, sorted_cluster_centers
 
 def find_closest_points(
     out_dir, x_min, x_max, x_grid_points, x_name, 

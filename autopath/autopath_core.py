@@ -223,7 +223,7 @@ class AutoPath:
         with mda.Writer(f"{sys_name}/pocket_atoms.pdb", u_eq.atoms.n_atoms) as W:
             W.write(pocket_atoms)
     
-        ligand_atoms = get_ligand_atoms(u_eq, lig_resname, self.use_murcko_scaffold, f'{sys_name}/ligand_{lig_resname}_murcko.pdb')
+        ligand_atoms = get_ligand_atoms(u_eq, lig_resname, self.use_murcko_scaffold, f'{sys_name}/ligand_{lig_resname}_murcko.png')
         ligand_atoms_indices = [atom.index for atom in ligand_atoms]
 
         final_com = calculate_com_distance(u_eq, ligand_atoms, pocket_atoms)[-1] /10 # convert to nm
@@ -277,59 +277,42 @@ class AutoPath:
         ##############################################################################################
         
         if self.extract_milestones:
-            from deeptime.clustering import RegularSpace
-
-            os.makedirs(f"{sys_name}/milestones/pdbs", exist_ok=True)
+            out_dir = f"{sys_name}/milestones/pdbs"
+            os.makedirs(out_dir, exist_ok=True)
 
             sMD_trajs = glob(f"{sys_name}/sMD/*_aligned.dcd")
-            u_all = mda.Universe(prmtop_file, sMD_trajs)
-
+            if len(sMD_trajs) == 0:
+                logging.error("No sMD trajectories found. Please check the sMD pulling step.")
+                exit(1)
+                
             # use the same pocket selection as in the equilibration, but create a new atomgroup for this Universe
-            pocket_atoms = u_all.select_atoms(f'index {" ".join(map(str, pocket_atom_indices))}')
-            ligand_atoms = u_all.select_atoms(f'index {" ".join(map(str, ligand_atoms_indices))}')
-
-            coms = calculate_com_distance(u_all, ligand_atoms, pocket_atoms, wrap=False)
-            rmsd = compute_rmsd(u_all, u_all, 
+            u_sMD = mda.Universe(prmtop_file, sMD_trajs)
+            pocket_atoms = u_sMD.select_atoms(f'index {" ".join(map(str, pocket_atom_indices))}')
+            ligand_atoms = u_sMD.select_atoms(f'index {" ".join(map(str, ligand_atoms_indices))}')
+            
+            # calculate some features for clustering
+            coms = calculate_com_distance(u_sMD, ligand_atoms, pocket_atoms, wrap=False)
+            rmsd = compute_rmsd(u_sMD, u_sMD, 
                                 alig_select=f"resname {lig_resname} and (not name H*)",
                                 groupselections={'ligand': f"resname {lig_resname} and (not name H*)"},
-                                out_dir=f"{sys_name}/milestones/pdbs")
+                                out_dir=out_dir)
             rmsd['COM'] = coms
             X = rmsd[['RMSD_ligand', 'COM']].values
 
-            # cluster_estimator = KMeans(n_clusters=5)
-            cluster_estimator = RegularSpace(dmin=3, max_centers=self.n_milestones)
-            fitted_model = cluster_estimator.fit(X).fetch_model()
-            cluster_centers = fitted_model.cluster_centers
-            labels = fitted_model.transform(X)
-
-            closest_frames = match_cluster_centroids(X, cluster_centers) 
-
-            # for i, idx in enumerate(closest_frames):
-            #     dist = np.linalg.norm(X[idx] - cluster_centers[i])
-            #     logging.info(f"Cluster {i}: Closest frame is {idx} (distance = {dist:.3f})")
+            labels, sorted_cluster_centers = cluster_sMD_trajectories(u_sMD, X, 
+                                                                      n_clusters=self.n_milestones, 
+                                                                      out_dir=out_dir)
 
             # Plot the clustering results
             plt.figure(figsize=(6, 5))
             sns.scatterplot(x=rmsd['RMSD_ligand'], y=rmsd['COM'], hue=labels, palette='viridis')
-            plt.scatter(cluster_centers[:, 0], cluster_centers[:, 1], color='red', marker='x', s=100, label='Cluster Centers')
+            plt.scatter(sorted_cluster_centers[:, 0], sorted_cluster_centers[:, 1], color='red', marker='x', s=100, label='Cluster Centers')
             plt.xlabel('RMSD (A)'); plt.ylabel('COM Distance (A)')
             plt.title(f"{sys_name} sMD clustering")
             plt.tight_layout()
             plt.legend()
-            plt.savefig(f"{sys_name}/milestones/pdbs/milestones_clustering_plot.png")
+            plt.savefig(f"{out_dir}/milestones_clustering_plot.png")
             plt.close()
-
-            # Write each representative frame to a PDB
-            u_all.trajectory[0]  # reset
-            for i, frame_index in enumerate(closest_frames):
-                u_all.trajectory[frame_index]
-                with mda.Writer(os.path.join(f"{sys_name}/milestones/pdbs", f"milestone_{i+1}_frame_{frame_index}.pdb"), u_all.atoms.n_atoms) as W:
-                    W.write(u_all.atoms)
-
-            # Add the equilibrated system is in the milestones folder
-            # u_eq.trajectory[-1] 
-            # with mda.Writer(os.path.join(f"{sys_name}/milestones/pdbs", f"milestone_0_frame_0.pdb"), u_eq.atoms.n_atoms) as W:
-            #     W.write(u_eq.atoms)
 
         ##############################################################################################
         ##################################### Metadynamics simulations ###############################
