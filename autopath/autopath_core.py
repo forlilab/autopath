@@ -32,7 +32,7 @@ class AutoPath:
         VS_mode: bool = False,
         pdb_path: str = None,
         do_fix_pdb: bool = True,
-        pocket_selection: str = "protein and (around 5 resname UNK) and name CA",
+        pocket_selection: str = "same residue as protein and (around 4 resname UNK) and (not name H*)",
         use_murcko_scaffold: bool = True,
         temperature: float = 300,
         random_state: int = 42,
@@ -63,6 +63,7 @@ class AutoPath:
         relax_steps: int = 25000,
         run_metadynamics: bool = True,
         mMD_bias_factor: int = 12,
+        mMD_bias_frequency: int = 2,  # ps
         mMD_hill_height: float = 0.3,  # Kcal/mol approx 0.5KT
         mMD_hill_width: float = 0.02,
         mMD_time: int = 3,  # ns
@@ -100,6 +101,7 @@ class AutoPath:
         # Metadynamics
         self.run_metadynamics = run_metadynamics
         self.mMD_bias_factor = mMD_bias_factor
+        self.mMD_bias_frequency = mMD_bias_frequency
         self.mMD_hill_height = mMD_hill_height
         self.mMD_hill_width = mMD_hill_width
         self.mMD_time = mMD_time
@@ -425,7 +427,7 @@ class AutoPath:
                         bias_factor=self.mMD_bias_factor,
                         hill_height=self.mMD_hill_height, #kJ/mol
                         hill_width=self.mMD_hill_width, #nm
-                        bias_frequency=2, #ps
+                        bias_frequency=self.mMD_bias_frequency, #ps
                         grid_dimensions=(min_com, max_com),
                         # grid_dimensions=(0, 1),
                     )

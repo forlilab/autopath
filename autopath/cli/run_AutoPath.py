@@ -70,7 +70,7 @@ def main():
         ionicStrength=config.ionicStrength,
         variants=config.variants,
         is_membrane=config.is_membrane,
-        lipid_type=config.lipid_type
+        lipid_type=config.lipid_type,
         # Equilibration
         run_equilibration=config.run_equilibration,
         equilibration_scheme=config.equilibration_scheme,
@@ -85,13 +85,11 @@ def main():
         # Milestones
         extract_milestones=config.extract_milestones,
         n_milestones=config.n_milestones,
-        run_relax=config.run_relax,
-        relax_steps=config.relax_steps,
         # Metadynamics
         run_metadynamics=config.run_metadynamics,
-        mMD_walkers=config.mMD_walkers,
         mMD_time=config.mMD_time,
         mMD_bias_factor=config.mMD_bias_factor,
+        mMD_bias_frequency=config.mMD_bias_frequency,
         mMD_hill_height=config.mMD_hill_height,
         mMD_hill_width=config.mMD_hill_width,
     )

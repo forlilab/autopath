@@ -16,7 +16,7 @@ class Config(object):
         VS_mode: bool = False,
         pdb_path: str = None,
         do_fix_pdb: bool = True,
-        pocket_selection: str = "protein and (around 3 resname UNK) and (not name H*)",
+        pocket_selection: str = "same residue as protein and (around 4 resname UNK) and (not name H*)",
         use_murcko_scaffold: bool = True,
         temperature: float = 300,
         random_state: int = 42,
@@ -47,6 +47,7 @@ class Config(object):
         run_metadynamics: bool = True,
         mMD_time: int = 2,  # ns
         mMD_bias_factor: int = 15,
+        mMD_bias_frequency: int = 2,  # ps
         mMD_hill_height: float = 0.3,  # Kcal/mol
         mMD_hill_width: float = 0.01,
     ):
@@ -92,6 +93,7 @@ class Config(object):
         self.run_metadynamics = run_metadynamics
         self.mMD_time = mMD_time
         self.mMD_bias_factor = mMD_bias_factor
+        self.mMD_bias_frequency = mMD_bias_frequency
         self.mMD_hill_height = mMD_hill_height
         self.mMD_hill_width = mMD_hill_width
 
