@@ -10,7 +10,7 @@ import openmm.unit as openmmunit
 
 # AutoPath imports
 from autopath.utils import *
-from autopath.customForces import add_flatbottom_COM_restraints, add_barostat
+from autopath.customForces import add_flatbottom_COM_restraints
 from autopath.equilibration import warm_up_system
 
 
@@ -69,13 +69,13 @@ class RelaxMD:
 
         startdist = get_COM_dist(simulation, self.ligand_atoms, self.pocket_atoms)
         # Add flat-bottom COM restraints to prevent ligand from drifting too far away
-        logging.info("Adding flat-bottom COM restraints..")
+        logging.debug("Adding flat-bottom COM restraints..")
         add_flatbottom_COM_restraints(system, self.ligand_atoms, self.pocket_atoms, r0=startdist)
 
-        logging.info("Minimizing..")
+        logging.debug("Minimizing..")
         simulation.minimizeEnergy()
 
-        logging.info("Warming up the system..")
+        logging.debug("Warming up the system..")
         warm_up_system(simulation, integrator, 
                        warming_steps=npt_steps*2, 
                        timestep=0.002,# * openmmunit.picoseconds, # lower timestep for warming
@@ -84,14 +84,13 @@ class RelaxMD:
         # logging.info("Minimizing..")
         # simulation.minimizeEnergy()
 
-        logging.info("Running short NPT..")
-
+        logging.debug("Running short NPT..")
         # Add barostat to the system
         system = add_barostat(system, self.temperature, is_membrane=self.is_membrane)
 
         # adjust timestep if needed
         if self.timestep != integrator.getStepSize():
-            logging.info(f"Adjusting timestep from {integrator.getStepSize()} to {self.timestep} ps.")
+            logging.debug(f"Adjusting timestep from {integrator.getStepSize()} to {self.timestep} ps.")
             integrator.setStepSize(self.timestep * openmmunit.picoseconds)
     
         simulation.context.reinitialize(preserveState=True)
@@ -105,7 +104,7 @@ class RelaxMD:
         for f_idx in range(system.getNumForces()):
             force = system.getForce(f_idx)
             if force.getName().startswith("k_flat_com"):
-                logging.info(f"Removing force {force.getName()} at index {f_idx}.")
+                logging.debug(f"Removing force {force.getName()} at index {f_idx}.")
                 forces_to_remove.append(f_idx)
 
         for f_idx in sorted(forces_to_remove, reverse=True):
