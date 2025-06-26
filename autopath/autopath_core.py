@@ -322,7 +322,7 @@ class AutoPath:
             # pocket_atom_indices = [atom.index for atom in pocket_atoms]
             pocket_residues = [f"{atom.resname}_{atom.resid}" for atom in pocket_atoms]
             logging.info(f"Pocket residues are: {', '.join(set(pocket_residues))}")
-            pocket_full_names = [f"{atom.resname}_{atom.resid}_{atom.index}" for atom in pocket_atoms]
+            # pocket_full_names = [f"{atom.resname}_{atom.resid}_{atom.index}" for atom in pocket_atoms]
             # logging.info(f"Pocket atoms are: {', '.join(set(pocket_full_names))}")
 
             coms = calculate_com_distance(u_all, ligand_atoms, pocket_atoms, wrap=False)
@@ -346,10 +346,11 @@ class AutoPath:
 
             # Plot the clustering results
             plt.figure(figsize=(6, 5))
-            sns.scatterplot(x=rmsd['RMSD_ligand'], y=rmsd['coms'], hue=labels, palette='viridis')
+            sns.scatterplot(x=rmsd['RMSD_ligand'], y=rmsd['COM'], hue=labels, palette='viridis')
             plt.scatter(cluster_centers[:, 0], cluster_centers[:, 1], color='red', marker='x', s=100, label='Cluster Centers')
             plt.xlabel('RMSD (A)'); plt.ylabel('COM Distance (A)')
             plt.title(f"{sys_name} sMD clustering")
+            plt.tight_layout()
             plt.legend()
             plt.savefig(f"{sys_name}/milestones/pdbs/milestones_clustering_plot.png")
             plt.close()

@@ -7,6 +7,7 @@ from openmm.app import *
 import openmm.unit as openmmunit
 
 from autopath.utils import *
+from autopath.customForces import add_harmonic_restraints
 
 
 class VanillaMD:

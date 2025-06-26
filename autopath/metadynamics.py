@@ -11,6 +11,7 @@ import openmm.unit as openmmunit
 import cvpack
 from glob import glob
 from autopath.utils import *
+from autopath.customForces import *
 from autopath.analysis import (
     plot_bias,
     plot_colvar,

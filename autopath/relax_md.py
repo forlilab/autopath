@@ -10,7 +10,7 @@ import openmm.unit as openmmunit
 
 # AutoPath imports
 from autopath.utils import *
-from autopath.utils import _print_current_forces
+from autopath.customForces import add_flatbottom_COM_restraints, add_barostat
 from autopath.equilibration import warm_up_system
 
 
@@ -111,7 +111,7 @@ class RelaxMD:
         for f_idx in sorted(forces_to_remove, reverse=True):
             system.removeForce(f_idx)
 
-        # _print_current_forces(system)
+        # print_current_forces(system)
 
         # save stuff
         final_positions = simulation.context.getState(getPositions=True).getPositions()

@@ -10,7 +10,7 @@ from openmm.app import *
 import openmm.unit as openmmunit
 
 from autopath.utils import *
-from autopath.utils import _print_current_forces
+from autopath.customForces import *
 import datetime
 
 @dataclass
@@ -337,7 +337,7 @@ class Equilibration:
 
         simulation.context.reinitialize(preserveState=True)
 
-        # _print_current_forces(self.system)
+        # print_current_forces(self.system)
 
         logging.info("Warming up the system..")
         warm_up_system(simulation, integrator, 
@@ -362,7 +362,7 @@ class Equilibration:
         for f_idx in sorted(forces_to_remove, reverse=True):
             self.system.removeForce(f_idx)
 
-        # _print_current_forces(self.system)
+        # print_current_forces(self.system)
 
         final_positions = simulation.context.getState(getPositions=True).getPositions()
         self.topology.setPeriodicBoxVectors(simulation.context.getState(getPositions=True).getPeriodicBoxVectors()) #saves correct box vectors to the pdb

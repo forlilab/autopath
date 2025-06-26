@@ -5,6 +5,7 @@ import logging
 from glob import glob
 
 from autopath.utils import *
+from autopath.customForces import add_COM_force, add_harmonic_restraints
 from autopath.analysis import plot_sMD_statistics
 
 from openmm import *
@@ -101,17 +102,15 @@ class SteeredMD:
 
         # Save final positions
         final_positions = simulation.context.getState(getPositions=True).getPositions()
-        save_pdb(
-            self.topology, final_positions, f"{self.out_dir}/steeredMD_{rep_idx}_{direction}.pdb"
-        )
+        save_pdb(self.topology, final_positions, f"{self.out_dir}/steeredMD_{rep_idx}_{direction}.pdb")
 
     def run(
         self,
         sMD_time: float = 1,  # 1ns
-        displacement: float = 0.5,  # nm
+        displacement: float = 2.5,  # nm
         steps_per_move: int = 250,  # 1ps
         pulling_force: int = 1000,
-        replicas: int = 5,
+        replicas: int = 3,
         rep_suffix: str = None,
         checkpoint_file: str = None,
         do_backwards: bool = False,
@@ -148,8 +147,7 @@ class SteeredMD:
             )
 
         # Add COM force with arbitrary initial r0, then run_single_direction will set it properly
-        add_COM_force(
-            self.system, self.ligand_atoms, self.pocket_atoms, self.fc_pull, 0)
+        add_COM_force(self.system, self.ligand_atoms, self.pocket_atoms, self.fc_pull, 0)
         simulation.context.setTime(0)  # reset simulation time
         simulation.context.reinitialize(preserveState=True)
         
