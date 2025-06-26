@@ -20,9 +20,6 @@ import parmed
 import pickle
 
 import MDAnalysis as mda
-from MDAnalysis.analysis import align
-from MDAnalysis.transformations import wrap
-from MDAnalysis.core.universe import Universe
 from MDAnalysis.analysis.rms import RMSD, RMSF
 from scipy.spatial.distance import cdist
 from scipy.spatial import KDTree
@@ -36,7 +33,6 @@ import pytraj as pt
 
 from rdkit import Chem
 from rdkit.Chem.Draw import SimilarityMaps
-
 
 
 def save_model(model, filename):

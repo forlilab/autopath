@@ -55,8 +55,8 @@ class MetadynamicsMD:
 
         # These are for debugging purposes if one wants to check the CVs over the time of the simulation
         self.verbose = verbose
-        self.record_CV = (1/self.timestep) * 10  # record the CVs every 10 ps
-        self.store_CV = (1/self.timestep) * 100  # log the stored COLVAR every 100ps
+        self.record_CV = int((1/self.timestep) * 10)  # record the CVs every 10 ps
+        self.store_CV = int((1/self.timestep) * 100)  # log the stored COLVAR every 100ps
 
         return
 
@@ -113,8 +113,8 @@ class MetadynamicsMD:
 
         # Calculate the number of steps required
         mMD_steps = math.ceil(mMD_time / self.timestep * 1000.0)  # 250.000 1ns at 4fs
-        bias_frequency = (1/self.timestep) * bias_frequency  # deposit bias every 2 ps (250 is 1ps at 4fs timestep)
-        saveFrequency = (1/self.timestep) * saveFrequency  # write bias every 50ps
+        bias_frequency = int((1/self.timestep) * bias_frequency)  # deposit bias every 2 ps (250 is 1ps at 4fs timestep)
+        saveFrequency = int((1/self.timestep) * saveFrequency)  # write bias every 50ps
 
         hill_height = hill_height * openmmunit.kilocalories_per_mole
 
@@ -330,10 +330,7 @@ class MetadynamicsMD:
             colvar_array = np.array([meta.getCollectiveVariables(simulation)])
             for i in range(0, int(mMD_steps), self.record_CV):
                 if i % self.store_CV == 0:
-                    np.save(
-                        os.path.join(self.out_dir, f"COLVAR_{run_id}.npy"),
-                        colvar_array,
-                    )
+                    np.save(os.path.join(self.out_dir, f"COLVAR_{run_id}.npy"), colvar_array)
 
                 meta.step(simulation, self.record_CV)
                 current_cvs = meta.getCollectiveVariables(simulation)
