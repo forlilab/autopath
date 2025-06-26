@@ -498,9 +498,7 @@ def plot_atomic_rmsf(u, lig_resname:str='UNK', outname:str='rmsf.png', log_rmsf:
 
 def _print_current_forces(system: System = None) -> None:
     for index, fc in enumerate(system.getForces()):
-        logging.info(
-            f"Force Index:{index} | Name: {fc.getName()} | Group: {fc.getForceGroup()}"
-        )
+        print(f"Force Index:{index} | Name: {fc.getName()} | Group: {fc.getForceGroup()}")
     return
 
 def _remove_force(force_name: str = None, system: System = None, simulation=None):

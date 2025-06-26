@@ -176,7 +176,8 @@ class SteeredMD:
                 )
 
             if self.verbose > 0:
-                plot_sMD_statistics(f"{self.out_dir}/sMD_log_{rep_idx}_forward.dat", f'{rep_name}_forward', self.out_dir)
+                files_f = glob(f"{self.out_dir}/sMD_log_*_forward.dat")
+                plot_sMD_statistics(files_f, f'{rep_name}_forward', self.out_dir)
 
             if do_backwards:
                 # Run backward direction
@@ -186,7 +187,8 @@ class SteeredMD:
                                         steps_per_move=steps_per_move, initial_r0=initial_r0, final_r0=final_r0)
 
                 if self.verbose > 0:
-                    plot_sMD_statistics(f"{self.out_dir}/sMD_log_{rep_idx}_backward.dat", f'{rep_name}_backward', self.out_dir)
+                    files_f = glob(f"{self.out_dir}/sMD_log_*_backward.dat")
+                    plot_sMD_statistics(files_f, f'{rep_name}_backward', self.out_dir)
 
             # Logging the time taken for each replica
             replica_time = time.monotonic() - replica_start_time
