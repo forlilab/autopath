@@ -39,7 +39,7 @@ class MetadynamicsMD:
         self.temperature = temp * openmmunit.kelvin
 
         self.topology = topology
-
+        self.n_atoms = self.topology.getNumAtoms()
         self.is_membrane = is_membrane
 
         self.out_dir = out_dir
@@ -55,8 +55,8 @@ class MetadynamicsMD:
 
         # These are for debugging purposes if one wants to check the CVs over the time of the simulation
         self.verbose = verbose
-        self.record_CV = 2500  # record the CVs every 10 ps
-        self.store_CV = 25000  # log the stored COLVAR every 100ps
+        self.record_CV = (1/self.timestep) * 10  # record the CVs every 10 ps
+        self.store_CV = (1/self.timestep) * 100  # log the stored COLVAR every 100ps
 
         return
 
@@ -106,22 +106,19 @@ class MetadynamicsMD:
             "com",
             "rmsd",
             "rmsd_states",
+            "path_rmsd",
+            "path_cv",
             "nc",
-            "min_dist",
-            "dist",
         ], f"The selected colective variable {mMD_CV} is not implemented"
 
         # Calculate the number of steps required
         mMD_steps = math.ceil(mMD_time / self.timestep * 1000.0)  # 250.000 1ns at 4fs
-        total_steps = 25000 + mMD_steps
-        bias_frequency = (
-            250 * bias_frequency
-        )  # deposit bias every 2 ps (250 is 1ps at 4fs timestep)
-        saveFrequency = 250 * saveFrequency  # write bias every 50ps
+        bias_frequency = (1/self.timestep) * bias_frequency  # deposit bias every 2 ps (250 is 1ps at 4fs timestep)
+        saveFrequency = (1/self.timestep) * saveFrequency  # write bias every 50ps
 
         hill_height = hill_height * openmmunit.kilocalories_per_mole
 
-        grid_width = hill_width / 5  # also known as sigma
+        grid_width = hill_width / 5  # a.k.a. sigma
         grid_min, grid_max = grid_dimensions
         grid = int(abs(grid_min - grid_max) / grid_width)
 
@@ -129,9 +126,8 @@ class MetadynamicsMD:
         logging.info(f"Grid boundaries are min={grid_min:.3f} - max={grid_max:.3f}")
         logging.info(f"Sigma is {hill_width} nm and there are {grid} grid points ")
 
-        logging.debug("Setting up the integrator")
+        logging.debug("Setting up a LangevinMiddleIntegrator")
         integrator = LangevinMiddleIntegrator(self.temperature, 1 / openmmunit.picoseconds, self.timestep)
-        # integrator.setRandomNumberSeed(int(rep_idx))
 
         if self.topology is None:
             if pdb_file is None:
@@ -157,7 +153,6 @@ class MetadynamicsMD:
 
         # Add harmonic positional restraints to protein CA
         input_positions = simulation.context.getState(getPositions=True).getPositions()
-        num_atoms = self.topology.getNumAtoms()
 
         if self.restrained_atoms is not None:
             add_harmonic_restraints(
@@ -175,7 +170,7 @@ class MetadynamicsMD:
             simulation,
             self.out_dir,
             f"metadynamics_{run_id}",
-            total_steps,
+            mMD_steps,
             saveFrequency,
         )
 
@@ -192,7 +187,7 @@ class MetadynamicsMD:
             )
 
         elif mMD_CV == "rmsd":
-            cv = cvpack.RMSD(input_positions, self.ligand_atoms, num_atoms)
+            cv = cvpack.RMSD(input_positions, self.ligand_atoms, self.n_atoms)
 
         elif mMD_CV == "rmsd_states":
 
@@ -212,7 +207,81 @@ class MetadynamicsMD:
                 metric=cvpack.path.progress,
                 milestones=milestones_dicts,
                 sigma=0.01 * openmmunit.nanometers,
-                numAtoms=num_atoms,
+                numAtoms=self.n_atoms,
+            )
+        elif mMD_CV == "path_rmsd":
+
+            # atom_names_to_match = ["CA"]
+            ligand_residue = [r for r in self.topology.residues() if r.name == "UNK"]
+            ligand_atoms_to_match = [a.index for a in ligand_residue[0].atoms() if not a.name.startswith("H")]
+            ligand_names_to_match = [a.name for a in ligand_residue[0].atoms() if not a.name.startswith("H")]
+            logging.info(f"Matched {len(ligand_atoms_to_match)} heavy atoms from the ligand")
+            sys_name =self.out_dir.split('/')[0] 
+            milestones = glob(f'{sys_name}/milestones/pdbs/milestone_*.pdb')
+            milestones.sort(key=lambda x: int(os.path.basename(x).split('_')[1]))
+       
+            milestones_dicts = [self._get_reference_dict(pdb, ligand_names_to_match, ligand_atoms_to_match) for pdb in milestones]
+            cv = cvpack.PathInRMSDSpace(
+                metric=cvpack.path.progress,
+                milestones=milestones_dicts,
+                sigma=0.001 * openmmunit.nanometers,
+                numAtoms=self.n_atoms,
+            )
+        elif mMD_CV == "path_cv":
+
+            from copy import deepcopy
+
+            ligand_residue = [r for r in self.topology.residues() if r.name == "UNK"]
+            ligand_atoms_to_match = [a.index for a in ligand_residue[0].atoms() if not a.name.startswith("H")]
+            ligand_names_to_match = [a.name for a in ligand_residue[0].atoms() if not a.name.startswith("H")]
+            logging.info(f"Matched {len(ligand_atoms_to_match)} heavy atoms from the ligand")
+            print(ligand_atoms_to_match)
+            
+            sys_name = '6dy7_A'
+            milestones = glob(f'{sys_name}/milestones/pdbs/milestone_*.pdb')           
+
+            print(f"Found {len(milestones)} milestones")
+            
+            milestones_array = np.zeros((len(milestones), 2))
+            for i, milestone in enumerate(milestones):
+                milestone_name = os.path.basename(milestone)
+                _system = deepcopy(system)
+                _context = Context(_system, VerletIntegrator(1.0), self.platform)
+                milestone_positions = PDBFile(milestone).positions
+                _context.setPositions(milestone_positions)
+                logging.info(f"Calculating CVs for {milestone_name}..")
+                cv1 = cvpack.RMSD(milestone_positions, self.ligand_atoms, self.n_atoms)
+                cv2 = cvpack.CentroidFunction(
+                                                f"sqrt(distance(g1,g2)^2)",
+                                                openmmunit.nanometers,
+                                                groups=[self.pocket_atoms] + [self.ligand_atoms],
+                                                weighByMass=True,
+                                                pbc=False,
+                                            )
+                cv1.addToSystem(_system)
+                cv2.addToSystem(_system)
+                _context.reinitialize(preserveState=True)
+                _context.setPositions(milestone_positions)
+                logging.info(f"Milestone {milestone_name} CV1: {cv1.getValue(_context)}, CV2: {cv2.getValue(_context)}")
+                milestones_array[i, 0] = round(cv1.getValue(_context).value_in_unit(openmmunit.nanometers),2)
+                milestones_array[i, 1] = round(cv2.getValue(_context).value_in_unit(openmmunit.nanometers),2)    
+            
+            print(milestones_array)
+
+            cv1 = cvpack.RMSD(input_positions, self.ligand_atoms, self.n_atoms)
+            cv2 = cvpack.CentroidFunction(
+                                        f"sqrt(distance(g1,g2)^2)",
+                                        openmmunit.nanometers,
+                                        groups=[self.pocket_atoms] + [self.ligand_atoms],
+                                        weighByMass=True,
+                                        pbc=False,
+                                    )
+ 
+            cv = cvpack.PathInCVSpace(
+                metric=cvpack.path.progress,
+                variables=[cv1, cv2],
+                milestones=milestones_array,
+                sigma=0.001 * openmmunit.nanometers,
             )
 
         elif mMD_CV == "nc":
@@ -228,21 +297,6 @@ class MetadynamicsMD:
                 cutoffFactor=2.0,
                 switchFactor=1.5,
                 reference=50,
-            )
-
-        elif mMD_CV == "min_dist":
-
-            num_atoms = system.getNumParticles()
-            cv = cvpack.ShortestDistance(
-                self.pocket_atoms,
-                self.ligand_atoms,
-                num_atoms,
-                cutoffDistance=0.5,
-            )
-
-        elif mMD_CV == "dist":
-            cv = cvpack.Distance(
-                self.pocket_atoms[0], self.ligand_atoms[0], pbc=False, name="distance"
             )
 
         bias_variable = BiasVariable(
@@ -266,8 +320,8 @@ class MetadynamicsMD:
             biasDir=self.out_dir,
         )
 
-        simulation.context.reinitialize(preserveState=True)
-
+        simulation.context.reinitialize(preserveState=True)  
+        
         if not self.verbose:
             # # Advance all steps at once do not record CVs
             meta.step(simulation, mMD_steps)
@@ -326,11 +380,8 @@ class MetadynamicsMD:
         start_time = time.monotonic()
 
         # Metadynamics time in ns
-        mMD_steps = 250000 * mMD_time  # 250.000 1ns at 4fs
-        total_steps = 25000 + mMD_steps
-        bias_frequency = (
-            250 * bias_frequency
-        )  # deposit bias every 2 ps (250 is 1ns at 4fs timestep)
+        mMD_steps = math.ceil(mMD_time / self.timestep * 1000.0)  # 250.000 1ns at 4fs
+        bias_frequency = 250 * bias_frequency  # deposit bias every 2 ps (250 is 1ns at 4fs timestep)
         saveFrequency = 250 * saveFrequency  # write bias every 50ps
 
         logging.debug("Setting up the integrator")
@@ -565,7 +616,7 @@ class MetadynamicsMD:
             simulation,
             self.out_dir,
             f"metadynamics_{run_id}",
-            total_steps,
+            mMD_steps,
             bias_frequency,
         )
 
