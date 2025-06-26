@@ -191,42 +191,38 @@ class AutoPath:
                             traj_file=equilibrated_traj,
                             out_fname=equilibrated_traj.replace(".dcd", "_aligned.dcd"))
             os.remove(equilibrated_traj)
-            
-        # Equilibration VS checkpoint
+
+        ##############################################################################################
+        ############################# Post-equilibration Analysis ####################################
+        ##############################################################################################
+
         equilibrated_traj = equilibrated_traj.replace(".dcd", "_aligned.dcd")
         u_eq = mda.Universe(prmtop_file, equilibrated_traj, in_memory=True)
-        lig_rmsd_equilibration = compute_rmsd(u_eq, u_eq,
-                                            alig_select="backbone", 
-                                            groupselections={"ligand":f"resname {lig_resname} and not name H*", 
-                                                            "protein":'protein and not name H*'},
-                                            out_dir=f"{sys_name}/equilibration"
-                                            )
-        lig_rmsd_equilibration.to_csv(f"{sys_name}/equilibration/{sys_name}_ligand_rmsd.csv", index=False)
+        rmsd = compute_rmsd(u_eq, u_eq,
+                            alig_select="backbone", 
+                            groupselections={"ligand":f"resname {lig_resname} and not name H*", 
+                                            "protein":'protein and not name H*'},
+                            out_dir=f"{sys_name}/equilibration"
+                            )
+        rmsd.to_csv(f"{sys_name}/equilibration/{sys_name}_ligand_rmsd.csv", index=False)
         plot_atomic_rmsf(u_eq, outname=f"{sys_name}/equilibration/{sys_name}_RMSF.png", log_rmsf=True)
-
+        
+        # Equilibration VS checkpoint
         # if self.equilibration_checkpoint:
         #     final_rmsd = lig_rmsd_equilibration[-1:].values
         #     if final_rmsd > self.eq_checkpoint_cutoff * 10:  # to Angs
         #         logging.warning(f"Simulation for ligand {sys_name} terminated because ligand RMSD={final_rmsd:.2f} > {self.eq_checkpoint_cutoff}")
         #         exit(1)
 
-
-        u_eq.trajectory[-1]  # set pointer to last frame
-
-        # Get pocket atoms
-        pocket_atoms = u_eq.select_atoms(self.pocket_selection)
+        pocket_atoms = get_pocket_indexes(u_eq, self.pocket_selection, lig_resname=lig_resname)
         pocket_atom_indices = [atom.index for atom in pocket_atoms]
         pocket_residues = [f"{atom.resname}_{atom.resid}" for atom in pocket_atoms]
-        # pocket_full_names = [f"{atom.resname}_{atom.resid}_{atom.index}" for atom in pocket_atoms]
         logging.info(f"Pocket residues are: {', '.join(set(pocket_residues))}")
-        
-        #write out the pocket atoms to a pdb
+
+        # write out the pocket atoms to a pdb
         with mda.Writer(f"{sys_name}/pocket_atoms.pdb", u_eq.atoms.n_atoms) as W:
             W.write(pocket_atoms)
-        #write out the pocket atoms to a pdb
-        with mda.Writer(f"{sys_name}/equilib.pdb", u_eq.atoms.n_atoms) as W:
-            W.write(u_eq.atoms)
-
+  
         if self.use_murcko_scaffold:
             from rdkit.Chem.Scaffolds import MurckoScaffold
             from rdkit.Chem import rdDepictor, Draw

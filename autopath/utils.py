@@ -320,6 +320,35 @@ def add_variants(modeller: Modeller, variants_dict: dict = None) -> Modeller:
 
     return modeller 
 
+def get_pocket_indexes(u, pocket_selection:str, lig_resname:str):
+    """Get the indices of the pocket atoms based on a user provided selection 
+    or the ligand residue name and some default heuristics."""
+
+    u.trajectory[-1]  # set pointer to last frame if its a trajectory
+
+    if pocket_selection is None and lig_resname is None:
+        logging.error("No pocket selection or ligand residue name provided.")
+        return []
+
+    # If a custom pocket selection is provided, use it directly
+    if pocket_selection is not None:
+        pocket_atoms = u.select_atoms(pocket_selection)
+    # If no custom selection, use the ligand residue name to define the pocket
+    elif lig_resname is not None:
+        backbone_names = ["N", "CA", "C", "O"]
+        ligand = u.select_atoms(f"resname {lig_resname}")
+        protein_residues = u.select_atoms(f"protein and around 4 group ligand", ligand=ligand).residues
+        pocket_atoms_indices = [atom.index for res in protein_residues 
+                                for atom in res.atoms
+                                if atom.name in backbone_names]
+        if len(pocket_atoms_indices) == 0:
+            logging.error(f"No atoms found for the provided pocket selection")
+            return []
+        else:
+            # convert to MDAnalysis AtomGroup
+            pocket_atoms = u.select_atoms(f"index {' '.join(map(str, pocket_atoms_indices))}")
+            return pocket_atoms
+            
 def get_protein_ha(topology: app.Topology, lig_name: str = "UNK") -> Tuple[list, list]:
 
     ATOMSET = set(("HOH", "WAT", "POP", "K", "CL", "NA", lig_name))
