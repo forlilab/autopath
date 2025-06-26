@@ -33,7 +33,8 @@ import pytraj as pt
 
 from rdkit import Chem
 from rdkit.Chem.Draw import SimilarityMaps
-
+from rdkit.Chem.Scaffolds import MurckoScaffold
+# from rdkit.Chem import rdDepictor, Draw
 
 def save_model(model, filename):
     with open(filename, 'wb') as file:
@@ -320,8 +321,8 @@ def add_variants(modeller: Modeller, variants_dict: dict = None) -> Modeller:
 
     return modeller 
 
-def get_pocket_indexes(u, pocket_selection:str, lig_resname:str):
-    """Get the indices of the pocket atoms based on a user provided selection 
+def get_pocket_atoms(u, pocket_selection:str, lig_resname:str):
+    """Get the pocket atoms based on a user provided selection 
     or the ligand residue name and some default heuristics."""
 
     u.trajectory[-1]  # set pointer to last frame if its a trajectory
@@ -348,7 +349,41 @@ def get_pocket_indexes(u, pocket_selection:str, lig_resname:str):
             # convert to MDAnalysis AtomGroup
             pocket_atoms = u.select_atoms(f"index {' '.join(map(str, pocket_atoms_indices))}")
             return pocket_atoms
+
+def get_ligand_atoms(u, lig_resname:str, use_murcko_scaffold:bool = True, lig_img:str = None):
+    """Get the ligand atoms based on the residue name and optionally save a Murcko scaffold image."""
+
+    if lig_img is None:
+        lig_img = f'ligand_{lig_resname}_murcko.png'
+
+    if use_murcko_scaffold:
+        try:
+            ligand_selection = u.select_atoms(f'resname {lig_resname}')
+            mol = ligand_selection.convert_to('RDKIT')
+            sel_atoms = mol.GetAtoms()
+            # Get Murcko scaffold and match it to parent molecule
+            murcko = MurckoScaffold.GetScaffoldForMol(mol)
+            murcko_match = mol.GetSubstructMatch(murcko)
+            murcko_atom_names = [sel_atoms[i].GetProp('_MDAnalysis_name') for i in murcko_match]
+            # select the Murcko scaffold atoms in the MDAnalysis universe
+            ligand_atoms = u.select_atoms(f'name {" ".join(map(str, murcko_atom_names))}')
             
+            # save the Murcko scaffold image
+            Chem.rdDepictor.Compute2DCoords(mol)
+            mol = Chem.RemoveHs(mol)
+            img = Chem.Draw.MolToImage(mol, size=(300, 300), highlightAtoms=murcko_match)
+            img.save(lig_img)
+        except Exception as e:
+            logging.error(f"Error processing Murcko scaffold: {e}")
+            logging.warning("Falling back to using all non-hydrogen atoms in the ligand.")
+            ligand_atoms = u.select_atoms(f'resname {lig_resname} and not name H*')
+    else:
+        # If not using Murcko scaffold, select all non-hydrogen atoms in the ligand
+        logging.warning("Using all non-hydrogen atoms in the ligand as ligand_atoms.")
+        ligand_atoms = u.select_atoms(f"resname {lig_resname} and not name H*")
+
+    return ligand_atoms
+
 def get_protein_ha(topology: app.Topology, lig_name: str = "UNK") -> Tuple[list, list]:
 
     ATOMSET = set(("HOH", "WAT", "POP", "K", "CL", "NA", lig_name))

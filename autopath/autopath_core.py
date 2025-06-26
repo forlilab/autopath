@@ -214,7 +214,7 @@ class AutoPath:
         #         logging.warning(f"Simulation for ligand {sys_name} terminated because ligand RMSD={final_rmsd:.2f} > {self.eq_checkpoint_cutoff}")
         #         exit(1)
 
-        pocket_atoms = get_pocket_indexes(u_eq, self.pocket_selection, lig_resname=lig_resname)
+        pocket_atoms = get_pocket_atoms(u_eq, self.pocket_selection, lig_resname=lig_resname)
         pocket_atom_indices = [atom.index for atom in pocket_atoms]
         pocket_residues = [f"{atom.resname}_{atom.resid}" for atom in pocket_atoms]
         logging.info(f"Pocket residues are: {', '.join(set(pocket_residues))}")
@@ -222,39 +222,12 @@ class AutoPath:
         # write out the pocket atoms to a pdb
         with mda.Writer(f"{sys_name}/pocket_atoms.pdb", u_eq.atoms.n_atoms) as W:
             W.write(pocket_atoms)
-  
-        if self.use_murcko_scaffold:
-            from rdkit.Chem.Scaffolds import MurckoScaffold
-            from rdkit.Chem import rdDepictor, Draw
-            try:
-                ligand_selection = u_eq.select_atoms(f'resname {lig_resname}')
-                mol = ligand_selection.convert_to('RDKIT')
-                sel_atoms = mol.GetAtoms()
-                # Get Murcko scaffold and match it to parent molecule
-                murcko = MurckoScaffold.GetScaffoldForMol(mol)
-                murcko_match = mol.GetSubstructMatch(murcko)
-                murcko_atom_names = [sel_atoms[i].GetProp('_MDAnalysis_name') for i in murcko_match]
-                # select the Murcko scaffold atoms in the MDAnalysis universe
-                ligand_atoms = u_eq.select_atoms(f'name {" ".join(map(str, murcko_atom_names))}')
-                
-                # save the Murcko scaffold image
-                rdDepictor.Compute2DCoords(mol)
-                mol = Chem.RemoveHs(mol)
-                img = Draw.MolToImage(mol, size=(300, 300), highlightAtoms=murcko_match)
-                img.save(f'{sys_name}/ligand_{lig_resname}_murcko.png')
-            except Exception as e:
-                logging.error(f"Error processing Murcko scaffold: {e}")
-                logging.warning("Falling back to using all non-hydrogen atoms in the ligand.")
-                ligand_atoms = u_eq.select_atoms(f'resname {lig_resname} and not name H*')
-        else:
-            # If not using Murcko scaffold, select all non-hydrogen atoms in the ligand
-            logging.warning("Using all non-hydrogen atoms in the ligand as ligand_atoms.")
-            ligand_atoms = u_eq.select_atoms(f"resname {lig_resname} and not name H*")
-
+    
+        ligand_atoms = get_ligand_atoms(u_eq, lig_resname, self.use_murcko_scaffold, f'{sys_name}/ligand_{lig_resname}_murcko.pdb')
         ligand_atoms_indices = [atom.index for atom in ligand_atoms]
 
-        eq_com = calculate_com_distance(u_eq, ligand_atoms, pocket_atoms)[-1] /10 # convert to nm
-        logging.info(f"COM distance after equilibration is: {eq_com:.2f} nm")
+        final_com = calculate_com_distance(u_eq, ligand_atoms, pocket_atoms)[-1] /10 # convert to nm
+        logging.info(f"COM distance after equilibration is: {final_com:.2f} nm")
 
         u_eq.trajectory[-1]  # set pointer to last frame
         restrained_atoms = u_eq.select_atoms("group pocket_atoms and name CA", pocket_atoms=pocket_atoms)
@@ -315,16 +288,11 @@ class AutoPath:
             pocket_atoms = u_all.select_atoms(f'index {" ".join(map(str, pocket_atom_indices))}')
             ligand_atoms = u_all.select_atoms(f'index {" ".join(map(str, ligand_atoms_indices))}')
 
-            # pocket_atom_indices = [atom.index for atom in pocket_atoms]
-            pocket_residues = [f"{atom.resname}_{atom.resid}" for atom in pocket_atoms]
-            logging.info(f"Pocket residues are: {', '.join(set(pocket_residues))}")
-            # pocket_full_names = [f"{atom.resname}_{atom.resid}_{atom.index}" for atom in pocket_atoms]
-            # logging.info(f"Pocket atoms are: {', '.join(set(pocket_full_names))}")
-
             coms = calculate_com_distance(u_all, ligand_atoms, pocket_atoms, wrap=False)
-            rmsd = compute_rmsd(u_all, u_all, alig_select=f"resname {lig_resname} and (not name H*)",
+            rmsd = compute_rmsd(u_all, u_all, 
+                                alig_select=f"resname {lig_resname} and (not name H*)",
                                 groupselections={'ligand': f"resname {lig_resname} and (not name H*)"},
-                                                out_dir=f"{sys_name}/milestones/pdbs")
+                                out_dir=f"{sys_name}/milestones/pdbs")
             rmsd['COM'] = coms
             X = rmsd[['RMSD_ligand', 'COM']].values
 
@@ -369,7 +337,7 @@ class AutoPath:
 
         if self.run_metadynamics:
 
-            min_com = eq_com * 0.75
+            min_com = final_com * 0.75
             max_com = self.sMD_pulling_dist
 
             milestones = glob(f'{sys_name}/milestones/pdbs/milestone_*.pdb')           
