@@ -8,7 +8,6 @@ import shutil
 from sys import exit
 from glob import glob
 import MDAnalysis as mda
-from MDAnalysis.analysis.distances import distance_array
 
 # OpenMM imports
 from openmm import *
@@ -238,6 +237,8 @@ class AutoPath:
         ##############################################################################################
         ##################################### Steered MD simulations #################################
         ##############################################################################################
+        
+        sMD_outdir = f"{sys_name}/sMD"
 
         if self.run_sMDpulling:
             
@@ -250,7 +251,7 @@ class AutoPath:
                 pocket_atoms=pocket_atom_indices,
                 restrained_atoms=restrained_atoms_indices,
                 restart_velocities=True,
-                out_dir=f"{sys_name}/sMD",
+                out_dir=sMD_outdir,
             )
 
             sMD.run(
@@ -260,10 +261,11 @@ class AutoPath:
                 steps_per_move=self.sMD_steps_per_move,
                 pulling_force=self.sMD_pulling_force,
                 replicas=self.sMD_replicas,
+                do_backwards=False,     #CAREFUL: this will run the pulling in both directions
             )
 
             # Load and align the sMD trajectories
-            sMD_trajs = glob(f"{sys_name}/sMD/trajectory_sMD*")
+            sMD_trajs = glob(f"{sMD_outdir}/trajectory_sMD*")
             for traj_file in sMD_trajs:
                 align_trajectory(
                                 prmtop_file=prmtop_file,
@@ -280,7 +282,7 @@ class AutoPath:
             out_dir = f"{sys_name}/milestones/pdbs"
             os.makedirs(out_dir, exist_ok=True)
 
-            sMD_trajs = glob(f"{sys_name}/sMD/*_aligned.dcd")
+            sMD_trajs = glob(f"{sMD_outdir}/*_aligned.dcd")
             if len(sMD_trajs) == 0:
                 logging.error("No sMD trajectories found. Please check the sMD pulling step.")
                 exit(1)
@@ -377,6 +379,7 @@ class AutoPath:
                         hill_width=self.mMD_hill_width, #nm
                         bias_frequency=self.mMD_bias_frequency, #ps
                         grid_dimensions=(min_com, max_com),
+                        saveFrequency=10,  # save every 10 ps
                         # grid_dimensions=(0, 1),
                     )
                 except Exception as e:
