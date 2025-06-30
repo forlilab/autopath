@@ -20,6 +20,7 @@ from autopath.analysis import (
     plot_colvar_2D,
 )
 
+from reweightingreporter import ReweightingReporter
 
 class MetadynamicsMD:
 
@@ -127,8 +128,18 @@ class MetadynamicsMD:
         logging.info(f"Grid boundaries are min={grid_min:.3f} - max={grid_max:.3f}")
         logging.info(f"Sigma is {hill_width} nm and there are {grid} grid points ")
 
-        logging.debug("Setting up a LangevinMiddleIntegrator")
-        integrator = LangevinMiddleIntegrator(self.temperature, 1 / openmmunit.picoseconds, self.timestep)
+        logging.debug("Setting up a LangevinSplittingGirsanov")
+        print_current_forces(system)
+
+        from openmmtools.integrators import LangevinSplittingGirsanov
+        integrator = LangevinSplittingGirsanov(
+            nstxout = saveFrequency,                      
+            temperature = self.temperature,
+            collision_rate = 1.0/openmmunit.picosecond,
+            timestep = self.timestep*openmmunit.femtosecond,
+            splitting = "R V O V R",        # ABOBA – reweightable
+            constraint_tolerance = 1.0e-6,
+        )
 
         if self.topology is None:
             if pdb_file is None:
@@ -175,6 +186,12 @@ class MetadynamicsMD:
             saveFrequency,
         )
 
+        simulation.reporters.append(ReweightingReporter(f"{self.out_dir}/GR_metadynamics_{run_id}.dat", 
+                                                        saveFrequency, 
+                                                        integrator, 
+                                                        unperturebed=True,
+                                                        firtsPertubation=True,
+                                                        ))
         if mMD_CV == "com":
 
             groups = [self.pocket_atoms] + [self.ligand_atoms]
@@ -321,8 +338,12 @@ class MetadynamicsMD:
             biasDir=self.out_dir,
         )
 
+        meta._force.setForceGroup(1)            # force group 1 for reweighting
+
         simulation.context.reinitialize(preserveState=True)  
         
+        print_current_forces(system)
+
         if not self.verbose:
             # # Advance all steps at once do not record CVs
             meta.step(simulation, mMD_steps)

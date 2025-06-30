@@ -24,6 +24,7 @@ class RelaxMD:
         is_membrane: bool = False,
         HMR: bool = True,
         temp: float = 300,
+        use_GReweighting: bool = False,
     ) -> None:
 
         self.topology = topology
@@ -37,9 +38,18 @@ class RelaxMD:
         self.ligand_atoms = ligand_atoms
         self.pocket_atoms = pocket_atoms
         self.is_membrane = is_membrane
+        self.use_GReweighting = use_GReweighting
 
         self.platform = select_platform("fastest")
 
+        self.use_GReweighting = use_GReweighting
+        if self.use_GReweighting:
+            try:
+                from openmmtools.integrators import LangevinSplittingGirsanov
+                from reweightingreporter import ReweightingReporter
+            except ImportError:
+                raise ImportError("Please install openmmtools to use Girsanov reweighting.")
+            
         return None
 
     def run(
@@ -54,7 +64,18 @@ class RelaxMD:
         start_time = time.monotonic()
 
         logging.debug("Setting up the integrator..")
-        integrator = LangevinMiddleIntegrator(self.temperature, 1 / openmmunit.picoseconds, self.timestep)
+        if self.use_GReweighting:
+            integrator = LangevinSplittingGirsanov(
+                nstxout = 1000000,   # we dont care about this here
+                temperature = self.temperature,
+                collision_rate = 1.0/openmmunit.picoseconds,
+                timestep = self.timestep * openmmunit.picoseconds,
+                splitting = "R V O V R",        # ABOBA – reweightable
+                constraint_tolerance = 1.0e-6,
+            )
+        else:
+            integrator = LangevinMiddleIntegrator(self.temperature, 1 / openmmunit.picoseconds, self.timestep)
+
         # integrator.setRandomNumberSeed(int(rep_idx))
 
         # Setting Simulation object and loading the checkpoint

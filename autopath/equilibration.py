@@ -12,6 +12,7 @@ import openmm.unit as openmmunit
 from autopath.utils import *
 from autopath.customForces import *
 import datetime
+from reweightingreporter import ReweightingReporter
 
 @dataclass
 class EquilibrationStep:
@@ -169,8 +170,8 @@ class Equilibration:
         timestep: float = 0.004,
         save_freq: int = 6250, # 12500 is 0.05ns at 4fs timestep
         is_membrane: bool = False,
+        use_GReweighting: bool = False,
         verbose: int = 2,
-
     ) -> None:
 
         self.system = system
@@ -189,6 +190,14 @@ class Equilibration:
         self.restrained_minimization = restrained_minimization
 
         self.platform = select_platform("fastest")
+
+        self.use_GReweighting = use_GReweighting
+        if self.use_GReweighting:
+            try:
+                from openmmtools.integrators import LangevinSplittingGirsanov
+                from reweightingreporter import ReweightingReporter
+            except ImportError:
+                raise ImportError("Please install openmmtools to use Girsanov reweighting.")
 
         # Load the equilibration protocol
         self.protocol = self.from_json(protocol_fname)
@@ -250,11 +259,19 @@ class Equilibration:
         start_time = time.monotonic()
 
         logging.debug("Setting up the integrator..")
-        integrator = LangevinMiddleIntegrator(
-            self.temperature, 1 / openmmunit.picoseconds, self.timestep
-        )
+        if self.use_GReweighting:
+            integrator = LangevinSplittingGirsanov(
+                nstxout = 1000000,   # we dont care about this here
+                temperature = self.temperature,
+                collision_rate = 1.0/openmmunit.picoseconds,
+                timestep = self.timestep * openmmunit.picoseconds,
+                splitting = "R V O V R",        # ABOBA – reweightable
+                constraint_tolerance = 1.0e-6,
+            )
+        else:
+            integrator = LangevinMiddleIntegrator(self.temperature, 1 / openmmunit.picoseconds, self.timestep)
+
         # integrator.setRandomNumberSeed(seed)
-        # integrator.setConstraintTolerance(0.00001)
 
         pdb = PDBFile(pdb_file)
         initial_positions = pdb.positions
@@ -271,6 +288,9 @@ class Equilibration:
             total_steps=self.total_steps,
             verbose=self.verbose
         )
+
+        # if self.use_GReweighting:        
+        # simulation.reporters.append(ReweightingReporter(f"{self.out_dir}/ReweightingFactors.txt", self.save_freq, integrator))
 
        # Add the required forces to the system
         for num, (name, selection) in enumerate(self.components_lookup.items()):

@@ -5,7 +5,7 @@ import logging
 from glob import glob
 
 from autopath.utils import *
-from autopath.customForces import add_COM_force, add_harmonic_restraints
+from autopath.customForces import add_COM_force, add_harmonic_restraints, print_current_forces
 from autopath.analysis import plot_sMD_statistics
 
 from openmm import *
@@ -27,6 +27,7 @@ class SteeredMD:
         restart_velocities: bool = False,
         HMR: bool = True,
         temperature: float = 300,
+        use_GReweighting: bool = False,
         out_dir: str = None,
         verbose: int = 2,
     ):
@@ -45,6 +46,16 @@ class SteeredMD:
 
         self.platform = select_platform("fastest")
 
+        self.use_GReweighting = use_GReweighting
+        if self.use_GReweighting:
+            try:
+                from openmmtools.integrators import LangevinSplittingGirsanov
+                from reweightingreporter import ReweightingReporter
+            except ImportError:
+                raise ImportError("Please install openmmtools to use Girsanov reweighting.")
+    
+        return None
+
     def run_single_direction(
         self, simulation, rep_idx, direction, dx_per_move, sMD_moves, steps_per_move, initial_r0, final_r0
     ):
@@ -56,9 +67,17 @@ class SteeredMD:
             self.out_dir,
             f"sMD_{rep_idx}_{direction}",
             sMD_moves,
-            steps_per_move * 2,
+            steps_per_move,
             self.verbose
         )
+
+        if self.use_GReweighting:
+            simulation.reporters.append(ReweightingReporter(f"{self.out_dir}/GR_{rep_idx}_{direction}.dat", 
+                                                            steps_per_move, 
+                                                            self.integrator, 
+                                                            unperturebed=True,
+                                                            firtsPertubation=True,
+                                                            ))
 
         logging.info(f"Initial COM distance: {initial_r0}")
         simulation.context.setParameter("r0", initial_r0)
@@ -125,10 +144,19 @@ class SteeredMD:
 
         self.fc_pull = pulling_force * openmmunit.kilojoules_per_mole / openmmunit.nanometer**2
 
-        integrator = LangevinMiddleIntegrator(
-            self.temperature, 1 / openmmunit.picoseconds, self.timestep
-        )
-        simulation = Simulation(self.topology, self.system, integrator, self.platform)
+        if self.use_GReweighting:
+            self.integrator = LangevinSplittingGirsanov(
+                nstxout = steps_per_move,   
+                temperature = self.temperature,
+                collision_rate = 1.0/openmmunit.picoseconds,
+                timestep = self.timestep * openmmunit.picoseconds,
+                splitting = "R V O V R",        # ABOBA – reweightable
+                constraint_tolerance = 1.0e-6,
+            )
+        else:
+            self.integrator = LangevinMiddleIntegrator(self.temperature, 1 / openmmunit.picoseconds, self.timestep)
+
+        simulation = Simulation(self.topology, self.system, self.integrator, self.platform)
 
         # Load checkpoint file
         simulation.loadCheckpoint(checkpoint_file)
@@ -147,10 +175,12 @@ class SteeredMD:
             )
 
         # Add COM force with arbitrary initial r0, then run_single_direction will set it properly
-        add_COM_force(self.system, self.ligand_atoms, self.pocket_atoms, self.fc_pull, 0)
+        add_COM_force(self.system, self.ligand_atoms, self.pocket_atoms, self.fc_pull, 0, 1) # groupd 1 for reweighting
         simulation.context.setTime(0)  # reset simulation time
         simulation.context.reinitialize(preserveState=True)
         
+        # print_current_forces(self.system)
+
         # Loop over replicas
         for rep_idx in range(1, replicas + 1):
             rep_name = f"{rep_suffix}_{rep_idx}" if rep_suffix else f"replica_{rep_idx}"
