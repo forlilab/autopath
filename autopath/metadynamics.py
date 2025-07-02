@@ -104,6 +104,7 @@ class MetadynamicsMD:
         hill_height: float = 0.3,
         hill_width: float = 0.01,
         grid_dimensions: tuple = (0.0, 1.0),
+        grid_points: int = None,
         biasFrequency: int = 2,
         saveFrequency: int = 50,
     ) -> None:
@@ -125,14 +126,10 @@ class MetadynamicsMD:
         saveFrequency = int((1/self.timestep) * saveFrequency)  # write bias every 50ps
 
         hill_height = hill_height * openmmunit.kilocalories_per_mole
-
-        grid_width = hill_width / 5  # a.k.a. sigma
         grid_min, grid_max = grid_dimensions
-        grid = int(abs(grid_min - grid_max) / grid_width)
 
         logging.info(f"Running metadynamics with Colective Variable {mMD_CV}")
-        logging.info(f"Grid boundaries are min={grid_min:.3f} - max={grid_max:.3f}")
-        logging.info(f"Sigma is {hill_width} nm and there are {grid} grid points ")
+        logging.info(f"Grid boundaries are min={grid_min:.3f} - max={grid_max:.3f} and sigma={hill_width:.3f} nm")
 
         logging.debug("Setting up the integrator..")
         if self.use_GReweighting:
@@ -330,8 +327,8 @@ class MetadynamicsMD:
             minValue=grid_min,
             maxValue=grid_max,
             biasWidth=hill_width,
+            gridWidth=grid_points,
             periodic=False,
-            gridWidth=grid,
         )
 
         # Set up the metadynamics object
@@ -350,7 +347,7 @@ class MetadynamicsMD:
 
         simulation.context.reinitialize(preserveState=True)  
         
-        print_current_forces(system)
+        # print_current_forces(system)
 
         if not self.verbose:
             # # Advance all steps at once do not record CVs
@@ -371,8 +368,8 @@ class MetadynamicsMD:
 
         # Create plots for all current runs
         plot_colvar(self.out_dir, mMD_CV)
-        plot_bias(self.out_dir, grid_min, grid_max, grid, mMD_CV)
-        plot_FE(self.out_dir, grid_min, grid_max, grid, mMD_CV)
+        plot_bias(self.out_dir, grid_min, grid_max, grid_points, mMD_CV)
+        plot_FE(self.out_dir, grid_min, grid_max, grid_points, mMD_CV)
 
         # Save everything
         final_positions = simulation.context.getState(getPositions=True).getPositions()
