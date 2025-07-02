@@ -167,29 +167,28 @@ class Equilibration:
         out_dir: str = "equilibration",
         restrained_minimization: bool = True,
         protocol_fname: str = "autopath/data/equilibration.json",
-        timestep: float = 0.004,
         save_freq: int = 6250, # 12500 is 0.05ns at 4fs timestep
         is_membrane: bool = False,
         use_GReweighting: bool = True,
         verbose: int = 2,
     ) -> None:
 
-        self.system = system
-        self.topology = topology
-        self.verbose = verbose
-
         self.out_dir = out_dir
         os.makedirs(out_dir, exist_ok=True)
 
+        self.system = system
+        self.topology = topology
+
         self.is_membrane = is_membrane
 
-        # self.temperature = 100 * openmmunit.kelvin # a low value to initilize the integrator
-        self.timestep = timestep #* openmmunit.picoseconds
+        # some default value, its going to be updated by the protocol
+        self.timestep = 0.004 * openmmunit.picoseconds
         self.save_freq = save_freq
 
         self.restrained_minimization = restrained_minimization
 
         self.platform = select_platform("fastest")
+        self.verbose = verbose
 
         self.use_GReweighting = use_GReweighting
         if self.use_GReweighting:
@@ -265,14 +264,13 @@ class Equilibration:
                 nstxout = 1000000,   # we dont care about this here
                 temperature = self.temperature,
                 collision_rate = 1.0/openmmunit.picoseconds,
-                timestep = self.timestep * openmmunit.picoseconds,
+                timestep = self.timestep,
                 splitting = "R V O V R",        # ABOBA – reweightable
                 constraint_tolerance = 1.0e-6,
             )
         else:
             integrator = LangevinMiddleIntegrator(self.temperature, 1 / openmmunit.picoseconds, self.timestep* openmmunit.picoseconds)
 
-        # integrator.setRandomNumberSeed(seed)
 
         pdb = PDBFile(pdb_file)
         initial_positions = pdb.positions
@@ -323,6 +321,7 @@ class Equilibration:
         
         if self.verbose > 0: # Save the minimized structure
             minimized_positions = simulation.context.getState(getPositions=True).getPositions()
+            self.topology.setPeriodicBoxVectors(simulation.context.getState(getPositions=True).getPeriodicBoxVectors()) #saves correct box vectors to the pdb
             save_pdb(self.topology, minimized_positions, f"{self.out_dir}/{run_id}_minim.pdb")
 
         # After restrained minimization remove and re-add restraints with updated reference positions
