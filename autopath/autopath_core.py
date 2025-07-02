@@ -319,6 +319,14 @@ class AutoPath:
         ##############################################################################################
         ##################################### Metadynamics simulations ###############################
         ##############################################################################################
+        use_biasing_scheme = True
+        biasing_scheme = {
+                            1:{'height': 0.5, 'width': 0.04},
+                            2:{'height': 0.4, 'width': 0.05},
+                            3:{'height': 0.3, 'width': 0.06},
+                            4:{'height': 0.2, 'width': 0.07},
+                            5:{'height': 0.1, 'width': 0.08}
+                            }
 
         if self.run_metadynamics:
 
@@ -351,6 +359,7 @@ class AutoPath:
 
             for milestone in milestones:
                 milestone_name = os.path.basename(milestone).split('.')[0]
+                milestone_number = int(milestone_name.split('_')[1])
                 milestone_system = f"{sys_name}/milestones/{milestone_name}_relax_system.xml"
                 milestone_chk = f"{sys_name}/milestones/{milestone_name}_relax_checkpoint.chk"
 
@@ -375,12 +384,10 @@ class AutoPath:
                         mMD_CV='com',
                         mMD_time=self.mMD_time, #ns
                         bias_factor=self.mMD_bias_factor,
-                        hill_height=self.mMD_hill_height, #kJ/mol
-                        hill_width=self.mMD_hill_width, #nm
-                        bias_frequency=self.mMD_bias_frequency, #ps
-                        grid_dimensions=(min_com, max_com),
-                        saveFrequency=10,  # save every 10 ps
-                        # grid_dimensions=(0, 1),
+                        hill_height=biasing_scheme[milestone_number]['height'] if use_biasing_scheme else self.mMD_hill_height, #kcal/mol
+                        hill_width=biasing_scheme[milestone_number]['width'] if use_biasing_scheme else self.mMD_hill_width, #nm
+                        biasFrequency=self.mMD_bias_frequency, #ps
+                        grid_dimensions=(min_com, max_com)
                     )
                 except Exception as e:
                     logging.error(f"Error during WTMetaD for {milestone_name}: {e}")
