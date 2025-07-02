@@ -238,7 +238,7 @@ class AutoPath:
         ##################################### Steered MD simulations #################################
         ##############################################################################################
         
-        sMD_outdir = f"{sys_name}/sMD"
+        sMD_outdir = f"{sys_name}/sMD_2ns"
 
         if self.run_sMDpulling:
             

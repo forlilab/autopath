@@ -572,7 +572,7 @@ def match_cluster_centroids(X:np.ndarray, centroids:np.ndarray, N:int=1):
 def cluster_sMD_trajectories(u: mda.Universe, X:np.ndarray, n_clusters:int, out_dir:str):
 
     # cluster_estimator = KMeans(n_clusters=5)
-    cluster_estimator = RegularSpace(dmin=4, max_centers=n_clusters)
+    cluster_estimator = RegularSpace(dmin=3, max_centers=n_clusters)
     fitted_model = cluster_estimator.fit(X).fetch_model()
     cluster_centers = fitted_model.cluster_centers
     labels = fitted_model.transform(X)

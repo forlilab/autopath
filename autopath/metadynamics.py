@@ -20,8 +20,6 @@ from autopath.analysis import (
     plot_colvar_2D,
 )
 
-from reweightingreporter import ReweightingReporter
-
 class MetadynamicsMD:
 
     def __init__(
@@ -34,6 +32,7 @@ class MetadynamicsMD:
         is_membrane: bool = False,
         HMR: bool = True,
         temp: float = 300,
+        use_GReweighting: bool = True,
         verbose: bool = True,
     ) -> None:
 
@@ -54,7 +53,14 @@ class MetadynamicsMD:
         self.restrained_atoms = restrained_atoms
 
         self.platform = select_platform("fastest")
-
+        self.use_GReweighting = use_GReweighting
+        if self.use_GReweighting:
+            try:
+                from openmmtools.integrators import LangevinSplittingGirsanov
+                from reweightingreporter import ReweightingReporter
+            except ImportError:
+                raise ImportError("Please install openmmtools to use Girsanov reweighting.")
+            
         # These are for debugging purposes if one wants to check the CVs over the time of the simulation
         self.verbose = verbose
         self.record_CV = int((1/self.timestep) * 10)  # record the CVs every 10 ps
@@ -128,18 +134,20 @@ class MetadynamicsMD:
         logging.info(f"Grid boundaries are min={grid_min:.3f} - max={grid_max:.3f}")
         logging.info(f"Sigma is {hill_width} nm and there are {grid} grid points ")
 
-        logging.debug("Setting up a LangevinSplittingGirsanov")
-        print_current_forces(system)
-
-        from openmmtools.integrators import LangevinSplittingGirsanov
-        integrator = LangevinSplittingGirsanov(
-            nstxout = saveFrequency,                      
-            temperature = self.temperature,
-            collision_rate = 1.0/openmmunit.picosecond,
-            timestep = self.timestep*openmmunit.femtosecond,
-            splitting = "R V O V R",        # ABOBA – reweightable
-            constraint_tolerance = 1.0e-6,
-        )
+        logging.debug("Setting up the integrator..")
+        if self.use_GReweighting:
+            from openmmtools.integrators import LangevinSplittingGirsanov
+            from reweightingreporter import ReweightingReporter
+            integrator = LangevinSplittingGirsanov(
+                nstxout = bias_frequency,   # 500 is 2ps at 4fs timestep
+                temperature = self.temperature,
+                collision_rate = 1.0/openmmunit.picoseconds,
+                timestep = self.timestep * openmmunit.picoseconds,
+                splitting = "R V O V R",        # ABOBA – reweightable
+                constraint_tolerance = 1.0e-6,
+            )
+        else:
+            integrator = LangevinMiddleIntegrator(self.temperature, 1 / openmmunit.picoseconds, self.timestep)
 
         if self.topology is None:
             if pdb_file is None:
@@ -183,15 +191,15 @@ class MetadynamicsMD:
             self.out_dir,
             f"metadynamics_{run_id}",
             mMD_steps,
-            saveFrequency,
+            bias_frequency,
         )
-
-        simulation.reporters.append(ReweightingReporter(f"{self.out_dir}/GR_metadynamics_{run_id}.dat", 
-                                                        saveFrequency, 
-                                                        integrator, 
-                                                        unperturebed=True,
-                                                        firtsPertubation=True,
-                                                        ))
+        if self.use_GReweighting:
+            simulation.reporters.append(ReweightingReporter(f"{self.out_dir}/GR_metadynamics_{run_id}.dat", 
+                                                            bias_frequency, 
+                                                            integrator, 
+                                                            unperturebed=True,
+                                                            firtsPertubation=True,
+                                                            ))
         if mMD_CV == "com":
 
             groups = [self.pocket_atoms] + [self.ligand_atoms]

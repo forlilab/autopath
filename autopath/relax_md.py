@@ -24,7 +24,7 @@ class RelaxMD:
         is_membrane: bool = False,
         HMR: bool = True,
         temp: float = 300,
-        use_GReweighting: bool = False,
+        use_GReweighting: bool = True,
     ) -> None:
 
         self.topology = topology
@@ -65,8 +65,10 @@ class RelaxMD:
 
         logging.debug("Setting up the integrator..")
         if self.use_GReweighting:
+            from openmmtools.integrators import LangevinSplittingGirsanov
+            from reweightingreporter import ReweightingReporter
             integrator = LangevinSplittingGirsanov(
-                nstxout = 1000000,   # we dont care about this here
+                nstxout = 250,   # we dont care about this here
                 temperature = self.temperature,
                 collision_rate = 1.0/openmmunit.picoseconds,
                 timestep = self.timestep * openmmunit.picoseconds,
