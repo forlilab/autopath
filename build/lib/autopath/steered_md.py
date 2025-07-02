@@ -25,7 +25,7 @@ class SteeredMD:
         restrained_atoms: list[int] = None,
         restart_velocities: bool = False,
         HMR: bool = True,
-        temp: float = 300,
+        temperature: float = 300,
         out_dir: str = None,
         verbose: int = 2,
     ):
@@ -36,7 +36,7 @@ class SteeredMD:
 
         self.restart_velocities = restart_velocities
         self.timestep = 0.004 if HMR else 0.002
-        self.temperature = temp * openmmunit.kelvin
+        self.temperature = temperature * openmmunit.kelvin
         self.ligand_atoms = ligand_atoms
         self.pocket_atoms = pocket_atoms
         self.restrained_atoms = restrained_atoms
@@ -60,7 +60,7 @@ class SteeredMD:
         )
 
         logging.info(f"Initial COM distance: {initial_r0}")
-        simulation.context.setParameter("r0", initial_r0)
+        simulation.context.setParameter("r0_COM_force", initial_r0)
 
         # Initialize work
         work_val_old = openmmunit.Quantity(value=0, unit=openmmunit.kilojoules_per_mole)
@@ -77,10 +77,11 @@ class SteeredMD:
                 r_current = initial_r0 + float(i + 1) * dx_per_move
                 r_start = initial_r0 + float(i) * dx_per_move
 
-            simulation.context.setParameter("r0", r_current)
+            simulation.context.setParameter("r0_COM_force", r_current)
             force_val = -self.fc_pull * (current_dist - r_current)
 
             simulation.step(steps_per_move)
+            pdb_path = f"{self.out_dir}/trajectory_step_{rep_idx}_{direction}_{i}.pdb"
 
             # Calculate work for difference in potential energy in transition
             spr_energy_end = 0.5 * -self.fc_pull * (current_dist - r_current) ** 2
@@ -112,12 +113,12 @@ class SteeredMD:
         steps_per_move: int = 250,  # 1ps
         pulling_force: int = 1000,
         replicas: int = 5,
+        rep_suffix: str = None,
         checkpoint_file: str = None,
         do_backwards: bool = False,
     ):
         """Main method to run steered MD in both directions (forward and backward) for multiple replicas."""
         simulation_start_time = time.monotonic()
-        sys_name = self.out_dir.split("/")[0]
 
         # Calculate the number of steps
         sMD_steps = math.ceil(sMD_time / self.timestep * 1000.0)
@@ -155,6 +156,7 @@ class SteeredMD:
         
         # Loop over replicas
         for rep_idx in range(1, replicas + 1):
+            rep_name = f"{rep_suffix}_{rep_idx}" if rep_suffix else f"replica_{rep_idx}"
             replica_start_time = time.monotonic()
 
             # Load checkpoint file
@@ -170,26 +172,26 @@ class SteeredMD:
             
             # Run forward direction
             self.run_single_direction(
-                simulation, rep_idx, direction="forward", dx_per_move=dx_per_move, sMD_moves=sMD_moves,
+                simulation, rep_name, direction="forward", dx_per_move=dx_per_move, sMD_moves=sMD_moves,
                 steps_per_move=steps_per_move, initial_r0=initial_r0, final_r0=final_r0
                 )
 
             # Generate statistics and plots for the forward direction
             files_f = glob(f"{self.out_dir}/sMD_log_*_forward.dat")
-            plot_sMD_statistics(files_f, f'{sys_name}_forward', self.out_dir)
+            plot_sMD_statistics(files_f, f'{rep_name}_forward', self.out_dir)
 
             if do_backwards:
                 # Run backward direction
                 # Reset velocities to temperature after forward pulling
                 simulation.context.setVelocitiesToTemperature(self.temperature)
                 self.run_single_direction(
-                    simulation, rep_idx, direction="backward", dx_per_move=-dx_per_move, sMD_moves=sMD_moves,
+                    simulation, rep_name, direction="backward", dx_per_move=-dx_per_move, sMD_moves=sMD_moves,
                     steps_per_move=steps_per_move, initial_r0=initial_r0, final_r0=final_r0
                 )
 
                 # Generate statistics and plots for the backward direction
                 files_b = glob(f"{self.out_dir}/sMD_log_*_backward.dat")
-                plot_sMD_statistics(files_b, f'{sys_name}_backward', self.out_dir)
+                plot_sMD_statistics(files_b, f'{rep_name}_backward', self.out_dir)
 
             # Logging the time taken for each replica
             replica_time = time.monotonic() - replica_start_time

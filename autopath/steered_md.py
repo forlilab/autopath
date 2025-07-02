@@ -60,7 +60,7 @@ class SteeredMD:
         )
 
         logging.info(f"Initial COM distance: {initial_r0}")
-        simulation.context.setParameter("r0", initial_r0)
+        simulation.context.setParameter("r0_COM_force", initial_r0)
 
         # Initialize work
         work_val_old = openmmunit.Quantity(value=0, unit=openmmunit.kilojoules_per_mole)
@@ -77,10 +77,11 @@ class SteeredMD:
                 r_current = initial_r0 + float(i + 1) * dx_per_move
                 r_start = initial_r0 + float(i) * dx_per_move
 
-            simulation.context.setParameter("r0", r_current)
+            simulation.context.setParameter("r0_COM_force", r_current)
             force_val = -self.fc_pull * (current_dist - r_current)
 
             simulation.step(steps_per_move)
+            pdb_path = f"{self.out_dir}/trajectory_step_{rep_idx}_{direction}_{i}.pdb"
 
             # Calculate work for difference in potential energy in transition
             spr_energy_end = 0.5 * -self.fc_pull * (current_dist - r_current) ** 2

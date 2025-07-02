@@ -524,14 +524,17 @@ def add_COM_force(
     r0=None,
     force_group: Optional[int] = 15,
 ):
-
-    force = CustomCentroidBondForce(2, "0.5 * fc_pull * (distance(g1,g2)-r0)^2")
-    force.addGlobalParameter("r0", r0)
-    # force.addGlobalParameter('fc_pull', fc_pull)
+    force = CustomCentroidBondForce(2, "0.5 * fc_pull * (distance(g1,g2)-r0_COM_force)^2")
+    force.addGlobalParameter("r0_COM_force", r0)
     force.addPerBondParameter("fc_pull")
-    force.addGroup(group_A)
-    force.addGroup(group_B)
-    # force.addBond([0, 1], [])
+
+    # Provide equal weights for each atom (non-zero)
+    weights_A = [1.0 for _ in group_A]
+    weights_B = [1.0 for _ in group_B]
+
+    force.addGroup(group_A, weights_A)
+    force.addGroup(group_B, weights_B)
+
     force.addBond([0, 1], [fc_pull])
     force.setUsesPeriodicBoundaryConditions(True)
     force.setForceGroup(force_group)

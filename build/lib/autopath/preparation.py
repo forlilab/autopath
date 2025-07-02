@@ -344,36 +344,37 @@ class SystemPreparation:
             hydrogenMass=self.hydrogenMass,
             constraints=HBonds,
         )
-       
-        # # Add the dummy atom to the modeller
-        modeller.add(dummy_topology, [dummy_position_quantity])
+         # CASE: Ligand and membrane only
+        if protein is None and self.is_membrane: #so better allison
+            # # Add the dummy atom to the modeller
+            modeller.add(dummy_topology, [dummy_position_quantity])
 
-        unmatched_residues = self.forcefield.getUnmatchedResidues(modeller.topology)
-        print(
-            f"unmatched residues:{[unmatched_residue.name for unmatched_residue in unmatched_residues]}"
-        )
-        [templates, residues] = self.forcefield.generateTemplatesForUnmatchedResidues(
-            modeller.topology
-        )
-
-        # reduce residues to uniquely named
-        residues = list(dict.values({r.name: r for r in residues}))
-        templates = {t.name: t for t in templates}
-        for residue in residues:
+            unmatched_residues = self.forcefield.getUnmatchedResidues(modeller.topology)
             print(
-                "creating template for residue",
-                residue.name,
-                "(MDSimulationProcess::172)",
+                f"unmatched residues:{[unmatched_residue.name for unmatched_residue in unmatched_residues]}"
             )
-            template = templates[residue.name]
-            forcefield.registerResidueTemplate(template)
+            [templates, residues] = self.forcefield.generateTemplatesForUnmatchedResidues(
+                modeller.topology
+            )
 
-        nonbonded = [f for f in system.getForces() if isinstance(f, NonbondedForce)][0]
-        # Add a single dummy particle
-        dummyIndex = system.addParticle(0)  # 0 mass
-        nonbonded.addParticle(
-            0, 0, 0
-        )  # 0 charge, 0 sigma (VDWR), 0 epsilon (interaction strength)
+            # reduce residues to uniquely named
+            residues = list(dict.values({r.name: r for r in residues}))
+            templates = {t.name: t for t in templates}
+            for residue in residues:
+                print(
+                    "creating template for residue",
+                    residue.name,
+                    "(MDSimulationProcess::172)",
+                )
+                template = templates[residue.name]
+                forcefield.registerResidueTemplate(template)
+
+            nonbonded = [f for f in system.getForces() if isinstance(f, NonbondedForce)][0]
+            # Add a single dummy particle
+            dummyIndex = system.addParticle(0)  # 0 mass
+            nonbonded.addParticle(
+                0, 0, 0
+            )  # 0 charge, 0 sigma (VDWR), 0 epsilon (interaction strength)
 
         #translating the system up so that all coords are positve in the z-dimension to avoid some weird metadynamics behavior 
         # box_vectors = modeller.topology.getPeriodicBoxVectors()

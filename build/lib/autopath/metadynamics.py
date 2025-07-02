@@ -318,8 +318,19 @@ class MetadynamicsMD:
         grid_dimensions_B: tuple = (0.0, 1.0),
         bias_frequency: int = 2,
         saveFrequency: int = 50,
-        pbc_b: bool = True
+        cv2: str = "lmz",
+        atom1: list = None, #these are the two atoms in the delta z calculation....make this more clear somehow?
+        atom2: list = None,
     ) -> None:
+
+        # Validate cv2
+        if cv2 not in ["lmz", "dz"]:
+            logging.error(f"Invalid value for cv2: '{cv2}'. Must be 'lmz' or 'dz'.")
+
+        # Require atom1 and atom2 if using distance-based CV
+            if cv2 == "dz":
+                if not atom1 or not atom2:
+                    raise ValueError("When cv2 is 'dz', atom1 and atom2 must be provided as lists of atom indices.")
 
         start_time = time.monotonic()
 
@@ -377,9 +388,6 @@ class MetadynamicsMD:
                 14,
             )
 
-        #FIXME thi is a mess I know 
-        # ligand_atoms = [a.index for a in self.topology.atoms() if a.residue.name == 'UNK']
-        # add_cylindrical_restraints(system, host_index=self.pocket_atoms, guest_index=ligand_atoms, R_cylinder=1.5 * openmmunit.nanometers, force_group=31)
 
         ##################### Z depth CV #################################
 
@@ -393,12 +401,12 @@ class MetadynamicsMD:
 
 
         groups = [self.ligand_atoms] + [dummy_atom]
+        print(f'groups: {groups}')
         COM_Z = cvpack.CentroidFunction(
             # f"z1-z2",
             # f"z1",
-            # f"pointdistance(0, 0, z1, 0, 0, z2)",
-            # f"(step(z1 - z2) * 2 - 1) * pointdistance(0, 0, z1, 0, 0, z2)",
             "select(step((z1 - z2)/zsize - floor((z1 - z2)/zsize) - 0.5), -1, 1) * pointdistance(0, 0, z1, 0, 0, z2)",
+            # "select(step((z1 - 0)/zsize - floor((z1 - 0)/zsize) - 0.5), -1, 1) * pointdistance(0, 0, z1, 0, 0, 0)",
             openmmunit.nanometers,
             groups,
             weighByMass=False,
@@ -420,95 +428,132 @@ class MetadynamicsMD:
             periodic=False, 
             gridWidth=grid_A,
         )
-
+        
         ##################### Lipophilicity moment CV #################################
 
         # get crippen contribution list
-        logging.info(f"Calculating Crippen contributions for the ligand")
-        ligand_mol = SDMolSupplier(ligand_sdf, removeHs=False)[0]
-        atom_contribs = rdMolDescriptors._CalcCrippenContribs(ligand_mol)
-        clogp_contributions = [contrib[0] for contrib in atom_contribs]
+        if cv2 == "lmz":
+            logging.info(f"Calculating Crippen contributions for the ligand")
+            ligand_mol = SDMolSupplier(ligand_sdf, removeHs=False)[0]
+            atom_contribs = rdMolDescriptors._CalcCrippenContribs(ligand_mol)
+            clogp_contributions = [contrib[0] for contrib in atom_contribs]
 
-        # Get the centroid (x, y, z) of the molecule "
+            # Get the centroid (x, y, z) of the molecule "
+            
+            for i in self.ligand_atoms:
+                if i == 0:
+                    centroid_x = f"(x{i+1})"
+                    centroid_y = f"(y{i+1})"
+                    centroid_z = f"(z{i+1})"
+
+                else:
+                    centroid_x += f" + (x{i+1})"
+                    centroid_y += f" + (y{i+1})"
+                    centroid_z += f" + (z{i+1})"
+
+            N = len(self.ligand_atoms)
+            centroid_x = f"(({centroid_x}) / {N})"
+            centroid_y = f"(({centroid_y}) / {N})"
+            centroid_z = f"(({centroid_z}) / {N})"
+
+            #get:
+            #delta_lipophilicity_x = sum ((atom_i_x-centroid_x)*crippen_contribution_i),
+            #delta_lipophilicity_y  sum ((atom_i_y-centroid_y)*crippen_contribution_i),
+            #delta_lipophilicity_z  sum ((atom_i_z-centroid_z)*crippen_contribution_i)
+            
+            for i in self.ligand_atoms:
+                if i == 0:
+                    delta_lipophilicity_x = f"(((x{i+1}) - ({centroid_x})) * {clogp_contributions[i]})"
+                    delta_lipophilicity_y = f"(((y{i+1}) - ({centroid_y})) * {clogp_contributions[i]})"
+                    delta_lipophilicity_z = f"(((z{i+1}) - ({centroid_z})) * {clogp_contributions[i]})"                 
+                else:
+                    delta_lipophilicity_x += f" + (((x{i+1}) - ({centroid_x})) * {clogp_contributions[i]})"
+                    delta_lipophilicity_y += f" + (((y{i+1}) - ({centroid_y})) * {clogp_contributions[i]})"
+                    delta_lipophilicity_z += f" + (((z{i+1}) - ({centroid_z})) * {clogp_contributions[i]})"   
+
+
+            #now we want the -magnitude of the LM in the z direction (delta_lipophilicity_x, delta_lipophilicity_y, delta_lipophilicity_z)
+            #((delta_lipophilicity_x, delta_lipophilicity_y, delta_lipophilicity_z) dot (0, 0, -1)/|(delta_lipophilicity_x, delta_lipophilicity_y, delta_lipophilicity_z)||(0, 0, -1)|)
+            #(0*delta_lipophilicity_x + 0*delta_lipophilicity_y+ -1*delta_lipophilicity_z) / ((sqrt(0^2+0^2+(-1)^2)) * sqrt(delta_lipophilicity_x^2 + delta_lipophilicity_y^2 +delta_lipophilicity_z^2)))
+            #((-delta_lipophilicity_z) / (sqrt(delta_lipophilicity_x^2 + delta_lipophilicity_y^2 +delta_lipophilicity_z^2))
+            
+            lm_num = f"({delta_lipophilicity_z})"
+            lm_denom = f"sqrt((({delta_lipophilicity_x})^2) + (({delta_lipophilicity_y})^2) + (({delta_lipophilicity_z})^2))"
+            lipophilicity_moment_z = f"({lm_num})/({lm_denom})"
+
+            print(f'lipophilicity_moment z component: {lipophilicity_moment_z}')
+
+            LM = cvpack.AtomicFunction(lipophilicity_moment_z,
+                                        openmmunit.nanometer,
+                                        self.ligand_atoms)
+
         
-        for i in self.ligand_atoms:
-            if i == 0:
-                centroid_x = f"(x{i+1})"
-                centroid_y = f"(y{i+1})"
-                centroid_z = f"(z{i+1})"
+            grid_width_B = hill_width_B / 5
+            grid_min_B, grid_max_B = grid_dimensions_B
+            grid_B = round(abs(grid_min_B - grid_max_B) / grid_width_B)
 
-            else:
-                centroid_x += f" + (x{i+1})"
-                centroid_y += f" + (y{i+1})"
-                centroid_z += f" + (z{i+1})"
+            lm_cv = BiasVariable(
+                LM,
+                minValue=grid_min_B,
+                maxValue=grid_max_B,
+                biasWidth=hill_width_B,
+                periodic=False,
+                gridWidth=grid_B,
+            )
 
-        N = len(self.ligand_atoms)
-        centroid_x = f"(({centroid_x}) / {N})"
-        centroid_y = f"(({centroid_y}) / {N})"
-        centroid_z = f"(({centroid_z}) / {N})"
+            ##############################################################
 
-        #get:
-        #delta_lipophilicity_x = sum ((atom_i_x-centroid_x)*crippen_contribution_i),
-        #delta_lipophilicity_y  sum ((atom_i_y-centroid_y)*crippen_contribution_i),
-        #delta_lipophilicity_z  sum ((atom_i_z-centroid_z)*crippen_contribution_i)
-        
-        for i in self.ligand_atoms:
-            if i == 0:
-                delta_lipophilicity_x = f"(((x{i+1}) - ({centroid_x})) * {clogp_contributions[i]})"
-                delta_lipophilicity_y = f"(((y{i+1}) - ({centroid_y})) * {clogp_contributions[i]})"
-                delta_lipophilicity_z = f"(((z{i+1}) - ({centroid_z})) * {clogp_contributions[i]})"                 
-            else:
-                delta_lipophilicity_x += f" + (((x{i+1}) - ({centroid_x})) * {clogp_contributions[i]})"
-                delta_lipophilicity_y += f" + (((y{i+1}) - ({centroid_y})) * {clogp_contributions[i]})"
-                delta_lipophilicity_z += f" + (((z{i+1}) - ({centroid_z})) * {clogp_contributions[i]})"   
+            meta = Metadynamics(
+                system,
+                [com_cv, lm_cv],
+                self.temperature,
+                bias_factor,
+                hill_height,
+                frequency=bias_frequency,
+                saveFrequency=saveFrequency,
+                biasDir=self.out_dir,
+            )
 
 
-        #now we want the -magnitude of the LM in the z direction (delta_lipophilicity_x, delta_lipophilicity_y, delta_lipophilicity_z)
-        #((delta_lipophilicity_x, delta_lipophilicity_y, delta_lipophilicity_z) dot (0, 0, -1)/|(delta_lipophilicity_x, delta_lipophilicity_y, delta_lipophilicity_z)||(0, 0, -1)|)
-        #(0*delta_lipophilicity_x + 0*delta_lipophilicity_y+ -1*delta_lipophilicity_z) / ((sqrt(0^2+0^2+(-1)^2)) * sqrt(delta_lipophilicity_x^2 + delta_lipophilicity_y^2 +delta_lipophilicity_z^2)))
-        #((-delta_lipophilicity_z) / (sqrt(delta_lipophilicity_x^2 + delta_lipophilicity_y^2 +delta_lipophilicity_z^2))
-        
-        lm_num = f"({delta_lipophilicity_z})"
-        lm_denom = f"sqrt((({delta_lipophilicity_x})^2) + (({delta_lipophilicity_y})^2) + (({delta_lipophilicity_z})^2))"
-        lipophilicity_moment_z = f"({lm_num})/({lm_denom})"
-
-        print(f'lipophilicity_moment z component: {lipophilicity_moment_z}')
-
-        LM = cvpack.AtomicFunction(lipophilicity_moment_z,
-                                    openmmunit.nanometer,
-                                    self.ligand_atoms)
+        if cv2 == "dz":
+            groups = [atom1] + [atom2]
+            print(f'groups: {groups}')
+            dz = "(z2-z1)/(sqrt((x1-x2)^2+(y1-y2)^2+(z2-z1)^2))"
+            dz =  cvpack.CentroidFunction(dz,
+                                        openmmunit.nanometer,
+                                        groups,
+                                        periodicBounds = None,
+                                        pbc = True)
 
         
+            grid_width_B = hill_width_B / 5
+            grid_min_B, grid_max_B = grid_dimensions_B
+            grid_B = round(abs(grid_min_B - grid_max_B) / grid_width_B)
 
+            dz_cv = BiasVariable(
+                dz,
+                minValue=grid_min_B,
+                maxValue=grid_max_B,
+                biasWidth=hill_width_B,
+                periodic=False,
+                gridWidth=grid_B,
+            )
 
-    
-        grid_width_B = hill_width_B / 5
-        grid_min_B, grid_max_B = grid_dimensions_B
-        grid_B = round(abs(grid_min_B - grid_max_B) / grid_width_B)
+            ##############################################################
 
-        lm_cv = BiasVariable(
-            LM,
-            minValue=grid_min_B,
-            maxValue=grid_max_B,
-            biasWidth=hill_width_B,
-            periodic=False,
-            gridWidth=grid_B,
-        )
+            meta = Metadynamics(
+                system,
+                [com_cv, dz_cv],
+                self.temperature,
+                bias_factor,
+                hill_height,
+                frequency=bias_frequency,
+                saveFrequency=saveFrequency,
+                biasDir=self.out_dir,
+            )
 
-        ##############################################################
-
-        meta = Metadynamics(
-            system,
-            [com_cv, lm_cv],
-            self.temperature,
-            bias_factor,
-            hill_height,
-            frequency=bias_frequency,
-            saveFrequency=saveFrequency,
-            biasDir=self.out_dir,
-        )
-
-
+        simulation.context.reinitialize(preserveState=True)
+        
         logging.debug(f"Setting up reporters for {run_id}..")
         add_reporters(
             simulation,
@@ -533,9 +578,9 @@ class MetadynamicsMD:
 
 
             # Print cylindrical restraint energy (force group 10)
-            # state = simulation.context.getState(getEnergy=True, groups={10})
-            # cylinder_energy = state.getPotentialEnergy()
-            # print(f'cylindrical restraint energy: {cylinder_energy}') 
+            state = simulation.context.getState(getEnergy=True, groups={10})
+            cylinder_energy = state.getPotentialEnergy()
+            print(f'cylindrical restraint energy: {cylinder_energy}') 
             print(f'current CV: {meta.getCollectiveVariables(simulation)}')
             meta.step(simulation, self.record_CV)
             _, _, c = simulation.context.getState(getPositions=False, getVelocities=False, getEnergy=False).getPeriodicBoxVectors()
@@ -561,7 +606,8 @@ class MetadynamicsMD:
             "lm_cv",
         )
 
-        final_positions = simulation.context.getState(getPositions=True, enforcePeriodicBox=True).getPositions() #I added  enforcePeriodicBox=True
+        # final_positions = simulation.context.getState(getPositions=True, enforcePeriodicBox=True).getPositions() #I added  enforcePeriodicBox=True
+        final_positions = simulation.context.getState(getPositions=True).getPositions()
         save_system(system, f"{self.out_dir}/system_mMD_{run_id}.xml")
         save_simulation(simulation, f"{self.out_dir}/mMD_checkpoint_{run_id}")
         save_pdb(self.topology, final_positions, f"{self.out_dir}/mMD_{run_id}.pdb")
