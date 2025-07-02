@@ -137,6 +137,7 @@ class RelaxMD:
 
         # save stuff
         final_positions = simulation.context.getState(getPositions=True).getPositions()
+        self.topology.setPeriodicBoxVectors(simulation.context.getState(getPositions=True).getPeriodicBoxVectors()) #saves correct box vectors to the pdb
         save_simulation(simulation, f"{self.out_dir}/{run_id}_relax_checkpoint")
         save_system(system, f"{self.out_dir}/{run_id}_relax_system.xml")
         save_pdb(self.topology, final_positions, f"{self.out_dir}/{run_id}_relax.pdb")
