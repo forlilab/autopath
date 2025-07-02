@@ -240,7 +240,7 @@ def add_cylindrical_restraints(
         2,
         "U_cylinder;"
         "U_cylinder = step(r_xy - R_cylinder) * 0.5 * k_xy * (r_xy - R_cylinder)^2;"
-        "r_xy = sqrt((x2 - x1)^2 + (y2 - y1)^2);"
+        "r_xy = pointdistance(x1, y1, 0, x2, y2, 0);"
     )
     cylindrical_restraint.setUsesPeriodicBoundaryConditions(False)
     cylindrical_restraint.setForceGroup(force_group)
