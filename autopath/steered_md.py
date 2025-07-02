@@ -27,7 +27,7 @@ class SteeredMD:
         restart_velocities: bool = False,
         HMR: bool = True,
         temperature: float = 300,
-        use_GReweighting: bool = False,
+        use_GReweighting: bool = True,
         out_dir: str = None,
         verbose: int = 2,
     ):
@@ -72,6 +72,7 @@ class SteeredMD:
         )
 
         if self.use_GReweighting:
+            from reweightingreporter import ReweightingReporter
             simulation.reporters.append(ReweightingReporter(f"{self.out_dir}/GR_{rep_idx}_{direction}.dat", 
                                                             steps_per_move, 
                                                             self.integrator, 
@@ -121,6 +122,7 @@ class SteeredMD:
 
         # Save final positions
         final_positions = simulation.context.getState(getPositions=True).getPositions()
+        self.topology.setPeriodicBoxVectors(simulation.context.getState(getPositions=True).getPeriodicBoxVectors()) #saves correct box vectors to the pdb
         save_pdb(self.topology, final_positions, f"{self.out_dir}/steeredMD_{rep_idx}_{direction}.pdb")
 
     def run(
@@ -145,6 +147,8 @@ class SteeredMD:
         self.fc_pull = pulling_force * openmmunit.kilojoules_per_mole / openmmunit.nanometer**2
 
         if self.use_GReweighting:
+            from openmmtools.integrators import LangevinSplittingGirsanov
+            from reweightingreporter import ReweightingReporter
             self.integrator = LangevinSplittingGirsanov(
                 nstxout = steps_per_move,   
                 temperature = self.temperature,

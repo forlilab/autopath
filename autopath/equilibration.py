@@ -170,7 +170,7 @@ class Equilibration:
         timestep: float = 0.004,
         save_freq: int = 6250, # 12500 is 0.05ns at 4fs timestep
         is_membrane: bool = False,
-        use_GReweighting: bool = False,
+        use_GReweighting: bool = True,
         verbose: int = 2,
     ) -> None:
 
@@ -184,7 +184,7 @@ class Equilibration:
         self.is_membrane = is_membrane
 
         # self.temperature = 100 * openmmunit.kelvin # a low value to initilize the integrator
-        self.timestep = timestep * openmmunit.picoseconds
+        self.timestep = timestep #* openmmunit.picoseconds
         self.save_freq = save_freq
 
         self.restrained_minimization = restrained_minimization
@@ -260,6 +260,7 @@ class Equilibration:
 
         logging.debug("Setting up the integrator..")
         if self.use_GReweighting:
+            from openmmtools.integrators import LangevinSplittingGirsanov
             integrator = LangevinSplittingGirsanov(
                 nstxout = 1000000,   # we dont care about this here
                 temperature = self.temperature,
@@ -269,7 +270,7 @@ class Equilibration:
                 constraint_tolerance = 1.0e-6,
             )
         else:
-            integrator = LangevinMiddleIntegrator(self.temperature, 1 / openmmunit.picoseconds, self.timestep)
+            integrator = LangevinMiddleIntegrator(self.temperature, 1 / openmmunit.picoseconds, self.timestep* openmmunit.picoseconds)
 
         # integrator.setRandomNumberSeed(seed)
 
@@ -289,7 +290,8 @@ class Equilibration:
             verbose=self.verbose
         )
 
-        # if self.use_GReweighting:        
+        # if self.use_GReweighting:
+        # from reweightingreporter import ReweightingReporter
         # simulation.reporters.append(ReweightingReporter(f"{self.out_dir}/ReweightingFactors.txt", self.save_freq, integrator))
 
        # Add the required forces to the system
@@ -320,8 +322,8 @@ class Equilibration:
             run_restrained_minimization(simulation, list(self.components_lookup.keys()), self.minimization_scheme)
         
         if self.verbose > 0: # Save the minimized structure
-            final_positions = simulation.context.getState(getPositions=True).getPositions()
-            save_pdb(self.topology, final_positions, f"{self.out_dir}/{run_id}_minim.pdb")
+            minimized_positions = simulation.context.getState(getPositions=True).getPositions()
+            save_pdb(self.topology, minimized_positions, f"{self.out_dir}/{run_id}_minim.pdb")
 
         # After restrained minimization remove and re-add restraints with updated reference positions
         logging.debug("Resetting harmonic restraints after minimization to update reference positions.")

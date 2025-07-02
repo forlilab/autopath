@@ -102,9 +102,9 @@ class MetadynamicsMD:
         mMD_time: int = 10,
         bias_factor: float = 10,
         hill_height: float = 0.3,
-        hill_width: float = 0.01,
+        hill_width: float = 0.05,
         grid_dimensions: tuple = (0.0, 1.0),
-        grid_points: int = None,
+        grid_points: int = 125,
         biasFrequency: int = 2,
         saveFrequency: int = 50,
     ) -> None:
