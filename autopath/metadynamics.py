@@ -104,7 +104,7 @@ class MetadynamicsMD:
         hill_height: float = 0.3,
         hill_width: float = 0.01,
         grid_dimensions: tuple = (0.0, 1.0),
-        bias_frequency: int = 2,
+        biasFrequency: int = 2,
         saveFrequency: int = 50,
     ) -> None:
 
@@ -121,7 +121,7 @@ class MetadynamicsMD:
 
         # Calculate the number of steps required
         mMD_steps = math.ceil(mMD_time / self.timestep * 1000.0)  # 250.000 1ns at 4fs
-        bias_frequency = int((1/self.timestep) * bias_frequency)  # deposit bias every 2 ps (250 is 1ps at 4fs timestep)
+        biasFrequency = int((1/self.timestep) * biasFrequency)  # deposit bias every 2 ps (250 is 1ps at 4fs timestep)
         saveFrequency = int((1/self.timestep) * saveFrequency)  # write bias every 50ps
 
         hill_height = hill_height * openmmunit.kilocalories_per_mole
@@ -139,7 +139,7 @@ class MetadynamicsMD:
             from openmmtools.integrators import LangevinSplittingGirsanov
             from reweightingreporter import ReweightingReporter
             integrator = LangevinSplittingGirsanov(
-                nstxout = bias_frequency,   # 500 is 2ps at 4fs timestep
+                nstxout = biasFrequency,   # 500 is 2ps at 4fs timestep
                 temperature = self.temperature,
                 collision_rate = 1.0/openmmunit.picoseconds,
                 timestep = self.timestep * openmmunit.picoseconds,
@@ -191,11 +191,11 @@ class MetadynamicsMD:
             self.out_dir,
             f"metadynamics_{run_id}",
             mMD_steps,
-            bias_frequency,
+            biasFrequency,
         )
         if self.use_GReweighting:
             simulation.reporters.append(ReweightingReporter(f"{self.out_dir}/GR_metadynamics_{run_id}.dat", 
-                                                            bias_frequency, 
+                                                            biasFrequency, 
                                                             integrator, 
                                                             unperturebed=True,
                                                             firtsPertubation=True,
@@ -341,7 +341,7 @@ class MetadynamicsMD:
             self.temperature,
             bias_factor,
             hill_height,
-            frequency=bias_frequency,
+            frequency=biasFrequency,
             saveFrequency=saveFrequency,
             biasDir=self.out_dir,
         )
@@ -400,7 +400,7 @@ class MetadynamicsMD:
         grid_dimensions_A: tuple = (0.0, 1.0),
         hill_width_B: float = 0.01,
         grid_dimensions_B: tuple = (0.0, 1.0),
-        bias_frequency: int = 2,
+        biasFrequency: int = 2,
         saveFrequency: int = 50,
     ) -> None:
 
@@ -408,7 +408,7 @@ class MetadynamicsMD:
 
         # Metadynamics time in ns
         mMD_steps = math.ceil(mMD_time / self.timestep * 1000.0)  # 250.000 1ns at 4fs
-        bias_frequency = 250 * bias_frequency  # deposit bias every 2 ps (250 is 1ns at 4fs timestep)
+        biasFrequency = 250 * biasFrequency  # deposit bias every 2 ps (250 is 1ns at 4fs timestep)
         saveFrequency = 250 * saveFrequency  # write bias every 50ps
 
         logging.debug("Setting up the integrator")
@@ -631,7 +631,7 @@ class MetadynamicsMD:
             self.temperature,
             bias_factor,
             hill_height,
-            frequency=bias_frequency,
+            frequency=biasFrequency,
             saveFrequency=saveFrequency,
             biasDir=self.out_dir,
         )
@@ -644,7 +644,7 @@ class MetadynamicsMD:
             self.out_dir,
             f"metadynamics_{run_id}",
             mMD_steps,
-            bias_frequency,
+            biasFrequency,
         )
 
         if not self.verbose:
