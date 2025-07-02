@@ -8,6 +8,7 @@ import shutil
 from sys import exit
 from glob import glob
 import MDAnalysis as mda
+import mdtraj as md
 
 # OpenMM imports
 from openmm import *
@@ -179,16 +180,19 @@ class AutoPath:
                                 topology=topology,
                                 system=system,
                                 out_dir=f"{sys_name}/equilibration",
-                                restrained_minimization=False,
+                                restrained_minimization=True,
                                 is_membrane=self.is_membrane,
                                 protocol_fname=self.protocol_fname,
                                 )
             equilibrated_system = equilibration.run(solvated_system_pdb, run_id=sys_name)
         
-            # Wrap, align and save the clean trajectory
-            align_trajectory(prmtop_file=prmtop_file,
-                            traj_file=equilibrated_traj,
-                            out_fname=equilibrated_traj.replace(".dcd", "_aligned.dcd"))
+            #Wrap, align and save the clean trajectory
+            traj = md.load(equilibrated_traj, top=prmtop_file)
+            traj = traj.image_molecules()
+            backbone = traj.topology.select("backbone")
+            traj = traj.superpose(traj[0], atom_indices=backbone)
+            traj = traj.center_coordinates()
+            traj.save(equilibrated_traj.replace(".dcd", "_aligned.dcd"))
             os.remove(equilibrated_traj)
 
         ##############################################################################################
@@ -225,7 +229,7 @@ class AutoPath:
         ligand_atoms = get_ligand_atoms(u_eq, lig_resname, self.use_murcko_scaffold, f'{sys_name}/ligand_{lig_resname}_murcko.png')
         ligand_atoms_indices = [atom.index for atom in ligand_atoms]
 
-        final_com = calculate_com_distance(u_eq, ligand_atoms, pocket_atoms)[-1] /10 # convert to nm
+        final_com = calculate_com_distance(u_eq, ligand_atoms, pocket_atoms, wrap=False)[-1] /10 # convert to nm
         logging.info(f"COM distance after equilibration is: {final_com:.2f} nm")
 
         u_eq.trajectory[-1]  # set pointer to last frame
@@ -238,7 +242,7 @@ class AutoPath:
         ##################################### Steered MD simulations #################################
         ##############################################################################################
         
-        sMD_outdir = f"{sys_name}/sMD_2ns"
+        sMD_outdir = f"{sys_name}/sMD"
 
         if self.run_sMDpulling:
             
@@ -265,21 +269,24 @@ class AutoPath:
             )
 
             # Load and align the sMD trajectories
-            sMD_trajs = glob(f"{sMD_outdir}/trajectory_sMD*")
+            sMD_trajs = glob(f"{sMD_outdir}/trajectory_sMD_replica_*_*.dcd")
             for traj_file in sMD_trajs:
-                align_trajectory(
-                                prmtop_file=prmtop_file,
-                                traj_file=traj_file,
-                                out_fname=traj_file.replace(".dcd", "_aligned.dcd"),
-                            )
+                traj = md.load(traj_file, top=prmtop_file)
+                traj = traj.image_molecules()
+                backbone = traj.topology.select("backbone")
+                traj = traj.superpose(traj[0], atom_indices=backbone)
+                traj = traj.center_coordinates()
+                traj.save(traj_file.replace(".dcd", "_aligned.dcd"))
                 os.remove(traj_file) # remove the dcd
 
         ##############################################################################################
         ###################################### Extract Milestones ####################################
         ##############################################################################################
-        
+
+        out_dir = f"{sys_name}/milestones/pdbs"
+
         if self.extract_milestones:
-            out_dir = f"{sys_name}/milestones/pdbs"
+            
             os.makedirs(out_dir, exist_ok=True)
 
             sMD_trajs = glob(f"{sMD_outdir}/*_aligned.dcd")
@@ -321,11 +328,11 @@ class AutoPath:
         ##############################################################################################
         use_biasing_scheme = True
         biasing_scheme = {
-                            1:{'height': 0.5, 'width': 0.04},
-                            2:{'height': 0.4, 'width': 0.05},
-                            3:{'height': 0.3, 'width': 0.06},
-                            4:{'height': 0.2, 'width': 0.07},
-                            5:{'height': 0.1, 'width': 0.08}
+                            1:{'height': 0.3, 'width': 0.04},
+                            2:{'height': 0.2, 'width': 0.05},
+                            3:{'height': 0.1, 'width': 0.06},
+                            # 4:{'height': 0.2, 'width': 0.07},
+                            # 5:{'height': 0.1, 'width': 0.08}
                             }
 
         if self.run_metadynamics:
@@ -394,12 +401,14 @@ class AutoPath:
                     continue
 
         # Load and align the WTMetaD trajectories
-        WTMetaD_trajs = glob(f"{sys_name}/metadynamics/trajectory_metadynamics*")
+        WTMetaD_trajs = glob(f"{sys_name}/metadynamics/trajectory_metadynamics_milestone_*_frame_*.dcd")
         for traj_file in WTMetaD_trajs:
-            align_trajectory(prmtop_file=prmtop_file,
-                            traj_file=traj_file,
-                            out_fname=traj_file.replace(".dcd", "_aligned.dcd"),
-                            )
+            traj = md.load(traj_file, top=prmtop_file)
+            traj = traj.image_molecules()
+            backbone = traj.topology.select("backbone")
+            traj = traj.superpose(traj[0], atom_indices=backbone)
+            traj = traj.center_coordinates()
+            traj.save(traj_file.replace(".dcd", "_aligned.dcd"))
             os.remove(traj_file) # remove the dcd
 
         simulation_time = time.monotonic() - start_time
