@@ -48,8 +48,8 @@ class Config(object):
         mMD_time: int = 2,  # ns
         mMD_bias_factor: int = 15,
         mMD_bias_frequency: int = 2,  # ps
-        mMD_hill_height: float = 0.3,  # Kcal/mol
-        mMD_hill_width: float = 0.01,
+        mMD_hill_height: float = 1.2,  # KJ/mol
+        mMD_hill_width: float = 0.05,
     ):
 
         # General

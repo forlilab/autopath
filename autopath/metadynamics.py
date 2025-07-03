@@ -101,7 +101,7 @@ class MetadynamicsMD:
         mMD_CV: str = "com",
         mMD_time: int = 10,
         bias_factor: float = 10,
-        hill_height: float = 0.3,
+        hill_height: float = 1.2, #  # 1.2 kJ/mol approx 0.5 KbT
         hill_width: float = 0.05,
         grid_dimensions: tuple = (0.0, 1.0),
         grid_points: int = 125,
@@ -125,7 +125,7 @@ class MetadynamicsMD:
         biasFrequency = int((1/self.timestep.value_in_unit(openmmunit.picoseconds)) * biasFrequency)  # deposit bias every 2 ps (250 is 1ps at 4fs timestep)
         saveFrequency = int((1/self.timestep.value_in_unit(openmmunit.picoseconds)) * saveFrequency)  # write bias every 50ps
 
-        hill_height = hill_height * openmmunit.kilocalories_per_mole
+        hill_height = hill_height * openmmunit.kilojoules_per_mole
         grid_min, grid_max = grid_dimensions
 
         logging.info(f"Running metadynamics with Colective Variable {mMD_CV}")
