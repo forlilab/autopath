@@ -21,8 +21,8 @@ class SteeredMD:
         self,
         system: str = None,
         topology: str = None,
-        ligand_atoms: list[int] = None,
-        pocket_atoms: list[int] = None,
+        groupA_atoms: list[int] = None,
+        groupB_atoms: list[int] = None,
         restrained_atoms: list[int] = None,
         restart_velocities: bool = True,
         timestep: float = 0.004, #  # 4 fs timestep
@@ -39,8 +39,8 @@ class SteeredMD:
         self.restart_velocities = restart_velocities
         self.timestep = timestep * openmmunit.picoseconds
         self.temperature = temperature * openmmunit.kelvin
-        self.ligand_atoms = ligand_atoms
-        self.pocket_atoms = pocket_atoms
+        self.groupA_atoms = groupA_atoms # ligand atoms
+        self.groupB_atoms = groupB_atoms # pocket atoms
         self.restrained_atoms = restrained_atoms
         self.verbose = verbose
 
@@ -88,7 +88,7 @@ class SteeredMD:
         f = open(f"{self.out_dir}/sMD_log_{rep_idx}_{direction}.dat", "a")
 
         for i in range(sMD_moves):
-            current_dist = get_COM_dist(simulation, self.ligand_atoms, self.pocket_atoms) * openmmunit.nanometers
+            current_dist = get_COM_dist(simulation, self.groupA_atoms, self.groupB_atoms) * openmmunit.nanometers
 
             # Get distance of starting point and end point
             if direction == "backward":
@@ -117,7 +117,7 @@ class SteeredMD:
         f.close()
 
         # Log final COM distance
-        final_dist = get_COM_dist(simulation, self.ligand_atoms, self.pocket_atoms)
+        final_dist = get_COM_dist(simulation, self.groupA_atoms, self.groupB_atoms)
         logging.info(f"Final COM distance: {final_dist:.2f} nm")
 
         # Save final positions
@@ -181,7 +181,7 @@ class SteeredMD:
             )
 
         # Add COM force with arbitrary initial r0, then run_single_direction will set it properly
-        add_COM_force(self.system, self.ligand_atoms, self.pocket_atoms, self.fc_pull, 0, 1) # groupd 1 for reweighting
+        add_COM_force(self.system, self.groupA_atoms, self.groupB_atoms, self.fc_pull, 0, 1) # groupd 1 for reweighting
         simulation.context.setTime(0)  # reset simulation time
         simulation.context.reinitialize(preserveState=True)
         
@@ -199,7 +199,7 @@ class SteeredMD:
             if self.restart_velocities:
                 simulation.context.setVelocitiesToTemperature(self.temperature)
 
-            startdist = get_COM_dist(simulation, self.ligand_atoms, self.pocket_atoms)
+            startdist = get_COM_dist(simulation, self.groupA_atoms, self.groupB_atoms)
             initial_r0 = startdist * openmmunit.nanometers
             final_r0 = initial_r0 + abs(dx_per_move) * sMD_moves
             

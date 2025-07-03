@@ -251,8 +251,8 @@ class AutoPath:
             sMD = SteeredMD(
                 system=equilibrated_system,
                 topology=topology,
-                ligand_atoms=ligand_atoms_indices,
-                pocket_atoms=pocket_atom_indices,
+                groupA_atoms=ligand_atoms_indices,
+                groupB_atoms=pocket_atom_indices,
                 restrained_atoms=restrained_atoms_indices,
                 restart_velocities=True,
                 out_dir=sMD_outdir,
@@ -338,7 +338,7 @@ class AutoPath:
         if self.run_metadynamics:
 
             min_com = final_com * 0.75
-            max_com = self.sMD_pulling_dist
+            max_com = final_com + self.sMD_pulling_dist
 
             milestones = glob(f'{sys_name}/milestones/pdbs/milestone_*.pdb')           
             if len(milestones) == 0:
