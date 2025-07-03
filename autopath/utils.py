@@ -22,14 +22,14 @@ import pickle
 import MDAnalysis as mda
 from MDAnalysis.analysis.rms import RMSD, RMSF
 from scipy.spatial.distance import cdist
+from MDAnalysis.analysis.distances import distance_array
+
 from scipy.spatial import KDTree
 
 import seaborn as sns
 import matplotlib.pyplot as plt
 import matplotlib.style as style
 style.use("fivethirtyeight")
-
-import pytraj as pt
 
 from rdkit import Chem
 from rdkit.Chem.Draw import SimilarityMaps
@@ -55,6 +55,8 @@ def align_trajectory(
     strip_mask: str = None,  #':HOH,NA,CL,K,POP'
     out_fname: str = None,
 ) -> None:
+
+    import pytraj as pt
 
     ptraj = pt.iterload(traj_file, prmtop_file, stride=stride)
     ptraj = ptraj.autoimage()
@@ -351,39 +353,155 @@ def get_pocket_atoms(u, pocket_selection:str, lig_resname:str):
             pocket_atoms = u.select_atoms(f"index {' '.join(map(str, pocket_atoms_indices))}")
             return pocket_atoms
 
-def get_ligand_atoms(u, lig_resname:str, use_murcko_scaffold:bool = True, lig_img:str = None):
-    """Get the ligand atoms based on the residue name and optionally save a Murcko scaffold image."""
+def reduce_to_murcko_scaffold(u, lig_resname: str, img_name: str = None):
+    """
+    Reduce ligand atoms to their Murcko scaffold representation.
 
-    if lig_img is None:
-        lig_img = f'ligand_{lig_resname}_murcko.png'
+    Returns
+    -------
+    reduced_ligand : MDAnalysis.AtomGroup
+    highlight_rdk_indices : list of int (for RDKit visualization)
+    mol : RDKit Mol object (with Hs removed and 2D coords)
+    """
+    if img_name is None:
+        img_name = f"ligand_{lig_resname}_murcko.png"
 
-    if use_murcko_scaffold:
-        try:
-            ligand_selection = u.select_atoms(f'resname {lig_resname}')
-            mol = ligand_selection.convert_to('RDKIT')
-            sel_atoms = mol.GetAtoms()
-            # Get Murcko scaffold and match it to parent molecule
-            murcko = MurckoScaffold.GetScaffoldForMol(mol)
-            murcko_match = mol.GetSubstructMatch(murcko)
-            murcko_atom_names = [sel_atoms[i].GetProp('_MDAnalysis_name') for i in murcko_match]
-            # select the Murcko scaffold atoms in the MDAnalysis universe
-            ligand_atoms = u.select_atoms(f'name {" ".join(map(str, murcko_atom_names))}')
-            
-            # save the Murcko scaffold image
-            Chem.rdDepictor.Compute2DCoords(mol)
-            mol = Chem.RemoveHs(mol)
-            img = Chem.Draw.MolToImage(mol, size=(300, 300), highlightAtoms=murcko_match)
-            img.save(lig_img)
-        except Exception as e:
-            logging.error(f"Error processing Murcko scaffold: {e}")
-            logging.warning("Falling back to using all non-hydrogen atoms in the ligand.")
-            ligand_atoms = u.select_atoms(f'resname {lig_resname} and not name H*')
+    ligand_all = u.select_atoms(f"resname {lig_resname}")
+    mol = ligand_all.convert_to('RDKIT')
+    sel_atoms = mol.GetAtoms()
+
+    try:
+        murcko = MurckoScaffold.GetScaffoldForMol(mol)
+        murcko_match = mol.GetSubstructMatch(murcko)
+        murcko_atom_names = [sel_atoms[i].GetProp('_MDAnalysis_name') for i in murcko_match]
+        reduced_ligand = u.select_atoms(f'resname {lig_resname} and name {" ".join(murcko_atom_names)}')
+
+        return reduced_ligand, murcko_match, mol
+
+    except Exception as e:
+        logging.warning(f"Could not extract Murcko scaffold: {e}")
+        return u.select_atoms(f'resname {lig_resname} and not name H*'), [], mol
+
+def get_ligand_anchor_atoms(
+    u,
+    lig_resname: str,
+    pocket_sel: str = "protein and around 4 resname UNK and not name H*",
+    mode: str = "com",
+    frames: int = 100,
+    n_atoms: int = 5,
+    reduce_before: bool = True,
+    expand_rings: bool = True,
+    out_dir: str = None,
+    verbose: bool = True,
+):
+    """
+    Select anchor atoms in the ligand for pulling and optionally visualize them.
+
+    If mode="murcko", returns Murcko scaffold atoms.
+
+    Parameters
+    ----------
+    reduce_before : bool
+        If True, reduce ligand to Murcko scaffold before anchor selection.
+    """
+
+    img_name = f"{out_dir}/pulling_{lig_resname}_{mode}.png"
+
+    ligand_full = u.select_atoms(f"resname {lig_resname} and not name H*")
+    if ligand_full.n_atoms == 0:
+        raise ValueError(f"No atoms found for ligand {lig_resname}.")
+
+    if mode == "murcko":
+        ligand, anchor_indices, mol = reduce_to_murcko_scaffold(u, lig_resname, img_name)
+        anchor = [ligand.atoms[i].index for i in range(len(ligand))]
+        return anchor
+
+    # Reduce first if requested
+    if reduce_before:
+        ligand, highlight_rdk_indices, mol = reduce_to_murcko_scaffold(u, lig_resname, img_name)
     else:
-        # If not using Murcko scaffold, select all non-hydrogen atoms in the ligand
-        logging.warning("Using all non-hydrogen atoms in the ligand as ligand_atoms.")
-        ligand_atoms = u.select_atoms(f"resname {lig_resname} and not name H*")
+        ligand = ligand_full
+        mol = ligand_full.convert_to("RDKIT")
+        highlight_rdk_indices = []
 
-    return ligand_atoms
+    u.trajectory[-1]  # Ensure we are at the last frame
+    pocket = u.select_atoms(pocket_sel)
+    anchor = []
+
+    if mode == "com":
+        com = ligand.center_of_mass()
+        dists = np.linalg.norm(ligand.positions - com, axis=1)
+        anchor = ligand.atoms[np.argsort(dists)[:n_atoms]].indices
+
+    elif mode == "closest":
+        pocket_com = pocket.center_of_mass()
+        dists = np.linalg.norm(ligand.positions - pocket_com, axis=1)
+        anchor = ligand.atoms[np.argsort(dists)[:n_atoms]].indices
+
+    elif mode == "contacts":
+        contact_counts = np.zeros(len(ligand))
+        for ts in u.trajectory[:frames]:
+            dmat = distance_array(ligand.positions, pocket.positions)
+            contacts = (dmat < 3.5).any(axis=1)
+            contact_counts += contacts
+        top_indices = np.argsort(contact_counts)[-n_atoms:]
+        anchor = ligand.atoms[top_indices].indices
+
+    elif mode == "inertia":
+        coords = ligand.positions - ligand.center_of_mass()
+        inertia_tensor = np.dot(coords.T, coords)
+        eigvals, eigvecs = np.linalg.eigh(inertia_tensor)
+        principal_axis = eigvecs[:, np.argmin(eigvals)]
+        projections = np.dot(coords, principal_axis)
+        anchor = ligand.atoms[np.argsort(projections)[:n_atoms]].indices
+        # anchor = ligand.atoms[np.argsort(projections)[-n_atoms:]].indices
+
+    elif mode == "weighted_com":
+        contact_counts = np.zeros(len(ligand))
+        for ts in u.trajectory[:frames]:
+            dmat = distance_array(ligand.positions, pocket.positions)
+            contacts = (dmat < 3.5).any(axis=1)
+            contact_counts += contacts
+        top_indices = np.argsort(contact_counts)[-n_atoms:]
+        anchor_coords = ligand.positions[top_indices]
+        anchor_com = anchor_coords.mean(axis=0)
+        dists = np.linalg.norm(ligand.positions - anchor_com, axis=1)
+        anchor = ligand.atoms[np.argsort(dists)[:n_atoms]].indices
+
+    else:
+        raise ValueError(f"Unknown mode '{mode}'")
+
+    if expand_rings:
+        rdk_anchor_indices = []
+        idx_map = {a.index: i for i, a in enumerate(ligand_full.atoms)}
+        for idx in anchor:
+            if idx in idx_map:
+                rdk_anchor_indices.append(idx_map[idx])
+        ring_info = mol.GetRingInfo()
+        anchor_rings = [set(ring) for ring in ring_info.AtomRings() if any(i in ring for i in rdk_anchor_indices)]
+        expanded_rdk_indices = set()
+        for ring in anchor_rings:
+            expanded_rdk_indices.update(ring)
+        expanded_mda_indices = [ligand_full.atoms[i].index for i in expanded_rdk_indices]
+        anchor = list(set(anchor).union(expanded_mda_indices))
+        print(f"[get_ligand_anchor_atoms] Expanded to include rings: {expanded_mda_indices}")
+
+    # Draw 2D image with highlights
+    try:
+        idx_map = {a.index: i for i, a in enumerate(ligand_full.atoms)}
+        highlight_rdk_indices = [idx_map[i] for i in anchor if i in idx_map]
+        Chem.rdDepictor.Compute2DCoords(mol)
+        mol = Chem.RemoveHs(mol)
+        img = Draw.MolToImage(mol, size=(300, 300), highlightAtoms=highlight_rdk_indices)
+        img.save(img_name)
+    except Exception as e:
+        logging.warning(f"Could not generate 2D image with highlights: {e}")
+
+    if verbose:
+        print(f"[get_ligand_anchor_atoms] Anchor atoms selected ({mode}): {anchor}")
+
+    return anchor
+
 
 def get_protein_ha(topology: app.Topology, lig_name: str = "UNK") -> Tuple[list, list]:
 

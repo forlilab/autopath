@@ -226,8 +226,10 @@ class AutoPath:
         with mda.Writer(f"{sys_name}/pocket_atoms.pdb", u_eq.atoms.n_atoms) as W:
             W.write(pocket_atoms)
     
-        ligand_atoms = get_ligand_atoms(u_eq, lig_resname, self.use_murcko_scaffold, f'{sys_name}/ligand_{lig_resname}_murcko.png')
-        ligand_atoms_indices = [atom.index for atom in ligand_atoms]
+        ligand_atoms_indices = get_ligand_anchor_atoms(u_eq, lig_resname, 
+                                                       mode='contacts', 
+                                                       out_dir=sys_name)
+        ligand_atoms = u_eq.select_atoms(f'index {" ".join(map(str, ligand_atoms_indices))}')
 
         final_com = calculate_com_distance(u_eq, ligand_atoms, pocket_atoms, wrap=False)[-1] /10 # convert to nm
         logging.info(f"COM distance after equilibration is: {final_com:.2f} nm")
@@ -328,9 +330,9 @@ class AutoPath:
         ##############################################################################################
         use_biasing_scheme = True
         biasing_scheme = {
-                            1:{'height': 0.3, 'width': 0.04},
-                            2:{'height': 0.2, 'width': 0.05},
-                            3:{'height': 0.1, 'width': 0.06},
+                            1:{'height': 1.2, 'width': 0.04}, #KJ/mol and nm
+                            2:{'height': 1.0, 'width': 0.05},
+                            3:{'height': 0.8, 'width': 0.06},
                             # 4:{'height': 0.2, 'width': 0.07},
                             # 5:{'height': 0.1, 'width': 0.08}
                             }
