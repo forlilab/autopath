@@ -24,8 +24,8 @@ class SteeredMD:
         ligand_atoms: list[int] = None,
         pocket_atoms: list[int] = None,
         restrained_atoms: list[int] = None,
-        restart_velocities: bool = False,
-        HMR: bool = True,
+        restart_velocities: bool = True,
+        timestep: float = 0.004, #  # 4 fs timestep
         temperature: float = 300,
         use_GReweighting: bool = True,
         out_dir: str = None,
@@ -37,7 +37,7 @@ class SteeredMD:
         os.makedirs(out_dir, exist_ok=True)
 
         self.restart_velocities = restart_velocities
-        self.timestep = 0.004 if HMR else 0.002
+        self.timestep = timestep * openmmunit.picoseconds
         self.temperature = temperature * openmmunit.kelvin
         self.ligand_atoms = ligand_atoms
         self.pocket_atoms = pocket_atoms
@@ -140,7 +140,7 @@ class SteeredMD:
         simulation_start_time = time.monotonic()
 
         # Calculate the number of steps
-        sMD_steps = math.ceil(sMD_time / self.timestep * 1000.0)
+        sMD_steps = math.ceil(sMD_time / self.timestep.value_in_unit(openmmunit.picoseconds) * 1000.0)
         sMD_moves = int(sMD_steps / steps_per_move)
         dx_per_move = (displacement / sMD_moves) * openmmunit.nanometers
 
@@ -153,12 +153,14 @@ class SteeredMD:
                 nstxout = steps_per_move,   
                 temperature = self.temperature,
                 collision_rate = 1.0/openmmunit.picoseconds,
-                timestep = self.timestep * openmmunit.picoseconds,
+                timestep = self.timestep,
                 splitting = "R V O V R",        # ABOBA – reweightable
                 constraint_tolerance = 1.0e-6,
             )
         else:
-            self.integrator = LangevinMiddleIntegrator(self.temperature, 1 / openmmunit.picoseconds, self.timestep)
+            self.integrator = LangevinMiddleIntegrator(self.temperature, 
+                                                       1.0/openmmunit.picoseconds, 
+                                                       self.timestep)
 
         simulation = Simulation(self.topology, self.system, self.integrator, self.platform)
 

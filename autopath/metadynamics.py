@@ -30,29 +30,29 @@ class MetadynamicsMD:
         restrained_atoms: list[int] = None,
         out_dir: str = "metadynamics",
         is_membrane: bool = False,
-        HMR: bool = True,
+        timestep: float = 0.004, #  # 4 fs timestep
         temp: float = 300,
         use_GReweighting: bool = True,
         verbose: bool = True,
     ) -> None:
-
-        self.timestep = 0.004 if HMR else 0.002
-        self.temperature = temp * openmmunit.kelvin
+        
+        self.out_dir = out_dir
+        os.makedirs(self.out_dir, exist_ok=True)
 
         self.topology = topology
         self.n_atoms = self.topology.getNumAtoms()
         self.is_membrane = is_membrane
 
-        self.out_dir = out_dir
-        os.makedirs(self.out_dir, exist_ok=True)
+        self.timestep = timestep * openmmunit.picoseconds
+        self.temperature = temp * openmmunit.kelvin
 
         self.ligand_atoms = ligand_atoms
         self.pocket_atoms = pocket_atoms
         
-        # Im not exposing all options here because I want to keep it simple
         self.restrained_atoms = restrained_atoms
 
         self.platform = select_platform("fastest")
+
         self.use_GReweighting = use_GReweighting
         if self.use_GReweighting:
             try:
@@ -63,8 +63,8 @@ class MetadynamicsMD:
             
         # These are for debugging purposes if one wants to check the CVs over the time of the simulation
         self.verbose = verbose
-        self.record_CV = int((1/self.timestep) * 10)  # record the CVs every 10 ps
-        self.store_CV = int((1/self.timestep) * 100)  # log the stored COLVAR every 100ps
+        self.record_CV = int((1/self.timestep.value_in_unit(openmmunit.picoseconds)) * 10)  # record the CVs every 10 ps
+        self.store_CV = int((1/self.timestep.value_in_unit(openmmunit.picoseconds)) * 100)  # log the stored COLVAR every 100ps
 
         return
 
@@ -121,9 +121,9 @@ class MetadynamicsMD:
         ], f"The selected colective variable {mMD_CV} is not implemented"
 
         # Calculate the number of steps required
-        mMD_steps = math.ceil(mMD_time / self.timestep * 1000.0)  # 250.000 1ns at 4fs
-        biasFrequency = int((1/self.timestep) * biasFrequency)  # deposit bias every 2 ps (250 is 1ps at 4fs timestep)
-        saveFrequency = int((1/self.timestep) * saveFrequency)  # write bias every 50ps
+        mMD_steps = math.ceil(mMD_time / self.timestep.value_in_unit(openmmunit.picoseconds) * 1000.0)  # 250.000 1ns at 4fs
+        biasFrequency = int((1/self.timestep.value_in_unit(openmmunit.picoseconds)) * biasFrequency)  # deposit bias every 2 ps (250 is 1ps at 4fs timestep)
+        saveFrequency = int((1/self.timestep.value_in_unit(openmmunit.picoseconds)) * saveFrequency)  # write bias every 50ps
 
         hill_height = hill_height * openmmunit.kilocalories_per_mole
         grid_min, grid_max = grid_dimensions
@@ -139,12 +139,14 @@ class MetadynamicsMD:
                 nstxout = biasFrequency,   # 500 is 2ps at 4fs timestep
                 temperature = self.temperature,
                 collision_rate = 1.0/openmmunit.picoseconds,
-                timestep = self.timestep * openmmunit.picoseconds,
+                timestep = self.timestep,
                 splitting = "R V O V R",        # ABOBA – reweightable
                 constraint_tolerance = 1.0e-6,
             )
         else:
-            integrator = LangevinMiddleIntegrator(self.temperature, 1 / openmmunit.picoseconds, self.timestep)
+            integrator = LangevinMiddleIntegrator(self.temperature, 
+                                                  1.0/openmmunit.picoseconds, 
+                                                  self.timestep)
 
         if self.topology is None:
             if pdb_file is None:
@@ -373,7 +375,7 @@ class MetadynamicsMD:
 
         # Save everything
         final_positions = simulation.context.getState(getPositions=True).getPositions()
-
+        self.topology.setPeriodicBoxVectors(simulation.context.getState(getPositions=True).getPeriodicBoxVectors()) #saves correct box vectors to the pdb
         save_system(system, f"{self.out_dir}/system_mMD_{run_id}.xml")
         save_simulation(simulation, f"{self.out_dir}/mMD_checkpoint_{run_id}")
         save_pdb(self.topology, final_positions, f"{self.out_dir}/mMD_{run_id}.pdb")
@@ -416,9 +418,7 @@ class MetadynamicsMD:
 
         if self.topology is None:
             if pdb_file is None:
-                logging.error(
-                    f"Either a PDB or a prmtop file must be provided to get the topology from"
-                )
+                logging.error(f"Either a PDB or a prmtop file must be provided to get the topology from")
                 exit(1)
             else:
                 self.topology = PDBFile(pdb_file).topology
@@ -433,11 +433,9 @@ class MetadynamicsMD:
         else:
             if pdb_file is not None:
                 logging.debug(f"Setting positions from PDB file {pdb_file}")
-                simulation.context.setPositions(pdb.positions)
+                simulation.context.setPositions(PDBFile(pdb_file).positions)
             else:
-                logging.error(
-                    f"Either a PDB or a checkpoint file must be provided to get coordinates from"
-                )
+                logging.error(f"Either a PDB or a checkpoint file must be provided to get coordinates from")
                 exit(1)
 
         # Add harmonic positional restraints to protein CA
@@ -679,6 +677,7 @@ class MetadynamicsMD:
         )
 
         final_positions = simulation.context.getState(getPositions=True).getPositions()
+        self.topology.setPeriodicBoxVectors(simulation.context.getState(getPositions=True).getPeriodicBoxVectors()) #saves correct box vectors to the pdb
         save_system(system, f"{self.out_dir}/system_mMD_{run_id}.xml")
         save_simulation(simulation, f"{self.out_dir}/mMD_checkpoint_{run_id}")
         save_pdb(self.topology, final_positions, f"{self.out_dir}/mMD_{run_id}.pdb")

@@ -61,7 +61,7 @@ def warm_up_system(
     to warm-up the system in the NVT ensemble.
     """
 
-    integrator.setStepSize(timestep * openmmunit.picoseconds)
+    integrator.setStepSize(timestep)
     logging.debug(f"Stepsize set to {integrator.getStepSize()}")
     simulation.context.reinitialize(preserveState=True)
 

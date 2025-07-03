@@ -22,23 +22,22 @@ class RelaxMD:
         pocket_atoms: list[int] = None,
         out_dir: str = "relax_md",
         is_membrane: bool = False,
-        HMR: bool = True,
+        timestep: float = 0.004, #  # 4 fs timestep
         temp: float = 300,
         use_GReweighting: bool = True,
     ) -> None:
 
-        self.topology = topology
-
         os.makedirs(out_dir, exist_ok=True)
         self.out_dir = out_dir
 
-        self.timestep = 0.004 if HMR else 0.002
+        self.topology = topology
+
+        self.timestep = timestep * openmmunit.picoseconds
         self.temperature = temp * openmmunit.kelvin
 
         self.ligand_atoms = ligand_atoms
         self.pocket_atoms = pocket_atoms
         self.is_membrane = is_membrane
-        self.use_GReweighting = use_GReweighting
 
         self.platform = select_platform("fastest")
 
@@ -71,14 +70,14 @@ class RelaxMD:
                 nstxout = 250,   # we dont care about this here
                 temperature = self.temperature,
                 collision_rate = 1.0/openmmunit.picoseconds,
-                timestep = self.timestep * openmmunit.picoseconds,
+                timestep = self.timestep,
                 splitting = "R V O V R",        # ABOBA – reweightable
                 constraint_tolerance = 1.0e-6,
             )
         else:
-            integrator = LangevinMiddleIntegrator(self.temperature, 1 / openmmunit.picoseconds, self.timestep)
-
-        # integrator.setRandomNumberSeed(int(rep_idx))
+            integrator = LangevinMiddleIntegrator(self.temperature, 
+                                                  1.0/openmmunit.picoseconds, 
+                                                  self.timestep)
 
         # Setting Simulation object and loading the checkpoint
         simulation = Simulation(self.topology, system, integrator, self.platform)
@@ -101,7 +100,7 @@ class RelaxMD:
         logging.debug("Warming up the system..")
         warm_up_system(simulation, integrator, 
                        warming_steps=npt_steps*2, 
-                       timestep=0.002,# * openmmunit.picoseconds, # lower timestep for warming
+                       timestep=0.002 * openmmunit.picoseconds, # lower timestep for warming
                        Tend=self.temperature.value_in_unit(openmmunit.kelvin))
 
         # logging.info("Minimizing..")
@@ -113,8 +112,8 @@ class RelaxMD:
 
         # adjust timestep if needed
         if self.timestep != integrator.getStepSize():
-            logging.debug(f"Adjusting timestep from {integrator.getStepSize()} to {self.timestep} ps.")
-            integrator.setStepSize(self.timestep * openmmunit.picoseconds)
+            logging.debug(f"Adjusting timestep from {integrator.getStepSize()} to {self.timestep}.")
+            integrator.setStepSize(self.timestep)
     
         simulation.context.reinitialize(preserveState=True)
         logging.debug(f"Stepsize set to {integrator.getStepSize()}")
