@@ -67,7 +67,7 @@ class RelaxMD:
             from openmmtools.integrators import LangevinSplittingGirsanov
             from reweightingreporter import ReweightingReporter
             integrator = LangevinSplittingGirsanov(
-                nstxout = 250,   # we dont care about this here
+                nstxout = 100000000,   # we dont care about this here
                 temperature = self.temperature,
                 collision_rate = 1.0/openmmunit.picoseconds,
                 timestep = self.timestep,

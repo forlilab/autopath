@@ -286,7 +286,8 @@ class AutoPath:
         ##############################################################################################
 
         out_dir = f"{sys_name}/milestones/pdbs"
-
+        min_dist = 4 # minimum distance between clusters of milestones
+        
         if self.extract_milestones:
             
             os.makedirs(out_dir, exist_ok=True)
@@ -311,7 +312,8 @@ class AutoPath:
             X = rmsd[['RMSD_ligand', 'COM']].values
 
             labels, sorted_cluster_centers = cluster_sMD_trajectories(u_sMD, X, 
-                                                                      n_clusters=self.n_milestones, 
+                                                                      n_clusters=self.n_milestones,
+                                                                      min_dist=min_dist,
                                                                       out_dir=out_dir)
 
             # Plot the clustering results
@@ -328,7 +330,7 @@ class AutoPath:
         ##############################################################################################
         ##################################### Metadynamics simulations ###############################
         ##############################################################################################
-        use_biasing_scheme = True
+        use_biasing_scheme = False
         biasing_scheme = {
                             1:{'height': 1.2, 'width': 0.04}, #KJ/mol and nm
                             2:{'height': 1.0, 'width': 0.05},
