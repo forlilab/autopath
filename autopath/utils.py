@@ -492,7 +492,7 @@ def get_ligand_anchor_atoms(
         highlight_rdk_indices = [idx_map[i] for i in anchor if i in idx_map]
         Chem.rdDepictor.Compute2DCoords(mol)
         mol = Chem.RemoveHs(mol)
-        img = Draw.MolToImage(mol, size=(300, 300), highlightAtoms=highlight_rdk_indices)
+        img = Chem.Draw.MolToImage(mol, size=(300, 300), highlightAtoms=highlight_rdk_indices)
         img.save(img_name)
     except Exception as e:
         logging.warning(f"Could not generate 2D image with highlights: {e}")
@@ -687,10 +687,14 @@ def match_cluster_centroids(X:np.ndarray, centroids:np.ndarray, N:int=1):
 
     return closest_points
 
-def cluster_sMD_trajectories(u: mda.Universe, X:np.ndarray, n_clusters:int, out_dir:str):
+def cluster_sMD_trajectories(u: mda.Universe, X:np.ndarray, 
+                             n_clusters:int, 
+                             min_dist:float,
+                             out_dir:str
+                             ) -> Tuple[np.ndarray, np.ndarray]:
 
     # cluster_estimator = KMeans(n_clusters=5)
-    cluster_estimator = RegularSpace(dmin=3, max_centers=n_clusters)
+    cluster_estimator = RegularSpace(dmin=min_dist, max_centers=n_clusters)
     fitted_model = cluster_estimator.fit(X).fetch_model()
     cluster_centers = fitted_model.cluster_centers
     labels = fitted_model.transform(X)
