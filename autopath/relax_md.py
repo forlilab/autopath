@@ -10,7 +10,7 @@ import openmm.unit as openmmunit
 
 # AutoPath imports
 from autopath.utils import *
-from autopath.customForces import add_flatbottom_COM_restraints
+from autopath.customForces import add_flatbottom_COM_restraints, print_current_forces
 from autopath.equilibration import warm_up_system
 
 
@@ -92,14 +92,20 @@ class RelaxMD:
         startdist = get_COM_dist(simulation, self.ligand_atoms, self.pocket_atoms)
         # Add flat-bottom COM restraints to prevent ligand from drifting too far away
         logging.debug("Adding flat-bottom COM restraints..")
-        add_flatbottom_COM_restraints(system, self.ligand_atoms, self.pocket_atoms, r0=startdist)
+        add_flatbottom_COM_restraints(system, self.ligand_atoms, self.pocket_atoms, 
+                                      r0=startdist,
+                                      upper_wall=0.01, # 0.1 nm upper wall
+                                      K_flat=500, # 500 kJ/mol/nm^2
+                                      )
+        simulation.context.reinitialize(preserveState=True)
+        # print_current_forces(system)
 
         logging.debug("Minimizing..")
         simulation.minimizeEnergy()
 
         logging.debug("Warming up the system..")
         warm_up_system(simulation, integrator, 
-                       warming_steps=npt_steps*2, 
+                       warming_steps=npt_steps, 
                        timestep=0.002 * openmmunit.picoseconds, # lower timestep for warming
                        Tend=self.temperature.value_in_unit(openmmunit.kelvin))
 
