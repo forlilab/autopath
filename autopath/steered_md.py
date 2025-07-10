@@ -56,17 +56,16 @@ class SteeredMD:
     
         return None
 
-    def run_single_direction(
-        self, simulation, rep_idx, direction, dx_per_move, sMD_moves, steps_per_move, initial_r0, final_r0
-    ):
+    def run_single_direction(self, simulation, rep_idx, direction, 
+                             dx_per_move, sMD_moves, steps_per_move, 
+                             initial_r0, final_r0):
         """Run the pulling process in a single direction (forward or backward) for a single replica."""
-        logging.info(f"Replica {rep_idx} - {direction} pulling")
-
+        
         add_reporters(
             simulation,
             self.out_dir,
             f"sMD_{rep_idx}_{direction}",
-            sMD_moves,
+            sMD_moves*steps_per_move, # total steps
             steps_per_move,
             self.verbose
         )
@@ -83,38 +82,37 @@ class SteeredMD:
         logging.info(f"Initial COM distance: {initial_r0}")
         simulation.context.setParameter("r0", initial_r0)
 
-        # Initialize work
-        work_val_old = openmmunit.Quantity(value=0, unit=openmmunit.kilojoules_per_mole)
-        f = open(f"{self.out_dir}/sMD_log_{rep_idx}_{direction}.dat", "a")
+        with open(f"{self.out_dir}/sMD_log_{rep_idx}_{direction}.dat","w") as f:
+            f.write("step,r_target(nm),r_before(nm),r_after(nm),force(kJ/mol/nm),work(kJ/mol)\n")
+            work_val = 0.0
 
-        for i in range(sMD_moves):
-            current_dist = get_COM_dist(simulation, self.groupA_atoms, self.groupB_atoms) * openmmunit.nanometers
+            for i in range(sMD_moves):
+                #actual distance before
+                dist_before = get_COM_dist(simulation, self.groupA_atoms, self.groupB_atoms)
 
-            # Get distance of starting point and end point
-            if direction == "backward":
-                r_current = final_r0 - float(i + 1) * abs(dx_per_move)
-                r_start = final_r0 - float(i) * abs(dx_per_move)
-            else:
-                r_current = initial_r0 + float(i + 1) * dx_per_move
-                r_start = initial_r0 + float(i) * dx_per_move
+                #compute your new target distance
+                if direction == "backward":
+                    r_end = final_r0 - (i+1)*abs(dx_per_move)
+                else:
+                    r_end = initial_r0 + (i+1)*dx_per_move
 
-            simulation.context.setParameter("r0", r_current)
-            force_val = -self.fc_pull * (current_dist - r_current)
+                simulation.context.setParameter("r0", r_end)
 
-            simulation.step(steps_per_move)
+                r_end = r_end.value_in_unit(openmmunit.nanometers)
 
-            # Calculate work for difference in potential energy in transition
-            spr_energy_end = 0.5 * -self.fc_pull * (current_dist - r_current) ** 2
-            spr_energy_start = 0.5 * -self.fc_pull * (current_dist - r_start) ** 2
-            work_val = work_val_old + spr_energy_end - spr_energy_start
-            work_val_old = work_val
+                #force before the step
+                force_val = -self.fc_pull * (dist_before - r_end)
+                force_val = force_val * openmmunit.nanometer**2/openmmunit.kilojoules_per_mole # remove units for logging
 
-            # Write log file
-            f.write(
-                f"{i},{r_current / openmmunit.nanometers},{current_dist / openmmunit.nanometers},{force_val / openmmunit.kilojoules_per_mole * openmmunit.nanometer},{work_val / openmmunit.kilojoules_per_mole}\n"
-            )
+                simulation.step(steps_per_move)
 
-        f.close()
+                #actual distance after
+                dist_after = get_COM_dist(simulation, self.groupA_atoms, self.groupB_atoms)
+
+                # accumulate work
+                work_val += force_val * (dist_after - dist_before)
+
+                f.write(f"{i},{r_end},{dist_before},{dist_after},{force_val},{work_val}\n")
 
         # Log final COM distance
         final_dist = get_COM_dist(simulation, self.groupA_atoms, self.groupB_atoms)
@@ -128,21 +126,32 @@ class SteeredMD:
     def run(
         self,
         sMD_time: float = 1,  # 1ns
-        displacement: float = 2.5,  # nm
+        max_displacement: float = 2.0,  # nm
         steps_per_move: int = 250,  # 1ps
+        pulling_speed: float = 0.002,  # nm/ps
         pulling_force: int = 1000,
-        replicas: int = 3,
         rep_suffix: str = None,
         checkpoint_file: str = None,
         do_backwards: bool = False,
     ):
-        """Main method to run steered MD in both directions (forward and backward) for multiple replicas."""
+        """Main method to run steered MD in both directions (forward and backward)."""
         simulation_start_time = time.monotonic()
 
         # Calculate the number of steps
-        sMD_steps = math.ceil(sMD_time / self.timestep.value_in_unit(openmmunit.picoseconds) * 1000.0)
-        sMD_moves = int(sMD_steps / steps_per_move)
-        dx_per_move = (displacement / sMD_moves) * openmmunit.nanometers
+        if pulling_speed is not None:
+            #TODO : this should be adaptative to detect unbinding
+            max_displacement = 2.0  # nm
+            sMD_time = max_displacement / pulling_speed/1000  # in ns
+            sMD_steps = math.ceil(sMD_time / self.timestep.value_in_unit(openmmunit.picoseconds) * 1000.0)
+            sMD_moves = int(sMD_steps / steps_per_move)
+            dx_per_move = (max_displacement / sMD_moves) * openmmunit.nanometers
+        
+        else:
+            # If pulling speed is not defined, use displacement and time to calculate dx_per_move
+            if sMD_time is not None and max_displacement is not None:
+                dx_per_move = (max_displacement * openmmunit.nanometers) / (sMD_time * openmmunit.nanoseconds / steps_per_move)
+            else:
+                raise ValueError("Either pulling_speed or both sMD_time and max_displacement must be provided.")
 
         self.fc_pull = pulling_force * openmmunit.kilojoules_per_mole / openmmunit.nanometer**2
 
@@ -159,7 +168,7 @@ class SteeredMD:
             )
         else:
             self.integrator = LangevinMiddleIntegrator(self.temperature, 
-                                                       1.0/openmmunit.picoseconds, 
+                                                       0.1/openmmunit.picoseconds, 
                                                        self.timestep)
 
         simulation = Simulation(self.topology, self.system, self.integrator, self.platform)
@@ -184,60 +193,56 @@ class SteeredMD:
         add_COM_force(self.system, self.groupA_atoms, self.groupB_atoms, self.fc_pull, 0, 1) # groupd 1 for reweighting
         simulation.context.setTime(0)  # reset simulation time
         simulation.context.reinitialize(preserveState=True)
+
+        # Reset velocities to temperature
+        if self.restart_velocities:
+            simulation.context.setVelocitiesToTemperature(self.temperature)
+
+        startdist = get_COM_dist(simulation, self.groupA_atoms, self.groupB_atoms)
+        initial_r0 = startdist * openmmunit.nanometers
+        final_r0 = initial_r0 + abs(dx_per_move) * sMD_moves
         
-        # print_current_forces(self.system)
+        rep_name = rep_suffix if rep_suffix else f"replica-{np.random.randint(1000000)}_v{pulling_speed}"
 
-        # Loop over replicas
-        for rep_idx in range(1, replicas + 1):
-            rep_name = f"{rep_suffix}_{rep_idx}" if rep_suffix else f"replica_{rep_idx}"
-            replica_start_time = time.monotonic()
+        logging.info(f"Forward pulling of replica {rep_suffix} at {pulling_speed} nm/ps for {max_displacement} nm in {sMD_time} ns")
 
-            # Load checkpoint file
-            simulation.loadCheckpoint(checkpoint_file)
+        # Run forward direction
+        self.run_single_direction(simulation, rep_name, direction="forward", 
+                                  dx_per_move=dx_per_move, sMD_moves=sMD_moves,
+                                  steps_per_move=steps_per_move, 
+                                  initial_r0=initial_r0, final_r0=final_r0)
 
-            # Reset velocities to temperature
-            if self.restart_velocities:
-                simulation.context.setVelocitiesToTemperature(self.temperature)
+        # if self.verbose > 0:
+            # files_f = glob(f"{self.out_dir}/sMD_log_*_forward.dat")
+            # plot_sMD_statistics(files_f, f'{rep_name}_forward', self.out_dir)
 
-            startdist = get_COM_dist(simulation, self.groupA_atoms, self.groupB_atoms)
-            initial_r0 = startdist * openmmunit.nanometers
-            final_r0 = initial_r0 + abs(dx_per_move) * sMD_moves
-            
-            # Run forward direction
-            self.run_single_direction(
-                simulation, rep_name, direction="forward", dx_per_move=dx_per_move, sMD_moves=sMD_moves,
-                steps_per_move=steps_per_move, initial_r0=initial_r0, final_r0=final_r0
-                )
+        if do_backwards:
+            logging.info(f"Running backward pulling of replica {rep_suffix} at speed {pulling_speed} nm/ps")
+            # Reset velocities to temperature after forward pulling
+            simulation.context.setVelocitiesToTemperature(self.temperature)
+            self.run_single_direction(simulation, rep_name, direction="backward", 
+                                      dx_per_move=-dx_per_move, sMD_moves=sMD_moves,
+                                      steps_per_move=steps_per_move, 
+                                      initial_r0=initial_r0, final_r0=final_r0)
 
-            if self.verbose > 0:
-                files_f = glob(f"{self.out_dir}/sMD_log_*_forward.dat")
-                plot_sMD_statistics(files_f, f'{rep_name}_forward', self.out_dir)
-
-            if do_backwards:
-                # Run backward direction
-                # Reset velocities to temperature after forward pulling
-                simulation.context.setVelocitiesToTemperature(self.temperature)
-                self.run_single_direction(simulation, rep_name, direction="backward", dx_per_move=-dx_per_move, sMD_moves=sMD_moves,
-                                        steps_per_move=steps_per_move, initial_r0=initial_r0, final_r0=final_r0)
-
-                if self.verbose > 0:
-                    files_f = glob(f"{self.out_dir}/sMD_log_*_backward.dat")
-                    plot_sMD_statistics(files_f, f'{rep_name}_backward', self.out_dir)
+            # if self.verbose > 0:
+                # files_f = glob(f"{self.out_dir}/sMD_log_*_backward.dat")
+                # plot_sMD_statistics(files_f, f'{rep_name}_backward', self.out_dir)
 
             # Logging the time taken for each replica
-            replica_time = time.monotonic() - replica_start_time
-            logging.info(f"Finished replica {rep_idx}/{replicas} in {replica_time/60:.2f} min")
+            # replica_time = time.monotonic() - replica_start_time
+            # logging.info(f"Finished replica {rep_idx}/{replicas} in {replica_time/60:.2f} min")
 
 
         # Generate statistics and plots for the forward direction
-        files_f = glob(f"{self.out_dir}/sMD_log_*_forward.dat")
-        plot_sMD_statistics(files_f, f'{rep_name}_forward', self.out_dir)
+        # files_f = glob(f"{self.out_dir}/sMD_log_*_forward.dat")
+        # plot_sMD_statistics(files_f, f'{rep_name}_forward', self.out_dir)
 
-        if do_backwards:
+        # if do_backwards:
             # Generate statistics and plots for the backward direction
-            files_b = glob(f"{self.out_dir}/sMD_log_*_backward.dat")
-            plot_sMD_statistics(files_b, f'{rep_name}_backward', self.out_dir)
+            # files_b = glob(f"{self.out_dir}/sMD_log_*_backward.dat")
+            # plot_sMD_statistics(files_b, f'{rep_name}_backward', self.out_dir)
 
         # Logging the total time for all replicas
         simulation_time = time.monotonic() - simulation_start_time
-        logging.info(f"Finished {replicas} replicas of sMD {'with backwards pulling' if do_backwards else ''} in {simulation_time/60:.2f} min.")
+        logging.info(f"Finished sMD simulation {'with backwards pulling' if do_backwards else ''} in {simulation_time/60:.2f} min.")
