@@ -324,34 +324,36 @@ def add_variants(modeller: Modeller, variants_dict: dict = None) -> Modeller:
 
     return modeller 
 
-def get_pocket_atoms(u, pocket_selection:str, lig_resname:str):
+def get_pocket_atoms(u:mda.Universe, pocket_selection:str, ligand_selection:str):
     """Get the pocket atoms based on a user provided selection 
     or the ligand residue name and some default heuristics."""
 
     u.trajectory[-1]  # set pointer to last frame if its a trajectory
 
-    if pocket_selection is None and lig_resname is None:
+    if pocket_selection is None and ligand_selection is None:
         logging.error("No pocket selection or ligand residue name provided.")
         return []
 
     # If a custom pocket selection is provided, use it directly
     if pocket_selection is not None:
         pocket_atoms = u.select_atoms(pocket_selection)
+        pocket_atoms_indices = [atom.index for atom in pocket_atoms]
     # If no custom selection, use the ligand residue name to define the pocket
-    elif lig_resname is not None:
+    elif ligand_selection is not None:
         backbone_names = ["N", "CA", "C", "O"]
-        ligand = u.select_atoms(f"resname {lig_resname}")
+        ligand = u.select_atoms(ligand_selection)
         protein_residues = u.select_atoms(f"protein and around 4 group ligand", ligand=ligand).residues
         pocket_atoms_indices = [atom.index for res in protein_residues 
                                 for atom in res.atoms
                                 if atom.name in backbone_names]
-        if len(pocket_atoms_indices) == 0:
-            logging.error(f"No atoms found for the provided pocket selection")
-            return []
-        else:
-            # convert to MDAnalysis AtomGroup
-            pocket_atoms = u.select_atoms(f"index {' '.join(map(str, pocket_atoms_indices))}")
-            return pocket_atoms
+        
+    if len(pocket_atoms_indices) == 0:
+        logging.error(f"No atoms found for the provided pocket selection")
+        return []
+    else:
+        # convert to MDAnalysis AtomGroup
+        pocket_atoms = u.select_atoms(f"index {' '.join(map(str, pocket_atoms_indices))}")
+        return pocket_atoms
 
 def reduce_to_murcko_scaffold(u, lig_resname: str, img_name: str = None):
     """
@@ -529,7 +531,7 @@ def get_protein_ha(topology: app.Topology, lig_name: str = "UNK") -> Tuple[list,
 
 
 def get_ligand_ha(topology: app.Topology, lig_name: str = "UNK") -> Tuple[list, list]:
-    """get names for all non-hydrogen ligand atoms"""
+    """get indices and names for all non-hydrogen ligand atoms"""
 
     residues = topology.residues()
     lig_ha_idx = []
@@ -538,11 +540,6 @@ def get_ligand_ha(topology: app.Topology, lig_name: str = "UNK") -> Tuple[list, 
         if r.name == lig_name:
             lig_ha_names = [a.name for a in r.atoms() if not a.name.startswith("H")]
             lig_ha_idx = [a.index for a in r.atoms() if not a.name.startswith("H")]
-
-    # mg_names = [a.name for a in topology.atoms() if a.name == "MG"]
-    # mg_idx = [a.index for a in topology.atoms() if a.name == "MG"]
-    # lig_ha_idx.extend(mg_idx)
-    # lig_ha_names.extend(mg_names)
 
     return lig_ha_idx, lig_ha_names
 
