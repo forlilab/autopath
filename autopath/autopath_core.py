@@ -52,11 +52,12 @@ class AutoPath:
         run_equilibration: bool = True,
         protocol_fname: str = None,
         run_sMDpulling: bool = True,
-        sMD_pulling_dist: float = 1.5,  # nm
-        sMD_time: int = 1,  # ns
+        sMD_pulling_dist: float = None,  # nm
+        sMD_pulling_speeds: list = [0.01, 0.02, 0.03],  # nm/ps
+        sMD_time: int = None,  # ns
         sMD_steps_per_move: int = 250,  # 1 ps
         sMD_pulling_force: float = 1000,  # KJ/mol/nm2
-        sMD_replicas: int = 3,
+        # sMD_replicas: int = 3,
         sMD_autostop: bool = False,
         extract_milestones: bool = True,
         n_milestones: int = 5,
@@ -90,7 +91,8 @@ class AutoPath:
         self.run_sMDpulling = run_sMDpulling
         self.sMD_pulling_dist = sMD_pulling_dist
         self.sMD_time = sMD_time
-        self.sMD_replicas = sMD_replicas
+        # self.sMD_replicas = sMD_replicas
+        self.sMD_pulling_speeds = sMD_pulling_speeds
         self.sMD_steps_per_move = sMD_steps_per_move
         self.sMD_pulling_force = sMD_pulling_force
         self.sMD_autostop = sMD_autostop
@@ -187,12 +189,12 @@ class AutoPath:
             equilibrated_system = equilibration.run(solvated_system_pdb, run_id=sys_name)
         
             #Wrap, align and save the clean trajectory
-            traj = md.load(equilibrated_traj, top=prmtop_file)
+            traj = md.load(traj_file, top=prmtop_file)
+            traj = traj.center_coordinates()
             traj = traj.image_molecules()
             backbone = traj.topology.select("backbone")
             traj = traj.superpose(traj[0], atom_indices=backbone)
-            traj = traj.center_coordinates()
-            traj.save(equilibrated_traj.replace(".dcd", "_aligned.dcd"))
+            traj.save(traj_file.replace(".dcd", "_aligned.dcd"))
             os.remove(equilibrated_traj)
 
         ##############################################################################################
@@ -217,7 +219,7 @@ class AutoPath:
         #         logging.warning(f"Simulation for ligand {sys_name} terminated because ligand RMSD={final_rmsd:.2f} > {self.eq_checkpoint_cutoff}")
         #         exit(1)
 
-        pocket_atoms = get_pocket_atoms(u_eq, self.pocket_selection, lig_resname=lig_resname)
+        pocket_atoms = get_pocket_atoms(u_eq, self.pocket_selection, f"resname {lig_resname}")
         pocket_atom_indices = [atom.index for atom in pocket_atoms]
         pocket_residues = [f"{atom.resname}_{atom.resid}" for atom in pocket_atoms]
         logging.info(f"Pocket residues are: {', '.join(set(pocket_residues))}")
@@ -227,7 +229,7 @@ class AutoPath:
             W.write(pocket_atoms)
     
         ligand_atoms_indices = get_ligand_anchor_atoms(u_eq, lig_resname, 
-                                                       mode='contacts', 
+                                                       mode='murcko', n_atoms=5,
                                                        out_dir=sys_name)
         ligand_atoms = u_eq.select_atoms(f'index {" ".join(map(str, ligand_atoms_indices))}')
 
@@ -244,77 +246,102 @@ class AutoPath:
         ##################################### Steered MD simulations #################################
         ##############################################################################################
         
-        sMD_outdir = f"{sys_name}/sMD"
+        sMD_outdir = f"{sys_name}/sMD_pulling-w"
 
         if self.run_sMDpulling:
             
             equilibrated_system = load_system(f"{sys_name}/equilibration/system_equil_{sys_name}.xml")
+            lig_ha_idx, lig_ha_names = get_ligand_ha(topology, lig_resname)
+            # pulling_force = self.sMD_pulling_force * len(ligand_atoms_indices)  # Normalize by ligand size
+            pulling_force = self.sMD_pulling_force * len(lig_ha_idx)  # Normalize by ligand size
+            logging.info(f"Pulling force is set to {pulling_force} KJ/mol/nm2 for {len(lig_ha_idx)} atoms.")
 
-            sMD = SteeredMD(
-                system=equilibrated_system,
-                topology=topology,
-                groupA_atoms=ligand_atoms_indices,
-                groupB_atoms=pocket_atom_indices,
-                restrained_atoms=restrained_atoms_indices,
-                restart_velocities=True,
-                out_dir=sMD_outdir,
-            )
-
-            sMD.run(
-                checkpoint_file=equilibrated_chk,
-                sMD_time=self.sMD_time,
-                displacement=self.sMD_pulling_dist,
-                steps_per_move=self.sMD_steps_per_move,
-                pulling_force=self.sMD_pulling_force,
-                replicas=self.sMD_replicas,
-                do_backwards=False,     #CAREFUL: this will run the pulling in both directions
-            )
+            # sMD = SteeredMD(
+            #     system=equilibrated_system,
+            #     topology=topology,
+            #     groupA_atoms=ligand_atoms_indices,
+            #     groupB_atoms=pocket_atom_indices,
+            #     restrained_atoms=restrained_atoms_indices,
+            #     restart_velocities=True,
+            #     timestep=0.002,  # 2 fs
+            #     out_dir=sMD_outdir,
+            # )
+            for i, speed in enumerate(self.sMD_pulling_speeds):
+                sMD = SteeredMD(
+                    system=equilibrated_system,
+                    topology=topology,
+                    groupA_atoms=ligand_atoms_indices,
+                    groupB_atoms=pocket_atom_indices,
+                    restrained_atoms=restrained_atoms_indices,
+                    restart_velocities=True,
+                    timestep=0.004,  # 2 fs
+                    out_dir=sMD_outdir,
+                )
+                sMD.run(
+                    checkpoint_file=equilibrated_chk,
+                    sMD_time=self.sMD_time,
+                    # max_displacement=self.sMD_pulling_dist,
+                    pulling_speed=speed,  # nm/ps
+                    steps_per_move=self.sMD_steps_per_move,
+                    pulling_force=pulling_force,
+                    rep_suffix=f'replica-{i+1}_v{speed}',
+                    do_backwards=False,     #CAREFUL: this will run the pulling in both directions
+                )
 
             # Load and align the sMD trajectories
             sMD_trajs = glob(f"{sMD_outdir}/trajectory_sMD_replica_*_*.dcd")
             for traj_file in sMD_trajs:
                 traj = md.load(traj_file, top=prmtop_file)
+                traj = traj.center_coordinates()
                 traj = traj.image_molecules()
                 backbone = traj.topology.select("backbone")
                 traj = traj.superpose(traj[0], atom_indices=backbone)
-                traj = traj.center_coordinates()
                 traj.save(traj_file.replace(".dcd", "_aligned.dcd"))
-                os.remove(traj_file) # remove the dcd
+                # os.remove(traj_file) # remove the dcd
 
         ##############################################################################################
         ###################################### Extract Milestones ####################################
         ##############################################################################################
 
-        out_dir = f"{sys_name}/milestones/pdbs"
-        min_dist = 4 # minimum distance between clusters of milestones
+        milestones_outdir = f"{sys_name}/milestones"
+        min_dist = 6 # minimum distance between clusters of milestones
         
         if self.extract_milestones:
             
-            os.makedirs(out_dir, exist_ok=True)
+            os.makedirs(milestones_outdir, exist_ok=True)
 
-            sMD_trajs = glob(f"{sMD_outdir}/*_aligned.dcd")
+            sMD_trajs = glob(f"{sMD_outdir}/trajectory_sMD_replica_*_*.dcd")
+            sMD_trajs = [t for t in sMD_trajs if not t.endswith("_aligned.dcd")]
+
             if len(sMD_trajs) == 0:
                 logging.error("No sMD trajectories found. Please check the sMD pulling step.")
                 exit(1)
-                
+            
+            #TODO move outside 
             # use the same pocket selection as in the equilibration, but create a new atomgroup for this Universe
             u_sMD = mda.Universe(prmtop_file, sMD_trajs)
             pocket_atoms = u_sMD.select_atoms(f'index {" ".join(map(str, pocket_atom_indices))}')
             ligand_atoms = u_sMD.select_atoms(f'index {" ".join(map(str, ligand_atoms_indices))}')
+            ligand_atoms_full = u_sMD.select_atoms(f'resname {lig_resname} and not name H*')
+            ligand_atoms_full_indices = [atom.index for atom in ligand_atoms_full]
             
             # calculate some features for clustering
-            coms = calculate_com_distance(u_sMD, ligand_atoms, pocket_atoms, wrap=False)
+            coms = calculate_com_distance(u_sMD, ligand_atoms_full, pocket_atoms, wrap=False)
             rmsd = compute_rmsd(u_sMD, u_sMD, 
-                                alig_select=f"resname {lig_resname} and (not name H*)",
-                                groupselections={'ligand': f"resname {lig_resname} and (not name H*)"},
-                                out_dir=out_dir)
+                                alig_select=f"resname {lig_resname} and not name H*",
+                                groupselections={'ligand': f"resname {lig_resname} and not name H*"},
+                                out_dir=milestones_outdir)
             rmsd['COM'] = coms
             X = rmsd[['RMSD_ligand', 'COM']].values
 
-            labels, sorted_cluster_centers = cluster_sMD_trajectories(u_sMD, X, 
+            # I didn't use the wrapped trajs for COM distances to avoid imaging artifacts
+            sMD_trajs_aligned = [traj.replace(".dcd", "_aligned.dcd") for traj in sMD_trajs]
+            u_sMD_aligned = mda.Universe(prmtop_file, sMD_trajs_aligned)
+
+            labels, sorted_cluster_centers = cluster_sMD_trajectories(u_sMD_aligned, X, 
                                                                       n_clusters=self.n_milestones,
                                                                       min_dist=min_dist,
-                                                                      out_dir=out_dir)
+                                                                      out_dir=milestones_outdir)
 
             # Plot the clustering results
             plt.figure(figsize=(6, 5))
@@ -324,7 +351,7 @@ class AutoPath:
             plt.title(f"{sys_name} sMD clustering")
             plt.tight_layout()
             plt.legend()
-            plt.savefig(f"{out_dir}/milestones_clustering_plot.png")
+            plt.savefig(f"{milestones_outdir}/milestones_clustering_plot.png")
             plt.close()
 
         ##############################################################################################
@@ -344,7 +371,7 @@ class AutoPath:
             min_com = final_com * 0.75
             max_com = final_com + self.sMD_pulling_dist
 
-            milestones = glob(f'{sys_name}/milestones/pdbs/milestone_*.pdb')           
+            milestones = glob(f'{milestones_outdir}/milestone_*.pdb')           
             if len(milestones) == 0:
                 logging.error("No milestones found. Please check the milestone extraction step.")
                 exit(1)
@@ -354,9 +381,9 @@ class AutoPath:
 
             milestone_relax = RelaxMD(
                 topology=topology,
-                ligand_atoms=ligand_atoms_indices,
+                ligand_atoms=ligand_atoms_full_indices, # use all atoms
                 pocket_atoms=pocket_atom_indices,
-                out_dir=f"{sys_name}/milestones",
+                out_dir=milestones_outdir,
                 temp=self.temperature,
             )
 
@@ -371,8 +398,8 @@ class AutoPath:
             for milestone in milestones:
                 milestone_name = os.path.basename(milestone).split('.')[0]
                 milestone_number = int(milestone_name.split('_')[1])
-                milestone_system = f"{sys_name}/milestones/{milestone_name}_relax_system.xml"
-                milestone_chk = f"{sys_name}/milestones/{milestone_name}_relax_checkpoint.chk"
+                milestone_system = f"{milestones_outdir}/{milestone_name}_relax_system.xml"
+                milestone_chk = f"{milestones_outdir}/{milestone_name}_relax_checkpoint.chk"
 
                 if os.path.exists(milestone_system):
                     milestone_system = load_system(milestone_system)
@@ -408,12 +435,12 @@ class AutoPath:
         WTMetaD_trajs = glob(f"{sys_name}/metadynamics/trajectory_metadynamics_milestone_*_frame_*.dcd")
         for traj_file in WTMetaD_trajs:
             traj = md.load(traj_file, top=prmtop_file)
+            traj = traj.center_coordinates()
             traj = traj.image_molecules()
             backbone = traj.topology.select("backbone")
             traj = traj.superpose(traj[0], atom_indices=backbone)
-            traj = traj.center_coordinates()
             traj.save(traj_file.replace(".dcd", "_aligned.dcd"))
-            os.remove(traj_file) # remove the dcd
+            # os.remove(traj_file) # remove the dcd
 
         simulation_time = time.monotonic() - start_time
         logging.info(f"Finished AutoPath simulation in {simulation_time/60:.2f} min.")
