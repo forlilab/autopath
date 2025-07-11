@@ -324,7 +324,11 @@ def add_variants(modeller: Modeller, variants_dict: dict = None) -> Modeller:
 
     return modeller 
 
-def get_pocket_atoms(u:mda.Universe, pocket_selection:str, ligand_selection:str):
+def get_pocket_atoms(u:mda.Universe, 
+                     pocket_selection:str, 
+                     ligand_selection:str,
+                     cutoff: float = 5.0
+                     ) -> mda.AtomGroup:
     """Get the pocket atoms based on a user provided selection 
     or the ligand residue name and some default heuristics."""
 
@@ -342,7 +346,7 @@ def get_pocket_atoms(u:mda.Universe, pocket_selection:str, ligand_selection:str)
     elif ligand_selection is not None:
         backbone_names = ["N", "CA", "C", "O"]
         ligand = u.select_atoms(ligand_selection)
-        protein_residues = u.select_atoms(f"protein and around 4 group ligand", ligand=ligand).residues
+        protein_residues = u.select_atoms(f"protein and around {cutoff} group ligand", ligand=ligand).residues
         pocket_atoms_indices = [atom.index for res in protein_residues 
                                 for atom in res.atoms
                                 if atom.name in backbone_names]
