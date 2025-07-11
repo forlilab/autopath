@@ -13,6 +13,12 @@ from autopath.utils import *
 from autopath.customForces import add_flatbottom_COM_restraints, print_current_forces
 from autopath.equilibration import warm_up_system
 
+try:
+    from openmmtools.integrators import LangevinSplittingGirsanov
+    from reweightingreporter import ReweightingReporter
+except ImportError:
+    girsanov = False
+    logging.warning("Please install openmmtools to use Girsanov reweighting.")
 
 class RelaxMD:
     def __init__(
@@ -24,7 +30,7 @@ class RelaxMD:
         is_membrane: bool = False,
         timestep: float = 0.004, #  # 4 fs timestep
         temp: float = 300,
-        use_GReweighting: bool = True,
+        use_GReweighting: bool = False,
     ) -> None:
 
         os.makedirs(out_dir, exist_ok=True)
@@ -64,8 +70,6 @@ class RelaxMD:
 
         logging.debug("Setting up the integrator..")
         if self.use_GReweighting:
-            from openmmtools.integrators import LangevinSplittingGirsanov
-            from reweightingreporter import ReweightingReporter
             integrator = LangevinSplittingGirsanov(
                 nstxout = 100000000,   # we dont care about this here
                 temperature = self.temperature,

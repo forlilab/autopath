@@ -12,9 +12,17 @@ from autopath.analysis import plot_sMD_statistics
 from openmm import *
 from openmm.app import *
 import openmm.unit as openmmunit
+from openmmtools.integrators import ExternalPerturbationLangevinIntegrator
 
 import cvpack
 
+try:
+    from openmmtools.integrators import LangevinSplittingGirsanov
+    from reweightingreporter import ReweightingReporter
+except ImportError:
+    girsanov = False
+    logging.warning("Please install openmmtools to use Girsanov reweighting.")
+    
 class SteeredMD:
     """
     A class to perform steered molecular dynamics, pulling a ligand out of its binding pocket
@@ -52,12 +60,11 @@ class SteeredMD:
 
         self.use_GReweighting = use_GReweighting
         if self.use_GReweighting:
-            try:
-                from openmmtools.integrators import LangevinSplittingGirsanov
-                from reweightingreporter import ReweightingReporter
-            except ImportError:
-                raise ImportError("Please install openmmtools to use Girsanov reweighting.")
-    
+            if not girsanov:
+                logging.error("Girsanov reweighting is enabled but openmmtools is not installed.")
+                self.use_GReweighting = False
+            logging.info("Using Girsanov reweighting for steered MD.")
+        
         return None
 
     def pull_single_direction(self, simulation, rep_idx, direction, 
@@ -75,7 +82,6 @@ class SteeredMD:
         )
 
         if self.use_GReweighting:
-            from reweightingreporter import ReweightingReporter
             simulation.reporters.append(ReweightingReporter(f"{self.out_dir}/GR_{rep_idx}_{direction}.dat", 
                                                             steps_per_move, 
                                                             simulation.integrator, 
@@ -129,7 +135,7 @@ class SteeredMD:
                     logging.debug(f"Step {i+1}/{sMD_moves}: r_target={r_end:.2f} nm, r_before={dist_before:.2f} nm, r_after={dist_after:.2f} nm, nc={nc_now}")
                 
                     if nc_now < 1:
-                        logging.info(f"Stopping pulling at step {i} because the ligand unbound with n_contacts={nc_now}.")
+                        logging.warning(f"Stopping pulling at step {i} because the ligand unbound with n_contacts={nc_now}.")
                         break   
 
 
@@ -159,12 +165,14 @@ class SteeredMD:
         """Main method to run steered MD in both directions (forward and backward)."""
         simulation_start_time = time.monotonic()
 
+        if self.autostop_freq is not None:
+            max_displacement = 5  # nm, to ensure the ligand is pulled out of the binding pocket
+
         # Calculate the number of steps
         if pulling_speed is not None:
             sMD_time = max_displacement / pulling_speed/1000  # in ns
             sMD_steps = math.ceil(sMD_time / self.timestep.value_in_unit(openmmunit.picoseconds) * 1000.0)
             sMD_moves = int(sMD_steps / steps_per_move)
-            # dx_per_move = (max_displacement / sMD_moves) * openmmunit.nanometers
             time_per_move = steps_per_move * self.timestep.value_in_unit(openmmunit.picoseconds)
             dx_per_move = pulling_speed * time_per_move * openmmunit.nanometers
         else:
@@ -177,8 +185,6 @@ class SteeredMD:
         pulling_force = pulling_force * openmmunit.kilojoules_per_mole / openmmunit.nanometer**2
 
         if self.use_GReweighting:
-            from openmmtools.integrators import LangevinSplittingGirsanov
-            from reweightingreporter import ReweightingReporter
             integrator = LangevinSplittingGirsanov(
                 nstxout = steps_per_move,   
                 temperature = self.temperature,
@@ -191,14 +197,6 @@ class SteeredMD:
             # integrator = LangevinMiddleIntegrator(self.temperature, 
             #                                            1.0/openmmunit.picoseconds, 
             #                                            self.timestep)
-
-            from openmmtools.integrators import LangevinIntegrator, ExternalPerturbationLangevinIntegrator
-            # integrator = LangevinIntegrator(self.temperature, 
-            #                                     1.0/openmmunit.picoseconds, 
-            #                                     self.timestep,
-            #                                     measure_shadow_work=True,
-            #                                     # constraint_tolerance=1.0e-6,
-            #                                     )
             integrator = ExternalPerturbationLangevinIntegrator(self.temperature, 
                                         1.0/openmmunit.picoseconds, 
                                         self.timestep,

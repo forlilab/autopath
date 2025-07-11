@@ -12,7 +12,13 @@ import openmm.unit as openmmunit
 from autopath.utils import *
 from autopath.customForces import *
 import datetime
-from reweightingreporter import ReweightingReporter
+
+try:
+    from openmmtools.integrators import LangevinSplittingGirsanov
+    from reweightingreporter import ReweightingReporter
+except ImportError:
+    girsanov = False
+    logging.warning("Please install openmmtools to use Girsanov reweighting.")
 
 @dataclass
 class EquilibrationStep:
@@ -192,11 +198,10 @@ class Equilibration:
 
         self.use_GReweighting = use_GReweighting
         if self.use_GReweighting:
-            try:
-                from openmmtools.integrators import LangevinSplittingGirsanov
-                from reweightingreporter import ReweightingReporter
-            except ImportError:
-                raise ImportError("Please install openmmtools to use Girsanov reweighting.")
+            if not girsanov:
+                logging.error("Girsanov reweighting is enabled but openmmtools is not installed.")
+                self.use_GReweighting = False
+            logging.info("Using Girsanov reweighting for steered MD.")
 
         # Load the equilibration protocol
         self.protocol = self.from_json(protocol_fname)
@@ -259,7 +264,6 @@ class Equilibration:
 
         logging.debug("Setting up the integrator..")
         if self.use_GReweighting:
-            from openmmtools.integrators import LangevinSplittingGirsanov
             integrator = LangevinSplittingGirsanov(
                 nstxout = 1000000,   # we dont care about this here
                 temperature = self.temperature,

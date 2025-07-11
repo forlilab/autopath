@@ -20,6 +20,13 @@ from autopath.analysis import (
     plot_colvar_2D,
 )
 
+try:
+    from openmmtools.integrators import LangevinSplittingGirsanov
+    from reweightingreporter import ReweightingReporter
+except ImportError:
+    girsanov = False
+    logging.warning("Please install openmmtools to use Girsanov reweighting.")
+
 class MetadynamicsMD:
 
     def __init__(
@@ -55,11 +62,10 @@ class MetadynamicsMD:
 
         self.use_GReweighting = use_GReweighting
         if self.use_GReweighting:
-            try:
-                from openmmtools.integrators import LangevinSplittingGirsanov
-                from reweightingreporter import ReweightingReporter
-            except ImportError:
-                raise ImportError("Please install openmmtools to use Girsanov reweighting.")
+            if not girsanov:
+                logging.error("Girsanov reweighting is enabled but openmmtools is not installed.")
+                self.use_GReweighting = False
+            logging.info("Using Girsanov reweighting for steered MD.")
             
         # These are for debugging purposes if one wants to check the CVs over the time of the simulation
         self.verbose = verbose
@@ -133,8 +139,6 @@ class MetadynamicsMD:
 
         logging.debug("Setting up the integrator..")
         if self.use_GReweighting:
-            from openmmtools.integrators import LangevinSplittingGirsanov
-            from reweightingreporter import ReweightingReporter
             integrator = LangevinSplittingGirsanov(
                 nstxout = biasFrequency,   # 500 is 2ps at 4fs timestep
                 temperature = self.temperature,
