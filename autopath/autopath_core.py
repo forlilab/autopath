@@ -52,13 +52,12 @@ class AutoPath:
         run_equilibration: bool = True,
         protocol_fname: str = None,
         run_sMDpulling: bool = True,
-        sMD_pulling_dist: float = None,  # nm
-        sMD_pulling_speeds: list = [0.01, 0.02, 0.03],  # nm/ps
+        sMD_pulling_speeds: dict = {0.001:2, 0.002:2, 0.003:2},  # nm/ps
+        sMD_max_pulling_dist: float = None,  # nm
         sMD_time: int = None,  # ns
         sMD_steps_per_move: int = 250,  # 1 ps
-        sMD_pulling_force: float = 1000,  # KJ/mol/nm2
-        # sMD_replicas: int = 3,
-        sMD_autostop: bool = False,
+        sMD_pulling_force: float = 50,  # KJ/mol/nm2
+        sMD_autostop_freq: int = 10, #moves
         extract_milestones: bool = True,
         n_milestones: int = 5,
         relax_steps: int = 25000,
@@ -89,13 +88,12 @@ class AutoPath:
         self.protocol_fname = protocol_fname
         # Steered MD
         self.run_sMDpulling = run_sMDpulling
-        self.sMD_pulling_dist = sMD_pulling_dist
+        self.sMD_max_pulling_dist = sMD_max_pulling_dist
         self.sMD_time = sMD_time
-        # self.sMD_replicas = sMD_replicas
         self.sMD_pulling_speeds = sMD_pulling_speeds
         self.sMD_steps_per_move = sMD_steps_per_move
         self.sMD_pulling_force = sMD_pulling_force
-        self.sMD_autostop = sMD_autostop
+        self.sMD_autostop = sMD_autostop_freq
         # Milestones
         self.extract_milestones = extract_milestones
         self.n_milestones = n_milestones
@@ -256,37 +254,38 @@ class AutoPath:
             pulling_force = self.sMD_pulling_force * len(lig_ha_idx)  # Normalize by ligand size
             logging.info(f"Pulling force is set to {pulling_force} KJ/mol/nm2 for {len(lig_ha_idx)} atoms.")
 
-            # sMD = SteeredMD(
-            #     system=equilibrated_system,
-            #     topology=topology,
-            #     groupA_atoms=ligand_atoms_indices,
-            #     groupB_atoms=pocket_atom_indices,
-            #     restrained_atoms=restrained_atoms_indices,
-            #     restart_velocities=True,
-            #     timestep=0.002,  # 2 fs
-            #     out_dir=sMD_outdir,
-            # )
-            for i, speed in enumerate(self.sMD_pulling_speeds):
-                sMD = SteeredMD(
-                    system=equilibrated_system,
-                    topology=topology,
-                    groupA_atoms=ligand_atoms_indices,
-                    groupB_atoms=pocket_atom_indices,
-                    restrained_atoms=restrained_atoms_indices,
-                    restart_velocities=True,
-                    timestep=0.004,  # 2 fs
-                    out_dir=sMD_outdir,
-                )
-                sMD.run(
-                    checkpoint_file=equilibrated_chk,
-                    sMD_time=self.sMD_time,
-                    # max_displacement=self.sMD_pulling_dist,
-                    pulling_speed=speed,  # nm/ps
-                    steps_per_move=self.sMD_steps_per_move,
-                    pulling_force=pulling_force,
-                    rep_suffix=f'replica-{i+1}_v{speed}',
-                    do_backwards=False,     #CAREFUL: this will run the pulling in both directions
-                )
+            sMD = SteeredMD(
+                system=equilibrated_system,
+                topology=topology,
+                groupA_atoms=ligand_atoms_indices,
+                groupB_atoms=pocket_atom_indices,
+                restrained_atoms=restrained_atoms_indices,
+                restart_velocities=True,
+                # timestep=0.002,  # 2 fs
+                out_dir=sMD_outdir,
+            )
+            for speed, reps in self.sMD_pulling_speeds.items():
+                for i in range(reps):
+                    # sMD = SteeredMD(
+                    #     system=equilibrated_system,
+                    #     topology=topology,
+                    #     groupA_atoms=ligand_atoms_indices,
+                    #     groupB_atoms=pocket_atom_indices,
+                    #     restrained_atoms=restrained_atoms_indices,
+                    #     restart_velocities=True,
+                    #     timestep=0.004,  # 2 fs
+                    #     out_dir=sMD_outdir,
+                    # )
+                    sMD.run(
+                        checkpoint_file=equilibrated_chk,
+                        sMD_time=self.sMD_time,
+                        max_displacement=self.sMD_max_pulling_dist,
+                        pulling_speed=speed,  # nm/ps
+                        steps_per_move=self.sMD_steps_per_move,
+                        pulling_force=pulling_force,
+                        rep_suffix=f'replica-{i+1}_v{speed}',
+                        do_backwards=False,     #CAREFUL: this will run the pulling in both directions
+                    )
 
             # Load and align the sMD trajectories
             sMD_trajs = glob(f"{sMD_outdir}/trajectory_sMD_replica_*_*.dcd")

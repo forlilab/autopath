@@ -387,7 +387,7 @@ def reduce_to_murcko_scaffold(u, lig_resname: str, img_name: str = None):
 def get_ligand_anchor_atoms(
     u,
     lig_resname: str,
-    pocket_sel: str = "protein and around 4 resname UNK and not name H*",
+    pocket_sel: str = "protein and around 5 resname UNK and not name H*",
     mode: str = "com",
     frames: int = 100,
     n_atoms: int = 5,
@@ -413,11 +413,6 @@ def get_ligand_anchor_atoms(
     if ligand_full.n_atoms == 0:
         raise ValueError(f"No atoms found for ligand {lig_resname}.")
 
-    if mode == "murcko":
-        ligand, anchor_indices, mol = reduce_to_murcko_scaffold(u, lig_resname, img_name)
-        anchor = [ligand.atoms[i].index for i in range(len(ligand))]
-        return anchor
-
     # Reduce first if requested
     if reduce_before:
         ligand, highlight_rdk_indices, mol = reduce_to_murcko_scaffold(u, lig_resname, img_name)
@@ -430,7 +425,15 @@ def get_ligand_anchor_atoms(
     pocket = u.select_atoms(pocket_sel)
     anchor = []
 
-    if mode == "com":
+    if mode == 'ha':
+        anchor = ligand_full.indices
+        mol = ligand_full.convert_to("RDKIT")
+
+    if mode == "murcko":
+        ligand, anchor_indices, mol = reduce_to_murcko_scaffold(u, lig_resname, img_name)
+        anchor = [ligand.atoms[i].index for i in range(len(ligand))]
+
+    elif mode == "com":
         com = ligand.center_of_mass()
         dists = np.linalg.norm(ligand.positions - com, axis=1)
         anchor = ligand.atoms[np.argsort(dists)[:n_atoms]].indices
