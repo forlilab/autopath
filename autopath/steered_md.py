@@ -9,10 +9,9 @@ from autopath.utils import *
 from autopath.customForces import add_COM_force, add_harmonic_restraints, print_current_forces
 from autopath.analysis import plot_sMD_statistics
 
-from openmm import *
+# from openmm import *
 from openmm.app import *
 import openmm.unit as openmmunit
-from openmmtools.integrators import ExternalPerturbationLangevinIntegrator
 
 import cvpack
 
@@ -35,7 +34,7 @@ class SteeredMD:
         groupA_atoms: list[int] = None,
         groupB_atoms: list[int] = None,
         restrained_atoms: list[int] = None,
-        restart_velocities: bool = True,
+        restart_velocities: bool = False,
         timestep: float = 0.004, #  # 4 fs timestep
         temperature: float = 300,
         use_GReweighting: bool = False,
@@ -160,6 +159,7 @@ class SteeredMD:
         pulling_force: int = 1000,
         rep_suffix: str = None,
         checkpoint_file: str = None,
+        pdb_file: str = None,
         do_backwards: bool = False,
     ):
         """Main method to run steered MD in both directions (forward and backward)."""
@@ -194,21 +194,46 @@ class SteeredMD:
                 constraint_tolerance = 1.0e-6,
             )
         else:
+            # This is the default openMM but do not track work
             # integrator = LangevinMiddleIntegrator(self.temperature, 
             #                                            1.0/openmmunit.picoseconds, 
             #                                            self.timestep)
+
+            # integrator = ExternalPerturbationLangevinIntegrator(self.temperature, 
+            #                             1.0/openmmunit.picoseconds, 
+            #                             self.timestep,
+            #                             splitting="V V R O R", # default is "V R O R V"
+            #                             measure_shadow_work=True,
+            #                             # constraint_tolerance=1.0e-6,
+            #                             )
+            from openmmtools.integrators import LangevinIntegrator
+            from openmmtools.integrators import ExternalPerturbationLangevinIntegrator, LangevinIntegrator
+            from openmmtools.integrators import NonequilibriumLangevinIntegrator
             integrator = ExternalPerturbationLangevinIntegrator(self.temperature, 
-                                        1.0/openmmunit.picoseconds, 
+                                        2.0/openmmunit.picoseconds, 
                                         self.timestep,
+                                        splitting="V V R O R", # default is "V R O R V"
                                         measure_shadow_work=True,
-                                        # constraint_tolerance=1.0e-6,
-                                        )    
+                                        constraint_tolerance=1.0e-6,
+                                        )  
+                    
         system = deepcopy(self.system)  # Create a copy of the system to avoid modifying the original
         simulation = Simulation(self.topology, system, integrator, self.platform)
 
-        # Load checkpoint file
-        simulation.loadCheckpoint(checkpoint_file)
-        
+        #If the systems was equilibrated with a different integrator I get NaNs (even with same splitting)
+        # so Im using the PDB instead of the checkpoint file
+        if checkpoint_file is None and pdb_file is not None:
+            logging.info(f"Setting positions from PDB file {pdb_file}")
+            pdb = PDBFile(pdb_file)
+            simulation.context.setPositions(pdb.getPositions())
+            simulation.context.setPeriodicBoxVectors(*pdb.topology.getPeriodicBoxVectors())
+            simulation.context.setVelocitiesToTemperature(self.temperature)
+
+        elif checkpoint_file is not None:
+            logging.info(f"Setting positions from checkpoint {checkpoint_file}")
+            simulation.loadCheckpoint(checkpoint_file)
+            simulation.integrator = integrator  # Replace the integrator with the new one
+
         # simulation.context.setDefaultPeriodicBoxVectors()
         # self.system.setDefaultPeriodicBoxVectors(*simulation.context.getState(getPositions=True).getPeriodicBoxVectors())
         # simulation.context.reinitialize(preserveState=True)
@@ -234,25 +259,24 @@ class SteeredMD:
                 forces["NonbondedForce"],
                 # stepFunction="1/(1+x^6)",
                 stepFunction="step(1-x)",
-                thresholdDistance=0.5,
+                thresholdDistance=0.45,
                 # cutoffFactor=2.0,
                 # switchFactor=1.5,
                 # reference=simulation.context
             )
             self.nc_cv.setForceGroup(18)  # Use a separate force group for the CV
             system.addForce(self.nc_cv)
-            # self.nc_cv.addToSystem(self.system)
         
         #restart here to have harmonic restraints and NOT COM force in the system
         simulation.context.reinitialize(preserveState=True)
 
-        # Reset velocities to temperature
+        #Reset velocities to temperature. Check https://github.com/openmm/openmm/pull/259
         if self.restart_velocities:
             simulation.context.setVelocitiesToTemperature(self.temperature)
-            # run a super short simulation to ensure the system is stable after temp reset
+            #run a super short simulation to ensure the system is stable after temp reset
             simulation.step(50/self.timestep.value_in_unit(openmmunit.picoseconds))  # 50 ps
-            simulation.integrator.reset()  # Reset the integrator to avoid issues with reinitialization
-            
+
+        simulation.integrator.reset()  # Reset the integrator. Only openmmtools integrators have this method    
         simulation.context.setTime(0)  # reset simulation time
         simulation.context.setStepCount(0)  # reset step count
 
@@ -275,10 +299,6 @@ class SteeredMD:
                                   steps_per_move=steps_per_move, pulling_force=pulling_force,
                                   initial_r0=initial_r0, final_r0=final_r0)
 
-        # if self.verbose > 0:
-            # files_f = glob(f"{self.out_dir}/sMD_log_*_forward.dat")
-            # plot_sMD_statistics(files_f, f'{rep_name}_forward', self.out_dir)
-
         if do_backwards:
             logging.info(f"Running backward pulling of replica {rep_suffix} at speed {pulling_speed} nm/ps")
             # Reset velocities to temperature after forward pulling
@@ -290,24 +310,6 @@ class SteeredMD:
                                       dx_per_move=-dx_per_move, sMD_moves=sMD_moves,
                                       steps_per_move=steps_per_move, pulling_force=pulling_force,
                                       initial_r0=initial_r0, final_r0=final_r0)
-
-            # if self.verbose > 0:
-                # files_f = glob(f"{self.out_dir}/sMD_log_*_backward.dat")
-                # plot_sMD_statistics(files_f, f'{rep_name}_backward', self.out_dir)
-
-            # Logging the time taken for each replica
-            # replica_time = time.monotonic() - replica_start_time
-            # logging.info(f"Finished replica {rep_idx}/{replicas} in {replica_time/60:.2f} min")
-
-
-        # Generate statistics and plots for the forward direction
-        # files_f = glob(f"{self.out_dir}/sMD_log_*_forward.dat")
-        # plot_sMD_statistics(files_f, f'{rep_name}_forward', self.out_dir)
-
-        # if do_backwards:
-            # Generate statistics and plots for the backward direction
-            # files_b = glob(f"{self.out_dir}/sMD_log_*_backward.dat")
-            # plot_sMD_statistics(files_b, f'{rep_name}_backward', self.out_dir)
 
         # Logging the total time for all replicas
         simulation_time = time.monotonic() - simulation_start_time
