@@ -13,13 +13,6 @@ from autopath.utils import *
 from autopath.customForces import *
 import datetime
 
-try:
-    from openmmtools.integrators import LangevinSplittingGirsanov
-    from reweightingreporter import ReweightingReporter
-except ImportError:
-    girsanov = False
-    logging.warning("Please install openmmtools to use Girsanov reweighting.")
-
 @dataclass
 class EquilibrationStep:
     name: str
@@ -175,7 +168,6 @@ class Equilibration:
         protocol_fname: str = "autopath/data/equilibration.json",
         save_freq: int = 6250, # 12500 is 0.05ns at 4fs timestep
         is_membrane: bool = False,
-        use_GReweighting: bool = True,
         verbose: int = 2,
     ) -> None:
 
@@ -195,13 +187,6 @@ class Equilibration:
 
         self.platform = select_platform("fastest")
         self.verbose = verbose
-
-        self.use_GReweighting = use_GReweighting
-        if self.use_GReweighting:
-            if not girsanov:
-                logging.error("Girsanov reweighting is enabled but openmmtools is not installed.")
-                self.use_GReweighting = False
-            logging.info("Using Girsanov reweighting for steered MD.")
 
         # Load the equilibration protocol
         self.protocol = self.from_json(protocol_fname)
@@ -263,19 +248,14 @@ class Equilibration:
         start_time = time.monotonic()
 
         logging.debug("Setting up the integrator..")
-        if self.use_GReweighting:
-            integrator = LangevinSplittingGirsanov(
-                nstxout = 1000000,   # we dont care about this here
-                temperature = self.temperature,
-                collision_rate = 1.0/openmmunit.picoseconds,
-                timestep = self.timestep,
-                splitting = "R V O V R",        # ABOBA – reweightable
-                constraint_tolerance = 1.0e-6,
-            )
-        else:
-            integrator = LangevinMiddleIntegrator(self.temperature, 1 / openmmunit.picoseconds, self.timestep* openmmunit.picoseconds)
-
-
+        # The native OpenMM integrator is faster bu cannot change splitting. 
+        # By default it is "V V R O R". If using this, remember to change the 
+        # splitting of any openmmtools integrator downstream.
+        # See this Github thread https://github.com/openmm/openmm/issues/2532
+        integrator = LangevinMiddleIntegrator(self.temperature, 
+                                        1 / openmmunit.picoseconds, 
+                                        self.timestep)
+        
         pdb = PDBFile(pdb_file)
         initial_positions = pdb.positions
         u = mda.Universe(pdb_file)
@@ -291,10 +271,6 @@ class Equilibration:
             total_steps=self.total_steps,
             verbose=self.verbose
         )
-
-        # if self.use_GReweighting:
-        # from reweightingreporter import ReweightingReporter
-        # simulation.reporters.append(ReweightingReporter(f"{self.out_dir}/ReweightingFactors.txt", self.save_freq, integrator))
 
        # Add the required forces to the system
         for num, (name, selection) in enumerate(self.components_lookup.items()):
@@ -334,15 +310,7 @@ class Equilibration:
         minimized_positions = simulation.context.getState(getPositions=True).getPositions()
         
         # remove existing restraint forces
-        forces_to_remove = []
-        for f_idx in range(self.system.getNumForces()):
-            force = self.system.getForce(f_idx)
-            if force.getName().startswith("k_"):
-                logging.debug(f"Removing force {force.getName()} at index {f_idx}.")
-                forces_to_remove.append(f_idx)
-
-        for f_idx in sorted(forces_to_remove, reverse=True):
-            self.system.removeForce(f_idx)
+        system = remove_openmm_force(system, "k_")
 
         # Re-add the restraints with updated positions.
         # Because the forces exist this will update them, there's no need to remove them first (I think).
@@ -361,7 +329,6 @@ class Equilibration:
             )
 
         simulation.context.reinitialize(preserveState=True)
-
         # print_current_forces(self.system)
 
         logging.info("Warming up the system..")
@@ -384,9 +351,7 @@ class Equilibration:
         )
 
         # remove the restraint forces after equilibration
-        for f_idx in sorted(forces_to_remove, reverse=True):
-            self.system.removeForce(f_idx)
-
+        system = remove_openmm_force(system, "k_")
         # print_current_forces(self.system)
 
         final_positions = simulation.context.getState(getPositions=True).getPositions()
