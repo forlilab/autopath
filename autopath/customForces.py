@@ -10,19 +10,20 @@ def print_current_forces(system: System = None) -> None:
         print(f"Force Index:{index} | Name: {fc.getName()} | Group: {fc.getForceGroup()}")
     return
 
-def remove_force(force_name: str = None, system: System = None, simulation=None):
-    """Remove a force from an OpenMM system based on its name."""
-    counter = 0
-    for index, fc in enumerate(system.getForces()):
-        if fc.getName() == force_name:
-            simulation.context.getSystem().removeForce(index)
-            logging.info(f"Removing existing {force_name} force")
-            counter += 1
-    if counter == 0:
-        logging.warning(f"No force was removed, check that {force_name} exist")
-        print_current_forces(system)
+def remove_openmm_force(system: System = None, fname: str = None) -> System:
+    """Remove a force from the system by name."""
+    forces_to_remove = []
+    for f_idx in range(system.getNumForces()):
+        force = system.getForce(f_idx)
+        if fname in force.getName():
+            logging.info(f"Removing force {force.getName()} at index {f_idx}.")
+            # print(f"Removing force {force.getName()} at index {f_idx}.")
+            forces_to_remove.append(f_idx)
 
-    return
+    for f_idx in sorted(forces_to_remove, reverse=True):
+        system.removeForce(f_idx)
+
+    return system
 
 def add_COM_force(
     system: System = None,
