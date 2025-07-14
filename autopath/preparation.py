@@ -62,7 +62,9 @@ class SystemPreparation:
         self.forcefield = ForceField(*forcefield)
         self.allow_undefined_stereo = allow_undefined_stereo
 
-        self.hydrogenMass = hydrogenMass * openmmunit.amu  # Use HMR
+        self.hydrogenMass = (
+    hydrogenMass * openmmunit.amu if hydrogenMass is not None else None
+) 
         self.boxShape = boxShape  # cube, dodecahedron
 
         if num_solvent is not None and padding is not None:
