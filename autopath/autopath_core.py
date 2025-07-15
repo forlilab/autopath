@@ -53,10 +53,10 @@ class AutoPath:
         protocol_fname: str = None,
         run_sMDpulling: bool = True,
         sMD_pulling_speeds: dict = {0.001:2, 0.002:2, 0.003:2},  # nm/ps
-        sMD_max_pulling_dist: float = None,  # nm
+        sMD_max_pulling_dist: float = 2.0,  # nm
         sMD_time: int = None,  # ns
         sMD_steps_per_move: int = 250,  # 1 ps
-        sMD_pulling_force: float = 50,  # KJ/mol/nm2
+        sMD_pulling_force: float = None,  # KJ/mol/nm2
         sMD_autostop_freq: int = 10, #moves
         extract_milestones: bool = True,
         n_milestones: int = 5,
@@ -174,6 +174,8 @@ class AutoPath:
 
         equilibrated_traj = f"{sys_name}/equilibration/trajectory_equilibration_{sys_name}.dcd"
         equilibrated_chk = f"{sys_name}/equilibration/checkpoint_equil_{sys_name}.chk"
+        equilibrated_pdb = f"{sys_name}/equilibration/{sys_name}_equilibrated.pdb"
+        equilibrated_system = f"{sys_name}/equilibration/system_equil_{sys_name}.xml"
 
         if self.run_equilibration:
             equilibration = Equilibration(
@@ -184,20 +186,27 @@ class AutoPath:
                                 is_membrane=self.is_membrane,
                                 protocol_fname=self.protocol_fname,
                                 )
+            
             equilibrated_system = equilibration.run(solvated_system_pdb, run_id=sys_name)
         
             #Wrap, align and save the clean trajectory
-            traj = md.load(traj_file, top=prmtop_file)
+            traj = md.load(equilibrated_traj, top=prmtop_file)
             traj = traj.center_coordinates()
             traj = traj.image_molecules()
-            backbone = traj.topology.select("backbone")
-            traj = traj.superpose(traj[0], atom_indices=backbone)
-            traj.save(traj_file.replace(".dcd", "_aligned.dcd"))
+            try: # if there's no protein
+                backbone = traj.topology.select("backbone")
+                traj = traj.superpose(traj[0], atom_indices=backbone)
+            except Exception as e:
+                logging.warning(f"Superposition failed: {e}. Proceeding without superposition.")
+            traj.save(equilibrated_traj.replace(".dcd", "_aligned.dcd"))
             os.remove(equilibrated_traj)
 
         ##############################################################################################
         ############################# Post-equilibration Analysis ####################################
         ##############################################################################################
+
+        lig_anchor_mode = 'murcko'
+        lig_anchor_mode_atoms = 5
 
         equilibrated_traj = equilibrated_traj.replace(".dcd", "_aligned.dcd")
         u_eq = mda.Universe(prmtop_file, equilibrated_traj, in_memory=True)
@@ -223,13 +232,21 @@ class AutoPath:
         logging.info(f"Pocket residues are: {', '.join(set(pocket_residues))}")
 
         # write out the pocket atoms to a pdb
-        with mda.Writer(f"{sys_name}/pocket_atoms.pdb", u_eq.atoms.n_atoms) as W:
+        with mda.Writer(f"{sys_name}/pocket_definition.pdb", u_eq.atoms.n_atoms) as W:
             W.write(pocket_atoms)
+        with mda.Writer(f"{sys_name}/pocket_prote.pdb", u_eq.atoms.n_atoms) as W:
+            W.write(u_eq.select_atoms(f'protein'))
+        with mda.Writer(f"{sys_name}/pocket_lig.pdb", u_eq.atoms.n_atoms) as W:
+            W.write(u_eq.select_atoms(f'resname {lig_resname}'))
     
         ligand_atoms_indices = get_ligand_anchor_atoms(u_eq, lig_resname, 
-                                                       mode='murcko', n_atoms=5,
+                                                       mode=lig_anchor_mode, 
+                                                       n_atoms=lig_anchor_mode_atoms,
                                                        out_dir=sys_name)
         ligand_atoms = u_eq.select_atoms(f'index {" ".join(map(str, ligand_atoms_indices))}')
+
+        # ligand_atoms = u_eq.select_atoms(f'resname {lig_resname} and not name H*')
+        # ligand_atoms_indices = [atom.index for atom in ligand_atoms]
 
         final_com = calculate_com_distance(u_eq, ligand_atoms, pocket_atoms, wrap=False)[-1] /10 # convert to nm
         logging.info(f"COM distance after equilibration is: {final_com:.2f} nm")
@@ -243,41 +260,46 @@ class AutoPath:
         ##############################################################################################
         ##################################### Steered MD simulations #################################
         ##############################################################################################
-        
-        sMD_outdir = f"{sys_name}/sMD_pulling-w"
+        def choose_steps_per_move(v_nm_per_ps,
+                          dt_ps=0.004,
+                          k_spring=1000,   # kJ/mol/nm**2
+                          T_K=300,
+                          Rmax=0.3):
+            kB = 0.0083144621          # kJ/mol/K
+            sigma = (kB*T_K/k_spring)**0.5
+            t_move_ps = Rmax * sigma / v_nm_per_ps
 
+            return max(1, int(t_move_ps / dt_ps))
+
+        sMD_outdir = f"{sys_name}/sMD_{lig_anchor_mode}_{lig_anchor_mode_atoms}_2fs_CA1ps_25spm"
+        # in this paper they used 80 kcal·mol−1? units don match tho. Ziada et al 2022.
+        sMD_pulling_force_per_atom = 50 * 4.184  # KJ/mol/nm2, converted from kcal
+        
         if self.run_sMDpulling:
-            
             equilibrated_system = load_system(f"{sys_name}/equilibration/system_equil_{sys_name}.xml")
-            lig_ha_idx, lig_ha_names = get_ligand_ha(topology, lig_resname)
-            # pulling_force = self.sMD_pulling_force * len(ligand_atoms_indices)  # Normalize by ligand size
-            pulling_force = self.sMD_pulling_force * len(lig_ha_idx)  # Normalize by ligand size
-            logging.info(f"Pulling force is set to {pulling_force} KJ/mol/nm2 for {len(lig_ha_idx)} atoms.")
+
+            if self.sMD_pulling_force is None:
+                # ligand_atoms_indices, ligand_atoms_names = get_ligand_ha(topology, lig_resname)
+                pulling_force = sMD_pulling_force_per_atom * len(ligand_atoms_indices)  # Normalize by ligand size
+                logging.info(f"Pulling force is set to {pulling_force} KJ/mol/nm2 for {len(ligand_atoms_indices)} atoms.")
+            else:
+                pulling_force = self.sMD_pulling_force
 
             sMD = SteeredMD(
                 system=equilibrated_system,
                 topology=topology,
                 groupA_atoms=ligand_atoms_indices,
-                groupB_atoms=pocket_atom_indices,
-                restrained_atoms=restrained_atoms_indices,
+                groupB_atoms=restrained_atoms_indices,
+                restrained_atoms=None,#restrained_atoms_indices
                 restart_velocities=True,
-                # timestep=0.002,  # 2 fs
+                timestep=0.002,  # 2 fs
                 out_dir=sMD_outdir,
             )
             for speed, reps in self.sMD_pulling_speeds.items():
                 for i in range(reps):
-                    # sMD = SteeredMD(
-                    #     system=equilibrated_system,
-                    #     topology=topology,
-                    #     groupA_atoms=ligand_atoms_indices,
-                    #     groupB_atoms=pocket_atom_indices,
-                    #     restrained_atoms=restrained_atoms_indices,
-                    #     restart_velocities=True,
-                    #     timestep=0.004,  # 2 fs
-                    #     out_dir=sMD_outdir,
-                    # )
                     sMD.run(
                         checkpoint_file=equilibrated_chk,
+                        pdb_file=equilibrated_pdb,
                         sMD_time=self.sMD_time,
                         max_displacement=self.sMD_max_pulling_dist,
                         pulling_speed=speed,  # nm/ps
@@ -293,8 +315,11 @@ class AutoPath:
                 traj = md.load(traj_file, top=prmtop_file)
                 traj = traj.center_coordinates()
                 traj = traj.image_molecules()
-                backbone = traj.topology.select("backbone")
-                traj = traj.superpose(traj[0], atom_indices=backbone)
+                try:
+                    backbone = traj.topology.select("backbone")
+                    traj = traj.superpose(traj[0], atom_indices=backbone)
+                except Exception as e:
+                    logging.warning(f"Superposition failed: {e}. Proceeding without superposition.")
                 traj.save(traj_file.replace(".dcd", "_aligned.dcd"))
                 # os.remove(traj_file) # remove the dcd
 
@@ -436,8 +461,11 @@ class AutoPath:
             traj = md.load(traj_file, top=prmtop_file)
             traj = traj.center_coordinates()
             traj = traj.image_molecules()
-            backbone = traj.topology.select("backbone")
-            traj = traj.superpose(traj[0], atom_indices=backbone)
+            try: # if there's no protein
+                backbone = traj.topology.select("backbone")
+                traj = traj.superpose(traj[0], atom_indices=backbone)
+            except Exception as e:
+                logging.warning(f"Superposition failed: {e}. Proceeding without superposition.")
             traj.save(traj_file.replace(".dcd", "_aligned.dcd"))
             # os.remove(traj_file) # remove the dcd
 

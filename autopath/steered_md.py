@@ -55,7 +55,9 @@ class SteeredMD:
         self.restrained_atoms = restrained_atoms
 
         self.atoms = [atom for atom in self.topology.atoms()]
-
+        protein_atoms = [atom for atom in self.topology.atoms() if atom.residue.name not in ["HOH", "WAT", "SOL", "NAC", "CL"]]
+        self.protein_HA = [atom.index for atom in protein_atoms if atom.element.symbol != "H"]  # Exclude hydrogens
+        
         self.verbose = verbose
         self.autostop_freq = 50  # In moves. Stop pulling if the ligand is unbound
 
@@ -188,11 +190,11 @@ class SteeredMD:
         simulation_start_time = time.monotonic()
 
         if self.autostop_freq is not None:
-            max_displacement = 5  # nm, to ensure the ligand is pulled out of the binding pocket
+            max_displacement = 2.5  # nm, to ensure the ligand is pulled out of the binding pocket
 
         # Calculate the number of steps
         if pulling_speed is not None:
-            sMD_time = max_displacement / pulling_speed  # in ps
+            sMD_time = max_displacement / pulling_speed  * 100 # in ps
             sMD_steps = math.ceil(sMD_time / self.timestep.value_in_unit(openmmunit.picoseconds))
             sMD_moves = int(sMD_steps / steps_per_move)
             time_per_move = steps_per_move * self.timestep.value_in_unit(openmmunit.picoseconds)
@@ -219,7 +221,7 @@ class SteeredMD:
             # This is the default openMM but do not track work
             # dicussion https://github.com/openmm/openmm/issues/2520
             integrator = LangevinMiddleIntegrator(self.temperature, 
-                                                2/openmmunit.picoseconds, 
+                                                1/openmmunit.picoseconds, 
                                                 self.timestep
                                                 # constraint_tolerance = 1.0e-6
                                                 )
@@ -277,7 +279,8 @@ class SteeredMD:
                 forces["NonbondedForce"],
                 # stepFunction="1/(1+x^6)",
                 stepFunction="step(1-x)",
-                thresholdDistance=0.7,
+                # TODO This should be adaptaed based on the pocket definition or consider the whole protein but that may be too slow?
+                thresholdDistance=0.7, 
                 # cutoffFactor=2.0,
                 # switchFactor=1.5,
                 # reference=simulation.context
