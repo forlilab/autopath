@@ -6,7 +6,8 @@ from glob import glob
 from copy import deepcopy
 
 from autopath.utils import *
-from autopath.customForces import add_COM_force, add_harmonic_restraints, print_current_forces
+from autopath.customForces import (add_COM_force, add_harmonic_restraints, 
+                                   print_current_forces, remove_openmm_force)
 from autopath.analysis import plot_sMD_statistics
 
 # from openmm import *
@@ -39,7 +40,7 @@ class SteeredMD:
         temperature: float = 300,
         use_GReweighting: bool = False,
         out_dir: str = None,
-        verbose: int = 2,
+        verbose: int = 0,
     ):
         self.system = system
         self.topology = topology
@@ -52,8 +53,11 @@ class SteeredMD:
         self.groupA_atoms = groupA_atoms # ligand atoms
         self.groupB_atoms = groupB_atoms # pocket atoms
         self.restrained_atoms = restrained_atoms
+
+        self.atoms = [atom for atom in self.topology.atoms()]
+
         self.verbose = verbose
-        self.autostop_freq = 10  # In moves. Stop pulling if the ligand is unbound
+        self.autostop_freq = 50  # In moves. Stop pulling if the ligand is unbound
 
         self.platform = select_platform("fastest")
 
@@ -67,7 +71,7 @@ class SteeredMD:
         return None
 
     def pull_single_direction(self, simulation, rep_idx, direction, 
-                             dx_per_move, sMD_moves, steps_per_move, pulling_force,
+                             dx_per_move, sMD_moves, steps_per_move,
                              initial_r0, final_r0):
         """Run the pulling process in a single direction (forward or backward) for a single replica."""
         
@@ -77,7 +81,7 @@ class SteeredMD:
             f"sMD_{rep_idx}_{direction}",
             sMD_moves*steps_per_move, # total steps
             steps_per_move,
-            self.verbose
+            0 #self.verbose
         )
 
         if self.use_GReweighting:
@@ -92,16 +96,21 @@ class SteeredMD:
         simulation.context.setParameter("r0", initial_r0)
 
         with open(f"{self.out_dir}/sMD_log_{rep_idx}_{direction}.dat","w") as f:
-            # f.write("step,r_target(nm),r_before(nm),r_after(nm),force(kJ/mol/nm),work(kJ/mol),shadow_work(KJ/mol)\n")
-            f.write("step,r_target(nm),r_before(nm),r_after(nm),force(kJ/mol/nm),work(kJ/mol),shadow_work(kJ/mol),protocol_work(kJ/mol)\n")
 
-            work_val = 0.0
+            f.write("step,r_target(nm),r_before(nm),r_after(nm),force_cvpack(kJ/mol/nm),work_cvpack(kJ/mol),m_eff(dalton)\n")
 
+            work_cvpack = 0.0
+            dist_after = 0.0
+            dist_before = 0.0
+            m_eff = 0.0
+            # Loop over the number of moves
             for i in range(sMD_moves):
-                #actual distance before
-                dist_before = get_COM_dist(simulation, self.groupA_atoms, self.groupB_atoms)
 
-                #compute your new target distance
+                #actual distance before
+                if self.verbose > 1:
+                    dist_before = get_COM_dist(simulation, self.groupA_atoms, self.groupB_atoms)
+
+                #compute the new target distance
                 if direction == "backward":
                     r_end = final_r0 - (i+1)*abs(dx_per_move)
                 else:
@@ -110,36 +119,47 @@ class SteeredMD:
                 simulation.context.setParameter("r0", r_end)
 
                 r_end = r_end.value_in_unit(openmmunit.nanometers)
-
-                #force before the step
-                force_val = -pulling_force * (dist_before - r_end)
-                force_val = force_val * openmmunit.nanometer**2/openmmunit.kilojoules_per_mole # remove units for logging
-
+    
+                # get the force from the COM CV
+                force_cvpack = self.com_cv.getValue(simulation.context, allowReinitialization=False).value_in_unit(openmmunit.kilojoules_per_mole/ openmmunit.nanometer)
+                # print("force_cvpack", force_cvpack) # force in kJ/mol/nm
+                
+                if self.verbose > 1:
+                    # get the effective mass of the COM CV
+                    m_eff = self.com_cv.getEffectiveMass(simulation.context).value_in_unit(openmmunit.nanometer**4*openmmunit.mole**2*openmmunit.dalton/(openmmunit.kilojoule**2))
+                    
+                # run for steps_per_move
                 simulation.step(steps_per_move)
 
-                #actual distance after
-                dist_after = get_COM_dist(simulation, self.groupA_atoms, self.groupB_atoms)
-
-                # accumulate work
-                work_val += force_val * (dist_after - dist_before)
+                if self.verbose > 1:
+                    # actual distance after
+                    dist_after = get_COM_dist(simulation, self.groupA_atoms, self.groupB_atoms)
                 
+                # increment the work -v do not use (dist_after - dist_before), use the expected displacement dx_per_move
+                # work_val += F_par * dx_per_move.value_in_unit(openmmunit.nanometers) # kJ/mol
+                work_cvpack += force_cvpack * dx_per_move.value_in_unit(openmmunit.nanometers) # kJ/mol
+
                 #log everything
-                shadow_work = simulation.integrator.get_shadow_work().value_in_unit(openmmunit.kilojoules_per_mole)
-                protocol_work = simulation.integrator.get_protocol_work().value_in_unit(openmmunit.kilojoules_per_mole)
-                f.write(f"{i},{r_end},{dist_before},{dist_after},{force_val},{work_val},{shadow_work},{protocol_work}\n")
+                #shadow_work = simulation.integrator.get_shadow_work().value_in_unit(openmmunit.kilojoules_per_mole)
+                #protocol_work = simulation.integrator.get_protocol_work().value_in_unit(openmmunit.kilojoules_per_mole)
+
+                f.write(f"{i},{r_end},{dist_before},{dist_after},{force_cvpack},{work_cvpack},{m_eff}\n")
 
                 if self.autostop_freq is not None and i%self.autostop_freq == 0:  # Check every 5 moves approx 5ps
                     # Check if the ligand is unbound
-                    nc_now = (self.nc_cv.getValue(simulation.context, allowReinitialization=True)).value_in_unit(openmmunit.dimensionless)
+                    nc_now = self.nc_cv.getValue(simulation.context, allowReinitialization=False).value_in_unit(openmmunit.dimensionless)
                     logging.debug(f"Step {i+1}/{sMD_moves}: r_target={r_end:.2f} nm, r_before={dist_before:.2f} nm, r_after={dist_after:.2f} nm, nc={nc_now}")
                 
                     if nc_now < 1:
                         logging.warning(f"Stopping pulling at step {i} because the ligand unbound with n_contacts={nc_now}.")
                         break   
 
-
         #make sure to reset the integrator
-        simulation.integrator.reset() #only openmmtools integrators have this method
+        try:
+            simulation.integrator.reset() #only openmmtools integrators have this method
+        except AttributeError:
+            logging.warning("Integrator does not have reset method. This is expected for standard OpenMM integrators.")
+            pass
 
         # Log final COM distance
         final_dist = get_COM_dist(simulation, self.groupA_atoms, self.groupB_atoms)
@@ -149,10 +169,12 @@ class SteeredMD:
         final_positions = simulation.context.getState(getPositions=True).getPositions()
         self.topology.setPeriodicBoxVectors(simulation.context.getState(getPositions=True).getPeriodicBoxVectors()) #saves correct box vectors to the pdb
         save_pdb(self.topology, final_positions, f"{self.out_dir}/steeredMD_{rep_idx}_{direction}.pdb")
+        return
+    
 
     def run(
         self,
-        sMD_time: float = 1,  # 1ns
+        sMD_time: int = 1000,  # 1ps
         max_displacement: float = 2.0,  # nm
         steps_per_move: int = 250,  # 1ps
         pulling_speed: float = 0.002,  # nm/ps
@@ -170,15 +192,15 @@ class SteeredMD:
 
         # Calculate the number of steps
         if pulling_speed is not None:
-            sMD_time = max_displacement / pulling_speed/1000  # in ns
-            sMD_steps = math.ceil(sMD_time / self.timestep.value_in_unit(openmmunit.picoseconds) * 1000.0)
+            sMD_time = max_displacement / pulling_speed  # in ps
+            sMD_steps = math.ceil(sMD_time / self.timestep.value_in_unit(openmmunit.picoseconds))
             sMD_moves = int(sMD_steps / steps_per_move)
             time_per_move = steps_per_move * self.timestep.value_in_unit(openmmunit.picoseconds)
             dx_per_move = pulling_speed * time_per_move * openmmunit.nanometers
         else:
             # If pulling speed is not defined, use displacement and time to calculate dx_per_move
             if sMD_time is not None and max_displacement is not None:
-                dx_per_move = (max_displacement * openmmunit.nanometers) / (sMD_time * 1000 / steps_per_move)
+                dx_per_move = (max_displacement * openmmunit.nanometers) / (sMD_time  / steps_per_move)
             else:
                 raise ValueError("Either pulling_speed or both sMD_time and max_displacement must be provided.")
 
@@ -195,27 +217,26 @@ class SteeredMD:
             )
         else:
             # This is the default openMM but do not track work
-            # integrator = LangevinMiddleIntegrator(self.temperature, 
-            #                                            1.0/openmmunit.picoseconds, 
-            #                                            self.timestep)
+            # dicussion https://github.com/openmm/openmm/issues/2520
+            integrator = LangevinMiddleIntegrator(self.temperature, 
+                                                2/openmmunit.picoseconds, 
+                                                self.timestep
+                                                # constraint_tolerance = 1.0e-6
+                                                )
+            # integrator = VariableLangevinIntegrator(self.temperature, 
+            #                                     1.0/openmmunit.picoseconds, 
+            #                                     0.001)
 
+            # from openmmtools.integrators import LangevinIntegrator
+            # from openmmtools.integrators import ExternalPerturbationLangevinIntegrator, LangevinIntegrator
+            # from openmmtools.integrators import NonequilibriumLangevinIntegrator
             # integrator = ExternalPerturbationLangevinIntegrator(self.temperature, 
             #                             1.0/openmmunit.picoseconds, 
             #                             self.timestep,
             #                             splitting="V V R O R", # default is "V R O R V"
             #                             measure_shadow_work=True,
             #                             # constraint_tolerance=1.0e-6,
-            #                             )
-            from openmmtools.integrators import LangevinIntegrator
-            from openmmtools.integrators import ExternalPerturbationLangevinIntegrator, LangevinIntegrator
-            from openmmtools.integrators import NonequilibriumLangevinIntegrator
-            integrator = ExternalPerturbationLangevinIntegrator(self.temperature, 
-                                        2.0/openmmunit.picoseconds, 
-                                        self.timestep,
-                                        splitting="V V R O R", # default is "V R O R V"
-                                        measure_shadow_work=True,
-                                        constraint_tolerance=1.0e-6,
-                                        )  
+            #                             )  
                     
         system = deepcopy(self.system)  # Create a copy of the system to avoid modifying the original
         simulation = Simulation(self.topology, system, integrator, self.platform)
@@ -234,23 +255,20 @@ class SteeredMD:
             simulation.loadCheckpoint(checkpoint_file)
             simulation.integrator = integrator  # Replace the integrator with the new one
 
-        # simulation.context.setDefaultPeriodicBoxVectors()
-        # self.system.setDefaultPeriodicBoxVectors(*simulation.context.getState(getPositions=True).getPeriodicBoxVectors())
-        # simulation.context.reinitialize(preserveState=True)
-
         # Add harmonic positional restraints to protein CA
         input_positions = simulation.context.getState(getPositions=True).getPositions()
         if self.restrained_atoms is not None:
-            add_harmonic_restraints(
-                system,
-                input_positions,
-                self.topology,
-                self.restrained_atoms,
-                10,
-                "k_CA",
-                14,
-            )
+            add_harmonic_restraints(system, input_positions, 
+                                    self.topology, self.restrained_atoms,
+                                    restraint_force=10,
+                                    force_name="k_CA",
+                                    force_group=14,
+                                )
+            
+        # system.setDefaultPeriodicBoxVectors(*PDBFile(pdb_file).topology.getPeriodicBoxVectors())
+        # simulation.context.reinitialize(preserveState=True)
 
+        # Add COM force to the ligand and pocket groups
         if self.autostop_freq is not None:
             forces = {f.getName(): f for f in system.getForces()}
             self.nc_cv = cvpack.NumberOfContacts(
@@ -259,35 +277,55 @@ class SteeredMD:
                 forces["NonbondedForce"],
                 # stepFunction="1/(1+x^6)",
                 stepFunction="step(1-x)",
-                thresholdDistance=0.45,
+                thresholdDistance=0.7,
                 # cutoffFactor=2.0,
                 # switchFactor=1.5,
                 # reference=simulation.context
             )
             self.nc_cv.setForceGroup(18)  # Use a separate force group for the CV
             system.addForce(self.nc_cv)
-        
-        #restart here to have harmonic restraints and NOT COM force in the system
-        simulation.context.reinitialize(preserveState=True)
 
         #Reset velocities to temperature. Check https://github.com/openmm/openmm/pull/259
         if self.restart_velocities:
             simulation.context.setVelocitiesToTemperature(self.temperature)
             #run a super short simulation to ensure the system is stable after temp reset
-            simulation.step(50/self.timestep.value_in_unit(openmmunit.picoseconds))  # 50 ps
+            # simulation.step(50/self.timestep.value_in_unit(openmmunit.picoseconds))  # 50 ps
+        
+        # Remove existing MonteCarloBarostat to run NVT
+        system = remove_openmm_force(system, "MonteCarloBarostat")
+        # Reinitialize the simulation context with the updated system
+        simulation.context.reinitialize(preserveState=True)
+        #run a super short simulation to ensure the system is stable after temp reset
+        simulation.step(50/self.timestep.value_in_unit(openmmunit.picoseconds))  # 50 ps
+        
+        try:
+            simulation.integrator.reset()  # Reset the integrator. Only openmmtools integrators have this method    
+        except AttributeError:
+            logging.warning("Integrator does not have reset method. This is expected for standard OpenMM integrators.")
 
-        simulation.integrator.reset()  # Reset the integrator. Only openmmtools integrators have this method    
         simulation.context.setTime(0)  # reset simulation time
         simulation.context.setStepCount(0)  # reset step count
-
-        # Add COM force with arbitrary initial r0, then run_single_direction will set it properly
-        add_COM_force(system, self.groupA_atoms, self.groupB_atoms, pulling_force, 0, 1) # keep it in group 1 for GR reweighting
+        
+        groups = [self.groupA_atoms] + [self.groupB_atoms]
+        self.com_cv = cvpack.CentroidFunction(
+            "0.5 * fc_pull * (distance(g1,g2)-r0)^2",
+            openmmunit.kilojoules_per_mole / openmmunit.nanometer,  # force
+            groups,
+            weighByMass=True,
+            pbc=True, #CHECK THIS
+        )
+        
+        self.com_cv.addGlobalParameter("r0", 0)
+        self.com_cv.addGlobalParameter('fc_pull', pulling_force)
+        self.com_cv.setForceGroup(1)  # Use a separate force group for the CV GROUP 1
+        system.addForce(self.com_cv)
         simulation.context.reinitialize(preserveState=True)
 
-        startdist = get_COM_dist(simulation, self.groupA_atoms, self.groupB_atoms)
-        initial_r0 = startdist * openmmunit.nanometers
+        initial_r0 = get_COM_dist(simulation, self.groupA_atoms, self.groupB_atoms) * openmmunit.nanometers  # initial distance in nm
         final_r0 = initial_r0 + abs(dx_per_move) * sMD_moves
         
+        simulation.context.setParameter("r0", initial_r0)
+
         rep_name = rep_suffix if rep_suffix else f"replica-{np.random.randint(1000000)}_v{pulling_speed}"
 
         logging.info(f"Forward pulling of replica {rep_suffix} at {pulling_speed} nm/ps for {max_displacement} nm in {sMD_time} ns")
@@ -296,19 +334,27 @@ class SteeredMD:
         # Run forward direction
         self.pull_single_direction(simulation, rep_name, direction="forward", 
                                   dx_per_move=dx_per_move, sMD_moves=sMD_moves,
-                                  steps_per_move=steps_per_move, pulling_force=pulling_force,
+                                  steps_per_move=steps_per_move,
                                   initial_r0=initial_r0, final_r0=final_r0)
 
         if do_backwards:
             logging.info(f"Running backward pulling of replica {rep_suffix} at speed {pulling_speed} nm/ps")
             # Reset velocities to temperature after forward pulling
             simulation.context.setVelocitiesToTemperature(self.temperature)
-            
             # run a super short simulation to ensure the system is stable after temp reset
             simulation.step(50/self.timestep.value_in_unit(openmmunit.picoseconds))  # 50 ps
+
+            try:
+                simulation.integrator.reset()  # Reset the integrator. Only openmmtools integrators have this method    
+            except AttributeError:
+                logging.warning("Integrator does not have reset method. This is expected for standard OpenMM integrators.")
+
+            simulation.context.setTime(0)  # reset simulation time
+            simulation.context.setStepCount(0)  # reset step count
+
             self.pull_single_direction(simulation, rep_name, direction="backward", 
                                       dx_per_move=-dx_per_move, sMD_moves=sMD_moves,
-                                      steps_per_move=steps_per_move, pulling_force=pulling_force,
+                                      steps_per_move=steps_per_move,
                                       initial_r0=initial_r0, final_r0=final_r0)
 
         # Logging the total time for all replicas
