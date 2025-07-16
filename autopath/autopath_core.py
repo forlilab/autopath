@@ -55,8 +55,8 @@ class AutoPath:
         sMD_pulling_speeds: dict = {0.001:2, 0.002:2, 0.003:2},  # nm/ps
         sMD_max_pulling_dist: float = 2.0,  # nm
         sMD_time: int = None,  # ns
-        sMD_steps_per_move: int = 250,  # 1 ps
-        sMD_pulling_force: float = None,  # KJ/mol/nm2
+        sMD_steps_per_move: int = None,  #ps
+        sMD_spring_cte: float = None,  # KJ/mol/nm2
         sMD_autostop_freq: int = 10, #moves
         extract_milestones: bool = True,
         n_milestones: int = 5,
@@ -92,7 +92,7 @@ class AutoPath:
         self.sMD_time = sMD_time
         self.sMD_pulling_speeds = sMD_pulling_speeds
         self.sMD_steps_per_move = sMD_steps_per_move
-        self.sMD_pulling_force = sMD_pulling_force
+        self.sMD_spring_cte = sMD_spring_cte
         self.sMD_autostop = sMD_autostop_freq
         # Milestones
         self.extract_milestones = extract_milestones
@@ -260,30 +260,23 @@ class AutoPath:
         ##############################################################################################
         ##################################### Steered MD simulations #################################
         ##############################################################################################
-        def choose_steps_per_move(v_nm_per_ps,
-                          dt_ps=0.004,
-                          k_spring=1000,   # kJ/mol/nm**2
-                          T_K=300,
-                          Rmax=0.3):
-            kB = 0.0083144621          # kJ/mol/K
-            sigma = (kB*T_K/k_spring)**0.5
-            t_move_ps = Rmax * sigma / v_nm_per_ps
+        
+        sMD_timestep = 0.004  # ps
 
-            return max(1, int(t_move_ps / dt_ps))
-
-        sMD_outdir = f"{sys_name}/sMD_{lig_anchor_mode}_{lig_anchor_mode_atoms}_2fs_CA1ps_25spm"
+        sMD_outdir = f"{sys_name}/sMD_{lig_anchor_mode}_{lig_anchor_mode_atoms}_4fs_2ps"
         # in this paper they used 80 kcal·mol−1? units don match tho. Ziada et al 2022.
-        sMD_pulling_force_per_atom = 50 * 4.184  # KJ/mol/nm2, converted from kcal
+        sMD_spring_cte_per_atom = 40 * 4.184  # KJ/mol/nm2, converted from kcal. This affects thermal fluctuations
         
         if self.run_sMDpulling:
             equilibrated_system = load_system(f"{sys_name}/equilibration/system_equil_{sys_name}.xml")
 
-            if self.sMD_pulling_force is None:
+            if self.sMD_spring_cte is None:
                 # ligand_atoms_indices, ligand_atoms_names = get_ligand_ha(topology, lig_resname)
-                pulling_force = sMD_pulling_force_per_atom * len(ligand_atoms_indices)  # Normalize by ligand size
-                logging.info(f"Pulling force is set to {pulling_force} KJ/mol/nm2 for {len(ligand_atoms_indices)} atoms.")
+                sMD_spring_cte = sMD_spring_cte_per_atom * len(ligand_atoms_indices)  # Normalize by ligand size
+                logging.info(f"Spring constant set to {sMD_spring_cte} KJ/mol/nm2 for {len(ligand_atoms_indices)} atoms.")
+                print(f"Spring constant set to {sMD_spring_cte} KJ/mol/nm2 for {len(ligand_atoms_indices)} atoms.")
             else:
-                pulling_force = self.sMD_pulling_force
+                sMD_spring_cte = self.sMD_spring_cte
 
             sMD = SteeredMD(
                 system=equilibrated_system,
@@ -292,19 +285,28 @@ class AutoPath:
                 groupB_atoms=restrained_atoms_indices,
                 restrained_atoms=None,#restrained_atoms_indices
                 restart_velocities=True,
-                timestep=0.002,  # 2 fs
+                timestep=sMD_timestep,
                 out_dir=sMD_outdir,
             )
+
+            if self.sMD_steps_per_move is None:
+                self.sMD_steps_per_move = sMD.guess_steps_per_move(
+                    v_nm_per_ps=max(self.sMD_pulling_speeds.keys()),
+                    dt_ps=sMD_timestep,
+                    k_spring=sMD_spring_cte,
+                    T_K=self.temperature,
+                    Rmax=0.3,  # Max displacement per move relative to thermal fluctuation
+                )
+            print(f"Using {self.sMD_steps_per_move} steps per move for sMD pulling.")
             for speed, reps in self.sMD_pulling_speeds.items():
                 for i in range(reps):
                     sMD.run(
                         checkpoint_file=equilibrated_chk,
                         pdb_file=equilibrated_pdb,
-                        sMD_time=self.sMD_time,
-                        max_displacement=self.sMD_max_pulling_dist,
+                        # dx_per_move=None,  # nm
                         pulling_speed=speed,  # nm/ps
                         steps_per_move=self.sMD_steps_per_move,
-                        pulling_force=pulling_force,
+                        sMD_spring_cte=sMD_spring_cte,
                         rep_suffix=f'replica-{i+1}_v{speed}',
                         do_backwards=False,     #CAREFUL: this will run the pulling in both directions
                     )
