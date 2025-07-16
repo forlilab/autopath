@@ -27,8 +27,8 @@
         "sMD_pulling_dist": 2.0,
         "sMD_time": 1,
         "sMD_replicas": 3,
-        "sMD_steps_per_move": 50,
-        "sMD_pulling_force": null
+        "sMD_steps_per_move": null,
+        "sMD_spring_cte": null
     },
     "milestones": {
         "extract_milestones": true,

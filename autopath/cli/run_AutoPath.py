@@ -80,7 +80,7 @@ def main():
         sMD_time=config.sMD_time,
         sMD_replicas=config.sMD_replicas,
         sMD_steps_per_move=config.sMD_steps_per_move,
-        sMD_pulling_force=config.sMD_pulling_force,
+        sMD_spring_cte=config.sMD_spring_cte,
         sMD_autostop=config.sMD_autostop,
         # Milestones
         extract_milestones=config.extract_milestones,
