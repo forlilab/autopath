@@ -129,7 +129,7 @@ class SteeredMD:
                 # print("force_cvpack", force_cvpack) # force in kJ/mol/nm
 
                 # get the effective mass of the COM CV
-                # m_eff = self.com_cv.getEffectiveMass(simulation.context).value_in_unit(openmmunit.dalton)
+                m_eff = self.meff_cv.getEffectiveMass(simulation.context).value_in_unit(openmmunit.dalton)
                 # print(f"Effective mass of COM CV: {m_eff:.2f} dalton")
                 
                 # run for steps_per_move
@@ -224,7 +224,7 @@ class SteeredMD:
             # This is the default openMM but do not track work
             # dicussion https://github.com/openmm/openmm/issues/2520
             integrator = LangevinMiddleIntegrator(self.temperature, 
-                                                2/openmmunit.picoseconds, 
+                                                0.1/openmmunit.picoseconds, 
                                                 self.timestep
                                                 # constraint_tolerance = 1.0e-6
                                                 )
@@ -311,6 +311,19 @@ class SteeredMD:
         self.com_cv.addGlobalParameter('fc_pull', self.sMD_spring_cte)
         self.com_cv.setForceGroup(1)  # Use a separate force group for the CV GROUP 1
         system.addForce(self.com_cv)
+
+        self.meff_cv = cvpack.CentroidFunction(
+            "distance(g1,g2)",
+            openmmunit.nanometers,  # distance not energy
+            groups,
+            weighByMass=True,
+            pbc=True, #CHECK THIS
+        )
+        
+        self.meff_cv.setForceGroup(3)  # Use a separate force group for the CV GROUP 3
+        system.addForce(self.meff_cv)
+
+
         simulation.context.reinitialize(preserveState=True)
 
         initial_r0 = get_COM_dist(simulation, self.groupA_atoms, self.groupB_atoms) * openmmunit.nanometers  # initial distance in nm
