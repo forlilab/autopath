@@ -5,8 +5,8 @@ Create a clean environment and install the required dependencies:
 ```bash
 $ micromamba create -n autopath
 $ micromamba activate autopath 
-$ micromamba install -c conda-forge openmm openmmtools openff-toolkit openmmforcefields espaloma pdbfixer parmed mdanalysis ambertools rdkit pandas
-$ micromamba install -c conda-forge -c mdtools cvpack
+$ micromamba install -c conda-forge openmm openmmtools openff-toolkit openmmforcefields espaloma pdbfixer parmed mdanalysis ambertools rdkit pandas deeptime
+$ micromamba install -c mdtools cvpack
 $ git clone git@github.com:forlilab/autopath.git
 $ cd autopath
 $ pip install -e .
