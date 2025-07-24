@@ -9,6 +9,11 @@ from scipy.ndimage import gaussian_filter1d
 from scipy.stats import linregress
 import statsmodels.formula.api as smf
 
+from dtaidistance import dtw_ndim
+import kmedoids
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.metrics import silhouette_score
+
 import seaborn as sns
 
 import matplotlib.pyplot as plt
@@ -139,6 +144,119 @@ class SteeredMDAnalysis:
 
         return pd.concat(all_data)
 
+    def cluster_trajectories_DTW(self, 
+                                data:pd.DataFrame=None, 
+                                features_dict:dict=None, 
+                                K:int=None,
+                                outdir:str=None):
+
+        """Cluster trajectories using Dynamic Time Warping (DTW) and k-medoids.
+        For more information on DTW see: https://doi.org/10.1073/pnas.231354212
+                                         https://dtaidistance.readthedocs.io/en/latest/index.html
+        """
+        if outdir is None:
+            outdir = os.path.join(os.getcwd(), self.sysname)
+        os.makedirs(outdir, exist_ok=True)
+        
+        if features_dict is None:
+            features_dict = {'r_before(nm)': (0.25, 2.5),
+                            'C':(5,70),
+                            'work(kJ/mol)': (10, None)
+                            }
+            
+        features = list(features_dict.keys())
+
+        if data is None:
+            data = self.raw_data.copy()
+
+        # check if features are in the data
+        for feature in features:
+            if feature not in data.columns:
+                raise ValueError(f"Feature '{feature}' not found in data columns.")
+            
+        data[features] = data[features].round(3)  # round features to 3 decimal places
+        if 'work(kJ/mol)' in features:
+            data['work(kJ/mol)'] = data['work(kJ/mol)'] / data['speed']  # normalize work by speed
+
+        # Filter data based on feature ranges
+        filters = []
+        for f, (l, h) in features_dict.items():
+            if l is not None and h is not None:
+                filters.append((data[f] > l) & (data[f] < h))
+            elif l is not None:
+                filters.append(data[f] > l)
+            elif h is not None:
+                filters.append(data[f] < h)
+        if filters:
+            data = data[np.logical_and.reduce(filters)]
+        data[features] = StandardScaler().fit_transform(data[features])
+
+        paths = []
+        # Extract paths for each trajectory and measure distance
+        for traj_name in data.groupby("trajname").groups:
+            traj_df = data[data["trajname"] == traj_name][features]
+            paths.append(traj_df[features].values)
+            
+        distmatrix = dtw_ndim.distance_matrix_fast(s=paths, ndim=paths[0].shape[1])
+        # plot the distance matrix
+        sns.heatmap(distmatrix, cmap='viridis')
+        plt.title(f"Distance Matrix for {self.sysname} - DTW Clustering")
+        plt.xlabel("Trajectories"); plt.ylabel("Trajectories")
+        plt.tight_layout()
+        plt.savefig(f"{outdir}/distmatrix.png", dpi=300)
+        plt.show()
+        plt.close()
+
+        # Perform clustering using k-medoids
+        if K is None:
+            silloutte_scores = {}
+            for i in range(2, data['trajname'].nunique()):
+                c = kmedoids.fasterpam(distmatrix, i)
+                silloutte_scores[i] = silhouette_score(distmatrix, c.labels)
+
+            K = max(silloutte_scores, key=silloutte_scores.get)
+            print(f"Optimal number of clusters: {K}")
+
+            # Plot silhouette scores
+            sns.lineplot(x=list(silloutte_scores.keys()), y=list(silloutte_scores.values()))
+            plt.xlabel("Number of clusters (K)"); plt.ylabel("Silhouette Score")
+            plt.title(f"Silhouette Scores for {self.sysname}")
+            plt.tight_layout()
+            plt.savefig(f"{outdir}/silhouette_scores.png", dpi=300)
+            plt.show()
+            plt.close()
+
+        cluster = kmedoids.fasterpam(distmatrix, K)
+
+        df_labels = []
+        for traj_name, label in zip(data.groupby("trajname").groups, cluster.labels):
+            df_labels.append([traj_name, label])
+
+        df = data.groupby(["trajname"]).first().reset_index()
+        df['label'] = cluster.labels
+        df = df.set_index('trajname')  # Restore original index
+        # Merge labels back to the original data
+        data['label'] = data['trajname'].map(df['label'])
+
+        if len(features) == 2:
+            sns.scatterplot(data=data, x=features[0], y=features[1], hue='label', alpha=0.3, palette='Set1')
+        else:
+            sns.PairGrid(data,
+                vars=features,
+                hue='label', # 'label','speed'
+                palette='viridis',
+                height=3).map_lower(sns.scatterplot).map_diag(sns.kdeplot)
+            
+        # plt.title(f"Clustering with {K} clusters")
+        plt.xlabel(features[0]); plt.ylabel(features[1])
+        plt.legend(title='Cluster', loc='upper right')
+        plt.tight_layout()
+        plt.savefig(f"{outdir}/trajs_clustered_k-{K}.png", dpi=300, bbox_inches='tight')
+        plt.show()   
+        plt.close()
+
+        return data
+
     def estimate_dG_Jarzynski(self, )-> pd.DataFrame:
         """Estimate the free energy difference using Jarzynski's equality.
         This method computes the free energy difference for each speed
@@ -169,10 +287,10 @@ class SteeredMDAnalysis:
         return pd.concat(records, ignore_index=True)
     
     def estimate_dG_dcWork(self, 
-                        smooth_Wdiss: bool = True,
-                        fit_spline: bool = True,
-                        inertial_correction: str = None, # "per_replica" or "per_bin"
-                        ) -> pd.DataFrame:
+                            smooth_Wdiss: bool = True,
+                            fit_spline: bool = True,
+                            inertial_correction: str = None, # "per_replica" or "per_bin"
+                            ) -> pd.DataFrame:
         """Estimate the free energy difference using the dissipated work.
         Optionally apply inertial correction via meff.
         """
