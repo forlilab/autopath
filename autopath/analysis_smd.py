@@ -37,6 +37,7 @@ class SteeredMDAnalysis:
                  min_points: int = 10,
                  temperature: float = 300, #K
                  timestep: float = 0.004, #ps
+                 cluster_method: str = 'DTW',
                  dist_column: str = 'r_target(nm)',
                  work_column: str = 'work(kJ/mol)',
                  force_column: str = 'force(kJ/mol/nm)',
@@ -66,9 +67,18 @@ class SteeredMDAnalysis:
 
         # assemble the master dataframe
         raw_data = self.load_logs(log_files)
-        
-        self.raw_data = self.bin_data(raw_data, bin_width, min_points)
 
+        # filter for r_target < 2.5 nm
+        # raw_data = raw_data.loc[raw_data[dist_column] < 2.5] 
+        raw_data = raw_data.loc[raw_data['C'] >= 2]  # filter by residue coordination
+
+        self.raw_data = self.bin_data(raw_data, bin_width, min_points)
+        if cluster_method == 'DTW':
+            outdir = os.path.join(os.path.dirname(log_files[0]), 'clustering_DTW')
+            os.makedirs(outdir, exist_ok=True)
+            self.raw_data = self.cluster_trajectories_DTW(self.raw_data, K=None, outdir=outdir)
+        else:
+            self.raw_data['path'] = 1 # default to single cluster if no clustering method is specified
         return
 
     def load_logs(self, log_files: list[str]) -> pd.DataFrame:
@@ -78,9 +88,8 @@ class SteeredMDAnalysis:
         raw_data = []
         for fn in log_files:
             try:
-                base = os.path.basename(fn).strip('.dat')
+                base = os.path.basename(fn)[:-4]  # remove .dat extension
                 # print(f"Loading {base}...")
-
                 speed = float(base.split('_')[-2].strip('v'))
                 df = pd.read_csv(fn, comment='#')
                 df['trajname'] = base
@@ -107,8 +116,6 @@ class SteeredMDAnalysis:
                  min_points: int=10
                  )-> pd.DataFrame:
                  
-        raw_data = raw_data.loc[raw_data['r_target(nm)'] < 2.5]  # filter for r_target < 2.0 nm
-
         # get overall centers and edges for histogram
         rmin, rmax = min(raw_data[self.dist_column]), max(raw_data[self.dist_column])
         edges  = np.arange(rmin, rmax + bin_width, bin_width)
@@ -157,26 +164,29 @@ class SteeredMDAnalysis:
         if outdir is None:
             outdir = os.path.join(os.getcwd(), self.sysname)
         os.makedirs(outdir, exist_ok=True)
-        
+
         if features_dict is None:
-            features_dict = {'r_before(nm)': (0.25, 2.5),
-                            'C':(5,70),
-                            'work(kJ/mol)': (10, None)
+            features_dict = {
+                            'r_before(nm)': (1.5, 2.5),
+                            # 'C':(1, None), # coordination number
+                            'work(kJ/mol)': (None, None)
                             }
             
         features = list(features_dict.keys())
 
         if data is None:
             data = self.raw_data.copy()
-
+        
+        raw_data = data.copy()
+        
         # check if features are in the data
         for feature in features:
             if feature not in data.columns:
                 raise ValueError(f"Feature '{feature}' not found in data columns.")
             
-        data[features] = data[features].round(3)  # round features to 3 decimal places
+        data[features] = data[features].round(2)  # round features to 2 decimal places
         if 'work(kJ/mol)' in features:
-            data['work(kJ/mol)'] = data['work(kJ/mol)'] / data['speed']  # normalize work by speed
+            data['work(kJ/mol)'] = data['work(kJ/mol)'] #/ data['speed']  # normalize work by speed
 
         # Filter data based on feature ranges
         filters = []
@@ -204,13 +214,13 @@ class SteeredMDAnalysis:
         plt.xlabel("Trajectories"); plt.ylabel("Trajectories")
         plt.tight_layout()
         plt.savefig(f"{outdir}/distmatrix.png", dpi=300)
-        plt.show()
+        # plt.show()
         plt.close()
 
         # Perform clustering using k-medoids
         if K is None:
             silloutte_scores = {}
-            for i in range(2, data['trajname'].nunique()):
+            for i in range(2, min(10, data['trajname'].nunique())):
                 c = kmedoids.fasterpam(distmatrix, i)
                 silloutte_scores[i] = silhouette_score(distmatrix, c.labels)
 
@@ -218,12 +228,13 @@ class SteeredMDAnalysis:
             print(f"Optimal number of clusters: {K}")
 
             # Plot silhouette scores
+            plt.figure(figsize=(6, 4))
             sns.lineplot(x=list(silloutte_scores.keys()), y=list(silloutte_scores.values()))
             plt.xlabel("Number of clusters (K)"); plt.ylabel("Silhouette Score")
             plt.title(f"Silhouette Scores for {self.sysname}")
             plt.tight_layout()
             plt.savefig(f"{outdir}/silhouette_scores.png", dpi=300)
-            plt.show()
+            # plt.show()
             plt.close()
 
         cluster = kmedoids.fasterpam(distmatrix, K)
@@ -233,17 +244,21 @@ class SteeredMDAnalysis:
             df_labels.append([traj_name, label])
 
         df = data.groupby(["trajname"]).first().reset_index()
-        df['label'] = cluster.labels
+        df['path'] = cluster.labels
+        path_counts = df.groupby(['path'])['trajname'].nunique()
+        df['path'] = df['path'].map(lambda x: f"path-{x} ({path_counts[x]})")
         df = df.set_index('trajname')  # Restore original index
+
         # Merge labels back to the original data
-        data['label'] = data['trajname'].map(df['label'])
+        raw_data['path'] = raw_data['trajname'].map(df['path'])
+        data['path'] = data['trajname'].map(df['path'])
 
         if len(features) == 2:
-            sns.scatterplot(data=data, x=features[0], y=features[1], hue='label', alpha=0.3, palette='Set1')
+            sns.scatterplot(data=data, x=features[0], y=features[1], hue='path', alpha=0.3, palette='Set1')
         else:
             sns.PairGrid(data,
                 vars=features,
-                hue='label', # 'label','speed'
+                hue='path', # 'path','speed'
                 palette='viridis',
                 height=3).map_lower(sns.scatterplot).map_diag(sns.kdeplot)
             
@@ -252,10 +267,10 @@ class SteeredMDAnalysis:
         plt.legend(title='Cluster', loc='upper right')
         plt.tight_layout()
         plt.savefig(f"{outdir}/trajs_clustered_k-{K}.png", dpi=300, bbox_inches='tight')
-        plt.show()   
+        # plt.show()
         plt.close()
 
-        return data
+        return raw_data
 
     def estimate_dG_Jarzynski(self, )-> pd.DataFrame:
         """Estimate the free energy difference using Jarzynski's equality.
@@ -295,74 +310,84 @@ class SteeredMDAnalysis:
         Optionally apply inertial correction via meff.
         """
 
+        data = self.raw_data.copy()
         # Ensure centers are sorted in ascending order
-        centers = self.raw_data['r_bin'].unique()
+        centers = data['r_bin'].unique()
         centers = np.sort(centers)
 
-        per_speed_dfs = []
-        for speed in self.raw_data['speed'].unique():
-            df = self.raw_data[self.raw_data['speed'] == speed]
+        all_data = []
+        for path in data['path'].unique():
+            # Filter data for the current path
+            path_data = data[data['path'] == path]
+            per_speed_dfs = []
+            for speed in path_data['speed'].unique():
+                df = path_data[path_data['speed'] == speed]
 
-            # Group by bin
-            g_work = df.groupby('bin')[self.work_column]
-            count = g_work.count().reindex(range(len(centers)), fill_value=0)
-            Wmean = g_work.mean().reindex(range(len(centers)), fill_value=np.nan)
-            Wvar = g_work.var(ddof=1).reindex(range(len(centers)), fill_value=0.0)
+                # Group by bin
+                g_work = df.groupby('bin')[self.work_column]
+                count = g_work.count().reindex(range(len(centers)), fill_value=0)
+                Wmean = g_work.mean().reindex(range(len(centers)), fill_value=np.nan)
+                Wvar = g_work.var(ddof=1).reindex(range(len(centers)), fill_value=0.0)
 
-            # Collect m_eff
-            g_meff = pd.Series(np.nan, index=range(len(centers)))
-            if self.meff_column is not None:
-                g_meff = df.groupby('bin')[self.meff_column].mean().reindex(range(len(centers)), fill_value=np.nan)
-            elif inertial_correction:
-                raise ValueError("Inertial correction requested but no m_eff column provided.")
+                # Collect m_eff
+                g_meff = pd.Series(np.nan, index=range(len(centers)))
+                if self.meff_column is not None:
+                    g_meff = df.groupby('bin')[self.meff_column].mean().reindex(range(len(centers)), fill_value=np.nan)
+                elif inertial_correction:
+                    raise ValueError("Inertial correction requested but no m_eff column provided.")
 
-            # Apply inertial correction
-            # This is very small, only meaningful for v high speeds
-            if inertial_correction == "per_replica":
-                df['work_corr'] = df[self.work_column] - 0.5 * df[self.meff_column] * speed**2
-                g_corr = df.groupby('bin')['work_corr']
-                Wmean = g_corr.mean().reindex(range(len(centers)), fill_value=np.nan)
-                Wvar = g_corr.var(ddof=1).reindex(range(len(centers)), fill_value=0.0)
+                # Apply inertial correction
+                # This is very small, only meaningful for v high speeds
+                if inertial_correction == "per_replica":
+                    df['work_corr'] = df[self.work_column] - 0.5 * df[self.meff_column] * speed**2
+                    g_corr = df.groupby('bin')['work_corr']
+                    Wmean = g_corr.mean().reindex(range(len(centers)), fill_value=np.nan)
+                    Wvar = g_corr.var(ddof=1).reindex(range(len(centers)), fill_value=0.0)
 
-            elif inertial_correction == "per_bin":
-                Wvar = Wvar - g_meff * speed**2  # use Var[W_corr] = Var[W] - Var[inertial term]
-                Wvar = np.clip(Wvar, 0.0, None)  # make sure no negatives
+                elif inertial_correction == "per_bin":
+                    Wvar = Wvar - g_meff * speed**2  # use Var[W_corr] = Var[W] - Var[inertial term]
+                    Wvar = np.clip(Wvar, 0.0, None)  # make sure no negatives
 
-            # Raw dissipated work
-            Wdiss = 0.5 * self.beta * Wvar.values
+                # Raw dissipated work
+                Wdiss = 0.5 * self.beta * Wvar.values
 
-            # Optional smoothing
-            if smooth_Wdiss:
-                Wdiss = gaussian_filter1d(Wdiss, sigma=1)
-                # smooth the dissipation using a Savitzky-Golay filter. This might be better
-                # Wdiss = savgol_filter(Wdiss, window_length=9, polyorder=3, mode='interp')
+                # Optional smoothing
+                if smooth_Wdiss:
+                    Wdiss = gaussian_filter1d(Wdiss, sigma=1)
+                    # smooth the dissipation using a Savitzky-Golay filter. This might be better
+                    # Wdiss = savgol_filter(Wdiss, window_length=9, polyorder=3, mode='interp')
 
-            # Optional spline fit for derivative
-            if fit_spline:
-                spline = UnivariateSpline(centers, Wdiss, k=3)
-                Gamma = spline.derivative()(centers) / speed
-            else:
-                Gamma = np.gradient(Wdiss, self.bin_width) / speed
+                # Optional spline fit for derivative
+                if fit_spline:
+                    spline = UnivariateSpline(centers, Wdiss, k=3)
+                    Gamma = spline.derivative()(centers) / speed
+                else:
+                    Gamma = np.gradient(Wdiss, self.bin_width) / speed
 
-            # Remove bad bins
-            Gamma = np.where(Gamma < 1e-3, np.nan, Gamma)
-            dG = Wmean.values - Wdiss
+                # Remove bad bins
+                Gamma = np.where(Gamma < 1e-3, np.nan, Gamma)
+                dG = Wmean.values - Wdiss
 
-            df_out = pd.DataFrame({
-                'speed': speed,
-                'count': count.values,
-                'W_mean': Wmean.values,
-                'W_var': Wvar.values,
-                'W_diss': Wdiss,
-                'dG': dG,
-                'Gamma': Gamma,
-                'm_eff': g_meff.values,
-                'tau_inertia': g_meff.values / Gamma,
-            }, index=pd.Index(centers, name='r_bin'))
+                df_out = pd.DataFrame({
+                    'speed': speed,
+                    'count': count.values,
+                    'W_mean': Wmean.values,
+                    'W_var': Wvar.values,
+                    'W_diss': Wdiss,
+                    'dG': dG,
+                    'Gamma': Gamma,
+                    'm_eff': g_meff.values,
+                    'tau_inertia': g_meff.values / Gamma,
+                }, index=pd.Index(centers, name='r_bin'))
 
-            per_speed_dfs.append(df_out)
+                per_speed_dfs.append(df_out)
 
-        result_df = pd.concat(per_speed_dfs).reset_index()
+            speed_df = pd.concat(per_speed_dfs).reset_index()
+            speed_df['path'] = path
+            all_data.append(speed_df)
+
+        result_df = pd.concat(all_data, ignore_index=True)
+
         return result_df
 
     def extrapolate_to_v0(self,
