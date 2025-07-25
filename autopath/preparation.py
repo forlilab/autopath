@@ -118,15 +118,18 @@ class SystemPreparation:
 
         if self.lig_ff == "ESPALOMA":
             template_generator = EspalomaTemplateGenerator(
-                molecules=ligand, forcefield="espaloma-0.3.2"
+                molecules=ligand, 
+                template_generator_kwargs = {"reference_forcefield": "openff_unconstrained-2.2.1"}
+                # forcefield="espaloma-0.3.2"
             )
         elif self.lig_ff == "SMIRNOFF":
             template_generator = SMIRNOFFTemplateGenerator(
-                molecules=ligand, forcefield="openff-1.2.0"
+                molecules=ligand, 
+                # forcefield="openff-1.2.0"
             )
         elif self.lig_ff == "GAFF":
             template_generator = GAFFTemplateGenerator(
-                molecules=ligand, forcefield="gaff-2.11"
+                molecules=ligand,
             )
 
         # add the template generator to the ff
@@ -270,7 +273,9 @@ class SystemPreparation:
 
         save_system(system, f"{self.out_dir}/system.xml")
         save_pdb(modeller.topology, modeller.positions, f"{self.out_dir}/system.pdb")
-        save_amber_topology(modeller.topology, modeller.positions, self.forcefield, self.out_dir)
+        # save_amber_topology(modeller.topology, modeller.positions, self.forcefield, 
+        #                     self.nb_cutoff, self.switchDistance, self.hydrogenMass, 
+        #                     self.out_dir)
 
         simulation_time = time.monotonic() - start_time
         logging.info(f"Finished system preparation in {simulation_time:.2f} seconds.")
