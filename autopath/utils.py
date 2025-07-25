@@ -169,6 +169,9 @@ def save_amber_topology(
     topology: app.Topology = None,
     positions: list = None,
     forcefield: app.ForceField = None,
+    nb_cutoff: openmmunit.Quantity = 1.0 * openmmunit.nanometers,
+    switchDistance: openmmunit.Quantity = 0.9 * openmmunit.nanometers,
+    hydrogenMass: openmmunit.Quantity = 3.0 * openmmunit.amu,
     out_path: str = None,
 ) -> None:
 
@@ -176,12 +179,14 @@ def save_amber_topology(
     new_system = forcefield.createSystem(
         topology,
         nonbondedMethod=app.PME,
-        nonbondedCutoff=10 * openmmunit.angstrom,
-        removeCMMotion=False,
+        nonbondedCutoff=nb_cutoff,
+        switchDistance=switchDistance,
+        removeCMMotion=True,
         rigidWater=False,
-        hydrogenMass=3.0 * openmmunit.amu,
+        hydrogenMass=hydrogenMass,
+        constraints=app.HBonds,
     )
-
+    
     parmed_structure = parmed.openmm.topsystem.load_topology(
         topology, new_system, positions
     )
@@ -429,20 +434,22 @@ def get_ligand_anchor_atoms(
     pocket = u.select_atoms(pocket_sel)
     anchor = []
 
-    if mode == 'ha':
-        anchor = ligand_full.indices
-        mol = ligand_full.convert_to("RDKIT")
+    if mode == 'lig_ha':
+        ligand_ha = u.select_atoms(f"resname {lig_resname} and not name H*")
+        anchor =[ligand_ha.atoms[i].index for i in range(len(ligand_ha))]
+        # mol = ligand_full.convert_to("RDKIT")
+        # sel_atoms = mol.GetAtoms()
 
     if mode == "murcko":
         ligand, anchor_indices, mol = reduce_to_murcko_scaffold(u, lig_resname, img_name)
         anchor = [ligand.atoms[i].index for i in range(len(ligand))]
 
-    elif mode == "com":
+    elif mode == "lig_com":
         com = ligand.center_of_mass()
         dists = np.linalg.norm(ligand.positions - com, axis=1)
         anchor = ligand.atoms[np.argsort(dists)[:n_atoms]].indices
 
-    elif mode == "closest":
+    elif mode == "pocket_closest":
         pocket_com = pocket.center_of_mass()
         dists = np.linalg.norm(ligand.positions - pocket_com, axis=1)
         anchor = ligand.atoms[np.argsort(dists)[:n_atoms]].indices
@@ -675,7 +682,8 @@ def plot_atomic_rmsf(u, lig_resname:str='UNK', outname:str='rmsf.png', log_rmsf:
     probe_mol = lig_select.convert_to('RDKIT')
     probe_mol.Compute2DCoords()
     probe_mol = Chem.RemoveHs(probe_mol)
-    fig = SimilarityMaps.GetSimilarityMapFromWeights(probe_mol, r.rmsf, step=0.01, alpha=0.3, contourLines=5) 
+    fig = SimilarityMaps.GetSimilarityMapFromWeights(probe_mol, r.rmsf,
+                                                     scale=2, step=0.01, alpha=0.3, contourLines=5) 
     fig.savefig(outname, bbox_inches='tight')
     
     # Optionally, log the RMSF values for further analysis
