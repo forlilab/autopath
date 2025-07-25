@@ -11,6 +11,7 @@
     "preparation": {
         "run_preparation": true,
         "forcefield": ["amber14/protein.ff14SB.xml", "amber14/tip3pfb.xml", "amber/tip3p_HFE_multivalent.xml"],
+        "hydrogenMass": 3.0,
         "lig_ff": "espaloma",
         "boxShape": "dodecahedron",
         "padding": 1.2,

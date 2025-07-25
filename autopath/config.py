@@ -26,6 +26,7 @@ class Config(object):
             "amber14/tip3pfb.xml",
             "amber/tip3p_HFE_multivalent.xml",
         ],
+        hydrogenMass: float = 3.0,  # amu
         lig_ff: str = "espaloma",
         boxShape: str = "dodecahedron",
         padding: float = 1.0,
@@ -64,6 +65,7 @@ class Config(object):
         # Preparation
         self.run_preparation = run_preparation
         self.forcefield = forcefield
+        self.hydrogenMass = hydrogenMass
         self.lig_ff = lig_ff
         self.boxShape = boxShape
         self.padding = padding

@@ -64,6 +64,7 @@ def main():
         # Preparation
         run_preparation=config.run_preparation,
         forcefield=config.forcefield,
+        hydrogenMass=config.hydrogenMass,
         lig_ff=config.lig_ff,
         boxShape=config.boxShape,
         padding=config.padding,
