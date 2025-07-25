@@ -310,7 +310,7 @@ class Equilibration:
         minimized_positions = simulation.context.getState(getPositions=True).getPositions()
         
         # remove existing restraint forces
-        system = remove_openmm_force(system, "k_")
+        self.system = remove_openmm_force(self.system, "k_")
 
         # Re-add the restraints with updated positions.
         # Because the forces exist this will update them, there's no need to remove them first (I think).
@@ -351,7 +351,7 @@ class Equilibration:
         )
 
         # remove the restraint forces after equilibration
-        system = remove_openmm_force(system, "k_")
+        self.system = remove_openmm_force(self.system, "k_")
         # print_current_forces(self.system)
 
         final_positions = simulation.context.getState(getPositions=True).getPositions()
