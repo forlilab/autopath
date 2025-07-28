@@ -9,7 +9,8 @@ import matplotlib.style as style
 style.use("fivethirtyeight")
 
 from rdkit import Chem
-from rdkit.Chem.Draw import SimilarityMaps
+from rdkit.Chem.Draw import rdMolDraw2D, SimilarityMaps
+
 import MDAnalysis as mda
 from MDAnalysis.analysis.rms import RMSF
 
@@ -33,13 +34,28 @@ def plot_atomic_rmsf(u, lig_resname:str='UNK', outname:str='rmsf.png', log_rmsf:
         This function does not return any value. It saves the RMSF plot and optionally logs the RMSF values.
     """
 
+    if outname.endswith('.svg'):
+        drawer = rdMolDraw2D.MolDraw2DSVG(300, 300)
+    else:
+        # Default to PNG if the file extension is not SVG
+        outname = outname.replace('.svg', '.png')
+        drawer = rdMolDraw2D.MolDraw2DCairo(300, 300)
+
     lig_select = u.select_atoms(f'resname {lig_resname}')
     r = RMSF(atomgroup=lig_select).run()
     probe_mol = lig_select.convert_to('RDKIT')
     probe_mol.Compute2DCoords()
-    probe_mol = Chem.RemoveHs(probe_mol)
-    fig = SimilarityMaps.GetSimilarityMapFromWeights(probe_mol, r.rmsf, step=0.01, alpha=0.3, contourLines=5) 
-    fig.savefig(outname, bbox_inches='tight')
+    # probe_mol = Chem.RemoveHs(probe_mol)
+    assert len(r.rmsf) == probe_mol.GetNumAtoms(), "Mismatch between RMSF length and atom count"
+
+    fig = SimilarityMaps.GetSimilarityMapFromWeights(mol=probe_mol, weights=r.rmsf.tolist(), draw2d=drawer)#, step=0.01, alpha=0.3, contourLines=5, scaling=1.0) 
+    fig.FinishDrawing()
+    if outname.endswith('.svg'):
+        fig = fig.GetDrawingText()
+        with open(outname,'w+') as outf:
+            outf.write(fig)
+    else:
+        fig.savefig(outname, bbox_inches='tight')
     
     # Optionally, log the RMSF values for further analysis
     if log_rmsf:
