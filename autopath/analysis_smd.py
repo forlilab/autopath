@@ -37,8 +37,9 @@ class SteeredMDAnalysis:
                  min_points: int = 10,
                  temperature: float = 300, #K
                  timestep: float = 0.004, #ps
+                 dist_minmax: tuple = (0.0, 2.5), #nm
                  cluster_method: str = 'DTW',
-                 dist_column: str = 'r_target(nm)',
+                 dist_column: str = 'r_before(nm)',
                  work_column: str = 'work(kJ/mol)',
                  force_column: str = 'force(kJ/mol/nm)',
                  meff_column: str = 'm_eff(dalton)'
@@ -64,15 +65,19 @@ class SteeredMDAnalysis:
         self.meff_column = meff_column
 
         self.bin_width = bin_width
+        self.dist_minmax = dist_minmax  # default min/max for distance bins
 
         # assemble the master dataframe
         raw_data = self.load_logs(log_files)
 
-        # filter for r_target < 2.5 nm
-        # raw_data = raw_data.loc[raw_data[dist_column] < 2.0]
-        # raw_data = raw_data.loc[raw_data['C'] >= 2]  # filter by residue coordination
+        if self.dist_minmax is not None:
+            print(f'WARNING: Filtering data by distance range: {self.dist_minmax}')
+            raw_data = raw_data[(raw_data[self.dist_column] >= self.dist_minmax[0]) & 
+                                          (raw_data[self.dist_column] <= self.dist_minmax[1])]
+            # raw_data = raw_data.loc[raw_data['C'] >= 2]  # filter by residue coordination
 
         self.raw_data = self.bin_data(raw_data, bin_width, min_points)
+
         if cluster_method == 'DTW':
             outdir = os.path.join(os.path.dirname(log_files[0]), 'clustering_DTW')
             os.makedirs(outdir, exist_ok=True)
@@ -167,10 +172,10 @@ class SteeredMDAnalysis:
 
         if features_dict is None:
             features_dict = {
-                            'r_before(nm)': (1.5, 2.5),
+                            f'{self.dist_column}': (1.5, 2.5),
                             'NC':(1, 70), # number of contacts
                             # 'RC':(1, None), # residue coordination
-                            # 'work(kJ/mol)': (None, None)
+                            f'{self.work_column}': (None, None)
                             }
             
         features = list(features_dict.keys())
