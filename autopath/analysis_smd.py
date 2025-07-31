@@ -7,6 +7,7 @@ from scipy.signal import savgol_filter
 from scipy.interpolate import UnivariateSpline
 from scipy.ndimage import gaussian_filter1d
 from scipy.stats import linregress
+from scipy.integrate import cumulative_trapezoid
 import statsmodels.formula.api as smf
 
 from dtaidistance import dtw_ndim
@@ -67,6 +68,7 @@ class SteeredMDAnalysis:
         self.bin_width = bin_width
         self.dist_minmax = dist_minmax  # default min/max for distance bins
 
+        recalculate_work =True
         # assemble the master dataframe
         raw_data = self.load_logs(log_files)
 
@@ -75,6 +77,9 @@ class SteeredMDAnalysis:
             raw_data = raw_data[(raw_data[self.dist_column] >= self.dist_minmax[0]) & 
                                           (raw_data[self.dist_column] <= self.dist_minmax[1])]
             # raw_data = raw_data.loc[raw_data['C'] >= 2]  # filter by residue coordination
+
+        if recalculate_work:
+            raw_data = self.integrate_force_dx(raw_data)
 
         self.raw_data = self.bin_data(raw_data, bin_width, min_points)
 
@@ -114,6 +119,17 @@ class SteeredMDAnalysis:
             print("No data loaded from log files.")
             return None
         return pd.concat(list(raw_data))
+
+    def integrate_force_dx(self, raw_data) -> pd.DataFrame:
+        """Integrate the force over distance to compute work done.
+        This will overwrite the work column in the raw_data DataFrame.
+        """
+        grouped = raw_data.groupby("trajname")
+        for traj, group in grouped:
+            work = cumulative_trapezoid(group[self.force_column], group[self.dist_column], initial=0.0)
+            raw_data.loc[raw_data['trajname'] == traj, self.work_column] = work
+        
+        return raw_data
 
     def bin_data(self, 
                  raw_data: pd.DataFrame,
@@ -440,7 +456,7 @@ class SteeredMDAnalysis:
 
     def extrapolate_to_v0(self,
                             df: pd.DataFrame = None,
-                            param_col: str = 'W_diss',
+                            param_cols: list[str]=['Wdiss_diss_gmm'],
                             speeds: list[float] = None,
                             mixed_models: bool = False
                             ) -> pd.DataFrame:
@@ -448,8 +464,6 @@ class SteeredMDAnalysis:
         """Extrapolate a given parameter to zero speed using linear regression. 
         This method groups the data by speed and fits a linear regression to the
         param vs speed for each bin."""
-
-        # param_col = 'W_mean'
 
         if df is None:
             df = self.estimate_dG_Cumulative()
@@ -482,34 +496,39 @@ class SteeredMDAnalysis:
                 
         else:
             results = []
-            for r_bin, group in df.groupby('r_bin'):
-                speeds = group['speed'].values
-                means = group[param_col].values
+            for param_col in param_cols:
+                _df = []
+                for r_bin, group in df.groupby('r_bin'):
+                    speeds = group['speed'].values
+                    means = group[param_col].values
 
-                # if len(speeds) < 2:
-                #     continue
+                    # if len(speeds) < 2:
+                    #     continue
 
-                lr_results = linregress(speeds, means)
-                results.append({
-                    'r_bin': r_bin,
-                    f"{param_col}_v0_intercept": lr_results.intercept,
-                    f"{param_col}_v0_slope": lr_results.slope,
-                    f"{param_col}_v0_intercept_se": lr_results.intercept_stderr,
-                    f"{param_col}_v0_slope_se": lr_results.stderr,
-                    'R2': lr_results.rvalue**2,
-                    'n_speeds': len(speeds)
-                })
+                    lr_results = linregress(speeds, means)
+                    _df.append({
+                        'r_bin': r_bin,
+                        f"{param_col}_v0_intercept": lr_results.intercept,
+                        f"{param_col}_v0_slope": lr_results.slope,
+                        f"{param_col}_v0_intercept_se": lr_results.intercept_stderr,
+                        f"{param_col}_v0_slope_se": lr_results.stderr,
+                        'R2': lr_results.rvalue**2,
+                        'n_speeds': len(speeds)
+                    })
 
-        if len(results) == 0:
-            print("No valid extrapolation results found.")
-            return pd.DataFrame()
-        
-        df = pd.DataFrame(results).set_index("r_bin")
+                if len(_df) == 0:
+                    print(f"No valid extrapolation results found for {param_col}.")
+
+                results.append(pd.DataFrame(_df))
+
+            results = pd.concat(results, axis=1)
+            # drop duplicate 'r_bin' adn speed columns
+            results = results.loc[:, ~results.columns.duplicated()]
 
         # Calculate the diffusion coefficient D(x) using the friction coefficient F(x)
         # df['D(x)'] = self.kB * self.temp / df['F(x)']
 
-        return df
+        return results
     
     def compute_gamma_from_fac(self, 
                                force_col='force(kJ/mol/nm)',
