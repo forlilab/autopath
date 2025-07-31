@@ -69,6 +69,7 @@ class SteeredMDAnalysis:
         self.dist_minmax = dist_minmax  # default min/max for distance bins
 
         recalculate_work =True
+
         # assemble the master dataframe
         raw_data = self.load_logs(log_files)
 
@@ -79,6 +80,7 @@ class SteeredMDAnalysis:
             # raw_data = raw_data.loc[raw_data['C'] >= 2]  # filter by residue coordination
 
         if recalculate_work:
+            print('WARNING: Recalculating work from force and distance.')
             raw_data = self.integrate_force_dx(raw_data)
 
         self.raw_data = self.bin_data(raw_data, bin_width, min_points)
@@ -119,7 +121,7 @@ class SteeredMDAnalysis:
             print("No data loaded from log files.")
             return None
         return pd.concat(list(raw_data))
-
+    
     def integrate_force_dx(self, raw_data) -> pd.DataFrame:
         """Integrate the force over distance to compute work done.
         This will overwrite the work column in the raw_data DataFrame.
@@ -130,7 +132,7 @@ class SteeredMDAnalysis:
             raw_data.loc[raw_data['trajname'] == traj, self.work_column] = work
         
         return raw_data
-
+    
     def bin_data(self, 
                  raw_data: pd.DataFrame,
                  bin_width: float=0.05, #nm
