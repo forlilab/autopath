@@ -13,6 +13,7 @@ from dtaidistance import dtw_ndim
 import kmedoids
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.metrics import silhouette_score
+from sklearn.mixture import GaussianMixture
 
 import seaborn as sns
 
@@ -27,7 +28,6 @@ class SteeredMDAnalysis:
     """Class to analyze Steered Molecular Dynamics (sMD) data, mostly within the dcTMD framework.
     For more information on the dcTMD see...
 
-    
     
     """
     def __init__(self, 
@@ -69,8 +69,8 @@ class SteeredMDAnalysis:
         raw_data = self.load_logs(log_files)
 
         # filter for r_target < 2.5 nm
-        # raw_data = raw_data.loc[raw_data[dist_column] < 2.5] 
-        raw_data = raw_data.loc[raw_data['C'] >= 2]  # filter by residue coordination
+        # raw_data = raw_data.loc[raw_data[dist_column] < 2.0]
+        # raw_data = raw_data.loc[raw_data['C'] >= 2]  # filter by residue coordination
 
         self.raw_data = self.bin_data(raw_data, bin_width, min_points)
         if cluster_method == 'DTW':
@@ -168,8 +168,9 @@ class SteeredMDAnalysis:
         if features_dict is None:
             features_dict = {
                             'r_before(nm)': (1.5, 2.5),
-                            # 'C':(1, None), # coordination number
-                            'work(kJ/mol)': (None, None)
+                            'NC':(1, 70), # number of contacts
+                            # 'RC':(1, None), # residue coordination
+                            # 'work(kJ/mol)': (None, None)
                             }
             
         features = list(features_dict.keys())
@@ -186,7 +187,7 @@ class SteeredMDAnalysis:
             
         data[features] = data[features].round(2)  # round features to 2 decimal places
         if 'work(kJ/mol)' in features:
-            data['work(kJ/mol)'] = data['work(kJ/mol)'] #/ data['speed']  # normalize work by speed
+            data['work(kJ/mol)'] = data['work(kJ/mol)'] / data['speed']  # normalize work by speed
 
         # Filter data based on feature ranges
         filters = []
@@ -199,7 +200,9 @@ class SteeredMDAnalysis:
                 filters.append(data[f] < h)
         if filters:
             data = data[np.logical_and.reduce(filters)]
-        data[features] = StandardScaler().fit_transform(data[features])
+            
+        data = data.copy()
+        data[features] = MinMaxScaler().fit_transform(data[features])  # normalize features to [0, 1]
 
         paths = []
         # Extract paths for each trajectory and measure distance
@@ -272,25 +275,43 @@ class SteeredMDAnalysis:
 
         return raw_data
 
-    def estimate_dG_Jarzynski(self, )-> pd.DataFrame:
+    def estimate_dG_Jarzynski(self,
+                              df: pd.DataFrame = None,
+                              work_column:str=None,
+                              speeds: list[float] = None,
+                              )-> pd.DataFrame:
         """Estimate the free energy difference using Jarzynski's equality.
         This method computes the free energy difference for each speed
         based on the work done during the pulling simulation"""
 
-        centers = self.raw_data['r_bin'].unique()
+
+        if df is None:
+            df = self.raw_data.copy()
+        # Filter out speeds if provided. You could only want to fit specific (low) speeds
+        if speeds is not None:
+            df = df[df['speed'].isin(speeds)]
+
+        if work_column is None:
+            work_column = self.work_column
+            
         # Ensure centers are sorted in ascending order
+        centers = df['r_bin'].unique()
         centers = np.sort(centers)
+
         records = []
-        for speed, speed_data in self.raw_data.groupby('speed'):
+        for speed, speed_data in df.groupby('speed'):
             try:
-                exp_av = (speed_data.groupby('bin')[self.work_column]
+                exp_av = (speed_data.groupby('r_bin')[work_column]
                         .apply(lambda w: np.exp(-self.beta * w).mean()))
 
                 dG = -(1.0 / self.beta) * np.log(exp_av)
+                Wmean = speed_data.groupby('r_bin')[work_column].mean()
+                W_diss_Jarz = Wmean - dG
 
                 df = pd.DataFrame({
-                    'r_center(nm)': centers[dG.index],
-                    'dG_Jarz(kJ/mol)': dG.values,
+                    'r_bin': centers[dG.index],
+                    'dG_Jarz': dG.values,
+                    'W_diss_Jarz': W_diss_Jarz.values,
                     'speed': speed,
                 })
                 records.append(df)
@@ -299,40 +320,55 @@ class SteeredMDAnalysis:
                 continue
         if len(records) == 0:
             return pd.DataFrame()
+        
         return pd.concat(records, ignore_index=True)
     
-    def estimate_dG_dcWork(self, 
+    def estimate_dG_Cumulative(self, 
+                            data: pd.DataFrame = None,
                             smooth_Wdiss: bool = True,
                             fit_spline: bool = True,
+                            path_column: str = 'path',
+                            replica_column: str = 'replica',
                             inertial_correction: str = None, # "per_replica" or "per_bin"
                             ) -> pd.DataFrame:
-        """Estimate the free energy difference using the dissipated work.
+        """Estimate the free energy difference using the dissipated work approximation 
+        Cumulant expansion to the second order.
+        If you clustered the trajectories before, like using any disance based method, 
+        you can specify the path_column to group by.
         Optionally apply inertial correction via meff.
         """
+        if data is None:
+            data = self.raw_data.copy()
 
-        data = self.raw_data.copy()
         # Ensure centers are sorted in ascending order
         centers = data['r_bin'].unique()
         centers = np.sort(centers)
 
         all_data = []
-        for path in data['path'].unique():
+        for path in data[path_column].unique():
             # Filter data for the current path
-            path_data = data[data['path'] == path]
+            path_data = data[data[path_column] == path]
             per_speed_dfs = []
             for speed in path_data['speed'].unique():
                 df = path_data[path_data['speed'] == speed]
 
-                # Group by bin
-                g_work = df.groupby('bin')[self.work_column]
-                count = g_work.count().reindex(range(len(centers)), fill_value=0)
-                Wmean = g_work.mean().reindex(range(len(centers)), fill_value=np.nan)
-                Wvar = g_work.var(ddof=1).reindex(range(len(centers)), fill_value=0.0)
+                # first we aggregate per (replica, bin)
+                df_replica_bin = (
+                    df.groupby([replica_column, 'r_bin'])[self.work_column]
+                    .mean()
+                    .reset_index()
+                )
+
+                # group across replicas
+                g_work = df_replica_bin.groupby('r_bin')[self.work_column]
+                count = g_work.count().reindex(centers, fill_value=0)
+                Wmean = g_work.mean().reindex(centers, fill_value=np.nan)
+                Wvar = g_work.var(ddof=1).reindex(centers, fill_value=0.0)
 
                 # Collect m_eff
-                g_meff = pd.Series(np.nan, index=range(len(centers)))
+                g_meff = pd.Series(np.nan, index=centers)
                 if self.meff_column is not None:
-                    g_meff = df.groupby('bin')[self.meff_column].mean().reindex(range(len(centers)), fill_value=np.nan)
+                    g_meff = df.groupby('r_bin')[self.meff_column].mean().reindex(centers, fill_value=np.nan)
                 elif inertial_correction:
                     raise ValueError("Inertial correction requested but no m_eff column provided.")
 
@@ -340,12 +376,19 @@ class SteeredMDAnalysis:
                 # This is very small, only meaningful for v high speeds
                 if inertial_correction == "per_replica":
                     df['work_corr'] = df[self.work_column] - 0.5 * df[self.meff_column] * speed**2
-                    g_corr = df.groupby('bin')['work_corr']
-                    Wmean = g_corr.mean().reindex(range(len(centers)), fill_value=np.nan)
-                    Wvar = g_corr.var(ddof=1).reindex(range(len(centers)), fill_value=0.0)
+
+                    df_replica_bin = (
+                        df.groupby([replica_column, 'r_bin'])['work_corr']
+                        .mean()
+                        .reset_index()
+                    )
+
+                    g_corr = df_replica_bin.groupby('r_bin')['work_corr']
+                    Wmean = g_corr.mean().reindex(centers, fill_value=np.nan)
+                    Wvar = g_corr.var(ddof=1).reindex(centers, fill_value=0.0)
 
                 elif inertial_correction == "per_bin":
-                    Wvar = Wvar - g_meff * speed**2  # use Var[W_corr] = Var[W] - Var[inertial term]
+                    Wvar = Wvar - g_meff * speed**2  # Var[W_corr] = Var[W] - Var[inertial term]
                     Wvar = np.clip(Wvar, 0.0, None)  # make sure no negatives
 
                 # Raw dissipated work
@@ -373,8 +416,8 @@ class SteeredMDAnalysis:
                     'count': count.values,
                     'W_mean': Wmean.values,
                     'W_var': Wvar.values,
-                    'W_diss': Wdiss,
-                    'dG': dG,
+                    'W_diss_Cum': Wdiss,
+                    'dG_Cum': dG,
                     'Gamma': Gamma,
                     'm_eff': g_meff.values,
                     'tau_inertia': g_meff.values / Gamma,
@@ -383,7 +426,7 @@ class SteeredMDAnalysis:
                 per_speed_dfs.append(df_out)
 
             speed_df = pd.concat(per_speed_dfs).reset_index()
-            speed_df['path'] = path
+            speed_df[path_column] = path
             all_data.append(speed_df)
 
         result_df = pd.concat(all_data, ignore_index=True)
@@ -392,24 +435,28 @@ class SteeredMDAnalysis:
 
     def extrapolate_to_v0(self,
                             df: pd.DataFrame = None,
-                            param_col: str = 'W_mean',
+                            param_col: str = 'W_diss',
                             speeds: list[float] = None,
                             mixed_models: bool = False
                             ) -> pd.DataFrame:
 
-        """Extrapolate a the mean work to zero speed using linear regression. 
+        """Extrapolate a given parameter to zero speed using linear regression. 
         This method groups the data by speed and fits a linear regression to the
         param vs speed for each bin."""
 
         # param_col = 'W_mean'
 
         if df is None:
-            df = self.estimate_dG_dcWork()
+            df = self.estimate_dG_Cumulative()
 
         # Filter out speeds if provided. You could only want to fit specific (low) speeds
         if speeds is not None:
             df = df[df['speed'].isin(speeds)]
 
+        if df['speed'].nunique() < 2:
+            print("Not enough speeds for extrapolation.")
+            return pd.DataFrame()
+        
         # FIXME 
         if mixed_models:
             results = []
@@ -423,8 +470,8 @@ class SteeredMDAnalysis:
                 slope = result.fe_params["speed"] + rand_eff["speed"]
                 results.append({
                 "r_bin": r_bin,
-                "dG_extrapolated": intercept,
-                "F(x)": slope,
+                f"{param_col}_v0_intercept": intercept,
+                f"{param_col}_v0_slope": slope,
                 "R2": 1.0
             })
                 
@@ -440,10 +487,10 @@ class SteeredMDAnalysis:
                 lr_results = linregress(speeds, means)
                 results.append({
                     'r_bin': r_bin,
-                    'dG_extrapolated': lr_results.intercept,
-                    'F(x)': lr_results.slope,
-                    'se_dG': lr_results.intercept_stderr,
-                    'se_F(x)': lr_results.stderr,
+                    f"{param_col}_v0_intercept": lr_results.intercept,
+                    f"{param_col}_v0_slope": lr_results.slope,
+                    f"{param_col}_v0_intercept_se": lr_results.intercept_stderr,
+                    f"{param_col}_v0_slope_se": lr_results.stderr,
                     'R2': lr_results.rvalue**2,
                     'n_speeds': len(speeds)
                 })
@@ -455,7 +502,7 @@ class SteeredMDAnalysis:
         df = pd.DataFrame(results).set_index("r_bin")
 
         # Calculate the diffusion coefficient D(x) using the friction coefficient F(x)
-        df['D(x)'] = self.kB * self.temp / df['F(x)']
+        # df['D(x)'] = self.kB * self.temp / df['F(x)']
 
         return df
     
@@ -753,3 +800,58 @@ class SteeredMDAnalysis:
             print(f"Error plotting extrapolated parameter: {e}")
             return None
         return
+    
+    @staticmethod
+    def fit_gmm_to_work_values(raw_work,
+                                max_K:int=5, 
+                                max_iter:int=1000,
+                                covariance_type:str='full',
+                                random_state:int=42
+                                ):   
+        """Fit GMMs to the work values and return the main parameters."""
+
+        # TODO maybe we dont need the elbow loop and can approximate K with the dirichlet process
+
+        raw_work = raw_work.reshape(-1, 1) # reshape for GMM
+        n_samples = raw_work.shape[0]
+
+        scores = []
+        models = []
+
+        for n in range(1, max_K):
+            if n > n_samples:
+                break  # can't fit more components than points
+
+            gmm = GaussianMixture(
+                n_components=n,
+                covariance_type=covariance_type,  # 'full' may overfit for small datasets
+                max_iter=max_iter,
+                init_params="k-means++",
+                random_state=random_state,
+                reg_covar=1e-6  # regularization to avoid singular covariance matrices
+            )
+            gmm.fit(raw_work)
+            models.append(gmm)
+
+            scores.append(gmm.bic(raw_work))
+            
+            # labels = gmm.predict(raw_work)
+            # if len(set(labels)) > 1: # silhouette score is not defined for single cluster
+            #     scores.append(1-(silhouette_score(raw_work, labels)))
+            # else:
+            #     scores.append(-1)
+                
+        best_gmm = models[np.argmin(scores)]
+
+        variances = best_gmm.covariances_.reshape(best_gmm.n_components, -1).flatten()
+
+        augmented_data = {
+            "GMM_n_components": best_gmm.n_components,
+            "GMM_scores": scores,
+            "GMM_weights": best_gmm.weights_,
+            "GMM_means": best_gmm.means_,
+            "GMM_variances": variances,
+            "GMM_posteriors": best_gmm.predict_proba(raw_work),
+            "GMM_labels": best_gmm.predict(raw_work),
+        }
+        return augmented_data
