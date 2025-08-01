@@ -8,6 +8,8 @@ from scipy.interpolate import UnivariateSpline
 from scipy.ndimage import gaussian_filter1d
 from scipy.stats import linregress
 from scipy.integrate import cumulative_trapezoid
+from scipy import special
+
 import statsmodels.formula.api as smf
 
 from dtaidistance import dtw_ndim
@@ -43,7 +45,8 @@ class SteeredMDAnalysis:
                  dist_column: str = 'r_before(nm)',
                  work_column: str = 'work(kJ/mol)',
                  force_column: str = 'force(kJ/mol/nm)',
-                 meff_column: str = 'm_eff(dalton)'
+                 meff_column: str = 'm_eff(dalton)',
+                 seed: int = 42
                  ):
 
         """Initialize the SteeredMDAnalysis class with log files and parameters."""
@@ -67,30 +70,12 @@ class SteeredMDAnalysis:
 
         self.bin_width = bin_width
         self.dist_minmax = dist_minmax  # default min/max for distance bins
+        self.min_points = min_points  # minimum points per bin to keep it
+        self.log_files = log_files
 
-        recalculate_work =True
+        self.seed = seed
+        self.cluster_method = cluster_method
 
-        # assemble the master dataframe
-        raw_data = self.load_logs(log_files)
-
-        if self.dist_minmax is not None:
-            print(f'WARNING: Filtering data by distance range: {self.dist_minmax}')
-            raw_data = raw_data[(raw_data[self.dist_column] >= self.dist_minmax[0]) & 
-                                          (raw_data[self.dist_column] <= self.dist_minmax[1])]
-            # raw_data = raw_data.loc[raw_data['C'] >= 2]  # filter by residue coordination
-
-        if recalculate_work:
-            print('WARNING: Recalculating work from force and distance.')
-            raw_data = self.integrate_force_dx(raw_data)
-
-        self.raw_data = self.bin_data(raw_data, bin_width, min_points)
-
-        if cluster_method == 'DTW':
-            outdir = os.path.join(os.path.dirname(log_files[0]), 'clustering_DTW')
-            os.makedirs(outdir, exist_ok=True)
-            self.raw_data = self.cluster_trajectories_DTW(self.raw_data, K=None, outdir=outdir)
-        else:
-            self.raw_data['path'] = 1 # default to single cluster if no clustering method is specified
         return
 
     def load_logs(self, log_files: list[str]) -> pd.DataFrame:
@@ -153,7 +138,7 @@ class SteeredMDAnalysis:
         #these are the center each point belongs to
         raw_data['r_bin'] = raw_data['bin'].map(lambda b: centers[b] if b >= 0 and b < len(centers) else np.nan)
 
-        return raw_data
+        return raw_data, centers
 
     def filter_low_count_bins(self, raw_data, min_points):
         """Filter low count bins per speed. This function filters out bins 
@@ -209,8 +194,8 @@ class SteeredMDAnalysis:
                 raise ValueError(f"Feature '{feature}' not found in data columns.")
             
         data[features] = data[features].round(2)  # round features to 2 decimal places
-        if 'work(kJ/mol)' in features:
-            data['work(kJ/mol)'] = data['work(kJ/mol)'] / data['speed']  # normalize work by speed
+        if self.work_column in features:
+            data[self.work_column] = data[self.work_column] / data['speed']  # normalize work by speed
 
         # Filter data based on feature ranges
         filters = []
@@ -297,6 +282,141 @@ class SteeredMDAnalysis:
         plt.close()
 
         return raw_data
+
+
+    def run_analysis(self, 
+                     speeds: list[float] = None,
+                     temperature: float = None,
+                     dist_minmax: tuple = None,
+                     )-> pd.DataFrame:
+        """Run the analysis on the raw data.
+        This method computes the free energy difference using Jarzynski's equality
+        and the dissipated work approximation.
+        """
+        # sometimes you wanna run the analysis with a different temperature or intervals
+        if temperature is not None:
+            self.temp = temperature
+            self.beta = 1.0 / (self.kB * self.temp)
+
+        if dist_minmax is not None:
+            self.dist_minmax = dist_minmax
+
+        # assemble the master dataframe
+        raw_data = self.load_logs(self.log_files)
+
+        if speeds is not None:
+            print(f'WARNING: Filtering data by speeds: {speeds}')
+            raw_data = raw_data[raw_data['speed'].isin(speeds)]
+
+        if self.dist_minmax is not None:
+            print(f'WARNING: Filtering data by distance range: {self.dist_minmax}')
+            raw_data = raw_data[(raw_data[self.dist_column] >= self.dist_minmax[0]) & 
+                                          (raw_data[self.dist_column] <= self.dist_minmax[1])]
+            # raw_data = raw_data.loc[raw_data['C'] >= 2]  # filter by residue coordination
+
+        print('WARNING: Recalculating work from force and distance.')
+        # raw_data = self.integrate_force_dx(raw_data)
+
+        self.raw_data, centers = self.bin_data(raw_data, self.bin_width, self.min_points)
+
+        if self.cluster_method == 'DTW':
+            outdir = os.path.join(os.path.dirname(self.log_files[0]), 'clustering_DTW')
+            os.makedirs(outdir, exist_ok=True)
+            self.raw_data = self.cluster_trajectories_DTW(self.raw_data, K=None, outdir=outdir)
+        else:
+            self.raw_data['path'] = 1 # default to single cluster if no clustering method is specified
+
+        results = pd.DataFrame(columns=[
+            'r_bin', 'speed', 'Wmean_raw', 'Wdiss_raw', 
+            'dG_Jarzynski', 'dG_Jarzynski_gmm', 
+            'Wmean_mix', 'dG_diss_gmm', 'Wdiss_diss_gmm'
+        ])
+
+        smoothing_sigma = 1.0  # smoothing factor for gaussian filter
+        use_GMM = True
+        GMM_max_components = 5 # number of GMM components to try
+        GMM_gauss_cutoff = 0.1 # # cutoff for GMM weights, below which we ignore the component
+
+        results = []
+        for (r_bin, speed), group in self.raw_data.groupby(["r_bin", "speed"]):
+            work = group[self.work_column].values
+
+            replica_W = group.groupby(["replica"])[self.work_column].mean().values
+            Wmean_raw = replica_W.mean()
+            var_raw = replica_W.var(ddof=1)
+
+            Wdiss_raw = 0.5 * self.beta * var_raw
+
+            # plain Jarzynski
+            dG_Jarzynski = -(1/self.beta) * np.log(np.exp(-self.beta * replica_W).mean())
+
+            # GMM branch
+            if use_GMM:
+                gmm_dict = self.fit_gmm_to_work_values(work,
+                                                    max_K=GMM_max_components,
+                                                    random_state=self.seed)
+
+                #These have shape (K,) for K components
+                w = np.asarray(gmm_dict["GMM_weights"])          # α_k
+                mu = np.asarray(gmm_dict["GMM_means"]).ravel()    # μ_k
+                sig2 = np.asarray(gmm_dict["GMM_variances"])       # σ_k²
+
+                # cumulant (second order) per component
+                dG_k = mu - 0.5 * self.beta * sig2 # now this is exact for each Gaussian
+
+                # mask small nonequilibrium weights, which means ignore small gaussians
+                w = np.where(w < GMM_gauss_cutoff, 0.0, w)
+
+                # Transfor the weights from the non-equilibrium populations
+                p_eq = w * np.exp(-self.beta * dG_k)
+                p_eq /= p_eq.sum()
+                # p_eq = w
+
+                # mixture cumulant estimate. Combine the dG per component
+                dG_diss_gmm  = np.dot(p_eq, dG_k)
+                Wdiss_diss_gmm = np.dot(p_eq, mu - dG_k) # = 0.5 β Σ p_eq σ²
+
+                # exact mixture Jarzynski
+                # This is the exact Jarzynski estimator for the Gaussian mixture in each bin.
+                # If k=1 this collapses to the exact Jarzynski estimator for the single gaussian
+                # and this can be approximated by cumulant expansion to the second order, what the dcTMD paper does.
+                log_terms = -self.beta * mu + 0.5 * self.beta**2 * sig2
+                log_Z = special.logsumexp(log_terms, b=w)          # log ⟨e^{-βW}⟩
+                dG_Jarzynski_gmm = -log_Z / self.beta
+
+                # mixture mean
+                Wmean_mix = np.dot(p_eq, mu)
+
+            results.append({
+                'r_bin': r_bin,
+                'speed': speed,
+                'Wmean_raw': Wmean_raw,
+                'Wdiss_raw': Wdiss_raw,
+                'dG_Jarzynski': dG_Jarzynski,
+                'dG_Jarzynski_gmm': dG_Jarzynski_gmm,
+                'Wmean_mix': Wmean_mix,
+                'dG_diss_gmm': dG_diss_gmm,
+                'Wdiss_diss_gmm': Wdiss_diss_gmm,
+            })
+
+        results = pd.DataFrame(results)
+
+        if smoothing_sigma is not None:
+            for col in results.columns:
+                if col not in ['r_bin', 'speed']:
+                    results[col] = gaussian_filter1d(results[col], sigma=smoothing_sigma)
+
+        # Now compute the rest of the properties from the smoothed results
+        results['dG_diss'] = results['Wmean_raw'] - results['Wdiss_raw']
+        results['Wdiss_Jarzynski'] = results['Wmean_raw'] - results['dG_Jarzynski']
+        results['Wdiss_Jarzynski_gmm'] = results['Wmean_mix'] - results['dG_Jarzynski_gmm']
+
+        return results
+
+
+
+
+
 
     def estimate_dG_Jarzynski(self,
                               df: pd.DataFrame = None,
