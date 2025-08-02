@@ -26,6 +26,7 @@ import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 # style.use("fivethirtyeight")
 
+from collections import defaultdict
 
 class SteeredMDAnalysis:
     """Class to analyze Steered Molecular Dynamics (sMD) data, mostly within the dcTMD framework.
@@ -133,7 +134,7 @@ class SteeredMDAnalysis:
         raw_data['bin'] = np.digitize(raw_data[self.dist_column], edges) - 1
         raw_data = raw_data[(raw_data['bin'] >= 0) & (raw_data['bin'] < len(centers))]
 
-        raw_data = self.filter_low_count_bins(raw_data, min_points)
+        # raw_data = self.filter_low_count_bins(raw_data, min_points)
 
         #these are the center each point belongs to
         raw_data['r_bin'] = raw_data['bin'].map(lambda b: centers[b] if b >= 0 and b < len(centers) else np.nan)
@@ -288,11 +289,18 @@ class SteeredMDAnalysis:
                      speeds: list[float] = None,
                      temperature: float = None,
                      dist_minmax: tuple = None,
+                     fit_GMM: bool = True
                      )-> pd.DataFrame:
+        
         """Run the analysis on the raw data.
         This method computes the free energy difference using Jarzynski's equality
         and the dissipated work approximation.
         """
+        
+        smoothing_sigma = 2.0  # smoothing factor for gaussian filter
+        GMM_max_components = 3 # number of GMM components to try
+        GMM_gauss_cutoff = 0.25 # # cutoff for GMM weights, below which we ignore the component
+
         # sometimes you wanna run the analysis with a different temperature or intervals
         if temperature is not None:
             self.temp = temperature
@@ -326,20 +334,10 @@ class SteeredMDAnalysis:
         else:
             self.raw_data['path'] = 1 # default to single cluster if no clustering method is specified
 
-        results = pd.DataFrame(columns=[
-            'r_bin', 'speed', 'Wmean_raw', 'Wdiss_raw', 
-            'dG_Jarzynski', 'dG_Jarzynski_gmm', 
-            'Wmean_mix', 'dG_diss_gmm', 'Wdiss_diss_gmm'
-        ])
-
-        smoothing_sigma = 1.0  # smoothing factor for gaussian filter
-        use_GMM = True
-        GMM_max_components = 5 # number of GMM components to try
-        GMM_gauss_cutoff = 0.1 # # cutoff for GMM weights, below which we ignore the component
-
         results = []
+        gmm_results = defaultdict(dict)  # to store GMM results per bin and speed
         for (r_bin, speed), group in self.raw_data.groupby(["r_bin", "speed"]):
-            work = group[self.work_column].values
+            raw_W = group[self.work_column].values
 
             replica_W = group.groupby(["replica"])[self.work_column].mean().values
             Wmean_raw = replica_W.mean()
@@ -350,11 +348,16 @@ class SteeredMDAnalysis:
             # plain Jarzynski
             dG_Jarzynski = -(1/self.beta) * np.log(np.exp(-self.beta * replica_W).mean())
 
+            dG_Jarzynski_gmm = Wdiss_diss_gmm = Wmean_mix = dG_diss_gmm = Wdiss_diss_gmm = np.nan
+
             # GMM branch
-            if use_GMM:
-                gmm_dict = self.fit_gmm_to_work_values(work,
-                                                    max_K=GMM_max_components,
-                                                    random_state=self.seed)
+            if fit_GMM:
+                if len(replica_W) < 2:
+                    print(f"Skipping GMM fitting for r_bin {r_bin}, speed {speed} due to insufficient data.")
+                    continue
+                gmm_dict = self.fit_gmm_to_work_values(replica_W,
+                                                        max_K=GMM_max_components,
+                                                        random_state=self.seed)
 
                 #These have shape (K,) for K components
                 w = np.asarray(gmm_dict["GMM_weights"])          # α_k
@@ -370,7 +373,6 @@ class SteeredMDAnalysis:
                 # Transfor the weights from the non-equilibrium populations
                 p_eq = w * np.exp(-self.beta * dG_k)
                 p_eq /= p_eq.sum()
-                # p_eq = w
 
                 # mixture cumulant estimate. Combine the dG per component
                 dG_diss_gmm  = np.dot(p_eq, dG_k)
@@ -387,9 +389,20 @@ class SteeredMDAnalysis:
                 # mixture mean
                 Wmean_mix = np.dot(p_eq, mu)
 
+                # Collect results in a dictionary for plotting 
+                gmm_results[r_bin][speed] = {'GMM_neq_weights': w,
+                                             'GMM_eq_weights': p_eq,
+                                             'raw_W': raw_W,
+                                             'replica_W': replica_W,
+                                             'GMM_means': mu,
+                                             'GMM_variances': sig2,
+                                             'Wmean_mix': Wmean_mix
+                                            }
+            # build this partial dataframe
             results.append({
                 'r_bin': r_bin,
                 'speed': speed,
+                'replica_W': replica_W,
                 'Wmean_raw': Wmean_raw,
                 'Wdiss_raw': Wdiss_raw,
                 'dG_Jarzynski': dG_Jarzynski,
@@ -401,17 +414,20 @@ class SteeredMDAnalysis:
 
         results = pd.DataFrame(results)
 
+        # Smooth the results
         if smoothing_sigma is not None:
-            for col in results.columns:
-                if col not in ['r_bin', 'speed']:
-                    results[col] = gaussian_filter1d(results[col], sigma=smoothing_sigma)
+            cols_to_smooth = ['Wmean_raw', 'Wdiss_raw', 'dG_Jarzynski', 'dG_Jarzynski_gmm', 'Wmean_mix', 'Wdiss_diss_gmm']
+            for speed, grp in results.groupby('speed'):
+                mask = results['speed'] == speed
+                for col in cols_to_smooth:
+                    results.loc[mask, col] = gaussian_filter1d(grp[col], sigma=smoothing_sigma)
 
         # Now compute the rest of the properties from the smoothed results
         results['dG_diss'] = results['Wmean_raw'] - results['Wdiss_raw']
         results['Wdiss_Jarzynski'] = results['Wmean_raw'] - results['dG_Jarzynski']
         results['Wdiss_Jarzynski_gmm'] = results['Wmean_mix'] - results['dG_Jarzynski_gmm']
 
-        return results
+        return results, gmm_results
 
 
 
