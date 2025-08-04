@@ -308,11 +308,39 @@ class Equilibration:
             save_pdb(self.topology, final_positions, f"{self.out_dir}/{run_id}_minim.pdb")
 
 
+        # After restrained minimization remove and re-add restraints with updated reference positions
+        logging.debug("Resetting harmonic restraints after minimization to update reference positions.")
 
-        # # Set the contraint forces to their initial values before running the equilibration
-        # initial_force_constants = self.equilibration_scheme[0]['forces']
-        # force_constants_dict = {k: v for k, v in zip(list(self.components_lookup.keys()), initial_force_constants)}
-        # update_force_constants(simulation, force_constants_dict)
+        minimized_positions = simulation.context.getState(getPositions=True).getPositions()
+        
+        # remove existing restraint forces
+        forces_to_remove = []
+        for f_idx in range(self.system.getNumForces()):
+            force = self.system.getForce(f_idx)
+            if force.getName().startswith("k_"):
+                logging.debug(f"Removing force {force.getName()} at index {f_idx}.")
+                forces_to_remove.append(f_idx)
+
+        for f_idx in sorted(forces_to_remove, reverse=True):
+            self.system.removeForce(f_idx)
+
+        # Re-add the restraints with updated positions.
+        # Because the forces exist this will update them, there's no need to remove them first (I think).
+        for num, (name, selection) in enumerate(self.components_lookup.items()):
+            restrain_idxs = u.select_atoms(selection).indices
+            logging.info(f"Re-adding {len(restrain_idxs)} harmonic restraints to {name} after minimization.")
+
+            add_harmonic_restraints(
+                self.system,
+                minimized_positions,
+                self.topology,
+                restrain_idxs,
+                restraint_force=15,  # some default value, will be updated during equilibration
+                force_name=f"k_{name}",
+                force_group=num + 15,
+            )
+
+        simulation.context.reinitialize(preserveState=True)
 
         logging.info("Warming up the system..")
         warm_up_system(simulation, integrator, 
@@ -333,24 +361,11 @@ class Equilibration:
             self.is_membrane,
         )
 
-        # # TODO forces should be removed by name. OpenMM behavior is weird with that
-        num_components = len(self.components_lookup)
-        print(f'num_components: {num_components}')
-        for i in range(num_components):
-            print(f'i: {simulation.context.getSystem().getNumForces()}')
-            index_to_remove = simulation.context.getSystem().getNumForces() - 2
-            print(f'index_to_remove: {index_to_remove}')
-            force = simulation.context.getSystem().getForce(index_to_remove)
-            print(f'Force type to remove: {force.__class__.__name__}')
-            
-            simulation.context.getSystem().removeForce(index_to_remove)
+        # remove the restraint forces after equilibration
+        for f_idx in sorted(forces_to_remove, reverse=True):
+            self.system.removeForce(f_idx)
 
-        # simulation.context.getSystem().removeForce(
-        #     simulation.context.getSystem().getNumForces() - 3
-        # )
-        # simulation.context.getSystem().removeForce(
-        #     simulation.context.getSystem().getNumForces() - 2
-        # )
+        print_current_forces(self.system)
 
         final_positions = simulation.context.getState(getPositions=True).getPositions()
         self.topology.setPeriodicBoxVectors(simulation.context.getState(getPositions=True).getPeriodicBoxVectors())#saves correct box vectors to the pdb
