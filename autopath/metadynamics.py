@@ -341,7 +341,8 @@ class MetadynamicsMD:
             250 * bias_frequency
         )  # deposit bias every 2 ps (250 is 1ns at 4fs timestep)
         saveFrequency = 250 * saveFrequency  # write bias every 50ps
-
+        hill_height = hill_height * openmmunit.kilocalories_per_mole
+        
         logging.debug("Setting up the integrator")
         integrator = LangevinMiddleIntegrator(
             self.temperature, 1 / openmmunit.picoseconds, self.timestep
