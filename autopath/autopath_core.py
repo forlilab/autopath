@@ -42,6 +42,7 @@ class AutoPath:
             "amber14/tip3pfb.xml",
             "amber/tip3p_HFE_multivalent.xml",
         ],
+        hydrogenMass: float = 3.0,  # amu
         lig_ff: str = "espaloma",
         boxShape: str = "dodecahedron",
         padding: float = 1.2,
@@ -76,6 +77,7 @@ class AutoPath:
         # Preparation
         self.run_preparation = run_preparation
         self.forcefield = forcefield
+        self.hydrogenMass = hydrogenMass
         self.lig_ff = lig_ff
         self.boxShape = boxShape
         self.padding = padding
@@ -156,6 +158,7 @@ class AutoPath:
             prepare_system = SystemPreparation(
                 out_dir=sys_name,
                 forcefield=self.forcefield,
+                hydrogenMass=self.hydrogenMass,
                 lig_ff=self.lig_ff,
                 boxShape=self.boxShape,
                 padding=self.padding,
@@ -166,13 +169,19 @@ class AutoPath:
             system, topology = prepare_system.run(self.protein_file, self.variants, ligand_file)
 
         system = load_system(f"{sys_name}/system.xml")
-        topology = AmberPrmtopFile(prmtop_file).topology
+        try:
+            topology = AmberPrmtopFile(prmtop_file).topology
+        except Exception as e:
+            logging.error(f"Error loading topology from {prmtop_file}: {e}")
+            topology = PDBFile(solvated_system_pdb).topology
 
         ##############################################################################################
         ##################################### System equilibration ###################################
         ##############################################################################################
-
-        equilibrated_traj = f"{sys_name}/equilibration/trajectory_equilibration_{sys_name}.dcd"
+        #FIXME: this is a temporary solution, new parmed fails to save prmtops
+        prmtop_file = f"{sys_name}/system.pdb" 
+        
+        equilibrated_traj = f"{sys_name}/equilibration/equilibration_{sys_name}.dcd"
         equilibrated_chk = f"{sys_name}/equilibration/checkpoint_equil_{sys_name}.chk"
         equilibrated_pdb = f"{sys_name}/equilibration/{sys_name}_equilibrated.pdb"
         equilibrated_system = f"{sys_name}/equilibration/system_equil_{sys_name}.xml"
@@ -185,31 +194,33 @@ class AutoPath:
                                 restrained_minimization=True,
                                 is_membrane=self.is_membrane,
                                 protocol_fname=self.protocol_fname,
+                                save_freq=12500 # for 2fs
                                 )
             
             equilibrated_system = equilibration.run(solvated_system_pdb, run_id=sys_name)
         
-            #Wrap, align and save the clean trajectory
-            traj = md.load(equilibrated_traj, top=prmtop_file)
-            traj = traj.center_coordinates()
-            traj = traj.image_molecules()
-            try: # if there's no protein
-                backbone = traj.topology.select("backbone")
-                traj = traj.superpose(traj[0], atom_indices=backbone)
-            except Exception as e:
-                logging.warning(f"Superposition failed: {e}. Proceeding without superposition.")
-            traj.save(equilibrated_traj.replace(".dcd", "_aligned.dcd"))
-            os.remove(equilibrated_traj)
+        #Wrap, align and save the clean trajectory
+        traj = md.load(equilibrated_traj, top=prmtop_file)
+        traj = traj.center_coordinates()
+        traj = traj.image_molecules()
+        try: # if there's no protein
+            backbone = traj.topology.select("backbone")
+            traj = traj.superpose(traj[0], atom_indices=backbone)
+        except Exception as e:
+            logging.warning(f"Superposition failed: {e}. Proceeding without superposition.")
+        traj.save(equilibrated_traj.replace(".dcd", "_aligned.dcd"))
+        os.remove(equilibrated_traj)
 
         ##############################################################################################
         ############################# Post-equilibration Analysis ####################################
         ##############################################################################################
 
-        lig_anchor_mode = 'murcko'
+        lig_anchor_mode = 'lig_ha'
         lig_anchor_mode_atoms = 5
 
         equilibrated_traj = equilibrated_traj.replace(".dcd", "_aligned.dcd")
         u_eq = mda.Universe(prmtop_file, equilibrated_traj, in_memory=True)
+
         rmsd = compute_rmsd(u_eq, u_eq,
                             alig_select="backbone", 
                             groupselections={"ligand":f"resname {lig_resname} and not name H*", 
@@ -229,7 +240,8 @@ class AutoPath:
         pocket_atoms = get_pocket_atoms(u_eq, self.pocket_selection, f"resname {lig_resname}")
         pocket_atom_indices = [atom.index for atom in pocket_atoms]
         pocket_residues = [f"{atom.resname}_{atom.resid}" for atom in pocket_atoms]
-        logging.info(f"Pocket residues are: {', '.join(set(pocket_residues))}")
+        # logging.info(f"Pocket residues are: {', '.join(set(pocket_residues))}")
+        print(f"Pocket residues are: {', '.join(set(pocket_residues))}")
 
         # write out the pocket atoms to a pdb
         with mda.Writer(f"{sys_name}/pocket_definition.pdb", u_eq.atoms.n_atoms) as W:
@@ -243,13 +255,14 @@ class AutoPath:
                                                        mode=lig_anchor_mode, 
                                                        n_atoms=lig_anchor_mode_atoms,
                                                        out_dir=sys_name)
-        ligand_atoms = u_eq.select_atoms(f'index {" ".join(map(str, ligand_atoms_indices))}')
+        
+        # ligand_ha = u_eq.select_atoms(f"resname {lig_resname} and not name H*")
+        # ligand_atoms_indices =[ligand_ha.atoms[i].index for i in range(len(ligand_ha))]
 
-        # ligand_atoms = u_eq.select_atoms(f'resname {lig_resname} and not name H*')
-        # ligand_atoms_indices = [atom.index for atom in ligand_atoms]
+        # ligand_atoms = u_eq.select_atoms(f'index {" ".join(map(str, ligand_atoms_indices))}')
 
-        final_com = calculate_com_distance(u_eq, ligand_atoms, pocket_atoms, wrap=False)[-1] /10 # convert to nm
-        logging.info(f"COM distance after equilibration is: {final_com:.2f} nm")
+        # final_com = calculate_com_distance(u_eq, ligand_atoms, pocket_atoms, wrap=False)[-1] /10 # convert to nm
+        # logging.info(f"COM distance after equilibration is: {final_com:.2f} nm")
 
         u_eq.trajectory[-1]  # set pointer to last frame
         restrained_atoms = u_eq.select_atoms("group pocket_atoms and name CA", pocket_atoms=pocket_atoms)
@@ -261,17 +274,17 @@ class AutoPath:
         ##################################### Steered MD simulations #################################
         ##############################################################################################
         
-        sMD_timestep = 0.004  # ps
+        sMD_timestep = 0.002  # ps
+        sMD_collision_frequency = 1  # ps^-1
 
-        sMD_outdir = f"{sys_name}/sMD_{lig_anchor_mode}_{lig_anchor_mode_atoms}_4fs_2ps"
+        sMD_outdir = f"{sys_name}/sMD_{lig_anchor_mode}_{sMD_timestep}ps_{sMD_collision_frequency}ps_001nm_npt"
         # in this paper they used 80 kcal·mol−1? units don match tho. Ziada et al 2022.
-        sMD_spring_cte_per_atom = 40 * 4.184  # KJ/mol/nm2, converted from kcal. This affects thermal fluctuations
+        sMD_spring_cte_per_atom = 50 * 4.184  # KJ/mol/nm2, converted from kcal. This affects thermal fluctuations
         
         if self.run_sMDpulling:
             equilibrated_system = load_system(f"{sys_name}/equilibration/system_equil_{sys_name}.xml")
 
             if self.sMD_spring_cte is None:
-                # ligand_atoms_indices, ligand_atoms_names = get_ligand_ha(topology, lig_resname)
                 sMD_spring_cte = sMD_spring_cte_per_atom * len(ligand_atoms_indices)  # Normalize by ligand size
                 logging.info(f"Spring constant set to {sMD_spring_cte} KJ/mol/nm2 for {len(ligand_atoms_indices)} atoms.")
                 print(f"Spring constant set to {sMD_spring_cte} KJ/mol/nm2 for {len(ligand_atoms_indices)} atoms.")
@@ -282,35 +295,30 @@ class AutoPath:
                 system=equilibrated_system,
                 topology=topology,
                 groupA_atoms=ligand_atoms_indices,
-                groupB_atoms=restrained_atoms_indices,
-                restrained_atoms=None,#restrained_atoms_indices
+                groupB_atoms=pocket_atom_indices,
+                # restrained_atoms=restrained_atoms_indices, #NO RESTRAINTS IN SMD
                 restart_velocities=True,
                 timestep=sMD_timestep,
                 out_dir=sMD_outdir,
             )
 
-            if self.sMD_steps_per_move is None:
-                self.sMD_steps_per_move = sMD.guess_steps_per_move(
-                    v_nm_per_ps=max(self.sMD_pulling_speeds.keys()),
-                    dt_ps=sMD_timestep,
-                    k_spring=sMD_spring_cte,
-                    T_K=self.temperature,
-                    Rmax=0.3,  # Max displacement per move relative to thermal fluctuation
-                )
-            print(f"Using {self.sMD_steps_per_move} steps per move for sMD pulling.")
             for speed, reps in self.sMD_pulling_speeds.items():
                 for i in range(reps):
-                    sMD.run(
-                        checkpoint_file=equilibrated_chk,
-                        pdb_file=equilibrated_pdb,
-                        # dx_per_move=None,  # nm
-                        pulling_speed=speed,  # nm/ps
-                        steps_per_move=self.sMD_steps_per_move,
-                        sMD_spring_cte=sMD_spring_cte,
-                        rep_suffix=f'replica-{i+1}_v{speed}',
-                        do_backwards=False,     #CAREFUL: this will run the pulling in both directions
-                    )
-
+                    try:
+                        sMD.run(
+                            # checkpoint_file=equilibrated_chk,
+                            pdb_file=equilibrated_pdb,
+                            pulling_speed=speed,  # nm/ps
+                            steps_per_move=self.sMD_steps_per_move,
+                            dx_per_move=0.001,  # nm, this is the displacement per move
+                            sMD_spring_cte=sMD_spring_cte,
+                            rep_suffix=f'replica-{i+1}_v{speed}',
+                            do_backwards=False,     #CAREFUL: this will run the pulling in both directions
+                        )
+                    except Exception as e:  
+                        logging.error(f"Error during sMD pulling for speed {speed} nm/ps, replica {i+1}: {e}")
+                        continue
+                    
             # Load and align the sMD trajectories
             sMD_trajs = glob(f"{sMD_outdir}/trajectory_sMD_replica_*_*.dcd")
             for traj_file in sMD_trajs:
@@ -347,7 +355,7 @@ class AutoPath:
             # use the same pocket selection as in the equilibration, but create a new atomgroup for this Universe
             u_sMD = mda.Universe(prmtop_file, sMD_trajs)
             pocket_atoms = u_sMD.select_atoms(f'index {" ".join(map(str, pocket_atom_indices))}')
-            ligand_atoms = u_sMD.select_atoms(f'index {" ".join(map(str, ligand_atoms_indices))}')
+            # ligand_atoms = u_sMD.select_atoms(f'index {" ".join(map(str, ligand_atoms_indices))}')
             ligand_atoms_full = u_sMD.select_atoms(f'resname {lig_resname} and not name H*')
             ligand_atoms_full_indices = [atom.index for atom in ligand_atoms_full]
             
