@@ -248,7 +248,7 @@ def add_reporters(
 
     simulation.reporters.append(
         DCDReporter(
-            f"{out_dir}/trajectory_{suffix}.dcd",
+            f"{out_dir}/{suffix}.dcd",
             reportInterval=logperiod,
             enforcePeriodicBox=False,  # WARNING this compromises autoimaging afterwards in some cases
         )
@@ -258,7 +258,7 @@ def add_reporters(
 
         simulation.reporters.append(
             StateDataReporter(
-                f"{out_dir}/statistics_{suffix}.csv",
+                f"{out_dir}/{suffix}.csv",
                 logperiod,
                 step=True,
                 time=True,
@@ -484,8 +484,8 @@ def get_ligand_anchor_atoms(
         dists = np.linalg.norm(ligand.positions - anchor_com, axis=1)
         anchor = ligand.atoms[np.argsort(dists)[:n_atoms]].indices
 
-    else:
-        raise ValueError(f"Unknown mode '{mode}'")
+    # else:
+    #     raise ValueError(f"Unknown mode '{mode}'")
 
     if expand_rings:
         rdk_anchor_indices = []
