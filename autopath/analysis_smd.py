@@ -17,6 +17,8 @@ import kmedoids
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.metrics import silhouette_score
 from sklearn.mixture import GaussianMixture
+from scipy.stats import norm
+import math
 
 import seaborn as sns
 
@@ -25,6 +27,8 @@ import matplotlib.style as style
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 # style.use("fivethirtyeight")
+
+import statsmodels.api as sm
 
 from collections import defaultdict
 
@@ -134,7 +138,7 @@ class SteeredMDAnalysis:
         raw_data['bin'] = np.digitize(raw_data[self.dist_column], edges) - 1
         raw_data = raw_data[(raw_data['bin'] >= 0) & (raw_data['bin'] < len(centers))]
 
-        # raw_data = self.filter_low_count_bins(raw_data, min_points)
+        raw_data = self.filter_low_count_bins(raw_data, min_points)
 
         #these are the center each point belongs to
         raw_data['r_bin'] = raw_data['bin'].map(lambda b: centers[b] if b >= 0 and b < len(centers) else np.nan)
@@ -176,9 +180,9 @@ class SteeredMDAnalysis:
 
         if features_dict is None:
             features_dict = {
-                            f'{self.dist_column}': (1.5, 2.5),
-                            'NC':(1, 70), # number of contacts
-                            # 'RC':(1, None), # residue coordination
+                            f'{self.dist_column}': (1.0, 1.5),
+                            # 'NC':(1, 70), # number of contacts
+                            # 'RG':(None, None), # radius of gyration
                             f'{self.work_column}': (None, None)
                             }
             
@@ -210,7 +214,7 @@ class SteeredMDAnalysis:
         if filters:
             data = data[np.logical_and.reduce(filters)]
             
-        data = data.copy()
+        # data = data.copy()
         data[features] = MinMaxScaler().fit_transform(data[features])  # normalize features to [0, 1]
 
         paths = []
@@ -250,6 +254,12 @@ class SteeredMDAnalysis:
             plt.close()
 
         cluster = kmedoids.fasterpam(distmatrix, K)
+        # get the medoids and labels
+        medoid_trajnames = [list(data.groupby("trajname").groups.keys())[i] for i in cluster.medoids]
+        print(f"Medoid trajectories: {medoid_trajnames}")
+
+        medoid_data = data[data['trajname'].isin(medoid_trajnames)]
+        # medoid_features = medoid_data[features]
 
         df_labels = []
         for traj_name, label in zip(data.groupby("trajname").groups, cluster.labels):
@@ -258,7 +268,7 @@ class SteeredMDAnalysis:
         df = data.groupby(["trajname"]).first().reset_index()
         df['path'] = cluster.labels
         path_counts = df.groupby(['path'])['trajname'].nunique()
-        df['path'] = df['path'].map(lambda x: f"path-{x} ({path_counts[x]})")
+        # df['path'] = df['path'].map(lambda x: f"path-{x} ({path_counts[x]})")
         df = df.set_index('trajname')  # Restore original index
 
         # Merge labels back to the original data
@@ -267,13 +277,17 @@ class SteeredMDAnalysis:
 
         if len(features) == 2:
             sns.scatterplot(data=data, x=features[0], y=features[1], hue='path', alpha=0.3, palette='Set1')
+            # sns.scatterplot(data=medoid_data, x=medoid_features[0], y=medoid_features[1], label='medoid', color='black', lw=2)
         else:
-            sns.PairGrid(data,
+            g = sns.PairGrid(data,
                 vars=features,
                 hue='path', # 'path','speed'
                 palette='viridis',
                 height=3).map_lower(sns.scatterplot).map_diag(sns.kdeplot)
             
+            # for medoid in medoid_features.itertuples():
+                # g.map_lower(plt.scatter, medoid[1], medoid[2], color='black', marker='x', s=100, label='Medoid')
+
         # plt.title(f"Clustering with {K} clusters")
         plt.xlabel(features[0]); plt.ylabel(features[1])
         plt.legend(title='Cluster', loc='upper right')
@@ -282,13 +296,64 @@ class SteeredMDAnalysis:
         # plt.show()
         plt.close()
 
+
+
         return raw_data
 
+    @staticmethod
+    def fit_gmm_to_work_values(raw_work,
+                                max_K:int=5, 
+                                max_iter:int=1000,
+                                covariance_type:str='full',
+                                random_state:int=42
+                                ):   
+        """Fit GMMs to the work values and return the main parameters."""
 
-    def run_analysis(self, 
+        # TODO maybe we dont need the elbow loop and can approximate K with the dirichlet process
+
+        raw_work = raw_work.reshape(-1, 1) # reshape for GMM
+        n_samples = raw_work.shape[0]
+
+        scores = []
+        models = []
+
+        for n in range(1, max_K):
+            if n > n_samples:
+                break  # can't fit more components than points
+
+            gmm = GaussianMixture(
+                n_components=n,
+                covariance_type=covariance_type,  # 'full' may overfit for small datasets
+                max_iter=max_iter,
+                init_params="k-means++",
+                random_state=random_state,
+                # reg_covar=1e-5  # regularization to avoid singular covariance matrices
+            )
+            gmm.fit(raw_work)
+            models.append(gmm)
+
+            scores.append(gmm.bic(raw_work))
+    
+        best_gmm = models[np.argmin(scores)]
+
+        variances = best_gmm.covariances_.reshape(best_gmm.n_components, -1).flatten()
+
+        augmented_data = {
+            "GMM_n_components": best_gmm.n_components,
+            "GMM_scores": scores,
+            "GMM_weights": best_gmm.weights_,
+            "GMM_means": best_gmm.means_,
+            "GMM_variances": variances,
+            "GMM_posteriors": best_gmm.predict_proba(raw_work),
+            "GMM_labels": best_gmm.predict(raw_work),
+        }
+        return augmented_data
+    
+    def run_analysis(self,
                      speeds: list[float] = None,
                      temperature: float = None,
                      dist_minmax: tuple = None,
+                     decorrelate_work: bool = True,
                      fit_GMM: bool = True
                      )-> pd.DataFrame:
         
@@ -297,9 +362,9 @@ class SteeredMDAnalysis:
         and the dissipated work approximation.
         """
         
-        smoothing_sigma = 2.0  # smoothing factor for gaussian filter
-        GMM_max_components = 3 # number of GMM components to try
-        GMM_gauss_cutoff = 0.25 # # cutoff for GMM weights, below which we ignore the component
+        smoothing_sigma = 1.0  # smoothing factor for gaussian filter
+        GMM_max_components = 5 # number of GMM components to try
+        GMM_gauss_cutoff = 0.1 # # cutoff for GMM weights, below which we ignore the component
 
         # sometimes you wanna run the analysis with a different temperature or intervals
         if temperature is not None:
@@ -323,7 +388,8 @@ class SteeredMDAnalysis:
             # raw_data = raw_data.loc[raw_data['C'] >= 2]  # filter by residue coordination
 
         print('WARNING: Recalculating work from force and distance.')
-        # raw_data = self.integrate_force_dx(raw_data)
+        # this will overwrite the work column in the raw_data DataFrame
+        raw_data = self.integrate_force_dx(raw_data)
 
         self.raw_data, centers = self.bin_data(raw_data, self.bin_width, self.min_points)
 
@@ -334,27 +400,37 @@ class SteeredMDAnalysis:
         else:
             self.raw_data['path'] = 1 # default to single cluster if no clustering method is specified
 
+        if decorrelate_work:
+            # decorrelate work values per bin, speed and replica using block averaging
+            # this will overwrite the work column in the raw_data DataFrame
+            print("WARNING: Decorrelating work values using block averaging.")
+            self.raw_data = self.decorrelate_work(self.raw_data, self.work_column)
+
         results = []
         gmm_results = defaultdict(dict)  # to store GMM results per bin and speed
         for (r_bin, speed), group in self.raw_data.groupby(["r_bin", "speed"]):
             raw_W = group[self.work_column].values
 
+            # If we dont do decorrelation, we should use the per-replica aggregated work
             replica_W = group.groupby(["replica"])[self.work_column].mean().values
+            print(f'{len(replica_W)} replicas in bin {r_bin:.2f} at speed {speed:.5f}')
+            # replica_W = raw_W
+
             Wmean_raw = replica_W.mean()
             var_raw = replica_W.var(ddof=1)
-
             Wdiss_raw = 0.5 * self.beta * var_raw
 
             # plain Jarzynski
             dG_Jarzynski = -(1/self.beta) * np.log(np.exp(-self.beta * replica_W).mean())
 
-            dG_Jarzynski_gmm = Wdiss_diss_gmm = Wmean_mix = dG_diss_gmm = Wdiss_diss_gmm = np.nan
+            dG_Jarzynski_gmm = Wdiss_diss_gmm = Wmean_mix = Wdiss_diss_gmm = np.nan
 
             # GMM branch
             if fit_GMM:
                 if len(replica_W) < 2:
-                    print(f"Skipping GMM fitting for r_bin {r_bin}, speed {speed} due to insufficient data.")
+                    print(f"Not enough data points for GMM fitting at r_bin={r_bin:.2f}, speed={speed:.5f}. Skipping GMM fit.")
                     continue
+
                 gmm_dict = self.fit_gmm_to_work_values(replica_W,
                                                         max_K=GMM_max_components,
                                                         random_state=self.seed)
@@ -368,15 +444,27 @@ class SteeredMDAnalysis:
                 dG_k = mu - 0.5 * self.beta * sig2 # now this is exact for each Gaussian
 
                 # mask small nonequilibrium weights, which means ignore small gaussians
+                if np.any(w < GMM_gauss_cutoff):
+                    print(f'WARNING: Filtering out {len(w[w < GMM_gauss_cutoff])} components from bin {r_bin} - {speed} w/ weights {w[w < GMM_gauss_cutoff]}')
+                
                 w = np.where(w < GMM_gauss_cutoff, 0.0, w)
+                w /= w.sum()  # normalize weights
 
                 # Transfor the weights from the non-equilibrium populations
                 p_eq = w * np.exp(-self.beta * dG_k)
                 p_eq /= p_eq.sum()
 
+                p_eq = w #WARNING
+
+                # mixture mean
+                Wmean_mix = np.dot(p_eq, mu)
+                
                 # mixture cumulant estimate. Combine the dG per component
-                dG_diss_gmm  = np.dot(p_eq, dG_k)
-                Wdiss_diss_gmm = np.dot(p_eq, mu - dG_k) # = 0.5 β Σ p_eq σ²
+                mix_var  = np.dot(p_eq, sig2 + (mu - Wmean_mix)**2)
+                Wdiss_diss_gmm = 0.5 * self.beta * mix_var
+
+                # dG_diss_gmm  = np.dot(p_eq, dG_k)
+                # Wdiss_diss_gmm = np.dot(p_eq, mu - dG_k) # = 0.5 β Σ p_eq σ²
 
                 # exact mixture Jarzynski
                 # This is the exact Jarzynski estimator for the Gaussian mixture in each bin.
@@ -386,13 +474,9 @@ class SteeredMDAnalysis:
                 log_Z = special.logsumexp(log_terms, b=w)          # log ⟨e^{-βW}⟩
                 dG_Jarzynski_gmm = -log_Z / self.beta
 
-                # mixture mean
-                Wmean_mix = np.dot(p_eq, mu)
-
                 # Collect results in a dictionary for plotting 
                 gmm_results[r_bin][speed] = {'GMM_neq_weights': w,
                                              'GMM_eq_weights': p_eq,
-                                             'raw_W': raw_W,
                                              'replica_W': replica_W,
                                              'GMM_means': mu,
                                              'GMM_variances': sig2,
@@ -402,13 +486,11 @@ class SteeredMDAnalysis:
             results.append({
                 'r_bin': r_bin,
                 'speed': speed,
-                'replica_W': replica_W,
                 'Wmean_raw': Wmean_raw,
                 'Wdiss_raw': Wdiss_raw,
                 'dG_Jarzynski': dG_Jarzynski,
                 'dG_Jarzynski_gmm': dG_Jarzynski_gmm,
                 'Wmean_mix': Wmean_mix,
-                'dG_diss_gmm': dG_diss_gmm,
                 'Wdiss_diss_gmm': Wdiss_diss_gmm,
             })
 
@@ -426,9 +508,130 @@ class SteeredMDAnalysis:
         results['dG_diss'] = results['Wmean_raw'] - results['Wdiss_raw']
         results['Wdiss_Jarzynski'] = results['Wmean_raw'] - results['dG_Jarzynski']
         results['Wdiss_Jarzynski_gmm'] = results['Wmean_mix'] - results['dG_Jarzynski_gmm']
+        results['dG_diss_gmm'] = results['Wmean_mix'] - results['Wdiss_diss_gmm']
 
         return results, gmm_results
 
+    def plot_gmm_per_speed(self, results, ncols=8, figsize=(22, 4), outdir:str=None):
+        """
+        For each pulling speed, plot a grid of GMM fits across r_bins.
+        
+        """
+        if outdir is None:
+            outdir = os.path.join(os.getcwd(), self.sysname)
+        os.makedirs(outdir, exist_ok=True)
+
+        # Identify all unique speeds
+        speeds = sorted({speed for speed_dict in results.values() for speed in speed_dict.keys()})
+        for speed in speeds:
+
+            r_bins_for_speed = [r for r, speed_dict in results.items() if speed in speed_dict]
+            nplots = len(r_bins_for_speed)
+            nrows = math.ceil(nplots / ncols)
+            
+            fig, axes = plt.subplots(nrows, ncols, figsize=(figsize[0], figsize[1] * nrows), 
+                                    sharex=False, sharey=False,
+                                    squeeze=False)
+            axes = axes.flatten()
+            
+            for ax, r_bin in zip(axes, r_bins_for_speed):
+                info = results[r_bin][speed]
+
+                work = info['replica_W'].flatten()
+                weights = info["GMM_eq_weights"]
+                means = info["GMM_means"]
+                variances = info["GMM_variances"]
+                
+                ax.hist(work, bins=30, density=True, alpha=0.4, color="C0")
+                
+                # PDF grid
+                x = np.linspace(work.min(), work.max(), 30)
+                
+                for w, m, v in zip(weights, means, variances):
+                    pdf_comp = w * norm.pdf(x, loc=m, scale=np.sqrt(v))
+                    ax.plot(x, pdf_comp, lw=2)
+                
+                # Plot total mixture PDF
+                total_pdf = np.sum([w * norm.pdf(x, loc=m, scale=np.sqrt(v))
+                                    for w, m, v in zip(weights, means, variances)], axis=0)
+                ax.plot(x, total_pdf, "k--", lw=2)
+                
+                ax.set_title(f"r_bin={r_bin:.2f}")
+                ax.set_xlabel("Work (kJ/mol)")
+                ax.set_ylabel("Density")
+            
+            for ax in axes[nplots:]:
+                ax.set_visible(False)
+            
+            fig.suptitle(f"GMM Fits at speed = {speed:.5f}", fontsize=16)
+            plt.tight_layout(rect=[0, 0, 1, 0.95])
+            plt.show()
+            plt.savefig(f'{outdir}/gmm_fits_speed_{speed:.5f}.png', dpi=300, bbox_inches='tight')
+            plt.close()
+        return
+    
+    @staticmethod
+    def compute_acf(series, nlags=100):
+        """Compute autocorrelation function of a series"""
+        return sm.tsa.acf(series, nlags=nlags, fft=True)
+    @staticmethod
+    def integrated_autocorrelation(acf_vals, cutoff=0.01):
+        """Compute integrated autocorrelation time (IACT)"""
+        acf_cut = acf_vals[1:]
+        # truncate where ACF first becomes negative or drops below cutoff
+        mask = acf_cut > cutoff
+        return 1 + 2 * np.sum(acf_cut[mask])
+    @staticmethod
+    def block_average(series, block_size):
+        """Returns block-averaged values from a time series. 
+        This splits the series into non-overlapping blocks of size block_size and averages each."""
+        n_blocks = len(series) // block_size
+        trimmed = series[:n_blocks * block_size]
+        blocks = trimmed.reshape(n_blocks, block_size)
+        return blocks.mean(axis=1)
+
+    def decorrelate_work(self,
+                         raw_data: pd.DataFrame = None,
+                         work_column = 'work(kJ/mol)'
+                        )-> pd.DataFrame:
+
+        if raw_data is None:
+            raw_data = self.raw_data.copy()
+
+        block_sizes = {}
+
+        for (r_bin, v), group in raw_data.groupby(["r_bin", "speed"]):
+            for replica, traj in group.groupby("replica"):
+                W = traj[work_column].values
+                acf_vals = self.compute_acf(W, nlags=200)
+                tau_int = self.integrated_autocorrelation(acf_vals, cutoff=0.05)
+                block_size = int(np.ceil(tau_int))
+                block_sizes[(r_bin, v, replica)] = block_size
+                # print(f"r_bin: {r_bin:.2f}, speed: {speed}, IACT: {tau_int:.2f}, W_lenght: {len(W)} block_size: {block_size}")
+
+        block_samples = []
+
+        for (r_bin, v), bin_group in raw_data.groupby(["r_bin", "speed"]):
+            for replica, traj in bin_group.groupby("replica"):
+                trajname = traj['trajname'].iloc[0]  # Get the trajectory name from the first row
+                path = traj['path'].iloc[0]  # Get the path from the first row
+                block_size = block_sizes.get((r_bin, v, replica), 1)
+                W = traj[work_column].values
+                W_blocks = self.block_average(W, block_size)
+
+                for w, w_eff in zip(W_blocks, W):
+                    block_samples.append({
+                        "r_bin": r_bin,
+                        "speed": v,
+                        "replica": replica,
+                        work_column: w_eff,
+                        f"{work_column}_raw": w,
+                        "block_size": block_size,
+                        'trajname': trajname,
+                        'path': path,
+                    })
+
+        return pd.DataFrame(block_samples)
 
 
 
@@ -678,7 +881,7 @@ class SteeredMDAnalysis:
         is obtained from a Green-Kubo-type relation that connects the integral 
         of the constraint-force fluctuations to the friction experienced 
         """
-
+        # #FIXME: check that steps per move should be the same so time make sense 
         df = self.raw_data.copy()
         
         gamma_results = []
@@ -963,57 +1166,3 @@ class SteeredMDAnalysis:
             return None
         return
     
-    @staticmethod
-    def fit_gmm_to_work_values(raw_work,
-                                max_K:int=5, 
-                                max_iter:int=1000,
-                                covariance_type:str='full',
-                                random_state:int=42
-                                ):   
-        """Fit GMMs to the work values and return the main parameters."""
-
-        # TODO maybe we dont need the elbow loop and can approximate K with the dirichlet process
-
-        raw_work = raw_work.reshape(-1, 1) # reshape for GMM
-        n_samples = raw_work.shape[0]
-
-        scores = []
-        models = []
-
-        for n in range(1, max_K):
-            if n > n_samples:
-                break  # can't fit more components than points
-
-            gmm = GaussianMixture(
-                n_components=n,
-                covariance_type=covariance_type,  # 'full' may overfit for small datasets
-                max_iter=max_iter,
-                init_params="k-means++",
-                random_state=random_state,
-                reg_covar=1e-6  # regularization to avoid singular covariance matrices
-            )
-            gmm.fit(raw_work)
-            models.append(gmm)
-
-            scores.append(gmm.bic(raw_work))
-            
-            # labels = gmm.predict(raw_work)
-            # if len(set(labels)) > 1: # silhouette score is not defined for single cluster
-            #     scores.append(1-(silhouette_score(raw_work, labels)))
-            # else:
-            #     scores.append(-1)
-                
-        best_gmm = models[np.argmin(scores)]
-
-        variances = best_gmm.covariances_.reshape(best_gmm.n_components, -1).flatten()
-
-        augmented_data = {
-            "GMM_n_components": best_gmm.n_components,
-            "GMM_scores": scores,
-            "GMM_weights": best_gmm.weights_,
-            "GMM_means": best_gmm.means_,
-            "GMM_variances": variances,
-            "GMM_posteriors": best_gmm.predict_proba(raw_work),
-            "GMM_labels": best_gmm.predict(raw_work),
-        }
-        return augmented_data
