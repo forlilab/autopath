@@ -48,15 +48,16 @@ def plot_atomic_rmsf(u, lig_resname:str='UNK', outname:str='rmsf.png', log_rmsf:
     # probe_mol = Chem.RemoveHs(probe_mol)
     assert len(r.rmsf) == probe_mol.GetNumAtoms(), "Mismatch between RMSF length and atom count"
 
-    fig = SimilarityMaps.GetSimilarityMapFromWeights(mol=probe_mol, weights=r.rmsf.tolist(), draw2d=drawer)#, step=0.01, alpha=0.3, contourLines=5, scaling=1.0) 
+    fig = SimilarityMaps.GetSimilarityMapFromWeights(mol=probe_mol, weights=r.rmsf.tolist(), draw2d=drawer,
+                                                    scaling=1.0, step=0.01, alpha=0.3, contourLines=5,) 
     fig.FinishDrawing()
     if outname.endswith('.svg'):
         fig = fig.GetDrawingText()
         with open(outname,'w+') as outf:
             outf.write(fig)
     else:
-        fig.savefig(outname, bbox_inches='tight')
-    
+        fig.WriteDrawingText(outname)
+
     # Optionally, log the RMSF values for further analysis
     if log_rmsf:
         log_fname = os.path.splitext(outname)[0]
