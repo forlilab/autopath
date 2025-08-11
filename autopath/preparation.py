@@ -38,7 +38,7 @@ class SystemPreparation:
         ],
         lig_ff: str = "espaloma",
         allow_undefined_stereo: bool = True,
-        hydrogenMass: float = 3,
+        hydrogenMass: float = 1,
         boxShape: str = "dodecahedron",
         padding: float = 1.0,
         num_solvent: int = None,

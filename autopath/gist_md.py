@@ -166,8 +166,8 @@ class GISTMD:
         out_dir: str = "equilibration",
         restrained_minimization: bool = False,
         protocol_fname: str = "autopath/data/equilibration.json",
-        timestep: float = 0.004,
-        save_freq: int = 6250, # 12500 is 0.05ns at 4fs timestep
+        timestep: float = 0.002,
+        save_freq: int = 3125, # 12500 is 0.05ns at 4fs timestep
         is_membrane: bool = False,
         verbose: int = 2,
 
@@ -310,8 +310,8 @@ class GISTMD:
         
         logging.info("Running NPT for 1ns..")
         equilibration_scheme = [
-        { "name": "Stage 1", "forces": [1.0, 2.5], "npt_flag": True, "nsteps": 125000, "stepsize": 0.004},                         
-        { "name": "Stage 2", "forces": [0.5, 2.5], "npt_flag": True, "nsteps": 125000, "stepsize": 0.004}
+        { "name": "Stage 1", "forces": [1.0, 2.5], "npt_flag": True, "nsteps": 250000, "stepsize": 0.002},                         
+        { "name": "Stage 2", "forces": [0.5, 2.5], "npt_flag": True, "nsteps": 250000, "stepsize": 0.002}
                                 ]
     
         run_restrained_md(
@@ -365,7 +365,7 @@ class GISTMD:
 
         logging.info("Running production NVT..")
         equilibration_scheme = [
-        { "name": "Stage 1", "forces": [2.5, 2.5], "npt_flag": False, "nsteps": 25000000, "stepsize": 0.004},                         
+        { "name": "Stage 1", "forces": [0.1, 2.5], "npt_flag": False, "nsteps": 50000000, "stepsize": 0.002},                         
                                 ]
     
         run_restrained_md(

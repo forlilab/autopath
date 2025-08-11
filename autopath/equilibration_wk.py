@@ -166,7 +166,7 @@ class EquilibrationWaterkit:
         out_dir: str = "equilibration_wk",
         restrained_minimization: bool = False,
         protocol_fname: str = "autopath/data/equilibration.json",
-        timestep: float = 0.004,
+        timestep: float = 0.002,
         save_freq: int = 6250, # 12500 is 0.05ns at 4fs timestep
         is_membrane: bool = False,
         verbose: int = 2,
