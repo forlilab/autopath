@@ -199,17 +199,17 @@ class AutoPath:
             
             equilibrated_system = equilibration.run(solvated_system_pdb, run_id=sys_name)
         
-        #Wrap, align and save the clean trajectory
-        traj = md.load(equilibrated_traj, top=prmtop_file)
-        traj = traj.center_coordinates()
-        traj = traj.image_molecules()
-        try: # if there's no protein
-            backbone = traj.topology.select("backbone")
-            traj = traj.superpose(traj[0], atom_indices=backbone)
-        except Exception as e:
-            logging.warning(f"Superposition failed: {e}. Proceeding without superposition.")
-        traj.save(equilibrated_traj.replace(".dcd", "_aligned.dcd"))
-        os.remove(equilibrated_traj)
+            #Wrap, align and save the clean trajectory
+            traj = md.load(equilibrated_traj, top=prmtop_file)
+            traj = traj.center_coordinates()
+            traj = traj.image_molecules()
+            try: # if there's no protein
+                backbone = traj.topology.select("backbone")
+                traj = traj.superpose(traj[0], atom_indices=backbone)
+            except Exception as e:
+                logging.warning(f"Superposition failed: {e}. Proceeding without superposition.")
+            traj.save(equilibrated_traj.replace(".dcd", "_aligned.dcd"))
+            os.remove(equilibrated_traj)
 
         ##############################################################################################
         ############################# Post-equilibration Analysis ####################################

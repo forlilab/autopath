@@ -404,7 +404,7 @@ class SteeredMDAnalysis:
             # decorrelate work values per bin, speed and replica using block averaging
             # this will overwrite the work column in the raw_data DataFrame
             print("WARNING: Decorrelating work values using block averaging.")
-            self.raw_data = self.decorrelate_work(self.raw_data, self.work_column)
+            # self.raw_data = self.decorrelate_work(self.raw_data, self.work_column)
 
         results = []
         gmm_results = defaultdict(dict)  # to store GMM results per bin and speed
@@ -413,7 +413,7 @@ class SteeredMDAnalysis:
 
             # If we dont do decorrelation, we should use the per-replica aggregated work
             replica_W = group.groupby(["replica"])[self.work_column].mean().values
-            print(f'{len(replica_W)} replicas in bin {r_bin:.2f} at speed {speed:.5f}')
+            # print(f'{len(replica_W)} replicas in bin {r_bin:.2f} at speed {speed:.5f}')
             # replica_W = raw_W
 
             Wmean_raw = replica_W.mean()
@@ -454,7 +454,7 @@ class SteeredMDAnalysis:
                 p_eq = w * np.exp(-self.beta * dG_k)
                 p_eq /= p_eq.sum()
 
-                p_eq = w #WARNING
+                # p_eq = w #WARNING
 
                 # mixture mean
                 Wmean_mix = np.dot(p_eq, mu)

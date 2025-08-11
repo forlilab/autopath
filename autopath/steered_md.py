@@ -100,15 +100,13 @@ class SteeredMD:
 
         with open(f"{self.out_dir}/sMD_log_{rep_idx}_{direction}.dat","w") as f:
 
-            f.write("step,r_target(nm),r_before(nm),r_after(nm),NC,RG,force(kJ/mol/nm),U_cvpack(kJ/mol),work(kJ/mol),m_eff(dalton)\n")
+            f.write("step,r_target(nm),r_before(nm),r_after(nm),NC,force(kJ/mol/nm),U_cvpack(kJ/mol),work(kJ/mol),m_eff(dalton)\n")
 
             work = 0.0 * openmmunit.kilojoules_per_mole
             dist_after_nm = 0.0 
             dist_before_nm = 0.0
             m_eff_dalton = 0.0
-            # rg_now = self.rg_cv.getValue(simulation.context, allowReinitialization=False).value_in_unit(openmmunit.nanometer)
             nc_now = 0.0
-            rg_now = 0.0
             
             if self.autostop_freq is not None:
                 nc_now = self.nc_cv.getValue(simulation.context, allowReinitialization=False).value_in_unit(openmmunit.dimensionless)
@@ -150,8 +148,6 @@ class SteeredMD:
                     dist_after_nm = self.com_dist.getValue(simulation.context, allowReinitialization=False).value_in_unit(openmmunit.nanometers)
                 
                 #log everything
-                #shadow_work = simulation.integrator.get_shadow_work().value_in_unit(openmmunit.kilojoules_per_mole)
-                #protocol_work = simulation.integrator.get_protocol_work().value_in_unit(openmmunit.kilojoules_per_mole)
                 r_end_nm = r_end.value_in_unit(openmmunit.nanometers)
                 dist_before_nm = dist_before.value_in_unit(openmmunit.nanometers)
                 force_kjmnm = force.value_in_unit(openmmunit.kilojoules_per_mole / openmmunit.nanometer)
@@ -162,10 +158,9 @@ class SteeredMD:
                 if direction == "forward" and self.autostop_freq is not None:
                     if i%self.autostop_freq == 0:
                         nc_now = self.nc_cv.getValue(simulation.context, allowReinitialization=False).value_in_unit(openmmunit.dimensionless)
-                        # rg_now = self.rg_cv.getValue(simulation.context, allowReinitialization=False).value_in_unit(openmmunit.nanometer)
                         print(f"Step {i+1}/{self.sMD_moves}: r_target={r_end_nm:.2f} nm, r_before={dist_before_nm:.2f} nm, r_after={dist_after_nm:.2f} nm, rg={rg_now}, nc={nc_now}")
                 
-                f.write(f"{i},{r_end_nm},{dist_before_nm},{dist_after_nm},{nc_now},{rg_now},{force_kjmnm},{U_cvpack_kjm},{work_kjmol},{m_eff_dalton}\n")
+                f.write(f"{i},{r_end_nm},{dist_before_nm},{dist_after_nm},{nc_now},{force_kjmnm},{U_cvpack_kjm},{work_kjmol},{m_eff_dalton}\n")
 
                 if nc_now < 1:
                     logging.warning(f"Stopping pulling at step {i} because n_contacts={nc_now}.")
@@ -266,15 +261,11 @@ class SteeredMD:
                                     force_group=14,
                                 )
             
-        # system.setDefaultPeriodicBoxVectors(*PDBFile(pdb_file).topology.getPeriodicBoxVectors())
+        system.setDefaultPeriodicBoxVectors(*PDBFile(pdb_file).topology.getPeriodicBoxVectors())
         # simulation.context.reinitialize(preserveState=True)
         
         # Get the subset of protein atoms close to the ligand
         subset_protein_HA, subset_protein_residues = self._get_pocket_atoms(simulation, cutoff=0.5)
-        ligand_residues = [res for res in self.topology.residues() if res.name == "UNK"]
-        # print(f'Protein residues are: {subset_protein_residues}')
-        # print(f'Ligand residues are: {ligand_residues}')
-
         if self.autostop_freq is not None:
             forces = {f.getName(): f for f in system.getForces()}
             self.nc_cv = cvpack.NumberOfContacts(
@@ -288,26 +279,7 @@ class SteeredMD:
             self.nc_cv.setForceGroup(19)  # Use a separate force group for the CV
             system.addForce(self.nc_cv)
 
-            # self.rc_cv = cvpack.ResidueCoordination(
-            #     ligand_residues,
-            #     subset_protein_residues,
-            #     stepFunction="1/(1+x^6)",
-            #     # stepFunction="step(1-x)",
-            #     weighByMass=False,
-            #     includeHydrogens=True,
-            #     # thresholdDistance=0.4*unit.nanometers,  # nm
-            # )
-            # self.rc_cv.setForceGroup(18)  # Use a separate force group for the CV
-            # system.addForce(self.rc_cv)
-        
-        # ligand_atoms = [atom for atom in self.topology.atoms() if atom.residue.name == 'UNK']
-        # ligand_atoms_idx = [atom.index for atom in ligand_atoms if atom.element.symbol != "H"]  # Exclude hydrogens
-        # print(f"Using ligand atoms: {ligand_atoms_idx}")
-        # self.rg_cv = cvpack.RadiusOfGyration(group=ligand_atoms_idx)
-        # self.rg_cv.setForceGroup(18)  # Use a separate force group for the CV
-        # system.addForce(self.rg_cv)
-
-        #Reset velocities to temperature. Check https://github.com/openmm/openmm/pull/259
+        # Reset velocities to temperature. Check https://github.com/openmm/openmm/pull/259
         if self.restart_velocities:
             simulation.context.setVelocitiesToTemperature(self.temperature)
         
@@ -331,8 +303,7 @@ class SteeredMD:
         
         # Add COM force to the ligand and pocket groups with a harmonic potential shape
         groups = [self.groupA_atoms] + [self.groupB_atoms]
-        print(f"Adding COM force for groups: {groups[0]} (ligand) and {groups[1]} (pocket)")
-
+        # print(f"Adding COM force for groups: {groups[0]} (ligand) and {groups[1]} (pocket)")
         self.com_force = cvpack.CentroidFunction(
             "0.5 * fc_pull * (distance(g1,g2)-r0_)^2",
             openmmunit.kilojoules_per_mole,  # energy not force
