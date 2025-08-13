@@ -14,6 +14,12 @@ import statsmodels.formula.api as smf
 
 from dtaidistance import dtw_ndim
 import kmedoids
+
+import MDAnalysis as mda
+from MDAnalysis.analysis.distances import distance_array
+import tqdm
+
+from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.metrics import silhouette_score
 from sklearn.mixture import GaussianMixture
@@ -40,13 +46,16 @@ class SteeredMDAnalysis:
     """
     def __init__(self, 
                  log_files: list[str] = None,
-                 sysname: str = "system",
+                 sysname: str = None,
                  bin_width: float = 0.05, #nm
                  min_points: int = 10,
                  temperature: float = 300, #K
                  timestep: float = 0.004, #ps
                  dist_minmax: tuple = (0.0, 2.5), #nm
-                 cluster_method: str = 'DTW',
+                 cluster_paths: bool = True,
+                 reference_pdb: str = None,
+                 pocket_select: str = 'protein within 6.0 of resname UNK and name CA',
+                 ligand_select: str = 'resname UNK and not name H*',
                  dist_column: str = 'r_before(nm)',
                  work_column: str = 'work(kJ/mol)',
                  force_column: str = 'force(kJ/mol/nm)',
@@ -60,13 +69,20 @@ class SteeredMDAnalysis:
         
         if sysname is None:
             sysname = log_files[0].split('/')[0]  # Extract system name from the first log file path
-
         self.sysname = sysname
+
+        self.outdir = os.path.dirname(log_files[0])  # Output directory is the same as the first log file
 
         self.temp = temperature # Kelvin
         self.kB = 0.0083144621 # kJ/(mol*K)
         self.beta = 1.0 / (self.kB * self.temp)
         self.timestep = timestep
+
+        self.cluster_paths = cluster_paths
+        # this will be used for topology and pocket selection, so should be pdb before pulling
+        self.reference_pdb = reference_pdb
+        self.ligand_select = ligand_select
+        self.pocket_select = pocket_select
 
         self.dist_column = dist_column
         self.work_column = work_column
@@ -79,281 +95,14 @@ class SteeredMDAnalysis:
         self.log_files = log_files
 
         self.seed = seed
-        self.cluster_method = cluster_method
 
         return
 
-    def load_logs(self, log_files: list[str]) -> pd.DataFrame:
-
-        # compile raw log files
-        count = 0
-        raw_data = []
-        for fn in log_files:
-            try:
-                base = os.path.basename(fn)[:-4]  # remove .dat extension
-                # print(f"Loading {base}...")
-                speed = float(base.split('_')[-2].strip('v'))
-                df = pd.read_csv(fn, comment='#')
-                df['trajname'] = base
-                df['speed'] = speed  # add speed column
-                df['replica'] = base.split('_')[-3]  # extract replica number from filename
-                raw_data.append(df)
-                count += 1
-            except Exception as e:
-                print(f"Error loading {fn}: {e}")
-                continue
-        if count == 0:
-            print("No valid log files found.")
-            return None
-        print(f"Loaded {count} log files for system '{self.sysname}'.")
-
-        if not raw_data:
-            print("No data loaded from log files.")
-            return None
-        return pd.concat(list(raw_data))
-    
-    def integrate_force_dx(self, raw_data) -> pd.DataFrame:
-        """Integrate the force over distance to compute work done.
-        This will overwrite the work column in the raw_data DataFrame.
-        """
-        grouped = raw_data.groupby("trajname")
-        for traj, group in grouped:
-            work = cumulative_trapezoid(group[self.force_column], group[self.dist_column], initial=0.0)
-            raw_data.loc[raw_data['trajname'] == traj, self.work_column] = work
-        
-        return raw_data
-    
-    def bin_data(self, 
-                 raw_data: pd.DataFrame,
-                 bin_width: float=0.05, #nm
-                 min_points: int=10
-                 )-> pd.DataFrame:
-                 
-        # get overall centers and edges for histogram
-        rmin, rmax = min(raw_data[self.dist_column]), max(raw_data[self.dist_column])
-        edges  = np.arange(rmin, rmax + bin_width, bin_width)
-        centers = edges[:-1] + bin_width / 2
-
-        # Use shared edges and centers
-        raw_data['bin'] = np.digitize(raw_data[self.dist_column], edges) - 1
-        raw_data = raw_data[(raw_data['bin'] >= 0) & (raw_data['bin'] < len(centers))]
-
-        raw_data = self.filter_low_count_bins(raw_data, min_points)
-
-        #these are the center each point belongs to
-        raw_data['r_bin'] = raw_data['bin'].map(lambda b: centers[b] if b >= 0 and b < len(centers) else np.nan)
-
-        return raw_data, centers
-
-    def filter_low_count_bins(self, raw_data, min_points):
-        """Filter low count bins per speed. This function filters out bins 
-        that have fewer than `min_points` data points for each speed.
-        """
-
-        all_data = []
-        for speed in raw_data['speed'].unique():
-
-            df = raw_data[raw_data['speed'] == speed]
-
-            # Count points per bin and filter out bins with too few points
-            points_per_bin = df.groupby('bin').size()
-            points_per_bin = points_per_bin[points_per_bin > min_points]  
-            df = df[df['bin'].isin(points_per_bin.index)]
-            df['speed'] = speed  # add speed column
-            all_data.append(df)
-
-        return pd.concat(all_data)
-
-    def cluster_trajectories_DTW(self, 
-                                data:pd.DataFrame=None, 
-                                features_dict:dict=None, 
-                                K:int=None,
-                                outdir:str=None):
-
-        """Cluster trajectories using Dynamic Time Warping (DTW) and k-medoids.
-        For more information on DTW see: https://doi.org/10.1073/pnas.231354212
-                                         https://dtaidistance.readthedocs.io/en/latest/index.html
-        """
-        if outdir is None:
-            outdir = os.path.join(os.getcwd(), self.sysname)
-        os.makedirs(outdir, exist_ok=True)
-
-        if features_dict is None:
-            features_dict = {
-                            f'{self.dist_column}': (1.0, 1.5),
-                            # 'NC':(1, 70), # number of contacts
-                            # 'RG':(None, None), # radius of gyration
-                            f'{self.work_column}': (None, None)
-                            }
-            
-        features = list(features_dict.keys())
-
-        if data is None:
-            data = self.raw_data.copy()
-        
-        raw_data = data.copy()
-        
-        # check if features are in the data
-        for feature in features:
-            if feature not in data.columns:
-                raise ValueError(f"Feature '{feature}' not found in data columns.")
-            
-        data[features] = data[features].round(2)  # round features to 2 decimal places
-        if self.work_column in features:
-            data[self.work_column] = data[self.work_column] / data['speed']  # normalize work by speed
-
-        # Filter data based on feature ranges
-        filters = []
-        for f, (l, h) in features_dict.items():
-            if l is not None and h is not None:
-                filters.append((data[f] > l) & (data[f] < h))
-            elif l is not None:
-                filters.append(data[f] > l)
-            elif h is not None:
-                filters.append(data[f] < h)
-        if filters:
-            data = data[np.logical_and.reduce(filters)]
-            
-        # data = data.copy()
-        data[features] = MinMaxScaler().fit_transform(data[features])  # normalize features to [0, 1]
-
-        paths = []
-        # Extract paths for each trajectory and measure distance
-        for traj_name in data.groupby("trajname").groups:
-            traj_df = data[data["trajname"] == traj_name][features]
-            paths.append(traj_df[features].values)
-            
-        distmatrix = dtw_ndim.distance_matrix_fast(s=paths, ndim=paths[0].shape[1])
-        # plot the distance matrix
-        sns.heatmap(distmatrix, cmap='viridis')
-        plt.title(f"Distance Matrix for {self.sysname} - DTW Clustering")
-        plt.xlabel("Trajectories"); plt.ylabel("Trajectories")
-        plt.tight_layout()
-        plt.savefig(f"{outdir}/distmatrix.png", dpi=300)
-        # plt.show()
-        plt.close()
-
-        # Perform clustering using k-medoids
-        if K is None:
-            silloutte_scores = {}
-            for i in range(2, min(10, data['trajname'].nunique())):
-                c = kmedoids.fasterpam(distmatrix, i)
-                silloutte_scores[i] = silhouette_score(distmatrix, c.labels)
-
-            K = max(silloutte_scores, key=silloutte_scores.get)
-            print(f"Optimal number of clusters: {K}")
-
-            # Plot silhouette scores
-            plt.figure(figsize=(6, 4))
-            sns.lineplot(x=list(silloutte_scores.keys()), y=list(silloutte_scores.values()))
-            plt.xlabel("Number of clusters (K)"); plt.ylabel("Silhouette Score")
-            plt.title(f"Silhouette Scores for {self.sysname}")
-            plt.tight_layout()
-            plt.savefig(f"{outdir}/silhouette_scores.png", dpi=300)
-            # plt.show()
-            plt.close()
-
-        cluster = kmedoids.fasterpam(distmatrix, K)
-        # get the medoids and labels
-        medoid_trajnames = [list(data.groupby("trajname").groups.keys())[i] for i in cluster.medoids]
-        print(f"Medoid trajectories: {medoid_trajnames}")
-
-        medoid_data = data[data['trajname'].isin(medoid_trajnames)]
-        # medoid_features = medoid_data[features]
-
-        df_labels = []
-        for traj_name, label in zip(data.groupby("trajname").groups, cluster.labels):
-            df_labels.append([traj_name, label])
-
-        df = data.groupby(["trajname"]).first().reset_index()
-        df['path'] = cluster.labels
-        path_counts = df.groupby(['path'])['trajname'].nunique()
-        # df['path'] = df['path'].map(lambda x: f"path-{x} ({path_counts[x]})")
-        df = df.set_index('trajname')  # Restore original index
-
-        # Merge labels back to the original data
-        raw_data['path'] = raw_data['trajname'].map(df['path'])
-        data['path'] = data['trajname'].map(df['path'])
-
-        if len(features) == 2:
-            sns.scatterplot(data=data, x=features[0], y=features[1], hue='path', alpha=0.3, palette='Set1')
-            # sns.scatterplot(data=medoid_data, x=medoid_features[0], y=medoid_features[1], label='medoid', color='black', lw=2)
-        else:
-            g = sns.PairGrid(data,
-                vars=features,
-                hue='path', # 'path','speed'
-                palette='viridis',
-                height=3).map_lower(sns.scatterplot).map_diag(sns.kdeplot)
-            
-            # for medoid in medoid_features.itertuples():
-                # g.map_lower(plt.scatter, medoid[1], medoid[2], color='black', marker='x', s=100, label='Medoid')
-
-        # plt.title(f"Clustering with {K} clusters")
-        plt.xlabel(features[0]); plt.ylabel(features[1])
-        plt.legend(title='Cluster', loc='upper right')
-        plt.tight_layout()
-        plt.savefig(f"{outdir}/trajs_clustered_k-{K}.png", dpi=300, bbox_inches='tight')
-        # plt.show()
-        plt.close()
-
-
-
-        return raw_data
-
-    @staticmethod
-    def fit_gmm_to_work_values(raw_work,
-                                max_K:int=5, 
-                                max_iter:int=1000,
-                                covariance_type:str='full',
-                                random_state:int=42
-                                ):   
-        """Fit GMMs to the work values and return the main parameters."""
-
-        # TODO maybe we dont need the elbow loop and can approximate K with the dirichlet process
-
-        raw_work = raw_work.reshape(-1, 1) # reshape for GMM
-        n_samples = raw_work.shape[0]
-
-        scores = []
-        models = []
-
-        for n in range(1, max_K):
-            if n > n_samples:
-                break  # can't fit more components than points
-
-            gmm = GaussianMixture(
-                n_components=n,
-                covariance_type=covariance_type,  # 'full' may overfit for small datasets
-                max_iter=max_iter,
-                init_params="k-means++",
-                random_state=random_state,
-                # reg_covar=1e-5  # regularization to avoid singular covariance matrices
-            )
-            gmm.fit(raw_work)
-            models.append(gmm)
-
-            scores.append(gmm.bic(raw_work))
-    
-        best_gmm = models[np.argmin(scores)]
-
-        variances = best_gmm.covariances_.reshape(best_gmm.n_components, -1).flatten()
-
-        augmented_data = {
-            "GMM_n_components": best_gmm.n_components,
-            "GMM_scores": scores,
-            "GMM_weights": best_gmm.weights_,
-            "GMM_means": best_gmm.means_,
-            "GMM_variances": variances,
-            "GMM_posteriors": best_gmm.predict_proba(raw_work),
-            "GMM_labels": best_gmm.predict(raw_work),
-        }
-        return augmented_data
-    
     def run_analysis(self,
                      speeds: list[float] = None,
                      temperature: float = None,
                      dist_minmax: tuple = None,
-                     decorrelate_work: bool = True,
+                     decorrelate_work: bool = False,
                      fit_GMM: bool = True
                      )-> pd.DataFrame:
         
@@ -371,9 +120,6 @@ class SteeredMDAnalysis:
             self.temp = temperature
             self.beta = 1.0 / (self.kB * self.temp)
 
-        if dist_minmax is not None:
-            self.dist_minmax = dist_minmax
-
         # assemble the master dataframe
         raw_data = self.load_logs(self.log_files)
 
@@ -381,11 +127,10 @@ class SteeredMDAnalysis:
             print(f'WARNING: Filtering data by speeds: {speeds}')
             raw_data = raw_data[raw_data['speed'].isin(speeds)]
 
-        if self.dist_minmax is not None:
-            print(f'WARNING: Filtering data by distance range: {self.dist_minmax}')
-            raw_data = raw_data[(raw_data[self.dist_column] >= self.dist_minmax[0]) & 
-                                          (raw_data[self.dist_column] <= self.dist_minmax[1])]
-            # raw_data = raw_data.loc[raw_data['C'] >= 2]  # filter by residue coordination
+        if dist_minmax is not None:
+            print(f'WARNING: Filtering data by distance range: {dist_minmax}')
+            raw_data = raw_data[(raw_data[self.dist_column] >= dist_minmax[0]) & 
+                                          (raw_data[self.dist_column] <= dist_minmax[1])]
 
         print('WARNING: Recalculating work from force and distance.')
         # this will overwrite the work column in the raw_data DataFrame
@@ -393,10 +138,8 @@ class SteeredMDAnalysis:
 
         self.raw_data, centers = self.bin_data(raw_data, self.bin_width, self.min_points)
 
-        if self.cluster_method == 'DTW':
-            outdir = os.path.join(os.path.dirname(self.log_files[0]), 'clustering_DTW')
-            os.makedirs(outdir, exist_ok=True)
-            self.raw_data = self.cluster_trajectories_DTW(self.raw_data, K=None, outdir=outdir)
+        if self.cluster_paths:
+            self.raw_data = self.cluster_trajectories()
         else:
             self.raw_data['path'] = 1 # default to single cluster if no clustering method is specified
 
@@ -404,16 +147,17 @@ class SteeredMDAnalysis:
             # decorrelate work values per bin, speed and replica using block averaging
             # this will overwrite the work column in the raw_data DataFrame
             print("WARNING: Decorrelating work values using block averaging.")
-            # self.raw_data = self.decorrelate_work(self.raw_data, self.work_column)
+            self.raw_data = self.decorrelate_work(self.raw_data, self.work_column)
 
         results = []
         gmm_results = defaultdict(dict)  # to store GMM results per bin and speed
         for (r_bin, speed), group in self.raw_data.groupby(["r_bin", "speed"]):
-            raw_W = group[self.work_column].values
 
-            # If we dont do decorrelation, we should use the per-replica aggregated work
-            replica_W = group.groupby(["replica"])[self.work_column].mean().values
-            # print(f'{len(replica_W)} replicas in bin {r_bin:.2f} at speed {speed:.5f}')
+            raw_W = group[self.work_column].values # shape (N_points,)
+
+            # If we dont decorrelate, we should use the per-replica aggregated work
+            replica_W = group.groupby(["replica"])[self.work_column].mean().values # shape (N_replicas,)
+            
             # replica_W = raw_W
 
             Wmean_raw = replica_W.mean()
@@ -511,6 +255,405 @@ class SteeredMDAnalysis:
         results['dG_diss_gmm'] = results['Wmean_mix'] - results['Wdiss_diss_gmm']
 
         return results, gmm_results
+    
+    def load_logs(self, log_files: list[str]) -> pd.DataFrame:
+
+        # compile raw log files
+        count = 0
+        raw_data = []
+        for fn in log_files:
+            try:
+                base = os.path.basename(fn)[:-4]  # remove .dat extension
+                # print(f"Loading {base}...")
+                speed = float(base.split('_')[-2].strip('v'))
+                df = pd.read_csv(fn, comment='#')
+                df['trajname'] = base
+                df['speed'] = speed  # add speed column
+                df['replica'] = base.split('_')[-3]  # extract replica number from filename
+                raw_data.append(df)
+                count += 1
+            except Exception as e:
+                print(f"Error loading {fn}: {e}")
+                continue
+        if count == 0:
+            print("No valid log files found.")
+            return None
+        print(f"Loaded {count} log files for system '{self.sysname}'.")
+
+        if not raw_data:
+            print("No data loaded from log files.")
+            return None
+        return pd.concat(list(raw_data))
+    
+    def integrate_force_dx(self, raw_data) -> pd.DataFrame:
+        """Integrate the force over distance to compute work done.
+        This will overwrite the work column in the raw_data DataFrame.
+        """
+        grouped = raw_data.groupby("trajname")
+        for traj, group in grouped:
+            work = cumulative_trapezoid(group[self.force_column], group[self.dist_column], initial=0.0)
+            raw_data.loc[raw_data['trajname'] == traj, self.work_column] = work
+        
+        return raw_data
+    
+    def bin_data(self, 
+                 raw_data: pd.DataFrame,
+                 bin_width: float=0.05, #nm
+                 min_points: int=10
+                 )-> pd.DataFrame:
+                 
+        # get overall centers and edges for histogram
+        rmin, rmax = min(raw_data[self.dist_column]), max(raw_data[self.dist_column])
+        edges  = np.arange(rmin, rmax + bin_width, bin_width)
+        centers = edges[:-1] + bin_width / 2
+
+        # Use shared edges and centers
+        raw_data['bin'] = np.digitize(raw_data[self.dist_column], edges) - 1
+        raw_data = raw_data[(raw_data['bin'] >= 0) & (raw_data['bin'] < len(centers))]
+
+        raw_data = self.filter_low_count_bins(raw_data, min_points)
+
+        #these are the center each point belongs to
+        raw_data['r_bin'] = raw_data['bin'].map(lambda b: centers[b] if b >= 0 and b < len(centers) else np.nan)
+
+        return raw_data, centers
+
+    def filter_low_count_bins(self, raw_data, min_points):
+        """Filter low count bins per speed. This function filters out bins 
+        that have fewer than `min_points` data points for each speed.
+        """
+
+        all_data = []
+        for speed in raw_data['speed'].unique():
+
+            df = raw_data[raw_data['speed'] == speed]
+
+            # Count points per bin and filter out bins with too few points
+            points_per_bin = df.groupby('bin').size()
+            points_per_bin = points_per_bin[points_per_bin > min_points]  
+            df = df[df['bin'].isin(points_per_bin.index)]
+            df['speed'] = speed  # add speed column
+            all_data.append(df)
+
+        return pd.concat(all_data)
+        
+    def cluster_trajectories(self, do_PCA:bool=True, do_plots:bool=True):
+        """Cluster trajectories using Dynamic Time Warping (DTW) and k-medoids.
+        For more information on DTW see: https://doi.org/10.1073/pnas.231354212
+                                         https://dtaidistance.readthedocs.io/en/latest/index.html
+        """
+
+        raw_data = self.raw_data.copy()
+
+        logs = set(raw_data['trajname'].values)
+        trajs = [f"{l.replace('log', 'traj')}.dcd" for l in logs]
+        trajs = [os.path.join(self.outdir, t) for t in trajs]
+
+        outdir = os.path.join(self.outdir,'path_clustering')
+        os.makedirs(outdir, exist_ok=True)
+        distance_file = f"{outdir}/{self.sysname}_raw_distances.csv"
+
+        if os.path.exists(distance_file):
+            df = pd.read_csv(distance_file)
+            print(f"Loaded raw distances from {distance_file}")
+        else:
+            all_distances = {}
+            for traj in tqdm.tqdm(trajs, desc="Calculating distances.."):
+                u = mda.Universe(self.reference_pdb, traj)
+                pocket_atoms = u.select_atoms(self.pocket_select)
+                ligand_atoms = u.select_atoms(self.ligand_select)
+                data_array = np.zeros((len(u.trajectory),(len(pocket_atoms)*len(ligand_atoms))))
+                for ts in u.trajectory:
+                    distances = distance_array(pocket_atoms, ligand_atoms, 
+                                                result=np.ndarray((len(pocket_atoms), len(ligand_atoms))))
+                    data_array[ts.frame] = distances.flatten() / 10.0  # Convert to nm
+                all_distances[os.path.basename(traj)] = data_array
+                
+            df_list = []
+            for traj_name, distances in all_distances.items():
+                num_frames = distances.shape[0]
+                traj_name = traj_name.replace('.dcd', '').replace('traj', 'log') 
+                frame_numbers = np.arange(num_frames)
+                traj_df = pd.DataFrame(distances, columns=[f"dist_{i}" for i in range(distances.shape[1])])
+                traj_df.insert(0, "frame", frame_numbers)
+                traj_df.insert(1, "trajname", traj_name)
+                df_list.append(traj_df)
+            df = pd.concat(df_list, ignore_index=True)
+            df.to_csv(distance_file, index=False)
+
+        # Ensure the keys in trajname_map align with the values in df['trajname']
+        trajname_map = raw_data.set_index('trajname')[self.work_column].to_dict()
+        df['self.work_column'] = df['trajname'].map(trajname_map)
+        df.dropna(inplace=True) # Ensure no NaN values in work column
+        trajname_map = raw_data.set_index('trajname')[self.dist_column].to_dict()
+        df[self.dist_column] = df['trajname'].map(trajname_map)
+
+        # # filter by r_bin
+        # df = df[(df['r_bin'] >= 1.2) & (df['r_bin'] <= 2.5)]
+
+        distances = df.iloc[:, 2:].values
+        scaler = StandardScaler()
+        distances = scaler.fit_transform(distances)  # Scale the distances
+
+        if do_PCA:
+            pca = PCA(n_components=2, random_state=self.seed)
+            distances = pca.fit_transform(distances)
+            print(f'The first 2 PC explain {sum(pca.explained_variance_ratio_)*100:.2f}% of the variance')
+
+        distance_df = pd.DataFrame(distances)
+        distance_df.insert(0, "frame", df['frame'])
+        distance_df.insert(1, "trajname", df['trajname'])
+
+        # Create a distance matrix using DTW
+        paths = defaultdict(np.ndarray)
+        for traj_name in distance_df.groupby("trajname").groups:
+            traj_df = distance_df[distance_df["trajname"] == traj_name]
+            paths[traj_name] = traj_df.iloc[:, 2:].values
+
+        stacked = [paths[traj_name] for traj_name in paths.keys()]
+
+        distmatrix = dtw_ndim.distance_matrix_fast(s=stacked, ndim=stacked[0].shape[1])
+
+        if do_plots:
+            # sort the distance matrix by the average distance of each trajectory for plotting
+            avg_distances = distmatrix.mean(axis=1)
+            sorted_indices = np.argsort(avg_distances)
+            sorted_distances = distmatrix[sorted_indices][:, sorted_indices]
+
+            plt.figure(figsize=(6, 5))
+            sns.heatmap(sorted_distances, cmap="viridis")
+            plt.title("DTW Distance Matrix")
+            plt.tight_layout()
+            plt.savefig(f"{outdir}/{self.sysname}_distmatrix.png")
+            plt.show()
+            plt.close()
+
+        # Find optimal number of paths using Elbow method and Silhouette score
+        maxK = min(8, len(paths))
+        silloutte_scores = {}
+        for i in range(2,maxK):
+            c = kmedoids.fasterpam(distmatrix, i) # c.loss
+            silloutte_scores[i] = silhouette_score(distmatrix, c.labels, metric="precomputed")
+
+        K = max(silloutte_scores, key=silloutte_scores.get)
+        print(f"Found {K} paths with Silhouette score {silloutte_scores[K]:.2f}")
+        
+        if do_plots:
+            plt.figure(figsize=(5, 4))
+            sns.lineplot(x=list(silloutte_scores.keys()), y=list(silloutte_scores.values()))
+            plt.axvline(x=K, color='red', linestyle='--', label=f'Optimal K={K}')
+            plt.xlabel("Number of paths"); plt.ylabel("Silhouette score")
+            plt.title(f"Optimal number of paths: {K}")
+            plt.tight_layout()
+            plt.savefig(f"{outdir}/{self.sysname}_elbowplot.png")
+            plt.show()
+            plt.close()
+
+        # K-Medoids clustering using the optimal number of paths
+        cluster = kmedoids.fasterpam(distmatrix, K, random_state=self.seed)
+
+        # visualize the medoids in the PCA space
+        if do_PCA and do_plots:
+            plt.figure(figsize=(6, 5))
+            sns.scatterplot(data=distance_df, x=distance_df.iloc[:, 2], y=distance_df.iloc[:, 3], alpha=0.2, c='gray', s=2, linewidth=0)
+            for medoid in cluster.medoids:
+                medoid_name = list(paths.keys())[medoid]
+                distance_df_medoid = distance_df[distance_df["trajname"] == medoid_name]
+                sns.scatterplot(data=distance_df_medoid, x=distance_df_medoid.iloc[:, 2], y=distance_df_medoid.iloc[:, 3], 
+                                label=medoid_name, alpha=1, s=25, linewidth=0#, edgecolor='black', st
+                                                                                )
+            plt.title(f"Medoids in PCA space for {K} paths")
+            plt.xlabel("PC1");  plt.ylabel("PC2")
+            plt.tight_layout()
+            plt.savefig(f"{outdir}/{self.sysname}_clustering_K-{K}.png")
+            plt.show()
+            plt.close()
+
+        trajname_map = pd.DataFrame({"trajname": list(paths.keys()),
+                        "cluster": cluster.labels}).set_index('trajname')['cluster'].to_dict()
+        raw_data['path'] = raw_data['trajname'].map(trajname_map)
+
+        return raw_data
+
+    @staticmethod
+    def fit_gmm_to_work_values(raw_work,
+                                max_K:int=5, 
+                                max_iter:int=1000,
+                                covariance_type:str='full',
+                                random_state:int=42
+                                ):   
+        """Fit GMMs to the work values and return the main parameters."""
+
+        # TODO maybe we dont need the elbow loop and can approximate K with the dirichlet process
+
+        raw_work = raw_work.reshape(-1, 1) # reshape for GMM
+        n_samples = raw_work.shape[0]
+
+        scores = []
+        models = []
+
+        for n in range(1, max_K):
+            if n > n_samples:
+                break  # can't fit more components than points
+
+            gmm = GaussianMixture(
+                n_components=n,
+                covariance_type=covariance_type,  # 'full' may overfit for small datasets
+                max_iter=max_iter,
+                init_params="k-means++",
+                random_state=random_state,
+                # reg_covar=1e-5  # regularization to avoid singular covariance matrices
+            )
+            gmm.fit(raw_work)
+            models.append(gmm)
+
+            scores.append(gmm.bic(raw_work))
+    
+        best_gmm = models[np.argmin(scores)]
+
+        variances = best_gmm.covariances_.reshape(best_gmm.n_components, -1).flatten()
+
+        augmented_data = {
+            "GMM_n_components": best_gmm.n_components,
+            "GMM_scores": scores,
+            "GMM_weights": best_gmm.weights_,
+            "GMM_means": best_gmm.means_,
+            "GMM_variances": variances,
+            "GMM_posteriors": best_gmm.predict_proba(raw_work),
+            "GMM_labels": best_gmm.predict(raw_work),
+        }
+        return augmented_data
+    
+    def load_logs(self, log_files: list[str]) -> pd.DataFrame:
+
+        # compile raw log files
+        count = 0
+        raw_data = []
+        for fn in log_files:
+            try:
+                base = os.path.basename(fn)[:-4]  # remove .dat extension
+                # print(f"Loading {base}...")
+                speed = float(base.split('_')[-2].strip('v'))
+                df = pd.read_csv(fn, comment='#')
+                df['trajname'] = base
+                df['speed'] = speed  # add speed column
+                df['replica'] = base.split('_')[-3]  # extract replica number from filename
+                raw_data.append(df)
+                count += 1
+            except Exception as e:
+                print(f"Error loading {fn}: {e}")
+                continue
+        if count == 0:
+            print("No valid log files found.")
+            return None
+        print(f"Loaded {count} log files for system '{self.sysname}'.")
+
+        if not raw_data:
+            print("No data loaded from log files.")
+            return None
+        return pd.concat(list(raw_data))
+    
+    def integrate_force_dx(self, raw_data) -> pd.DataFrame:
+        """Integrate the force over distance to compute work done.
+        This will overwrite the work column in the raw_data DataFrame.
+        """
+        grouped = raw_data.groupby("trajname")
+        for traj, group in grouped:
+            work = cumulative_trapezoid(group[self.force_column], group[self.dist_column], initial=0.0)
+            raw_data.loc[raw_data['trajname'] == traj, self.work_column] = work
+        
+        return raw_data
+    
+    def bin_data(self, 
+                 raw_data: pd.DataFrame,
+                 bin_width: float=0.05, #nm
+                 min_points: int=10
+                 )-> pd.DataFrame:
+                 
+        # get overall centers and edges for histogram
+        rmin, rmax = min(raw_data[self.dist_column]), max(raw_data[self.dist_column])
+        edges  = np.arange(rmin, rmax + bin_width, bin_width)
+        centers = edges[:-1] + bin_width / 2
+
+        # Use shared edges and centers
+        raw_data['bin'] = np.digitize(raw_data[self.dist_column], edges) - 1
+        raw_data = raw_data[(raw_data['bin'] >= 0) & (raw_data['bin'] < len(centers))]
+
+        raw_data = self.filter_low_count_bins(raw_data, min_points)
+
+        #these are the center each point belongs to
+        raw_data['r_bin'] = raw_data['bin'].map(lambda b: centers[b] if b >= 0 and b < len(centers) else np.nan)
+
+        return raw_data, centers
+
+    def filter_low_count_bins(self, raw_data, min_points):
+        """Filter low count bins per speed. This function filters out bins 
+        that have fewer than `min_points` data points for each speed.
+        """
+
+        all_data = []
+        for speed in raw_data['speed'].unique():
+
+            df = raw_data[raw_data['speed'] == speed]
+
+            # Count points per bin and filter out bins with too few points
+            points_per_bin = df.groupby('bin').size()
+            points_per_bin = points_per_bin[points_per_bin > min_points]  
+            df = df[df['bin'].isin(points_per_bin.index)]
+            df['speed'] = speed  # add speed column
+            all_data.append(df)
+
+        return pd.concat(all_data)
+
+    @staticmethod
+    def fit_gmm_to_work_values(raw_work,
+                                max_K:int=5, 
+                                max_iter:int=1000,
+                                covariance_type:str='full',
+                                random_state:int=42
+                                ):   
+        """Fit GMMs to the work values and return the main parameters."""
+
+        # TODO maybe we dont need the elbow loop and can approximate K with the dirichlet process
+
+        raw_work = raw_work.reshape(-1, 1) # reshape for GMM
+        n_samples = raw_work.shape[0]
+
+        scores = []
+        models = []
+
+        for n in range(1, max_K):
+            if n > n_samples:
+                break  # can't fit more components than points
+
+            gmm = GaussianMixture(
+                n_components=n,
+                covariance_type=covariance_type,  # 'full' may overfit for small datasets
+                max_iter=max_iter,
+                init_params="k-means++",
+                random_state=random_state,
+                # reg_covar=1e-5  # regularization to avoid singular covariance matrices
+            )
+            gmm.fit(raw_work)
+            models.append(gmm)
+
+            scores.append(gmm.bic(raw_work))
+    
+        best_gmm = models[np.argmin(scores)]
+
+        variances = best_gmm.covariances_.reshape(best_gmm.n_components, -1).flatten()
+
+        augmented_data = {
+            "GMM_n_components": best_gmm.n_components,
+            "GMM_scores": scores,
+            "GMM_weights": best_gmm.weights_,
+            "GMM_means": best_gmm.means_,
+            "GMM_variances": variances,
+            "GMM_posteriors": best_gmm.predict_proba(raw_work),
+            "GMM_labels": best_gmm.predict(raw_work),
+        }
+        return augmented_data
+        
 
     def plot_gmm_per_speed(self, results, ncols=8, figsize=(22, 4), outdir:str=None):
         """
@@ -595,6 +738,8 @@ class SteeredMDAnalysis:
                          work_column = 'work(kJ/mol)'
                         )-> pd.DataFrame:
 
+        #FIXME: I'm not sure if this is the best way 
+
         if raw_data is None:
             raw_data = self.raw_data.copy()
 
@@ -605,7 +750,7 @@ class SteeredMDAnalysis:
                 W = traj[work_column].values
                 acf_vals = self.compute_acf(W, nlags=200)
                 tau_int = self.integrated_autocorrelation(acf_vals, cutoff=0.05)
-                block_size = int(np.ceil(tau_int))
+                block_size = int(np.ceil(tau_int)) * 2  # use 2*tau_int as block size
                 block_sizes[(r_bin, v, replica)] = block_size
                 # print(f"r_bin: {r_bin:.2f}, speed: {speed}, IACT: {tau_int:.2f}, W_lenght: {len(W)} block_size: {block_size}")
 
