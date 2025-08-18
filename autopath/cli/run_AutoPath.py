@@ -77,7 +77,7 @@ def main():
         equilibration_scheme=config.equilibration_scheme,
         # Steered MD
         run_sMDpulling=config.run_sMDpulling,
-        sMD_pulling_dist=config.sMD_pulling_dist,
+        sMD_pulling_dir=config.sMD_pulling_dir,
         sMD_time=config.sMD_time,
         sMD_replicas=config.sMD_replicas,
         sMD_steps_per_move=config.sMD_steps_per_move,

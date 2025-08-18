@@ -37,10 +37,10 @@ class Config(object):
         run_equilibration: bool = True,
         equilibration_scheme: str = "autopath/data/equilibration.json",
         run_sMDpulling: bool = True,
-        sMD_pulling_dist: float = 2.0,  # nm
+        sMD_pulling_dir: str = "forward",  # "forward" or "backward"
         sMD_time: int = 1,  # ns
         sMD_steps_per_move: int = 250,  # 1 ps
-        sMD_pulling_force: float = 2000,  # KJ/mol/nm2
+        sMD_spring_cte: float = 50,  # KJ/mol/nm2/atom
         sMD_replicas: int = 5,
         sMD_autostop: bool = False,
         extract_milestones: bool = True,
@@ -80,11 +80,11 @@ class Config(object):
 
         # Steered MD
         self.run_sMDpulling = run_sMDpulling
+        self.sMD_pulling_dir = sMD_pulling_dir
         self.sMD_time = sMD_time  # ns
         self.sMD_replicas = sMD_replicas
-        self.sMD_pulling_dist = sMD_pulling_dist
         self.sMD_steps_per_move = sMD_steps_per_move  # 1 ps
-        self.sMD_pulling_force = sMD_pulling_force  # KJ/mol/nm2
+        self.sMD_spring_cte = sMD_spring_cte  # KJ/mol/nm2/atom
         self.sMD_autostop = sMD_autostop
 
         # Milestones

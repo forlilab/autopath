@@ -25,11 +25,11 @@
 
     "sMD": {
         "run_sMDpulling": true,
-        "sMD_pulling_dist": 2.0,
+        "sMD_pulling_dir": "forward",
         "sMD_time": 1,
         "sMD_replicas": 3,
         "sMD_steps_per_move": null,
-        "sMD_spring_cte": null
+        "sMD_spring_cte": 50
     },
     "milestones": {
         "extract_milestones": true,
