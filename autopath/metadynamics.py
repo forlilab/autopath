@@ -66,6 +66,7 @@ class MetadynamicsMD:
         self,
         pdb_file: str = None,
         system: str = None,
+        state_xml: str = None,
         checkpoint_file: str = None,
         run_id: str = None,
         mMD_CV: str = "com",
@@ -82,6 +83,8 @@ class MetadynamicsMD:
 
         assert mMD_CV in [
             "com",
+            "com_z",
+            "com_x_y",            
             "rmsd",
             "rmsd_states",
             "nc",
@@ -120,24 +123,31 @@ class MetadynamicsMD:
                 )
                 exit(1)
             else:
-                pdb = PDBFile(pdb_file)
-                self.topology = pdb.topology
+                self.topology = PDBFile(pdb_file).topology
 
         logging.debug(f"Creating the simulation for {run_id}")
         simulation = Simulation(self.topology, system, integrator, self.platform)
+        simulation.context.setPeriodicBoxVectors(*self.topology.getPeriodicBoxVectors())
+        box_vec=self.topology.getPeriodicBoxVectors()
+        print(f'setting box vectors: {box_vec} ')
 
         if checkpoint_file is not None:
             logging.debug(f"Loading simulation checkpoint {checkpoint_file}")
             simulation.loadCheckpoint(checkpoint_file)
         else:
-            if pdb_file is not None:
-                logging.debug(f"Setting positions from PDB file {pdb_file}")
-                simulation.context.setPositions(pdb.positions)
+            if state_xml is not None:
+                with open(state_xml) as f:
+                    state = XmlSerializer.deserialize(f.read())
+                    simulation.context.setState(state)
             else:
-                logging.error(
-                    f"Either a PDB or a checkpoint file must be provided to get coordinates from"
-                )
-                exit(1)
+                if pdb_file is not None:
+                    logging.debug(f"Setting positions from PDB file {pdb_file}")
+                    simulation.context.setPositions(PDBFile(pdb_file).positions)
+                else:
+                    logging.error(
+                        f"Either a PDB or a checkpoint file or state xml must be provided to get coordinates from"
+                    )
+                    exit(1)
 
         # Add harmonic positional restraints to protein CA
         input_positions = simulation.context.getState(getPositions=True).getPositions()
@@ -154,8 +164,8 @@ class MetadynamicsMD:
                 14,
             )
             
-        lig_name = "UNK"
-        ligand_atoms = [a.index for a in self.topology.atoms() if a.residue.name == lig_name]
+        # lig_name = "UNK"
+        # ligand_atoms = [a.index for a in self.topology.atoms() if a.residue.name == lig_name]
         # add_cylindrical_restraints(system, host_index=self.pocket_atoms, guest_index=ligand_atoms, R_cylinder=1.5 * openmmunit.nanometers, force_group=31)
 
         logging.debug(f"Setting up reporters for {run_id}..")
@@ -166,13 +176,34 @@ class MetadynamicsMD:
             total_steps,
             saveFrequency,
         )
-
         if mMD_CV == "com":
 
             groups = [self.pocket_atoms] + [self.ligand_atoms]
 
             cv = cvpack.CentroidFunction(
+                f"sqrt(distance(g1,g2)^2)",
+                openmmunit.nanometers,
+                groups,
+                weighByMass=True,
+                pbc=False,
+            )
+        if mMD_CV == "com_z":
+
+            groups = [self.pocket_atoms] + [self.ligand_atoms]
+
+            cv = cvpack.CentroidFunction(
                 f"sqrt(pointdistance(0,0,z1,0,0,z2)^2)",
+                openmmunit.nanometers,
+                groups,
+                weighByMass=False,
+                pbc=True,
+            )
+        if mMD_CV == "com_x_y":
+
+            groups = [self.pocket_atoms] + [self.ligand_atoms]
+
+            cv = cvpack.CentroidFunction(
+                f"sqrt(pointdistance(x1,y1,0,x2,y2,0)^2)",
                 openmmunit.nanometers,
                 groups,
                 weighByMass=False,
@@ -277,7 +308,7 @@ class MetadynamicsMD:
                         os.path.join(self.out_dir, f"COLVAR_{run_id}.npy"),
                         colvar_array,
                     )
-
+                print(f'current CV: {meta.getCollectiveVariables(simulation)}')
                 meta.step(simulation, self.record_CV)
                 current_cvs = meta.getCollectiveVariables(simulation)
                 colvar_array = np.append(colvar_array, [current_cvs], axis=0)
@@ -308,6 +339,7 @@ class MetadynamicsMD:
         ligand_sdf: str = None,
         system: str = None,
         checkpoint_file: str = None,
+        state_xml: str = None,
         run_id: str = None,
         mMD_time: int = 10,
         bias_factor: float = 10,
@@ -318,14 +350,23 @@ class MetadynamicsMD:
         grid_dimensions_B: tuple = (0.0, 1.0),
         bias_frequency: int = 2,
         saveFrequency: int = 50,
+        cv1: str = "com_z",
         cv2: str = "lmz",
         atom1: list = None, #these are the two atoms in the delta z calculation....make this more clear somehow?
-        atom2: list = None,
+        atom2: list = None, #these are the two atoms in the delta z calculation....make this more clear somehow?
+        rmsd_1_reference_positions: list = None,
+        rmsd_1_group: list = None,
+        rmsd_2_reference_positions: list = None,
+        rmsd_2_group: list = None,
     ) -> None:
 
+        # Validate cv1
+        if cv1 not in ["com_z", 'com', "rmsd"]:
+            logging.error(f"Invalid value for cv1: '{cv2}'. Must be 'com_z', 'com' or 'rmsd'.")
+
         # Validate cv2
-        if cv2 not in ["lmz", "dz"]:
-            logging.error(f"Invalid value for cv2: '{cv2}'. Must be 'lmz' or 'dz'.")
+        if cv2 not in ["lmz", "dz", "rmsd", 'nc']:
+            logging.error(f"Invalid value for cv2: '{cv2}'. Must be 'lmz', 'dz', 'rmsd', or  'nc'.")
 
         # Require atom1 and atom2 if using distance-based CV
             if cv2 == "dz":
@@ -366,15 +407,20 @@ class MetadynamicsMD:
             logging.debug(f"Loading simulation checkpoint {checkpoint_file}")
             simulation.loadCheckpoint(checkpoint_file)
         else:
-            if pdb_file is not None:
-                logging.debug(f"Setting positions from PDB file {pdb_file}")
-                simulation.context.setPositions(PDBFile(pdb_file).positions)
+            if state_xml is not None:
+                with open(state_xml) as f:
+                    logging.debug(f"Simulation state restored from {state_xml}")
+                    state = XmlSerializer.deserialize(f.read())
+                    simulation.context.setState(state)
             else:
-                logging.error(
-                    f"Either a PDB or a checkpoint file must be provided to get coordinates from"
-                )
-                exit(1)
-
+                if pdb_file is not None:
+                    logging.debug(f"Setting positions from PDB file {pdb_file}")
+                    simulation.context.setPositions(PDBFile(pdb_file).positions)
+                else:
+                    logging.error(
+                        f"Either a PDB or a checkpoint file or state xml must be provided to get coordinates from"
+                    )
+                    exit(1)
         # Add harmonic positional restraints to protein CA
         input_positions = simulation.context.getState(getPositions=True).getPositions()
 
@@ -389,48 +435,88 @@ class MetadynamicsMD:
                 14,
             )
 
-
-        ##################### Z depth CV #################################
-
-        dummy_atom = [atom.index for atom in self.topology.atoms() if atom.residue.name == "DUM"]
-        if not dummy_atom:
-            raise ValueError("Could not find ligand (UNK) or dummy atom (DUM) in the topology.")
-
-        #add z size parameter
-        _, _, c = simulation.context.getState(getPositions=False, getVelocities=False, getEnergy=False).getPeriodicBoxVectors()
-        zsize = c[2].value_in_unit(openmmunit.nanometers)
-
-
-        groups = [self.ligand_atoms] + [dummy_atom]
-        print(f'groups: {groups}')
-        COM_Z = cvpack.CentroidFunction(
-            # f"z1-z2",
-            # f"z1",
-            "select(step((z1 - z2)/zsize - floor((z1 - z2)/zsize) - 0.5), -1, 1) * pointdistance(0, 0, z1, 0, 0, z2)",
-            # "select(step((z1 - 0)/zsize - floor((z1 - 0)/zsize) - 0.5), -1, 1) * pointdistance(0, 0, z1, 0, 0, 0)",
-            openmmunit.nanometers,
-            groups,
-            weighByMass=False,
-            pbc=True,
-            zsize = zsize
-        )
-
-
-
         grid_width_A = hill_width_A / 5
         grid_min_A, grid_max_A = grid_dimensions_A
         grid_A = round(abs(grid_min_A - grid_max_A) / grid_width_A)
+        ##################### Z depth CV (cv1) #################################
 
-        com_cv = BiasVariable(
-            COM_Z,
-            minValue=grid_min_A,
-            maxValue=grid_max_A,
-            biasWidth=hill_width_A,
-            periodic=False, 
-            gridWidth=grid_A,
+        if cv1 == "com_z":
+            dummy_atom = [atom.index for atom in self.topology.atoms() if atom.residue.name == "DUM"]
+            if not dummy_atom:
+                raise ValueError("Could not find ligand (UNK) or dummy atom (DUM) in the topology.")
+
+            #add z size parameter
+            _, _, c = simulation.context.getState(getPositions=False, getVelocities=False, getEnergy=False).getPeriodicBoxVectors()
+            zsize = c[2].value_in_unit(openmmunit.nanometers)
+
+
+            groups = [self.ligand_atoms] + [dummy_atom]
+            print(f'groups: {groups}')
+            COM_Z = cvpack.CentroidFunction(
+                # f"z1-z2",
+                # f"z1",
+                "select(step((z1 - z2)/zsize - floor((z1 - z2)/zsize) - 0.5), -1, 1) * pointdistance(0, 0, z1, 0, 0, z2)",
+                # "select(step((z1 - 0)/zsize - floor((z1 - 0)/zsize) - 0.5), -1, 1) * pointdistance(0, 0, z1, 0, 0, 0)",
+                openmmunit.nanometers,
+                groups,
+                weighByMass=False,
+                pbc=True,
+                zsize = zsize
+            )
+
+
+
+            cv1_BiasVariable = BiasVariable(
+                COM_Z,
+                minValue=grid_min_A,
+                maxValue=grid_max_A,
+                biasWidth=hill_width_A,
+                periodic=False, 
+                gridWidth=grid_A,
         )
         
-        ##################### Lipophilicity moment CV #################################
+        ##################### RMSD CV (cv1) #################################
+        if cv1 == "rmsd":
+            
+            num_atoms = system.getNumParticles()
+
+            # Instantiate the RMSD collective variable
+            rmsd_cv = cvpack.RMSD(
+                referencePositions=rmsd_1_reference_positions,
+                group=rmsd_1_group,
+                numAtoms=num_atoms,  
+                name='rmsd_1'
+            )
+            cv1_BiasVariable = BiasVariable(
+                rmsd_cv,
+                minValue=grid_min_A,
+                maxValue=grid_max_A,
+                biasWidth=hill_width_A,
+                periodic=False, 
+                gridWidth=grid_A,
+        )        
+
+        ##################### COM CV (cv1) #################################
+        if cv1 == "com":
+
+            groups = [self.pocket_atoms] + [self.ligand_atoms]
+
+            com_cv = cvpack.CentroidFunction(
+                f"sqrt(distance(g1,g2)^2)",
+                openmmunit.nanometers,
+                groups,
+                weighByMass=True,
+                pbc=False,
+            )
+            cv1_BiasVariable = BiasVariable(
+                com_cv,
+                minValue=grid_min_A,
+                maxValue=grid_max_A,
+                biasWidth=hill_width_A,
+                periodic=False, 
+                gridWidth=grid_A,
+        )  
+        ##################### Lipophilicity moment CV (cv2) #################################
 
         # get crippen contribution list
         if cv2 == "lmz":
@@ -493,7 +579,7 @@ class MetadynamicsMD:
             grid_min_B, grid_max_B = grid_dimensions_B
             grid_B = round(abs(grid_min_B - grid_max_B) / grid_width_B)
 
-            lm_cv = BiasVariable(
+            cv2_BiasVariable = BiasVariable(
                 LM,
                 minValue=grid_min_B,
                 maxValue=grid_max_B,
@@ -502,20 +588,9 @@ class MetadynamicsMD:
                 gridWidth=grid_B,
             )
 
-            ##############################################################
-
-            meta = Metadynamics(
-                system,
-                [com_cv, lm_cv],
-                self.temperature,
-                bias_factor,
-                hill_height,
-                frequency=bias_frequency,
-                saveFrequency=saveFrequency,
-                biasDir=self.out_dir,
-            )
 
 
+        ##################### Delta Z CV (cv2) #################################
         if cv2 == "dz":
             groups = [atom1] + [atom2]
             print(f'groups: {groups}')
@@ -531,7 +606,7 @@ class MetadynamicsMD:
             grid_min_B, grid_max_B = grid_dimensions_B
             grid_B = round(abs(grid_min_B - grid_max_B) / grid_width_B)
 
-            dz_cv = BiasVariable(
+            cv2_BiasVariable = BiasVariable(
                 dz,
                 minValue=grid_min_B,
                 maxValue=grid_max_B,
@@ -540,18 +615,65 @@ class MetadynamicsMD:
                 gridWidth=grid_B,
             )
 
-            ##############################################################
 
-            meta = Metadynamics(
-                system,
-                [com_cv, dz_cv],
-                self.temperature,
-                bias_factor,
-                hill_height,
-                frequency=bias_frequency,
-                saveFrequency=saveFrequency,
-                biasDir=self.out_dir,
+        ##################### RMSD CV (cv2) #################################
+        if cv2 == "rmsd":
+            
+            num_atoms = system.getNumParticles()
+
+            # Instantiate the RMSD collective variable
+            rmsd_cv = cvpack.RMSD(
+                referencePositions=rmsd_2_reference_positions,
+                group=rmsd_2_group,
+                numAtoms=num_atoms,  
+                name=name
             )
+            cv2_BiasVariable = BiasVariable(
+                rmsd_cv,
+                minValue=grid_min_A,
+                maxValue=grid_max_A,
+                biasWidth=hill_width_A,
+                periodic=False, 
+                gridWidth=grid_A,
+        )    
+
+
+        ##################### NC CV (cv2) #################################
+        if cv2 == "nc":
+
+            forces = {f.getName(): f for f in system.getForces()}
+
+            nc_cv = cvpack.NumberOfContacts(
+                atom1,
+                atom2,
+                forces["NonbondedForce"],
+                stepFunction="1/(1+x^6)",
+                thresholdDistance=0.35,
+                cutoffFactor=2.0,
+                switchFactor=1.5,
+                reference=50,
+            )
+
+            cv2_BiasVariable = BiasVariable(
+                nc_cv,
+                minValue=grid_min_A,
+                maxValue=grid_max_A,
+                biasWidth=hill_width_A,
+                periodic=False, 
+                gridWidth=grid_A,
+        )    
+
+     ##############################################################
+        meta = Metadynamics(
+            system,
+            [cv1_BiasVariable, cv2_BiasVariable],
+            self.temperature,
+            bias_factor,
+            hill_height,
+            frequency=bias_frequency,
+            saveFrequency=saveFrequency,
+            biasDir=self.out_dir,
+        )
 
         simulation.context.reinitialize(preserveState=True)
         
@@ -584,9 +706,10 @@ class MetadynamicsMD:
             print(f'cylindrical restraint energy: {cylinder_energy}') 
             print(f'current CV: {meta.getCollectiveVariables(simulation)}')
             meta.step(simulation, self.record_CV)
-            _, _, c = simulation.context.getState(getPositions=False, getVelocities=False, getEnergy=False).getPeriodicBoxVectors()
-            zsize = c[2].value_in_unit(openmmunit.nanometers)
-            simulation.context.setParameter('zsize', zsize)
+            if cv1 == "com_z":
+                _, _, c = simulation.context.getState(getPositions=False, getVelocities=False, getEnergy=False).getPeriodicBoxVectors()
+                zsize = c[2].value_in_unit(openmmunit.nanometers)
+                simulation.context.setParameter('zsize', zsize)
             current_cvs = meta.getCollectiveVariables(simulation)
             colvar_array = np.append(colvar_array, [current_cvs], axis=0)
 

@@ -1,3 +1,4 @@
+
 import time
 import json
 import logging
@@ -10,7 +11,6 @@ from openmm.app import *
 import openmm.unit as openmmunit
 
 from autopath.utils import *
-from autopath.utils import _print_current_forces
 import datetime
 
 @dataclass
@@ -50,7 +50,7 @@ def warm_up_system(
     simulation,
     integrator,
     Tstart: int = 100,
-    Tend: int = 310,
+    Tend: int = 300,
     Tstep: int = 5,
     timestep: float = 0.001,
     warming_steps: int = 100000,
@@ -108,13 +108,12 @@ def run_restrained_minimization(
                     ) -> None:
     """Perform restrained minimization, progressively releasing constraints."""
     
-    logging.info(f"Current system's energy: {simulation.context.getState(getEnergy=True).getPotentialEnergy()}")
     for stage in minim_scheme:
         logging.info(f"Minimization stage {stage['name']}")
         force_constants = stage['forces']
         force_constants_dict = {k: v for k, v in zip(components, force_constants)}
         update_force_constants(simulation, force_constants_dict)
-        simulation.minimizeEnergy()
+        simulation.minimizeEnergy(maxIterations=2000) # default is 0 meaning until convergence
         logging.info(f"Current system's energy: {simulation.context.getState(getEnergy=True).getPotentialEnergy()}")
     return None
 
@@ -124,7 +123,7 @@ def run_restrained_md(
     integrator,
     components: List[str],
     equil_scheme: List[Dict[str, Any]],
-    temp: int = 310,
+    temp: int = 300,
     is_membrane: bool = False,
 ) -> None:
     """Perform restrained equilibration, adjusting force constants, timestep, and barostat as needed."""
@@ -165,10 +164,10 @@ class Equilibration:
         topology: str = None,
         system: str = None,
         out_dir: str = "equilibration",
-        restrained_minimization: bool = False,
+        restrained_minimization: bool = True,
         protocol_fname: str = "autopath/data/equilibration.json",
         timestep: float = 0.004,
-        save_freq: int = 12500, # 12500 is 0.05ns at 4fs timestep
+        save_freq: int = 6250, # 12500 is 0.05ns at 4fs timestep
         is_membrane: bool = False,
         verbose: int = 2,
 
@@ -219,11 +218,11 @@ class Equilibration:
         self.temperature = self.warmup_scheme["T_final"]
         self.temp_steps = self.warmup_scheme["T_step"]
         self.warm_up_steps = int(self.warmup_scheme["nsteps"])
+        self.warm_up_timestep = self.warmup_scheme["stepsize"]
 
         self.total_steps = self.warm_up_steps + self.equilibration_steps
 
-        self.simulation_time = self.warm_up_steps * 0.001 # in picoseconds
-
+        self.simulation_time = self.warm_up_steps * self.warm_up_timestep # in picoseconds
         for stage in self.equilibration_scheme:
             stage_time = int(stage['nsteps']) * stage['stepsize']
             self.simulation_time += stage_time
@@ -275,12 +274,10 @@ class Equilibration:
 
        # Add the required forces to the system
         for num, (name, selection) in enumerate(self.components_lookup.items()):
-            logging.info(f"Adding harmonic restraints to {name}..")
             restrain_idxs = u.select_atoms(selection).indices
             restrain_names = [u.atoms[idx].name for idx in restrain_idxs]
-
-            logging.debug(
-                f"The following {name} atoms will be restrained: {', '.join(restrain_names)}")
+            logging.info(f"Adding {len(restrain_idxs)} harmonic restraints to {name}..")
+            logging.debug(f"The following {name} atoms will be restrained: {', '.join(restrain_names)}")
 
             add_harmonic_restraints(
                 self.system,
@@ -292,9 +289,10 @@ class Equilibration:
                 force_group=num+15, #Offset by 15 to avoid overlap with other forces
             )
             simulation.context.reinitialize(preserveState=True)
-
+        print('boutta minimize')
+        print_current_forces(self.system)
+        logging.info(f"Current system's energy: {simulation.context.getState(getEnergy=True).getPotentialEnergy()}")
         if not self.restrained_minimization:
-            logging.info(f"Current system's energy: {simulation.context.getState(getEnergy=True).getPotentialEnergy()}")
             logging.info("Running standard minimization..")
             simulation.minimizeEnergy()
             logging.info(f"Current system's energy: {simulation.context.getState(getEnergy=True).getPotentialEnergy()}")
@@ -302,17 +300,45 @@ class Equilibration:
             logging.info("Running enhanced minimization..")
             run_restrained_minimization(simulation, list(self.components_lookup.keys()), self.minimization_scheme)
         
-        if self.verbose > 0:
-            # Save the minimized structure
+        if self.verbose > 0: # Save the minimized structure
             final_positions = simulation.context.getState(getPositions=True).getPositions()
             save_pdb(self.topology, final_positions, f"{self.out_dir}/{run_id}_minim.pdb")
 
+        # After restrained minimization remove and re-add restraints with updated reference positions
+        logging.debug("Resetting harmonic restraints after minimization to update reference positions.")
 
+        minimized_positions = simulation.context.getState(getPositions=True).getPositions()
+        
+        # remove existing restraint forces
+        forces_to_remove = []
+        for f_idx in range(self.system.getNumForces()):
+            force = self.system.getForce(f_idx)
+            if force.getName().startswith("k_"):
+                logging.debug(f"Removing force {force.getName()} at index {f_idx}.")
+                forces_to_remove.append(f_idx)
 
-        # # Set the contraint forces to their initial values before running the equilibration
-        # initial_force_constants = self.equilibration_scheme[0]['forces']
-        # force_constants_dict = {k: v for k, v in zip(list(self.components_lookup.keys()), initial_force_constants)}
-        # update_force_constants(simulation, force_constants_dict)
+        for f_idx in sorted(forces_to_remove, reverse=True):
+            self.system.removeForce(f_idx)
+
+        # Re-add the restraints with updated positions.
+        # Because the forces exist this will update them, there's no need to remove them first (I think).
+        for num, (name, selection) in enumerate(self.components_lookup.items()):
+            restrain_idxs = u.select_atoms(selection).indices
+            logging.info(f"Re-adding {len(restrain_idxs)} harmonic restraints to {name} after minimization.")
+
+            add_harmonic_restraints(
+                self.system,
+                minimized_positions,
+                self.topology,
+                restrain_idxs,
+                restraint_force=15,  # some default value, will be updated during equilibration
+                force_name=f"k_{name}",
+                force_group=num + 15,
+            )
+
+        simulation.context.reinitialize(preserveState=True)
+        print('boutta warm')
+        print_current_forces(self.system)
 
         logging.info("Warming up the system..")
         warm_up_system(simulation, integrator, 
@@ -332,37 +358,23 @@ class Equilibration:
             self.temperature,
             self.is_membrane,
         )
+        print('boutt run restrained md')
+        print_current_forces(self.system)
+        # remove the restraint forces after equilibration
+        for f_idx in sorted(forces_to_remove, reverse=True):
+            self.system.removeForce(f_idx)
+        print('boutta save final output')
+        print_current_forces(self.system)
 
-        # # TODO forces should be removed by name. OpenMM behavior is weird with that
-        num_components = len(self.components_lookup)
-        print(f'num_components: {num_components}')
-        for i in range(num_components):
-            print(f'i: {simulation.context.getSystem().getNumForces()}')
-            index_to_remove = simulation.context.getSystem().getNumForces() - 2
-            print(f'index_to_remove: {index_to_remove}')
-            force = simulation.context.getSystem().getForce(index_to_remove)
-            print(f'Force type to remove: {force.__class__.__name__}')
-            
-            simulation.context.getSystem().removeForce(index_to_remove)
-
-        # simulation.context.getSystem().removeForce(
-        #     simulation.context.getSystem().getNumForces() - 3
-        # )
-        # simulation.context.getSystem().removeForce(
-        #     simulation.context.getSystem().getNumForces() - 2
-        # )
 
         final_positions = simulation.context.getState(getPositions=True).getPositions()
-        self.topology.setPeriodicBoxVectors(simulation.context.getState(getPositions=True).getPeriodicBoxVectors())#saves correct box vectors to the pdb
+        self.topology.setPeriodicBoxVectors(simulation.context.getState(getPositions=True).getPeriodicBoxVectors()) #saves correct box vectors to the pdb
         save_system(self.system, f"{self.out_dir}/system_equil_{run_id}.xml")
         save_simulation(simulation, f"{self.out_dir}/checkpoint_equil_{run_id}")
         save_pdb(self.topology, final_positions, f"{self.out_dir}/{run_id}_equilibrated.pdb")
 
         self.simulation_time = (time.monotonic() - start_time) / 60 
-        logging.info(
-            f"Restrained equilibration completed in {self.simulation_time:.2f} min."
-        )
-
+        logging.info(f"Autopath equilibration completed in {self.simulation_time:.2f} min.")
         self.to_json(f"{self.out_dir}/equilibration_protocol.json")
 
         return self.system

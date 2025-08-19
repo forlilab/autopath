@@ -50,8 +50,7 @@ class SystemPreparation:
         add_cylindrical_restraint: bool = False,
         out_dir: str = ".",
     ) -> None:
-
-
+        print(f'lig_ff: {lig_ff}')
         if lig_ff.upper() in ["ESPALOMA", "SMIRNOFF", "GAFF"]:
             self.lig_ff = lig_ff.upper()
         else:
@@ -164,7 +163,7 @@ class SystemPreparation:
     def run(self, 
             protein: str = None, 
             variants: dict = None, 
-            ligands: Union[str,dict] = None
+            ligands: Union[str, List[Tuple[str, str]]] = None
             ) -> tuple[System, Topology]:
 
         start_time = time.monotonic()
@@ -178,14 +177,21 @@ class SystemPreparation:
                     res.name ='UNK'
                 modeller = Modeller(ligand_topology, ligand_positions)
 
-            elif isinstance(ligands, dict):
-                for lig_name, lig_path in ligands.items():
+            elif isinstance(ligands, list):
+                chain_id = ord('A')
+                for lig_name, lig_path in ligands:
+                    while chr(chain_id) in used_chains:
+                        chain_id += 1
                     logging.info(f"Parametrizing ligand {lig_name}..")
                     lig = self._sdf_to_mol(lig_path)
                     ligand_topology, ligand_positions = self._parametrize_ligand(lig)
+                    for chain in ligand_topology.chains():
+                        chain.id = chr(chain_id)
                     for res in ligand_topology.residues():
                         res.name = lig_name
-                    modeller = Modeller(ligand_topology, ligand_positions)
+                    modeller.add(ligand_topology, ligand_positions)
+                    used_chains.add(chr(chain_id))
+                    chain_id += 1
 
         if protein is not None:
             rec_name = os.path.splitext(os.path.basename(protein))[0]
@@ -213,14 +219,22 @@ class SystemPreparation:
                         res.name ='UNK'
                     modeller.add(ligand_topology, ligand_positions)
 
-                elif isinstance(ligands, dict):
-                    for lig_name, lig_path in ligands.items():
+                elif isinstance(ligands, list):
+                    used_chains = set(c.id for c in modeller.topology.chains()) if modeller else set()
+                    chain_id = ord('A')
+                    for lig_name, lig_path in ligands:
+                        while chr(chain_id) in used_chains:
+                            chain_id += 1
                         logging.info(f"Parametrizing ligand {lig_name}..")
                         lig = self._sdf_to_mol(lig_path)
                         ligand_topology, ligand_positions = self._parametrize_ligand(lig)
+                        for chain in ligand_topology.chains():
+                            chain.id = chr(chain_id)
                         for res in ligand_topology.residues():
                             res.name = lig_name
                         modeller.add(ligand_topology, ligand_positions)
+                        used_chains.add(chr(chain_id))
+                        chain_id += 1
 
         # CASE: Ligand and membrane only
         if protein is None and self.is_membrane:

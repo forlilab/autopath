@@ -140,7 +140,17 @@ def save_system(system: System, out_file: str) -> None:
 def save_simulation(simulation, out_file: str) -> None:
 
     simulation.saveCheckpoint(f"{out_file}.chk")
-    simulation.saveState(f"{out_file}.xml")
+    # Save XML state WITHOUT global parameters - I made this change because the restrain forces from minimization have been removed but the global parameters
+    #  havent and this casues problems when restarting.
+    state = simulation.context.getState(
+        getPositions=True,
+        getVelocities=True,
+        getForces=True,
+        getEnergy=True,
+        getParameters=False  # do not include global parameters
+    )
+    with open(f"{out_file}.xml", "w") as f:
+        f.write(XmlSerializer.serialize(state))
 
     return
 
@@ -494,12 +504,98 @@ def plot_atomic_rmsf(u, lig_resname:str='UNK', outname:str='rmsf.png', log_rmsf:
                 f.write(f'{res_id},{rmsf_value:.3f}\n')
     return
 
-def _print_current_forces(system: System = None) -> None:
-    for index, fc in enumerate(system.getForces()):
-        logging.info(
-            f"Force Index:{index} | Name: {fc.getName()} | Group: {fc.getForceGroup()}"
-        )
-    return
+# def print_current_forces(system: System = None) -> None:
+#     for index, fc in enumerate(system.getForces()):
+#         logging.info(
+#             f"Force Index:{index} | Name: {fc.getName()} | Group: {fc.getForceGroup()}"
+#         )
+#     return
+
+def print_current_forces(system):
+    """
+    Print a summary of all forces in an OpenMM system and the system's box vectors.
+    """
+
+    print("\n--- Force Summary ---")
+    for idx, force in enumerate(system.getForces()):
+        print(f"\n  Force {idx + 1}: {type(force).__name__}")
+
+        if isinstance(force, HarmonicBondForce):
+            print(f"    Number of bonds: {force.getNumBonds()}")
+
+        elif isinstance(force, HarmonicAngleForce):
+            print(f"    Number of angles: {force.getNumAngles()}")
+
+        elif isinstance(force, PeriodicTorsionForce):
+            print(f"    Number of torsions: {force.getNumTorsions()}")
+
+        elif isinstance(force, NonbondedForce):
+            print(f"    Number of particles: {force.getNumParticles()}")
+            print(f"    Cutoff distance: {force.getCutoffDistance()}")
+            if force.getUseSwitchingFunction():
+                print(f"    Switching distance: {force.getSwitchingDistance()}")
+            print(f"    Nonbonded method: {force.getNonbondedMethod()}")
+
+        elif isinstance(force, CustomExternalForce):
+            print(f"    Number of particles with restraint: {force.getNumParticles()}")
+            print(f"    Energy function: {force.getEnergyFunction()}")
+
+            # Global parameters
+            num_globals = force.getNumGlobalParameters()
+            if num_globals > 0:
+                print("    Global parameters:")
+                for p in range(num_globals):
+                    name = force.getGlobalParameterName(p)
+                    value = force.getGlobalParameterDefaultValue(p)
+                    # Convert with units
+                    value_quantity = value * unit.kilojoules_per_mole / unit.nanometers**2
+                    value_converted = value_quantity.in_units_of(
+                        unit.kilocalories_per_mole / unit.angstroms**2
+                    )
+                    print(f"      {name} = {value_converted}")
+
+        elif isinstance(force, MonteCarloMembraneBarostat):
+            print(f"    Default pressure: {force.getDefaultPressure()}")
+            print(f"    Default surface tension: {force.getDefaultSurfaceTension()}")
+            print(f"    Default temperature: {force.getDefaultTemperature()}")
+            print(f"    Frequency: {force.getFrequency()}")
+            print(f"    XY mode: {force.getXYMode()}")
+            print(f"    Z mode: {force.getZMode()}")
+            print(f"    Random seed: {force.getRandomNumberSeed()}")
+
+        elif isinstance(force, CustomCentroidBondForce):
+            print(f"    Number of groups: {force.getNumGroups()}")
+            print(f"    Number of bonds: {force.getNumBonds()}")
+            print(f"    Energy function: {force.getEnergyFunction()}")
+
+            # Global parameters
+            num_globals = force.getNumGlobalParameters()
+            if num_globals > 0:
+                print("    Global parameters:")
+                for p in range(num_globals):
+                    name = force.getGlobalParameterName(p)
+                    value = force.getGlobalParameterDefaultValue(p)
+                    print(f"      {name} = {value}")
+
+            # Per-bond parameters
+            num_bond_params = force.getNumPerBondParameters()
+            if num_bond_params > 0:
+                print("    Per-bond parameters:")
+                param_names = [force.getPerBondParameterName(pp) for pp in range(num_bond_params)]
+                print(f"      Names: {param_names}")
+                for b in range(min(5, force.getNumBonds())):
+                    groups, params = force.getBondParameters(b)
+                    print(f"      Bond {b}: groups={groups}, params={params}")
+
+        else:
+            print("    (No specific summary for this force type)")
+
+    # Print box vectors
+    print("\n--- Box Vectors ---")
+    a, b, c = system.getDefaultPeriodicBoxVectors()
+    print(f"  a = {a}")
+    print(f"  b = {b}")
+    print(f"  c = {c}")
 
 def _remove_force(force_name: str = None, system: System = None, simulation=None):
     """Remove a force from an OpenMM system based on its name."""
@@ -509,9 +605,10 @@ def _remove_force(force_name: str = None, system: System = None, simulation=None
             simulation.context.getSystem().removeForce(index)
             logging.info(f"Removing existing {force_name} force")
             counter += 1
+            print_current_forces(system)
     if counter == 0:
         logging.warning(f"No force was removed, check that {force_name} exist")
-        _print_current_forces(system)
+        print_current_forces(system)
 
     return
 
@@ -573,7 +670,7 @@ def add_harmonic_restraints(
             force.addParticle(i, atom_crd.value_in_unit(openmmunit.nanometers))
             counter += 1
     logging.info(f"{counter} atoms will be restrained")
-
+    force.setName(force_name)
     force.setForceGroup(force_group)
     system.addForce(force)
 

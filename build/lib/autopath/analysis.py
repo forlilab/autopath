@@ -16,10 +16,14 @@ from matplotlib.collections import LineCollection
 
 from rdkit import Chem
 from rdkit.Chem.Draw import SimilarityMaps
+from rdkit.Chem.Draw import rdMolDraw2D
+from rdkit.Chem import Draw
+
 import MDAnalysis as mda
 from MDAnalysis.analysis.rms import RMSF
 from rdkit.Chem import rdMolDescriptors
 import numpy as np
+
 
 from scipy.stats import pearsonr
 
@@ -90,7 +94,8 @@ def plot_atomic_rmsf(u, lig_resname:str='UNK', outname:str='rmsf.png', log_rmsf:
     probe_mol = lig_select.convert_to('RDKIT')
     probe_mol.Compute2DCoords()
     probe_mol = Chem.RemoveHs(probe_mol)
-    fig = SimilarityMaps.GetSimilarityMapFromWeights(probe_mol, r.rmsf, step=0.01, alpha=0.3, contourLines=5) 
+    drawer = rdMolDraw2D.MolDraw2DCairo(300, 300) 
+    fig = SimilarityMaps.GetSimilarityMapFromWeights(probe_mol, r.rmsf, drawer, step=0.01, alpha=0.3, contourLines=5) 
     fig.savefig(outname, bbox_inches='tight')
     
     # Optionally, log the RMSF values for further analysis
@@ -120,7 +125,7 @@ def plot_colvar(out_dir:str=None, colvar_name:str=None):
     files = glob(f"{out_dir}/COLVAR_*npy")
     data = []
     for f in files:
-        walker_name = f.split("/")[2].split(".")[0]
+        walker_name = f.split("/")[-1].split(".")[0]
         np_data = np.load(f)
         df = pd.DataFrame(np_data, columns=[colvar_name])
         df["walker"] = walker_name
@@ -147,7 +152,7 @@ def plot_bias(out_dir:str=None, x_min:float=None, x_max:float=None, grid_points:
     files = glob(f"{out_dir}/bias_*")
     data = []
     for f in files:
-        walker_name = f.split("/")[2].split(".")[0]
+        walker_name = f.split("/")[-1].split(".")[0]
         np_data = np.load(f)
         np_data = np_data * 0.239006  # KJ to Kcal
         df = pd.DataFrame(np_data, columns=["bias"])
@@ -178,7 +183,7 @@ def plot_FE(out_dir, x_min, x_max, grid_points, colvar_name):
     files = glob(f"{out_dir}/FE_*.npy")
     data = []
     for i, f in enumerate(files):
-        walker_name = f.split("/")[2].split(".")[0]  # +str(i)
+        walker_name = f.split("/")[-1].split(".")[0]  # +str(i)
         np_data = np.load(f)
         np_data = np_data * 0.239006  # KJ to Kcal
         df = pd.DataFrame(np_data, columns=["FE"])
