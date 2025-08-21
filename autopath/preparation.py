@@ -119,7 +119,7 @@ class SystemPreparation:
         if self.lig_ff == "ESPALOMA":
             template_generator = EspalomaTemplateGenerator(
                 molecules=ligand, 
-                template_generator_kwargs = {"reference_forcefield": "openff_unconstrained-2.2.1"}
+                # template_generator_kwargs = {"reference_forcefield": "openff_unconstrained-2.2.1"}
                 # forcefield="espaloma-0.3.2"
             )
         elif self.lig_ff == "SMIRNOFF":

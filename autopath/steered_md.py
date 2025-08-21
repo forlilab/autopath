@@ -117,8 +117,7 @@ class SteeredMD:
 
                 dist_before = self.com_dist.getValue(simulation.context, allowReinitialization=False)
                 
-                # if self.verbose > 0:
-                    # m_eff_dalton = self.com_dist.getEffectiveMass(simulation.context).value_in_unit(openmmunit.dalton)
+                # m_eff_dalton = self.com_dist.getEffectiveMass(simulation.context).value_in_unit(openmmunit.dalton)
 
                 # Compute new r_end
                 if direction == "backward":
