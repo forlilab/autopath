@@ -365,7 +365,7 @@ class GISTMD:
 
         logging.info("Running production NVT..")
         equilibration_scheme = [
-        { "name": "Stage 1", "forces": [0.1, 2.5], "npt_flag": False, "nsteps": 50000000, "stepsize": 0.002},                         
+        { "name": "Stage 1", "forces": [2.5, 2.5], "npt_flag": False, "nsteps": 50000000, "stepsize": 0.002},                         
                                 ]
     
         run_restrained_md(
