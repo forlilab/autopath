@@ -38,6 +38,7 @@ class SteeredMD:
         restart_velocities: bool = False,
         timestep: float = 0.004, #  # 4 fs timestep
         temperature: float = 300,
+        autostop_freq: int = None,  # If None, do not stop pulling
         use_NVT: bool = False,  # Use NVT ensemble
         use_GReweighting: bool = False,
         out_dir: str = None,
@@ -56,7 +57,7 @@ class SteeredMD:
         self.restart_velocities = restart_velocities
 
         self.verbose = verbose
-        self.autostop_freq = None  # In moves. Stop pulling if the ligand is unbound
+        self.autostop_freq = autostop_freq  # In moves. Stop pulling if the ligand is unbound
 
         self.use_NVT = use_NVT
 
