@@ -40,6 +40,7 @@ class Config(object):
         sMD_pulling_dir: str = "forward",  # "forward" or "backward"
         sMD_time: int = 1,  # ns
         sMD_steps_per_move: int = 250,  # 1 ps
+        sMD_dx_per_move: float = 0.001,  # nm
         sMD_spring_cte: float = 50,  # KJ/mol/nm2/atom
         sMD_replicas: int = 5,
         sMD_autostop: bool = False,
@@ -83,7 +84,8 @@ class Config(object):
         self.sMD_pulling_dir = sMD_pulling_dir
         self.sMD_time = sMD_time  # ns
         self.sMD_replicas = sMD_replicas
-        self.sMD_steps_per_move = sMD_steps_per_move  # 1 ps
+        self.sMD_steps_per_move = sMD_steps_per_move
+        self.sMD_dx_per_move = sMD_dx_per_move
         self.sMD_spring_cte = sMD_spring_cte  # KJ/mol/nm2/atom
         self.sMD_autostop = sMD_autostop
 

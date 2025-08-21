@@ -184,8 +184,8 @@ class SteeredMD:
         max_displacement: float = 10.0,  # nm
         max_time: float = 2000,  # ps
         steps_per_move: int = None,
-        dx_per_move: float = 0.005,  # nm
-        pulling_speed: float = 0.001,  # nm/ps equi 1 nm/ns
+        dx_per_move: float = 0.001,  # nm
+        pulling_speed: float = 0.001,  # nm/ps equi 1 nm/ns 1 m/s
         sMD_spring_cte: int = 1000, # kJ/mol/nm^2
         rep_suffix: str = None,
         checkpoint_file: str = None,

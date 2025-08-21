@@ -58,6 +58,7 @@ class AutoPath:
         sMD_max_pulling_dist: float = 2.0,  # nm
         sMD_time: int = None,  # ns
         sMD_steps_per_move: int = None,
+        sMD_dx_per_move: float = 0.001,  # nm, this is the displacement per move
         sMD_spring_cte: float = None,  # KJ/mol/nm2
         sMD_autostop_freq: int = 10, #moves
         extract_milestones: bool = True,
@@ -96,6 +97,7 @@ class AutoPath:
         self.sMD_time = sMD_time
         self.sMD_pulling_speeds = sMD_pulling_speeds
         self.sMD_steps_per_move = sMD_steps_per_move
+        self.sMD_dx_per_move = sMD_dx_per_move
         self.sMD_spring_cte = sMD_spring_cte
         self.sMD_autostop_freq = sMD_autostop_freq
         # Milestones
@@ -309,7 +311,7 @@ class AutoPath:
                             pdb_file=equilibrated_pdb,
                             pulling_speed=speed,  # nm/ps
                             steps_per_move=self.sMD_steps_per_move,
-                            dx_per_move=None,  # nm, this is the displacement per move
+                            dx_per_move=self.sMD_dx_per_move,  # nm, this is the displacement per move
                             sMD_spring_cte=sMD_spring_cte,
                             rep_suffix=f'replica-{i+1}_v{speed}',
                             pulling_direction=self.sMD_pulling_dir,  # "forward" or "backward"',

@@ -29,6 +29,7 @@
         "sMD_time": 1,
         "sMD_replicas": 3,
         "sMD_steps_per_move": null,
+        "sMD_dx_per_move": 0.001,
         "sMD_spring_cte": 50
     },
     "milestones": {
