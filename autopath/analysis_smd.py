@@ -111,7 +111,7 @@ class SteeredMDAnalysis:
         and the dissipated work approximation.
         """
         
-        smoothing_sigma = 1.0  # smoothing factor for gaussian filter
+        smoothing_sigma = None  # smoothing factor for gaussian filter
         GMM_max_components = 5 # number of GMM components to try
         GMM_gauss_cutoff = 0.1 # # cutoff for GMM weights, below which we ignore the component
 

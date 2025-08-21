@@ -56,7 +56,7 @@ class SteeredMD:
         self.restart_velocities = restart_velocities
 
         self.verbose = verbose
-        self.autostop_freq = 10  # In moves. Stop pulling if the ligand is unbound
+        self.autostop_freq = None  # In moves. Stop pulling if the ligand is unbound
 
         self.use_NVT = use_NVT
 
@@ -158,23 +158,15 @@ class SteeredMD:
                 if direction == "forward" and self.autostop_freq is not None:
                     if i%self.autostop_freq == 0:
                         nc_now = self.nc_cv.getValue(simulation.context, allowReinitialization=False).value_in_unit(openmmunit.dimensionless)
-                        print(f"Step {i+1}/{self.sMD_moves}: r_target={r_end_nm:.2f} nm, r_before={dist_before_nm:.2f} nm, r_after={dist_after_nm:.2f} nm, rg={rg_now}, nc={nc_now}")
-                
+                        print(f"Step {i+1}/{self.sMD_moves}: r_target={r_end_nm:.2f} nm, r_before={dist_before_nm:.2f} nm, r_after={dist_after_nm:.2f} nm, nc={nc_now}")
+                        
+                        if nc_now < 1:
+                            f.write(f"{i},{r_end_nm},{dist_before_nm},{dist_after_nm},{nc_now},{force_kjmnm},{U_cvpack_kjm},{work_kjmol},{m_eff_dalton}\n")
+                            logging.warning(f"Stopping pulling at step {i} because n_contacts={nc_now}.")
+                            break
+
                 f.write(f"{i},{r_end_nm},{dist_before_nm},{dist_after_nm},{nc_now},{force_kjmnm},{U_cvpack_kjm},{work_kjmol},{m_eff_dalton}\n")
 
-                if nc_now < 1:
-                    logging.warning(f"Stopping pulling at step {i} because n_contacts={nc_now}.")
-                    break
-                # if dist_before_nm > self.max_displacement:  
-                #     logging.warning(f"Stopping pulling at step {i} and dist {dist_before_nm} nm with RC={rc_now} and NC={nc_now}.")
-                #     break   
-
-        #make sure to reset the integrator
-        try:
-            simulation.integrator.reset() #only openmmtools integrators have this method
-        except AttributeError:
-            logging.warning("Integrator does not have reset method. This is expected for standard OpenMM integrators.")
-            pass
 
         # Log final COM distance
         final_dist_nm = self.com_dist.getValue(simulation.context, allowReinitialization=False).value_in_unit(openmmunit.nanometers)
@@ -188,7 +180,7 @@ class SteeredMD:
     
 
     def run(self,
-        max_displacement: float = 3.0,  # nm
+        max_displacement: float = 10.0,  # nm
         max_time: float = 2000,  # ps
         steps_per_move: int = None,
         dx_per_move: float = 0.005,  # nm
@@ -197,9 +189,13 @@ class SteeredMD:
         rep_suffix: str = None,
         checkpoint_file: str = None,
         pdb_file: str = None,
-        do_backwards: bool = False,
+        pulling_direction: str = "backward",
     ):
         """Main method to run steered MD in both directions (forward and backward)."""
+
+        if pulling_direction not in ["forward", "backward"]:
+            raise ValueError("pulling_direction must be either 'forward' or 'backward'.")
+
         simulation_start_time = time.monotonic()
 
         self.max_displacement = max_displacement  # nm
@@ -265,7 +261,7 @@ class SteeredMD:
         # simulation.context.reinitialize(preserveState=True)
         
         # Get the subset of protein atoms close to the ligand
-        subset_protein_HA, subset_protein_residues = self._get_pocket_atoms(simulation, cutoff=0.5)
+        subset_protein_HA, subset_protein_residues = self._get_pocket_atoms(simulation, cutoff=0.6)
         if self.autostop_freq is not None:
             forces = {f.getName(): f for f in system.getForces()}
             self.nc_cv = cvpack.NumberOfContacts(
@@ -333,29 +329,14 @@ class SteeredMD:
 
         rep_name = rep_suffix if rep_suffix else f"replica-{np.random.randint(1000000)}_v{pulling_speed}"
 
-        # Run forward direction
-        self.pull_single_direction(simulation, rep_name, direction="forward")
-
-        if do_backwards:
-            logging.info(f"Running backward pulling of replica {rep_suffix} at speed {pulling_speed} nm/ps")
-            # Reset velocities to temperature after forward pulling
-            simulation.context.setVelocitiesToTemperature(self.temperature)
-            # run a super short simulation to ensure the system is stable after temp reset
-            simulation.step(50/self.timestep.value_in_unit(openmmunit.picoseconds))  # 50 ps
-
-            try:
-                simulation.integrator.reset()  # Reset the integrator. Only openmmtools integrators have this method    
-            except AttributeError:
-                logging.warning("Integrator does not have reset method. This is expected for standard OpenMM integrators.")
-
-            simulation.context.setTime(0)  # reset simulation time
-            simulation.context.setStepCount(0)  # reset step count
-
-            self.pull_single_direction(simulation, rep_name, direction="backward")
+        # Run the actual pulling
+        self.pull_single_direction(simulation, rep_name, direction=pulling_direction)
 
         # Logging the total time for all replicas
         simulation_time = time.monotonic() - simulation_start_time
-        logging.info(f"Finished sMD simulation {'with backwards pulling' if do_backwards else ''} in {simulation_time/60:.2f} min.")
+        logging.info(f"Finished {pulling_direction} sMD simulation in {simulation_time/60:.2f} min.")
+
+        return
 
     @staticmethod
     def guess_steps_per_move(v_nm_per_ps,
@@ -468,7 +449,7 @@ class SteeredMD:
         protein_atoms = [atom for atom in self.topology.atoms() if atom.residue.name not in ["HOH", "WAT", "SOL", "NA", "CL", 'UNK']]
         protein_HA = [atom.index for atom in protein_atoms if atom.element.symbol != "H"]  # Exclude hydrogens
         
-        # Find a subset of protein_HA that are 0.6 nm away from groupA_atoms
+        # Find a subset of protein_HA that are cutoff nm away from groupA_atoms
         state = simulation.context.getState(getPositions=True, getVelocities=False)
         positions = state.getPositions(asNumpy=True) / openmmunit.nanometers
         ligand_pos = positions[self.groupA_atoms]

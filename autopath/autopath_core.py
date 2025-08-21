@@ -53,6 +53,7 @@ class AutoPath:
         run_equilibration: bool = True,
         protocol_fname: str = None,
         run_sMDpulling: bool = True,
+        sMD_pulling_dir: str = "forward",  # "forward" or "backward"
         sMD_pulling_speeds: dict = {0.001:2, 0.002:2, 0.003:2},  # nm/ps
         sMD_max_pulling_dist: float = 2.0,  # nm
         sMD_time: int = None,  # ns
@@ -90,6 +91,7 @@ class AutoPath:
         self.protocol_fname = protocol_fname
         # Steered MD
         self.run_sMDpulling = run_sMDpulling
+        self.sMD_pulling_dir = sMD_pulling_dir
         self.sMD_max_pulling_dist = sMD_max_pulling_dist
         self.sMD_time = sMD_time
         self.sMD_pulling_speeds = sMD_pulling_speeds
@@ -221,14 +223,14 @@ class AutoPath:
         equilibrated_traj = equilibrated_traj.replace(".dcd", "_aligned.dcd")
         u_eq = mda.Universe(prmtop_file, equilibrated_traj, in_memory=True)
 
-        rmsd = compute_rmsd(u_eq, u_eq,
-                            alig_select="backbone", 
-                            groupselections={"ligand":f"resname {lig_resname} and not name H*", 
-                                            "protein":'protein and not name H*'},
-                            out_dir=f"{sys_name}/equilibration"
-                            )
-        rmsd.to_csv(f"{sys_name}/equilibration/{sys_name}_ligand_rmsd.csv", index=False)
-        plot_atomic_rmsf(u_eq, outname=f"{sys_name}/equilibration/{sys_name}_RMSF.png", log_rmsf=True)
+        # rmsd = compute_rmsd(u_eq, u_eq,
+        #                     alig_select="backbone", 
+        #                     groupselections={"ligand":f"resname {lig_resname} and not name H*", 
+        #                                     "protein":'protein and not name H*'},
+        #                     plots_outdir=f"{sys_name}/equilibration"
+        #                     )
+        # rmsd.to_csv(f"{sys_name}/equilibration/{sys_name}_ligand_rmsd.csv", index=False)
+        # plot_atomic_rmsf(u_eq, outname=f"{sys_name}/equilibration/{sys_name}_RMSF.png", log_rmsf=True)
         
         # Equilibration VS checkpoint
         # if self.equilibration_checkpoint:
@@ -243,22 +245,19 @@ class AutoPath:
         # logging.info(f"Pocket residues are: {', '.join(set(pocket_residues))}")
         print(f"Pocket residues are: {', '.join(set(pocket_residues))}")
 
-        # write out the pocket atoms to a pdb
-        with mda.Writer(f"{sys_name}/pocket_definition.pdb", u_eq.atoms.n_atoms) as W:
-            W.write(pocket_atoms)
-        with mda.Writer(f"{sys_name}/pocket_prote.pdb", u_eq.atoms.n_atoms) as W:
-            W.write(u_eq.select_atoms(f'protein'))
-        with mda.Writer(f"{sys_name}/pocket_lig.pdb", u_eq.atoms.n_atoms) as W:
-            W.write(u_eq.select_atoms(f'resname {lig_resname}'))
+        # # write out the pocket atoms to a pdb
+        # with mda.Writer(f"{sys_name}/pocket_definition.pdb", u_eq.atoms.n_atoms) as W:
+        #     W.write(pocket_atoms)
+        # with mda.Writer(f"{sys_name}/pocket_prote.pdb", u_eq.atoms.n_atoms) as W:
+        #     W.write(u_eq.select_atoms(f'protein'))
+        # with mda.Writer(f"{sys_name}/pocket_lig.pdb", u_eq.atoms.n_atoms) as W:
+        #     W.write(u_eq.select_atoms(f'resname {lig_resname}'))
     
         ligand_atoms_indices = get_ligand_anchor_atoms(u_eq, lig_resname, 
                                                        mode=lig_anchor_mode, 
                                                        n_atoms=lig_anchor_mode_atoms,
                                                        out_dir=sys_name)
         
-        # ligand_ha = u_eq.select_atoms(f"resname {lig_resname} and not name H*")
-        # ligand_atoms_indices =[ligand_ha.atoms[i].index for i in range(len(ligand_ha))]
-
         # ligand_atoms = u_eq.select_atoms(f'index {" ".join(map(str, ligand_atoms_indices))}')
 
         # final_com = calculate_com_distance(u_eq, ligand_atoms, pocket_atoms, wrap=False)[-1] /10 # convert to nm
@@ -277,9 +276,9 @@ class AutoPath:
         sMD_timestep = 0.002  # ps
         sMD_collision_frequency = 1  # ps^-1
 
-        sMD_outdir = f"{sys_name}/sMD_{lig_anchor_mode}_{sMD_timestep}ps_{sMD_collision_frequency}ps_001nm_npt"
+        sMD_outdir = f"{sys_name}/sMD_{lig_anchor_mode}_{sMD_timestep}ps_{sMD_collision_frequency}ps_200stm"
         # in this paper they used 80 kcal·mol−1? units don match tho. Ziada et al 2022.
-        sMD_spring_cte_per_atom = 50 * 4.184  # KJ/mol/nm2, converted from kcal. This affects thermal fluctuations
+        sMD_spring_cte_per_atom = 80 * 4.184  # KJ/mol/nm2, converted from kcal. This affects thermal fluctuations
         
         if self.run_sMDpulling:
             equilibrated_system = load_system(f"{sys_name}/equilibration/system_equil_{sys_name}.xml")
@@ -310,10 +309,10 @@ class AutoPath:
                             pdb_file=equilibrated_pdb,
                             pulling_speed=speed,  # nm/ps
                             steps_per_move=self.sMD_steps_per_move,
-                            dx_per_move=0.001,  # nm, this is the displacement per move
+                            dx_per_move=None,  # nm, this is the displacement per move
                             sMD_spring_cte=sMD_spring_cte,
                             rep_suffix=f'replica-{i+1}_v{speed}',
-                            do_backwards=False,     #CAREFUL: this will run the pulling in both directions
+                            pulling_direction=self.sMD_pulling_dir,  # "forward" or "backward"',
                         )
                     except Exception as e:  
                         logging.error(f"Error during sMD pulling for speed {speed} nm/ps, replica {i+1}: {e}")
