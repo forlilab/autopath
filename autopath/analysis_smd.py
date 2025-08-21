@@ -134,7 +134,7 @@ class SteeredMDAnalysis:
 
         print('WARNING: Recalculating work from force and distance.')
         # this will overwrite the work column in the raw_data DataFrame
-        raw_data = self.integrate_force_dx(raw_data)
+        # raw_data = self.integrate_force_dx(raw_data)
 
         self.raw_data, centers = self.bin_data(raw_data, self.bin_width, self.min_points)
 
@@ -382,11 +382,11 @@ class SteeredMDAnalysis:
             df.to_csv(distance_file, index=False)
 
         # Ensure the keys in trajname_map align with the values in df['trajname']
-        trajname_map = raw_data.set_index('trajname')[self.work_column].to_dict()
-        df['self.work_column'] = df['trajname'].map(trajname_map)
-        df.dropna(inplace=True) # Ensure no NaN values in work column
-        trajname_map = raw_data.set_index('trajname')[self.dist_column].to_dict()
-        df[self.dist_column] = df['trajname'].map(trajname_map)
+        # trajname_map = raw_data.set_index('trajname')[self.work_column].to_dict()
+        # df[self.work_column] = df['trajname'].map(trajname_map)
+        # df.dropna(inplace=True) # Ensure no NaN values in work column
+        # trajname_map = raw_data.set_index('trajname')[self.dist_column].to_dict()
+        # df[self.dist_column] = df['trajname'].map(trajname_map)
 
         # # filter by r_bin
         # df = df[(df['r_bin'] >= 1.2) & (df['r_bin'] <= 2.5)]

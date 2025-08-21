@@ -320,19 +320,19 @@ class AutoPath:
                         logging.error(f"Error during sMD pulling for speed {speed} nm/ps, replica {i+1}: {e}")
                         continue
                     
-            # Load and align the sMD trajectories
-            sMD_trajs = glob(f"{sMD_outdir}/trajectory_sMD_replica_*_*.dcd")
-            for traj_file in sMD_trajs:
-                traj = md.load(traj_file, top=prmtop_file)
-                traj = traj.center_coordinates()
-                traj = traj.image_molecules()
-                try:
-                    backbone = traj.topology.select("backbone")
-                    traj = traj.superpose(traj[0], atom_indices=backbone)
-                except Exception as e:
-                    logging.warning(f"Superposition failed: {e}. Proceeding without superposition.")
-                traj.save(traj_file.replace(".dcd", "_aligned.dcd"))
-                # os.remove(traj_file) # remove the dcd
+            # # Load and align the sMD trajectories
+            # sMD_trajs = glob(f"{sMD_outdir}/sMD_traj_replica-*_*_*.dcd")
+            # for traj_file in sMD_trajs:
+            #     traj = md.load(traj_file, top=prmtop_file)
+            #     traj = traj.center_coordinates()
+            #     traj = traj.image_molecules()
+            #     try:
+            #         backbone = traj.topology.select("backbone")
+            #         traj = traj.superpose(traj[0], atom_indices=backbone)
+            #     except Exception as e:
+            #         logging.warning(f"Superposition failed: {e}. Proceeding without superposition.")
+            #     traj.save(traj_file.replace(".dcd", "_aligned.dcd"))
+            #     os.remove(traj_file) # remove the dcds
 
         ##############################################################################################
         ###################################### Extract Milestones ####################################
@@ -345,7 +345,7 @@ class AutoPath:
             
             os.makedirs(milestones_outdir, exist_ok=True)
 
-            sMD_trajs = glob(f"{sMD_outdir}/trajectory_sMD_replica_*_*.dcd")
+            sMD_trajs = glob(f"{sMD_outdir}/sMD_traj_replica-*_*_*.dcd")
             sMD_trajs = [t for t in sMD_trajs if not t.endswith("_aligned.dcd")]
 
             if len(sMD_trajs) == 0:
