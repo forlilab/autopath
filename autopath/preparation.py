@@ -38,7 +38,7 @@ class SystemPreparation:
         ],
         lig_ff: str = "espaloma",
         allow_undefined_stereo: bool = True,
-        hydrogenMass: float = 3,
+        hydrogenMass: float = 1.5, # # in amu, 1.5 is the default in OpenMM
         boxShape: str = "dodecahedron",
         padding: float = 1.2,
         num_solvent: int = None,
@@ -273,9 +273,9 @@ class SystemPreparation:
 
         save_system(system, f"{self.out_dir}/system.xml")
         save_pdb(modeller.topology, modeller.positions, f"{self.out_dir}/system.pdb")
-        # save_amber_topology(modeller.topology, modeller.positions, self.forcefield, 
-        #                     self.nb_cutoff, self.switchDistance, self.hydrogenMass, 
-        #                     self.out_dir)
+        save_amber_topology(modeller.topology, modeller.positions, self.forcefield, 
+                            self.nb_cutoff, self.switchDistance, self.hydrogenMass, 
+                            self.out_dir)
 
         simulation_time = time.monotonic() - start_time
         logging.info(f"Finished system preparation in {simulation_time:.2f} seconds.")
