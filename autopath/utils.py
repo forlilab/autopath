@@ -428,14 +428,13 @@ def calculate_com_distance(
 
     return np.array(distances)
 
-def compute_rmsd(u, u_ref,
-                    alig_select:str='backbone', 
-                    groupselections={}, 
-                    save_aligned=False,
-                    aligned_filename='aligned_trajectory.dcd',
-                    do_plot=True,
-                    out_dir=None
-                    ) -> pd.DataFrame:
+def compute_rmsd(u, 
+                u_ref,
+                alig_select:str='backbone', 
+                groupselections:dict={}, 
+                aligned_fname:str=None,
+                plots_outdir:str=None,
+                ) -> pd.DataFrame:
     r = RMSD(u, 
              u_ref,
              select=alig_select,
@@ -446,20 +445,20 @@ def compute_rmsd(u, u_ref,
     columns = ['frame','time (ps)', f'RMSD_selected_alignment'] + [f'RMSD_{group}' for group in groupselections.keys()]
     rmsd_df = pd.DataFrame(rmsd_results, columns=columns)
 
-    if save_aligned:
-        with mda.Writer(aligned_filename, n_atoms=u.atoms.n_atoms) as W:
+    if aligned_fname is not None:
+        # Align the trajectory to the reference and save it
+        with mda.Writer(aligned_fname, n_atoms=u.atoms.n_atoms) as W:
             for ts in u.trajectory:
                 W.write(u.atoms)
 
-    if do_plot:
-        
+    if plots_outdir is not None:
         plt.figure(figsize=(10, 5))
         for col in columns[3:]:
             sns.lineplot(x='frame', y=col, data=rmsd_df)
             plt.xlabel('Frame');            plt.ylabel(f'RMSD (A)')
             plt.title(f'{col} RMSD')
             plt.tight_layout()
-            plt.savefig(f'{out_dir}/{col}.png')
+            plt.savefig(f'{plots_outdir}/rmsd_{col}.png')
             plt.close()
 
     return rmsd_df
