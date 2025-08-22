@@ -167,6 +167,9 @@ def save_amber_topology(
     topology: app.Topology = None,
     positions: list = None,
     forcefield: app.ForceField = None,
+    nb_cutoff: openmmunit.Quantity = 1.0 * openmmunit.nanometers,
+    switchDistance: openmmunit.Quantity = 0.9 * openmmunit.nanometers,
+    hydrogenMass: openmmunit.Quantity = 3.0 * openmmunit.amu,
     out_path: str = None,
 ) -> None:
 
@@ -174,12 +177,14 @@ def save_amber_topology(
     new_system = forcefield.createSystem(
         topology,
         nonbondedMethod=app.PME,
-        nonbondedCutoff=10 * openmmunit.angstrom,
-        removeCMMotion=False,
+        nonbondedCutoff=nb_cutoff,
+        switchDistance=switchDistance,
+        removeCMMotion=True,
         rigidWater=False,
-        hydrogenMass=3.0 * openmmunit.amu,
+        hydrogenMass=hydrogenMass,
+        constraints=app.HBonds,
     )
-
+    
     parmed_structure = parmed.openmm.topsystem.load_topology(
         topology, new_system, positions
     )
