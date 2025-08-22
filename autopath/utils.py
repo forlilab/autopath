@@ -180,9 +180,9 @@ def save_amber_topology(
         nonbondedCutoff=nb_cutoff,
         switchDistance=switchDistance,
         removeCMMotion=True,
-        rigidWater=False,
+        rigidWater=False, # DO NOT USE THIS, it will not work with parmed
         hydrogenMass=hydrogenMass,
-        constraints=app.HBonds,
+        # constraints=app.HBonds, # DO NOT USE THIS, it will not work with parmed
     )
     
     parmed_structure = parmed.openmm.topsystem.load_topology(

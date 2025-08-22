@@ -118,15 +118,18 @@ class SystemPreparation:
 
         if self.lig_ff == "ESPALOMA":
             template_generator = EspalomaTemplateGenerator(
-                molecules=ligand, forcefield="espaloma-0.3.2"
+                molecules=ligand, 
+                # forcefield="espaloma-0.3.2"
             )
         elif self.lig_ff == "SMIRNOFF":
             template_generator = SMIRNOFFTemplateGenerator(
-                molecules=ligand, forcefield="openff-1.2.0"
+                molecules=ligand, 
+                # forcefield="openff-1.2.0"
             )
         elif self.lig_ff == "GAFF":
             template_generator = GAFFTemplateGenerator(
-                molecules=ligand, forcefield="gaff-2.11"
+                molecules=ligand, 
+                # forcefield="gaff-2.11"
             )
 
         # add the template generator to the ff
