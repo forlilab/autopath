@@ -273,9 +273,19 @@ class SystemPreparation:
 
         save_system(system, f"{self.out_dir}/system.xml")
         save_pdb(modeller.topology, modeller.positions, f"{self.out_dir}/system.pdb")
-        save_amber_topology(modeller.topology, modeller.positions, self.forcefield, 
-                            self.nb_cutoff, self.switchDistance, self.hydrogenMass, 
-                            self.out_dir)
+        # This is why: https://parmed.github.io/ParmEd/html/openmm.html
+        parmed_system = self.forcefield.createSystem(
+            modeller.topology,
+            nonbondedMethod=PME,
+            nonbondedCutoff=self.nb_cutoff,
+            switchDistance=self.switchDistance,
+            removeCMMotion=True,
+            rigidWater=False, # DO NOT USE THIS, it will not work with parmed
+            hydrogenMass=self.hydrogenMass,
+            # constraints=app.HBonds, # DO NOT USE THIS, it will not work with parmed
+        )
+
+        save_amber_files(modeller.topology, modeller.positions, parmed_system, self.out_dir)
 
         simulation_time = time.monotonic() - start_time
         logging.info(f"Finished system preparation in {simulation_time:.2f} seconds.")
