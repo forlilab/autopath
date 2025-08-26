@@ -7,7 +7,7 @@
 __version__ = "0.1.0"
 
 from .equilibration import Equilibration
-from .equilibration_wk import EquilibrationWaterkit
+from .gist_md import GISTMD
 from .preparation import SystemPreparation
 from .steered_md import SteeredMD
 from .metadynamics import MetadynamicsMD
@@ -16,6 +16,7 @@ from .vanilla_md import VanillaMD
 
 __all__ = [
     "Equilibration",
+    "GISTMD",
     "SystemPreparation",
     "SteeredMD",
     "MetadynamicsMD",

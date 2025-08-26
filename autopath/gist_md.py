@@ -10,7 +10,6 @@ from openmm.app import *
 import openmm.unit as openmmunit
 
 from autopath.utils import *
-from autopath.utils import _print_current_forces
 import datetime
 
 @dataclass
@@ -113,7 +112,7 @@ def run_restrained_minimization(
         force_constants = stage['forces']
         force_constants_dict = {k: v for k, v in zip(components, force_constants)}
         update_force_constants(simulation, force_constants_dict)
-        simulation.minimizeEnergy(maxIterations=2000) # default is 0 meaning until convergence
+        simulation.minimizeEnergy(maxIterations=0) # default is 0 meaning until convergence
         logging.info(f"Current system's energy: {simulation.context.getState(getEnergy=True).getPotentialEnergy()}")
     return None
 
@@ -157,17 +156,45 @@ def run_restrained_md(
 
     return None
 
+from openmm import CustomExternalForce
+
+def add_fixed_exclusion_sphere_external(
+    system,
+    ion_indices,
+    center,
+    r_excl=0.6,
+    K_flat=200.0,
+    force_name="flat_excl_fixed",
+    force_group=30,
+):
+    energy = "(k_flat/2)*max(r_excl - sqrt((x-x0)^2 + (y-y0)^2 + (z-z0)^2), 0)^2"
+    ext = CustomExternalForce(energy)
+    ext.addGlobalParameter("k_flat", K_flat * openmmunit.kilojoules_per_mole / (openmmunit.nanometer**2))
+    ext.addGlobalParameter("r_excl", r_excl * openmmunit.nanometer)
+    x0, y0, z0 = center
+    ext.addGlobalParameter("x0", x0 * openmmunit.nanometer)
+    ext.addGlobalParameter("y0", y0 * openmmunit.nanometer)
+    ext.addGlobalParameter("z0", z0 * openmmunit.nanometer)
+    for idx in ion_indices:
+        ext.addParticle(int(idx), [])
+    # ext.setUsesPeriodicBoundaryConditions(True)
+    ext.setForceGroup(force_group)
+    ext.setName(force_name)
+    system.addForce(ext)
+    return ext
+
 
 class GISTMD:
     def __init__(
         self,
         topology: str = None,
         system: str = None,
-        out_dir: str = "equilibration",
+        out_dir: str = "gist_md",
         restrained_minimization: bool = False,
         protocol_fname: str = "autopath/data/equilibration.json",
         timestep: float = 0.002,
-        save_freq: int = 3125, # 12500 is 0.05ns at 4fs timestep
+        pocket_selection: str = None,
+        save_freq: int = 6250, # 12500 is 0.05ns at 4fs timestep
         is_membrane: bool = False,
         verbose: int = 2,
 
@@ -182,9 +209,9 @@ class GISTMD:
 
         self.is_membrane = is_membrane
 
-        # self.temperature = 100 * openmmunit.kelvin # a low value to initilize the integrator
         self.timestep = timestep * openmmunit.picoseconds
         self.save_freq = save_freq
+        self.pocket_selection = pocket_selection
 
         self.restrained_minimization = restrained_minimization
 
@@ -266,7 +293,7 @@ class GISTMD:
         add_reporters(
             simulation,
             self.out_dir,
-            f"equilibration_{run_id}",
+            f"gistmd_{run_id}",
             logperiod=self.save_freq, #25000 is 0.1 ns at 4 fs timestep
             total_steps=self.total_steps,
             verbose=self.verbose
@@ -288,19 +315,75 @@ class GISTMD:
                 force_name=f"k_{name}",
                 force_group=num+15, #Offset by 15 to avoid overlap with other forces
             )
-            simulation.context.reinitialize(preserveState=True)
-        
-        logging.info(f"Current system's energy: {simulation.context.getState(getEnergy=True).getPotentialEnergy()}")
-        minim_scheme = [{ "name": "Stage 1", "forces": [2.5, 2.5] }]
+               
+        ions_idxs = u.select_atoms("resname NA CL K").indices
+        pocket_idxs = u.select_atoms(self.pocket_selection).indices
+        sel = [i for i,a in enumerate(self.topology.atoms()) if a.index in pocket_idxs]
+        logging.info(f"Found {len(ions_idxs)} ions and {len(sel)} pocket atoms.")
+
+        positions = simulation.context.getState(getPositions=True, getVelocities=False).getPositions(asNumpy=True) / openmmunit.nanometers
+        group_positions = positions[pocket_idxs]  # Get positions for the group pocket_idxs
+        center_nm = np.mean(group_positions, axis=0)  # Simple mean for COG
+        logging.info(f"Center of geometry for the pocket: {center_nm}")
+        add_fixed_exclusion_sphere_external(self.system, ion_indices=ions_idxs, center=center_nm)
+
+        simulation.context.reinitialize(preserveState=True)
+        logging.info("Current forces before minimization A:")
+
+        minim_scheme = [{ "name": "Water", "forces": [5.0, 5.0]},
+                        { "name": "Water_sidechain", "forces": [2.5, 0]},
+                        { "name": "Water_sidechain_backbone", "forces": [0.0, 0.0]}
+                        ]
         run_restrained_minimization(simulation, list(self.components_lookup.keys()), minim_scheme)
         
-        if self.verbose > 0: # Save the minimized structure
-            final_positions = simulation.context.getState(getPositions=True).getPositions()
-            save_pdb(self.topology, final_positions, f"{self.out_dir}/{run_id}_minim.pdb")
+        # Save the minimized structure
+        minimized_positions = simulation.context.getState(getPositions=True).getPositions()
+        save_pdb(self.topology, minimized_positions, f"{self.out_dir}/{run_id}_minim-A.pdb")
 
-        # _print_current_forces(self.system)
+        # After restrained minimization remove and re-add restraints with updated reference positions
+        logging.debug("Resetting harmonic restraints after minimization to update reference positions.")
+        
+        # remove existing restraint forces
+        self.system = remove_openmm_force(self.system, "k_")
+        simulation.context.reinitialize(preserveState=True)
 
-        logging.info("Warming up the system..")
+        # Re-add the restraints with updated positions.
+        # Because the forces exist this will update them, there's no need to remove them first (I think).
+        for num, (name, selection) in enumerate(self.components_lookup.items()):
+            restrain_idxs = u.select_atoms(selection).indices
+            logging.info(f"Re-adding {len(restrain_idxs)} harmonic restraints to {name} after minimization.")
+
+            add_harmonic_restraints(
+                self.system,
+                minimized_positions,
+                self.topology,
+                restrain_idxs,
+                restraint_force=10,  # some default value, will be updated during equilibration
+                force_name=f"k_{name}",
+                force_group=num + 15,
+            )
+
+        simulation.context.reinitialize(preserveState=True)
+        logging.info("Current forces after minimization A:")
+        print_current_forces(self.system)
+
+        logging.info("Warming up the system to 600K..")
+        warm_up_system(simulation, integrator, 
+                       Tstart=self.temp_init, 
+                       Tend=600, 
+                       Tstep=self.temp_steps,
+                       warming_steps=self.warm_up_steps
+                       )
+
+        logging.info("Running second minimization..")
+        minim_scheme = [{ "name": "Stage 1", "forces": [2.5, 0.0]}]
+        run_restrained_minimization(simulation, list(self.components_lookup.keys()), minim_scheme)
+        logging.info(f"Current system's energy: {simulation.context.getState(getEnergy=True).getPotentialEnergy()}")
+
+        minimized_positions = simulation.context.getState(getPositions=True).getPositions()
+        save_pdb(self.topology, minimized_positions, f"{self.out_dir}/{run_id}_minim-B.pdb")
+
+        logging.info("Warming up the system to 300K..")
         warm_up_system(simulation, integrator, 
                        Tstart=self.temp_init, 
                        Tend=self.temperature, 
@@ -308,40 +391,15 @@ class GISTMD:
                        warming_steps=self.warm_up_steps
                        )
         
-        logging.info("Running NPT for 1ns..")
-        equilibration_scheme = [
-        { "name": "Stage 1", "forces": [1.0, 2.5], "npt_flag": True, "nsteps": 250000, "stepsize": 0.002},                         
-        { "name": "Stage 2", "forces": [0.5, 2.5], "npt_flag": True, "nsteps": 250000, "stepsize": 0.002}
-                                ]
-    
-        run_restrained_md(
-            simulation,
-            self.system,
-            integrator,
-            list(self.components_lookup.keys()),
-            equilibration_scheme,
-            self.temperature,
-            self.is_membrane,
-        )
-
-        _print_current_forces(self.system)
-        
-        # remove existing restraint forces and the barostat
-        forces_to_remove = []
-        for f_idx in range(self.system.getNumForces()):
-            force = self.system.getForce(f_idx)
-            if (force.getName().startswith("k_") or force.getName().startswith("MonteCarlo")):
-                logging.debug(f"Removing force {force.getName()} at index {f_idx}.")
-                forces_to_remove.append(f_idx)
-
-        for f_idx in sorted(forces_to_remove, reverse=True):
-            self.system.removeForce(f_idx)
-
+        # remove existing restraint forces
+        self.system = remove_openmm_force(self.system, "k_")
         simulation.context.reinitialize(preserveState=True)
+
+        positions = simulation.context.getState(getPositions=True).getPositions()
+        save_pdb(self.topology, positions, f"{self.out_dir}/{run_id}_warm.pdb")
 
         # Re-add the restraints with updated positions.
         # Because the forces exist this will update them, there's no need to remove them first (I think).
-        positions = simulation.context.getState(getPositions=True).getPositions()
         for num, (name, selection) in enumerate(self.components_lookup.items()):
             restrain_idxs = u.select_atoms(selection).indices
             logging.info(f"Re-adding {len(restrain_idxs)} harmonic restraints to {name} after minimization.")
@@ -351,23 +409,18 @@ class GISTMD:
                 positions,
                 self.topology,
                 restrain_idxs,
-                restraint_force=15,  # some default value, will be updated during equilibration
+                restraint_force=2.5,  # some default value, will be updated during equilibration
                 force_name=f"k_{name}",
                 force_group=num + 15,
             )
 
         simulation.context.reinitialize(preserveState=True)
 
-        _print_current_forces(self.system)
-
-        self.topology.setPeriodicBoxVectors(simulation.context.getState(getPositions=True).getPeriodicBoxVectors()) #saves correct box vectors to the pdb
-        save_pdb(self.topology, positions, f"{self.out_dir}/{run_id}_before-gist.pdb")
-
-        logging.info("Running production NVT..")
+        logging.info("Running NPT for 1ns..")
         equilibration_scheme = [
-        { "name": "Stage 1", "forces": [2.5, 2.5], "npt_flag": False, "nsteps": 50000000, "stepsize": 0.002},                         
-                                ]
-    
+        { "name": "Waters", "forces": [2.5, 1.0], "npt_flag": True, "nsteps": 250000, "stepsize": 0.002},                         
+        { "name": "Water_sidechain", "forces": [1.0, 0.0], "npt_flag": True, "nsteps": 250000, "stepsize": 0.002}
+        ]
         run_restrained_md(
             simulation,
             self.system,
@@ -378,23 +431,46 @@ class GISTMD:
             self.is_membrane,
         )
 
-        _print_current_forces(self.system)
+        # remove existing restraint forces and the barostat
+        self.system = remove_openmm_force(self.system, "k_")
+        self.system = remove_openmm_force(self.system, "MonteCarlo")
+        simulation.context.reinitialize(preserveState=True)
 
-        # # remove the restraint forces after equilibration
-        # for f_idx in sorted(forces_to_remove, reverse=True):
-        #     self.system.removeForce(f_idx)
-        # simulation.context.reinitialize(preserveState=True)
+        positions = simulation.context.getState(getPositions=True).getPositions()
+        save_pdb(self.topology, positions, f"{self.out_dir}/{run_id}_npt.pdb")
 
-        # _print_current_forces(self.system)
+        # Re-add the restraints with updated positions.
+        # Because the forces exist this will update them, there's no need to remove them first (I think).
+        for num, (name, selection) in enumerate(self.components_lookup.items()):
+            restrain_idxs = u.select_atoms(selection).indices
+            logging.info(f"Re-adding {len(restrain_idxs)} harmonic restraints to {name} after minimization.")
+
+            add_harmonic_restraints(
+                self.system,
+                positions,
+                self.topology,
+                restrain_idxs,
+                restraint_force=5.0,  # some default value, will be updated during equilibration
+                force_name=f"k_{name}",
+                force_group=num + 15,
+            )
+
+        simulation.context.reinitialize(preserveState=True)
+
+        logging.info("Current forces after NPT:")
+        print_current_forces(self.system)
+
+        # The first 700000 steps are equilibration, the rest is production
+        logging.info("Running production NVT..")
+        simulation.step(50000000) #100ns at 2fs
+        # simulation.step(500000) #1 at 2fs
 
         final_positions = simulation.context.getState(getPositions=True).getPositions()
         self.topology.setPeriodicBoxVectors(simulation.context.getState(getPositions=True).getPeriodicBoxVectors()) #saves correct box vectors to the pdb
         save_system(self.system, f"{self.out_dir}/system_{run_id}.xml")
         save_simulation(simulation, f"{self.out_dir}/checkpoint_{run_id}")
-        save_pdb(self.topology, final_positions, f"{self.out_dir}/{run_id}_after-gist.pdb")
+        save_pdb(self.topology, final_positions, f"{self.out_dir}/{run_id}_final.pdb")
 
-        self.simulation_time = (time.monotonic() - start_time) / 60 
-        logging.info(f"Autopath equilibration completed in {self.simulation_time:.2f} min.")
-        self.to_json(f"{self.out_dir}/equilibration_protocol.json")
+        logging.info(f"GIST MD finished in {(time.monotonic() - start_time)/60:.2f} min.")
 
         return self.system
