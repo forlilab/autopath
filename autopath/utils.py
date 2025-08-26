@@ -163,34 +163,26 @@ def load_system(system_path: str) -> System:
     return system
 
 
-def save_amber_topology(
+def save_amber_files(
     topology: app.Topology = None,
     positions: list = None,
-    forcefield: app.ForceField = None,
-    nb_cutoff: openmmunit.Quantity = 1.0 * openmmunit.nanometers,
-    switchDistance: openmmunit.Quantity = 0.9 * openmmunit.nanometers,
-    hydrogenMass: openmmunit.Quantity = 3.0 * openmmunit.amu,
+    system: System = None,
     out_path: str = None,
 ) -> None:
 
+    """Saves the OpenMM system and topology to AMBER format files.
+    https://parmed.github.io/ParmEd/html/openmm.html
+    If system is None, it will not save the data from system but still will save the topology and positions. 
+    """
     os.makedirs(out_path, exist_ok=True)
-    new_system = forcefield.createSystem(
-        topology,
-        nonbondedMethod=app.PME,
-        nonbondedCutoff=nb_cutoff,
-        switchDistance=switchDistance,
-        removeCMMotion=True,
-        rigidWater=False, # DO NOT USE THIS, it will not work with parmed
-        hydrogenMass=hydrogenMass,
-        # constraints=app.HBonds, # DO NOT USE THIS, it will not work with parmed
-    )
-    
+
     parmed_structure = parmed.openmm.topsystem.load_topology(
-        topology, new_system, positions
+        topology, system, positions
     )
 
     parmed_structure.save(f"{out_path}/system.prmtop", overwrite=True, format="amber")
-    parmed_structure.save(f"{out_path}/system.rst7", overwrite=True, format="rst7")
+    if positions is not None:
+        parmed_structure.save(f"{out_path}/system.rst7", overwrite=True, format="rst7")
 
     return
 
@@ -588,6 +580,7 @@ def add_flatbottom_COM_restraints(
     r0: float = None,
     upper_wall: int = 0.1,
     K_flat: float = 200,
+    force_name: str = "k_flat_com",
     force_group: int = 30,
 ):
 
@@ -596,15 +589,14 @@ def add_flatbottom_COM_restraints(
     upper_wall_rest.addGroup(groupA)
     upper_wall_rest.addGroup(groupB)
     upper_wall_rest.addBond([0, 1])
-    upper_wall_rest.addGlobalParameter(
-        "k_flat", K_flat * openmmunit.kilojoules_per_mole
-    )
+    upper_wall_rest.addGlobalParameter("k_flat", K_flat * openmmunit.kilojoules_per_mole)
     upper_wall_rest.addGlobalParameter("upper_wall", upper_wall * openmmunit.nanometer)
     upper_wall_rest.addGlobalParameter("r0", r0 * openmmunit.nanometer)
 
     upper_wall_rest.setUsesPeriodicBoundaryConditions(True)
 
     upper_wall_rest.setForceGroup(force_group)
+    upper_wall_rest.setName(force_name)
 
     system.addForce(upper_wall_rest)
 
@@ -811,3 +803,23 @@ def find_closest_points(
     })
     
     return closest_df
+
+def remove_openmm_force(system: System = None, fname: str = None) -> System:
+    """Remove a force from the system by name."""
+    forces_to_remove = []
+    for f_idx in range(system.getNumForces()):
+        force = system.getForce(f_idx)
+        if force.getName().startswith(fname):
+            logging.warning(f"Removing force {force.getName()} at index {f_idx}.")
+            # print(f"Removing force {force.getName()} at index {f_idx}.")
+            forces_to_remove.append(f_idx)
+
+    for f_idx in sorted(forces_to_remove, reverse=True):
+        system.removeForce(f_idx)
+
+    return system
+
+def print_current_forces(system: System = None) -> None:
+    for index, fc in enumerate(system.getForces()):
+        logging.info(f"Force Index:{index} | Name: {fc.getName()} | Group: {fc.getForceGroup()}")
+    return
