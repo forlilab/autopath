@@ -25,7 +25,7 @@ from openmmforcefields.generators import (
 from rdkit.Chem import SDMolSupplier
 
 # AutoPath imports
-from autopath.utils import add_variants, save_pdb, save_system, save_amber_topology
+from autopath.utils import add_variants, save_pdb, save_system, save_amber_files
 
 
 class SystemPreparation:
@@ -70,8 +70,11 @@ class SystemPreparation:
                 "The arguments 'num_solvent' and 'padding' are incompatible. Please specify only one."
             )
             exit(1)
+
+        self.padding = padding
         if padding is not None:
             self.padding = padding * openmmunit.nanometers
+            
         self.num_solvent = num_solvent
 
         self.ionicStrength = ionicStrength * openmmunit.molar
@@ -99,8 +102,8 @@ class SystemPreparation:
             exit(1)
 
         # you proabably dont want to change this
-        self.nb_cutoff = 1.2 * openmmunit.nanometers
-        self.switchDistance = 1.1 * openmmunit.nanometers
+        self.nb_cutoff = 1.0 * openmmunit.nanometers
+        self.switchDistance = 0.9 * openmmunit.nanometers
 
     def _sdf_to_mol(self, lig_sdf: str = None):
         """Load ligand SDF and transform to OpenMM molecule"""
@@ -273,9 +276,20 @@ class SystemPreparation:
 
         save_system(system, f"{self.out_dir}/system.xml")
         save_pdb(modeller.topology, modeller.positions, f"{self.out_dir}/system.pdb")
-        save_amber_topology(modeller.topology, modeller.positions, self.forcefield, 
-                            self.nb_cutoff, self.switchDistance, self.hydrogenMass, 
-                            self.out_dir)
+
+        # This is why: https://parmed.github.io/ParmEd/html/openmm.html
+        parmed_system = self.forcefield.createSystem(
+            modeller.topology,
+            nonbondedMethod=PME,
+            nonbondedCutoff=self.nb_cutoff,
+            switchDistance=self.switchDistance,
+            removeCMMotion=True,
+            rigidWater=False, # DO NOT USE THIS, it will not work with parmed
+            hydrogenMass=self.hydrogenMass,
+            # constraints=app.HBonds, # DO NOT USE THIS, it will not work with parmed
+        )
+
+        save_amber_files(modeller.topology, modeller.positions, parmed_system, self.out_dir)
 
         simulation_time = time.monotonic() - start_time
         logging.info(f"Finished system preparation in {simulation_time:.2f} seconds.")
