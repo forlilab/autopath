@@ -438,6 +438,10 @@ class MetadynamicsMD:
         grid_width_A = hill_width_A / 5
         grid_min_A, grid_max_A = grid_dimensions_A
         grid_A = round(abs(grid_min_A - grid_max_A) / grid_width_A)
+        grid_width_B = hill_width_B / 5
+        grid_min_B, grid_max_B = grid_dimensions_B
+        grid_B = round(abs(grid_min_B - grid_max_B) / grid_width_B)
+
         ##################### Z depth CV (cv1) #################################
 
         if cv1 == "com_z":
@@ -575,9 +579,7 @@ class MetadynamicsMD:
                                         self.ligand_atoms)
 
         
-            grid_width_B = hill_width_B / 5
-            grid_min_B, grid_max_B = grid_dimensions_B
-            grid_B = round(abs(grid_min_B - grid_max_B) / grid_width_B)
+
 
             cv2_BiasVariable = BiasVariable(
                 LM,
@@ -723,11 +725,11 @@ class MetadynamicsMD:
             grid_min_A,
             grid_max_A,
             grid_A,
-            "com_z",
+            cv1,
             grid_min_B,
             grid_max_B,
             grid_B,
-            "lm_cv",
+            cv2,
         )
 
         # final_positions = simulation.context.getState(getPositions=True, enforcePeriodicBox=True).getPositions() #I added  enforcePeriodicBox=True
@@ -740,4 +742,3 @@ class MetadynamicsMD:
         logging.info(f"Finished {run_id} metadynamics in {simulation_time/60:.2f} min.")
 
         return
-

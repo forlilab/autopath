@@ -289,8 +289,7 @@ class Equilibration:
                 force_group=num+15, #Offset by 15 to avoid overlap with other forces
             )
             simulation.context.reinitialize(preserveState=True)
-        print('boutta minimize')
-        print_current_forces(self.system)
+
         logging.info(f"Current system's energy: {simulation.context.getState(getEnergy=True).getPotentialEnergy()}")
         if not self.restrained_minimization:
             logging.info("Running standard minimization..")
@@ -337,8 +336,6 @@ class Equilibration:
             )
 
         simulation.context.reinitialize(preserveState=True)
-        print('boutta warm')
-        print_current_forces(self.system)
 
         logging.info("Warming up the system..")
         warm_up_system(simulation, integrator, 
@@ -358,13 +355,11 @@ class Equilibration:
             self.temperature,
             self.is_membrane,
         )
-        print('boutt run restrained md')
-        print_current_forces(self.system)
+
         # remove the restraint forces after equilibration
         for f_idx in sorted(forces_to_remove, reverse=True):
             self.system.removeForce(f_idx)
-        print('boutta save final output')
-        print_current_forces(self.system)
+
 
 
         final_positions = simulation.context.getState(getPositions=True).getPositions()

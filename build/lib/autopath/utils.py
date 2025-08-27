@@ -831,17 +831,16 @@ def add_cylindrical_restraints(
     system: System,
     host_index: List[int],
     guest_index: List[int],
-    k_xy: Optional[openmmunit.Quantity] = 10.0
+    k_xy: Optional[openmmunit.Quantity] = 7.0
     * openmmunit.kilocalorie_per_mole
     / openmmunit.angstrom**2,
     R_cylinder: Optional[openmmunit.Quantity] = 10.0 * openmmunit.angstrom,
-    r0: Optional[openmmunit.Quantity] = 5 * openmmunit.angstrom,
     force_group: Optional[int] = 10,
 ):
     """
     Applies a cylindrical restraint to a guest molecule, allowing it to move freely in the Z direction
     but restricting its motion in the XY plane.
-    Inpired by https://github.com/jeff231li/funnel_potential
+
     """
 
     # Cylindrical restraint potential string expression
@@ -857,7 +856,6 @@ def add_cylindrical_restraints(
     # Cylindrical restraint parameters
     cylindrical_restraint.addGlobalParameter("k_xy", k_xy)
     cylindrical_restraint.addGlobalParameter("R_cylinder", R_cylinder)
-    cylindrical_restraint.addGlobalParameter("r0", r0)
 
     # Add host and guest indices
     g1 = cylindrical_restraint.addGroup(host_index, [1.0 for i in range(len(host_index))])
