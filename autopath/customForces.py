@@ -7,17 +7,17 @@ import openmm.unit as openmmunit
 
 def print_current_forces(system: System = None) -> None:
     for index, fc in enumerate(system.getForces()):
-        print(f"Force Index:{index} | Name: {fc.getName()} | Group: {fc.getForceGroup()}")
+        logging.info(f"Force Index:{index} | Name: {fc.getName()} | Group: {fc.getForceGroup()}")
     return
 
 def remove_openmm_force(system: System = None, fname: str = None) -> System:
-    """Remove a force from the system by name."""
+    """Remove a force from the system by name.
+    It will remove all forces that start with the given name."""
     forces_to_remove = []
     for f_idx in range(system.getNumForces()):
         force = system.getForce(f_idx)
-        if fname in force.getName():
-            logging.info(f"Removing force {force.getName()} at index {f_idx}.")
-            # print(f"Removing force {force.getName()} at index {f_idx}.")
+        if force.getName().startswith(fname):
+            logging.warning(f"Removing force {force.getName()} at index {f_idx}.")
             forces_to_remove.append(f_idx)
 
     for f_idx in sorted(forces_to_remove, reverse=True):
