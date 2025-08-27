@@ -65,15 +65,21 @@ class SystemPreparation:
         self.hydrogenMass = hydrogenMass * openmmunit.amu  # Use HMR
         self.boxShape = boxShape  # cube, dodecahedron
 
-        if num_solvent is not None and padding is not None:
-            logging.error(
-                "The arguments 'num_solvent' and 'padding' are incompatible. Please specify only one."
-            )
-            exit(1)
-        if padding is not None:
-            self.padding = padding * openmmunit.nanometers
+        self.padding = padding
         self.num_solvent = num_solvent
-
+        if self.padding is not None:
+            self.padding = self.padding * openmmunit.nanometers
+            if num_solvent is not None:
+                logging.warning("Both 'num_solvent' and 'padding' were specified. 'padding' will be ignored.")
+                self.num_solvent = num_solvent
+                self.padding = None
+        elif self.num_solvent is not None:
+            self.num_solvent = num_solvent
+            self.padding = None
+        else:
+            logging.error("Either 'num_solvent' or 'padding' must be specified.")
+            exit(1)
+            
         self.ionicStrength = ionicStrength * openmmunit.molar
 
         self.is_membrane = is_membrane
