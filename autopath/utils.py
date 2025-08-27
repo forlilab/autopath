@@ -164,38 +164,28 @@ def load_system(system_path: str) -> System:
         exit(1)
     return system
 
-
-def save_amber_topology(
+def save_amber_files(
     topology: app.Topology = None,
     positions: list = None,
-    forcefield: app.ForceField = None,
-    nb_cutoff: openmmunit.Quantity = 1.0 * openmmunit.nanometers,
-    switchDistance: openmmunit.Quantity = 0.9 * openmmunit.nanometers,
-    hydrogenMass: openmmunit.Quantity = 3.0 * openmmunit.amu,
+    system: System = None,
     out_path: str = None,
 ) -> None:
 
+    """Saves the OpenMM system and topology to AMBER format files.
+    https://parmed.github.io/ParmEd/html/openmm.html
+    If system is None, it will not save the data from system but still will save the topology and positions. 
+    """
     os.makedirs(out_path, exist_ok=True)
-    new_system = forcefield.createSystem(
-        topology,
-        nonbondedMethod=app.PME,
-        nonbondedCutoff=nb_cutoff,
-        switchDistance=switchDistance,
-        removeCMMotion=True,
-        rigidWater=False, # DO NOT USE THIS, it will not work with parmed
-        hydrogenMass=hydrogenMass,
-        # constraints=app.HBonds, # DO NOT USE THIS, it will not work with parmed
-    )
-    
+
     parmed_structure = parmed.openmm.topsystem.load_topology(
-        topology, new_system, positions
+        topology, system, positions
     )
 
     parmed_structure.save(f"{out_path}/system.prmtop", overwrite=True, format="amber")
-    parmed_structure.save(f"{out_path}/system.rst7", overwrite=True, format="rst7")
+    if positions is not None:
+        parmed_structure.save(f"{out_path}/system.rst7", overwrite=True, format="rst7")
 
     return
-
 
 def select_platform(platform_name: str = None, device_index: str = "0"):
 
