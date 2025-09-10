@@ -64,6 +64,7 @@ def main():
         # Preparation
         run_preparation=config.run_preparation,
         forcefield=config.forcefield,
+        hydrogenMass=config.hydrogenMass,
         lig_ff=config.lig_ff,
         boxShape=config.boxShape,
         padding=config.padding,
@@ -76,11 +77,12 @@ def main():
         equilibration_scheme=config.equilibration_scheme,
         # Steered MD
         run_sMDpulling=config.run_sMDpulling,
-        sMD_pulling_dist=config.sMD_pulling_dist,
+        sMD_pulling_dir=config.sMD_pulling_dir,
         sMD_time=config.sMD_time,
         sMD_replicas=config.sMD_replicas,
         sMD_steps_per_move=config.sMD_steps_per_move,
-        sMD_pulling_force=config.sMD_pulling_force,
+        sMD_dx_per_move=config.sMD_dx_per_move,
+        sMD_spring_cte=config.sMD_spring_cte,
         sMD_autostop=config.sMD_autostop,
         # Milestones
         extract_milestones=config.extract_milestones,

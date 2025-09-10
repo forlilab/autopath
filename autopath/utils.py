@@ -22,14 +22,14 @@ import pickle
 import MDAnalysis as mda
 from MDAnalysis.analysis.rms import RMSD, RMSF
 from scipy.spatial.distance import cdist
+from MDAnalysis.analysis.distances import distance_array
+
 from scipy.spatial import KDTree
 
 import seaborn as sns
 import matplotlib.pyplot as plt
 import matplotlib.style as style
 style.use("fivethirtyeight")
-
-import pytraj as pt
 
 from rdkit import Chem
 from rdkit.Chem.Draw import SimilarityMaps
@@ -55,6 +55,8 @@ def align_trajectory(
     strip_mask: str = None,  #':HOH,NA,CL,K,POP'
     out_fname: str = None,
 ) -> None:
+
+    import pytraj as pt
 
     ptraj = pt.iterload(traj_file, prmtop_file, stride=stride)
     ptraj = ptraj.autoimage()
@@ -162,33 +164,28 @@ def load_system(system_path: str) -> System:
         exit(1)
     return system
 
-
-def save_amber_topology(
+def save_amber_files(
     topology: app.Topology = None,
     positions: list = None,
-    forcefield: app.ForceField = None,
+    system: System = None,
     out_path: str = None,
 ) -> None:
 
+    """Saves the OpenMM system and topology to AMBER format files.
+    https://parmed.github.io/ParmEd/html/openmm.html
+    If system is None, it will not save the data from system but still will save the topology and positions. 
+    """
     os.makedirs(out_path, exist_ok=True)
-    new_system = forcefield.createSystem(
-        topology,
-        nonbondedMethod=app.PME,
-        nonbondedCutoff=10 * openmmunit.angstrom,
-        removeCMMotion=False,
-        rigidWater=False,
-        hydrogenMass=3.0 * openmmunit.amu,
-    )
 
     parmed_structure = parmed.openmm.topsystem.load_topology(
-        topology, new_system, positions
+        topology, system, positions
     )
 
     parmed_structure.save(f"{out_path}/system.prmtop", overwrite=True, format="amber")
-    parmed_structure.save(f"{out_path}/system.rst7", overwrite=True, format="rst7")
+    if positions is not None:
+        parmed_structure.save(f"{out_path}/system.rst7", overwrite=True, format="rst7")
 
     return
-
 
 def select_platform(platform_name: str = None, device_index: str = "0"):
 
@@ -241,7 +238,7 @@ def add_reporters(
 
     simulation.reporters.append(
         DCDReporter(
-            f"{out_dir}/trajectory_{suffix}.dcd",
+            f"{out_dir}/{suffix}.dcd",
             reportInterval=logperiod,
             enforcePeriodicBox=False,  # WARNING this compromises autoimaging afterwards in some cases
         )
@@ -251,7 +248,7 @@ def add_reporters(
 
         simulation.reporters.append(
             StateDataReporter(
-                f"{out_dir}/statistics_{suffix}.csv",
+                f"{out_dir}/{suffix}.csv",
                 logperiod,
                 step=True,
                 time=True,
@@ -322,68 +319,195 @@ def add_variants(modeller: Modeller, variants_dict: dict = None) -> Modeller:
 
     return modeller 
 
-def get_pocket_atoms(u, pocket_selection:str, lig_resname:str):
+def get_pocket_atoms(u:mda.Universe, 
+                     pocket_selection:str, 
+                     ligand_selection:str,
+                     cutoff: float = 5.0
+                     ) -> mda.AtomGroup:
     """Get the pocket atoms based on a user provided selection 
     or the ligand residue name and some default heuristics."""
 
     u.trajectory[-1]  # set pointer to last frame if its a trajectory
 
-    if pocket_selection is None and lig_resname is None:
+    if pocket_selection is None and ligand_selection is None:
         logging.error("No pocket selection or ligand residue name provided.")
         return []
 
     # If a custom pocket selection is provided, use it directly
     if pocket_selection is not None:
         pocket_atoms = u.select_atoms(pocket_selection)
+        pocket_atoms_indices = [atom.index for atom in pocket_atoms]
     # If no custom selection, use the ligand residue name to define the pocket
-    elif lig_resname is not None:
+    elif ligand_selection is not None:
         backbone_names = ["N", "CA", "C", "O"]
-        ligand = u.select_atoms(f"resname {lig_resname}")
-        protein_residues = u.select_atoms(f"protein and around 4 group ligand", ligand=ligand).residues
+        ligand = u.select_atoms(ligand_selection)
+        protein_residues = u.select_atoms(f"protein and around {cutoff} group ligand", ligand=ligand).residues
         pocket_atoms_indices = [atom.index for res in protein_residues 
                                 for atom in res.atoms
                                 if atom.name in backbone_names]
-        if len(pocket_atoms_indices) == 0:
-            logging.error(f"No atoms found for the provided pocket selection")
-            return []
-        else:
-            # convert to MDAnalysis AtomGroup
-            pocket_atoms = u.select_atoms(f"index {' '.join(map(str, pocket_atoms_indices))}")
-            return pocket_atoms
-
-def get_ligand_atoms(u, lig_resname:str, use_murcko_scaffold:bool = True, lig_img:str = None):
-    """Get the ligand atoms based on the residue name and optionally save a Murcko scaffold image."""
-
-    if lig_img is None:
-        lig_img = f'ligand_{lig_resname}_murcko.png'
-
-    if use_murcko_scaffold:
-        try:
-            ligand_selection = u.select_atoms(f'resname {lig_resname}')
-            mol = ligand_selection.convert_to('RDKIT')
-            sel_atoms = mol.GetAtoms()
-            # Get Murcko scaffold and match it to parent molecule
-            murcko = MurckoScaffold.GetScaffoldForMol(mol)
-            murcko_match = mol.GetSubstructMatch(murcko)
-            murcko_atom_names = [sel_atoms[i].GetProp('_MDAnalysis_name') for i in murcko_match]
-            # select the Murcko scaffold atoms in the MDAnalysis universe
-            ligand_atoms = u.select_atoms(f'name {" ".join(map(str, murcko_atom_names))}')
-            
-            # save the Murcko scaffold image
-            Chem.rdDepictor.Compute2DCoords(mol)
-            mol = Chem.RemoveHs(mol)
-            img = Chem.Draw.MolToImage(mol, size=(300, 300), highlightAtoms=murcko_match)
-            img.save(lig_img)
-        except Exception as e:
-            logging.error(f"Error processing Murcko scaffold: {e}")
-            logging.warning("Falling back to using all non-hydrogen atoms in the ligand.")
-            ligand_atoms = u.select_atoms(f'resname {lig_resname} and not name H*')
+        
+    if len(pocket_atoms_indices) == 0:
+        logging.error(f"No atoms found for the provided pocket selection")
+        return []
     else:
-        # If not using Murcko scaffold, select all non-hydrogen atoms in the ligand
-        logging.warning("Using all non-hydrogen atoms in the ligand as ligand_atoms.")
-        ligand_atoms = u.select_atoms(f"resname {lig_resname} and not name H*")
+        # convert to MDAnalysis AtomGroup
+        pocket_atoms = u.select_atoms(f"index {' '.join(map(str, pocket_atoms_indices))}")
+        return pocket_atoms
 
-    return ligand_atoms
+def reduce_to_murcko_scaffold(u, lig_resname: str, img_name: str = None):
+    """
+    Reduce ligand atoms to their Murcko scaffold representation.
+
+    Returns
+    -------
+    reduced_ligand : MDAnalysis.AtomGroup
+    highlight_rdk_indices : list of int (for RDKit visualization)
+    mol : RDKit Mol object (with Hs removed and 2D coords)
+    """
+    if img_name is None:
+        img_name = f"ligand_{lig_resname}_murcko.png"
+
+    ligand_all = u.select_atoms(f"resname {lig_resname}")
+    mol = ligand_all.convert_to('RDKIT')
+    sel_atoms = mol.GetAtoms()
+
+    try:
+        murcko = MurckoScaffold.GetScaffoldForMol(mol)
+        murcko_match = mol.GetSubstructMatch(murcko)
+        murcko_atom_names = [sel_atoms[i].GetProp('_MDAnalysis_name') for i in murcko_match]
+        reduced_ligand = u.select_atoms(f'resname {lig_resname} and name {" ".join(murcko_atom_names)}')
+
+        return reduced_ligand, murcko_match, mol
+
+    except Exception as e:
+        logging.warning(f"Could not extract Murcko scaffold: {e}")
+        return u.select_atoms(f'resname {lig_resname} and not name H*'), [], mol
+
+def get_ligand_anchor_atoms(
+    u,
+    lig_resname: str,
+    pocket_sel: str = "protein and around 5 resname UNK and not name H*",
+    mode: str = "com",
+    frames: int = 100,
+    n_atoms: int = 5,
+    reduce_before: bool = True,
+    expand_rings: bool = True,
+    out_dir: str = None,
+    verbose: bool = True,
+):
+    """
+    Select anchor atoms in the ligand for pulling and optionally visualize them.
+
+    If mode="murcko", returns Murcko scaffold atoms.
+
+    Parameters
+    ----------
+    reduce_before : bool
+        If True, reduce ligand to Murcko scaffold before anchor selection.
+    """
+
+    img_name = f"{out_dir}/pulling_{lig_resname}_{mode}.png"
+
+    ligand_full = u.select_atoms(f"resname {lig_resname} and not name H*")
+    if ligand_full.n_atoms == 0:
+        raise ValueError(f"No atoms found for ligand {lig_resname}.")
+
+    # Reduce first if requested
+    if reduce_before:
+        ligand, highlight_rdk_indices, mol = reduce_to_murcko_scaffold(u, lig_resname, img_name)
+    else:
+        ligand = ligand_full
+        mol = ligand_full.convert_to("RDKIT")
+        highlight_rdk_indices = []
+
+    u.trajectory[-1]  # Ensure we are at the last frame
+    pocket = u.select_atoms(pocket_sel)
+    anchor = []
+
+    if mode == 'lig_ha':
+        ligand_ha = u.select_atoms(f"resname {lig_resname} and not name H*")
+        anchor =[ligand_ha.atoms[i].index for i in range(len(ligand_ha))]
+        # mol = ligand_full.convert_to("RDKIT")
+        # sel_atoms = mol.GetAtoms()
+
+    if mode == "murcko":
+        ligand, anchor_indices, mol = reduce_to_murcko_scaffold(u, lig_resname, img_name)
+        anchor = [ligand.atoms[i].index for i in range(len(ligand))]
+
+    elif mode == "lig_com":
+        com = ligand.center_of_mass()
+        dists = np.linalg.norm(ligand.positions - com, axis=1)
+        anchor = ligand.atoms[np.argsort(dists)[:n_atoms]].indices
+
+    elif mode == "pocket_closest":
+        pocket_com = pocket.center_of_mass()
+        dists = np.linalg.norm(ligand.positions - pocket_com, axis=1)
+        anchor = ligand.atoms[np.argsort(dists)[:n_atoms]].indices
+
+    elif mode == "contacts":
+        contact_counts = np.zeros(len(ligand))
+        for ts in u.trajectory[:frames]:
+            dmat = distance_array(ligand.positions, pocket.positions)
+            contacts = (dmat < 3.5).any(axis=1)
+            contact_counts += contacts
+        top_indices = np.argsort(contact_counts)[-n_atoms:]
+        anchor = ligand.atoms[top_indices].indices
+
+    elif mode == "inertia":
+        coords = ligand.positions - ligand.center_of_mass()
+        inertia_tensor = np.dot(coords.T, coords)
+        eigvals, eigvecs = np.linalg.eigh(inertia_tensor)
+        principal_axis = eigvecs[:, np.argmin(eigvals)]
+        projections = np.dot(coords, principal_axis)
+        anchor = ligand.atoms[np.argsort(projections)[:n_atoms]].indices
+        # anchor = ligand.atoms[np.argsort(projections)[-n_atoms:]].indices
+
+    elif mode == "weighted_com":
+        contact_counts = np.zeros(len(ligand))
+        for ts in u.trajectory[:frames]:
+            dmat = distance_array(ligand.positions, pocket.positions)
+            contacts = (dmat < 3.5).any(axis=1)
+            contact_counts += contacts
+        top_indices = np.argsort(contact_counts)[-n_atoms:]
+        anchor_coords = ligand.positions[top_indices]
+        anchor_com = anchor_coords.mean(axis=0)
+        dists = np.linalg.norm(ligand.positions - anchor_com, axis=1)
+        anchor = ligand.atoms[np.argsort(dists)[:n_atoms]].indices
+
+    # else:
+    #     raise ValueError(f"Unknown mode '{mode}'")
+
+    if expand_rings:
+        rdk_anchor_indices = []
+        idx_map = {a.index: i for i, a in enumerate(ligand_full.atoms)}
+        for idx in anchor:
+            if idx in idx_map:
+                rdk_anchor_indices.append(idx_map[idx])
+        ring_info = mol.GetRingInfo()
+        anchor_rings = [set(ring) for ring in ring_info.AtomRings() if any(i in ring for i in rdk_anchor_indices)]
+        expanded_rdk_indices = set()
+        for ring in anchor_rings:
+            expanded_rdk_indices.update(ring)
+        expanded_mda_indices = [ligand_full.atoms[i].index for i in expanded_rdk_indices]
+        anchor = list(set(anchor).union(expanded_mda_indices))
+        print(f"[get_ligand_anchor_atoms] Expanded to include rings: {expanded_mda_indices}")
+
+    # Draw 2D image with highlights
+    try:
+        idx_map = {a.index: i for i, a in enumerate(ligand_full.atoms)}
+        highlight_rdk_indices = [idx_map[i] for i in anchor if i in idx_map]
+        Chem.rdDepictor.Compute2DCoords(mol)
+        mol = Chem.RemoveHs(mol)
+        img = Chem.Draw.MolToImage(mol, size=(300, 300), highlightAtoms=highlight_rdk_indices)
+        img.save(img_name)
+    except Exception as e:
+        logging.warning(f"Could not generate 2D image with highlights: {e}")
+
+    if verbose:
+        print(f"[get_ligand_anchor_atoms] Anchor atoms selected ({mode}): {anchor}")
+
+    return anchor
+
 
 def get_protein_ha(topology: app.Topology, lig_name: str = "UNK") -> Tuple[list, list]:
 
@@ -411,7 +535,7 @@ def get_protein_ha(topology: app.Topology, lig_name: str = "UNK") -> Tuple[list,
 
 
 def get_ligand_ha(topology: app.Topology, lig_name: str = "UNK") -> Tuple[list, list]:
-    """get names for all non-hydrogen ligand atoms"""
+    """get indices and names for all non-hydrogen ligand atoms"""
 
     residues = topology.residues()
     lig_ha_idx = []
@@ -420,11 +544,6 @@ def get_ligand_ha(topology: app.Topology, lig_name: str = "UNK") -> Tuple[list, 
         if r.name == lig_name:
             lig_ha_names = [a.name for a in r.atoms() if not a.name.startswith("H")]
             lig_ha_idx = [a.index for a in r.atoms() if not a.name.startswith("H")]
-
-    # mg_names = [a.name for a in topology.atoms() if a.name == "MG"]
-    # mg_idx = [a.index for a in topology.atoms() if a.name == "MG"]
-    # lig_ha_idx.extend(mg_idx)
-    # lig_ha_names.extend(mg_names)
 
     return lig_ha_idx, lig_ha_names
 
@@ -443,19 +562,26 @@ def get_pocket_ha(topology: app.Topology, pocket_resid: list[int] = None) -> lis
 
     return pocket_ha_idx
 
-def _get_center(positions, atoms, group, weighByMass):
+def get_center(positions, atoms, group, weighByMass):
     """Calculate the center of mass (COM) or center of geometry (COG) for a group of atoms in OpenMM."""
 
     group_positions = positions[group]  # Get positions for the group
 
     if weighByMass:
         masses = np.array([atom.element.mass.value_in_unit(openmmunit.dalton) for atom in atoms if atom.index in group])
+        if sum(masses) == 0:
+            logging.warning("All atoms in the group have zero mass. Using simple mean instead.")
+            masses = None
         center = np.average(group_positions, axis=0, weights=masses)  # Weighted average for COM
     else:
         center = np.mean(group_positions, axis=0)  # Simple mean for COG
     return center
     
-def get_COM_dist(simulation, groupA:list[int]=None, groupB:list[int]=None, weighByMass:bool=True) -> float:
+def get_COM_dist(simulation, 
+                 groupA:list[int]=None, 
+                 groupB:list[int]=None,
+                 weighByMass:bool=True
+                 ) -> float:
     """Calculate the distance between the centers of mass (COM) or centers of geometry (COG) of two groups of atoms in OpenMM."""
     
     # Get positions
@@ -464,8 +590,8 @@ def get_COM_dist(simulation, groupA:list[int]=None, groupB:list[int]=None, weigh
     atoms = [atom for atom in simulation.topology.atoms()]
 
     # Calculate centers for both groups and their distance
-    centerA = _get_center(positions, atoms, groupA, weighByMass)
-    centerB = _get_center(positions, atoms, groupB, weighByMass)
+    centerA = get_center(positions, atoms, groupA, weighByMass)
+    centerB = get_center(positions, atoms, groupB, weighByMass)
     dist = np.linalg.norm(centerA - centerB)
 
     return dist  # Unitless, but effectively in nanometers because.... openMM
@@ -486,14 +612,13 @@ def calculate_com_distance(u, ligand_atoms=None, pocket_atoms=None, weighByMass:
 
     return np.array(distances) # Distance will be in Angstroms because of MDanalysis
 
-def compute_rmsd(u, u_ref,
-                    alig_select:str='backbone', 
-                    groupselections={}, 
-                    save_aligned=False,
-                    aligned_filename='aligned_trajectory.dcd',
-                    do_plot=True,
-                    out_dir=None
-                    ) -> pd.DataFrame:
+def compute_rmsd(u, 
+                u_ref,
+                alig_select:str='backbone', 
+                groupselections:dict={}, 
+                aligned_fname:str=None,
+                plots_outdir:str=None,
+                ) -> pd.DataFrame:
     r = RMSD(u, 
              u_ref,
              select=alig_select,
@@ -504,58 +629,23 @@ def compute_rmsd(u, u_ref,
     columns = ['frame','time (ps)', f'RMSD_selected_alignment'] + [f'RMSD_{group}' for group in groupselections.keys()]
     rmsd_df = pd.DataFrame(rmsd_results, columns=columns)
 
-    if save_aligned:
-        with mda.Writer(aligned_filename, n_atoms=u.atoms.n_atoms) as W:
+    if aligned_fname is not None:
+        # Align the trajectory to the reference and save it
+        with mda.Writer(aligned_fname, n_atoms=u.atoms.n_atoms) as W:
             for ts in u.trajectory:
                 W.write(u.atoms)
 
-    if do_plot:
-        
+    if plots_outdir is not None:
         plt.figure(figsize=(10, 5))
         for col in columns[3:]:
             sns.lineplot(x='frame', y=col, data=rmsd_df)
             plt.xlabel('Frame');            plt.ylabel(f'RMSD (A)')
             plt.title(f'{col} RMSD')
             plt.tight_layout()
-            plt.savefig(f'{out_dir}/{col}.png')
+            plt.savefig(f'{plots_outdir}/rmsd_{col}.png')
             plt.close()
 
     return rmsd_df
-
-def plot_atomic_rmsf(u, lig_resname:str='UNK', outname:str='rmsf.png', log_rmsf:bool=False):
-    """
-    Draws a RMSF (Root Mean Square Fluctuation) plot for a specified ligand and saves it as an image file.
-    Parameters:
-    -----------
-    u : MDAnalysis.Universe
-        The MDAnalysis universe object containing the molecular dynamics trajectory and topology.
-    lig_resname : str, optional
-        The residue name of the ligand to analyze (default is 'UNK').
-    outname : str, optional
-        The name of the output image file where the RMSF plot will be saved (default is 'rmsf.png').
-    log_rmsf : bool, optional
-        If True, logs the RMSF values to a CSV file with the same name as the output image (default is False).
-    Returns:
-    --------
-    None
-        This function does not return any value. It saves the RMSF plot and optionally logs the RMSF values.
-    """
-
-    lig_select = u.select_atoms(f'resname {lig_resname}')
-    r = RMSF(atomgroup=lig_select).run()
-    probe_mol = lig_select.convert_to('RDKIT')
-    probe_mol.Compute2DCoords()
-    probe_mol = Chem.RemoveHs(probe_mol)
-    fig = SimilarityMaps.GetSimilarityMapFromWeights(probe_mol, r.rmsf, step=0.01, alpha=0.3, contourLines=5) 
-    fig.savefig(outname, bbox_inches='tight')
-    
-    # Optionally, log the RMSF values for further analysis
-    if log_rmsf:
-        log_fname = os.path.splitext(outname)[0]
-        with open(f'{log_fname}.csv', 'w') as f:
-            for res_id, rmsf_value in enumerate(r.rmsf):
-                f.write(f'{res_id},{rmsf_value:.3f}\n')
-    return
 
 def match_cluster_centroids(X:np.ndarray, centroids:np.ndarray, N:int=1):
     """A function to find the N closest points to each centroid in the dataset X.
@@ -569,10 +659,14 @@ def match_cluster_centroids(X:np.ndarray, centroids:np.ndarray, N:int=1):
 
     return closest_points
 
-def cluster_sMD_trajectories(u: mda.Universe, X:np.ndarray, n_clusters:int, out_dir:str):
+def cluster_sMD_trajectories(u: mda.Universe, X:np.ndarray, 
+                             n_clusters:int, 
+                             min_dist:float,
+                             out_dir:str
+                             ) -> Tuple[np.ndarray, np.ndarray]:
 
     # cluster_estimator = KMeans(n_clusters=5)
-    cluster_estimator = RegularSpace(dmin=4, max_centers=n_clusters)
+    cluster_estimator = RegularSpace(dmin=min_dist, max_centers=n_clusters)
     fitted_model = cluster_estimator.fit(X).fetch_model()
     cluster_centers = fitted_model.cluster_centers
     labels = fitted_model.transform(X)

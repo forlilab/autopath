@@ -38,11 +38,11 @@ class SystemPreparation:
         ],
         lig_ff: str = "espaloma",
         allow_undefined_stereo: bool = True,
-        hydrogenMass: float = 3,
+        hydrogenMass: float = 1.5, # # in amu, 1.5 is the default in OpenMM
         boxShape: str = "dodecahedron",
-        padding: float = 1.0,
+        padding: float = 1.2,
         num_solvent: int = None,
-        ionicStrength: float = 0.0,
+        ionicStrength: float = 0.15,
         is_membrane: bool = False,
         lipid_type: str = None,
         out_dir: str = ".",
@@ -67,15 +67,21 @@ class SystemPreparation:
 ) 
         self.boxShape = boxShape  # cube, dodecahedron
 
-        if num_solvent is not None and padding is not None:
-            logging.error(
-                "The arguments 'num_solvent' and 'padding' are incompatible. Please specify only one."
-            )
-            exit(1)
-        if padding is not None:
-            self.padding = padding * openmmunit.nanometers
+        self.padding = padding
         self.num_solvent = num_solvent
-
+        if self.padding is not None:
+            self.padding = self.padding * openmmunit.nanometers
+            if num_solvent is not None:
+                logging.warning("Both 'num_solvent' and 'padding' were specified. 'padding' will be ignored.")
+                self.num_solvent = num_solvent
+                self.padding = None
+        elif self.num_solvent is not None:
+            self.num_solvent = num_solvent
+            self.padding = None
+        else:
+            logging.error("Either 'num_solvent' or 'padding' must be specified.")
+            exit(1)
+            
         self.ionicStrength = ionicStrength * openmmunit.molar
 
         self.is_membrane = is_membrane
@@ -120,15 +126,18 @@ class SystemPreparation:
 
         if self.lig_ff == "ESPALOMA":
             template_generator = EspalomaTemplateGenerator(
-                molecules=ligand, forcefield="espaloma-0.3.2"
+                molecules=ligand, 
+                # template_generator_kwargs = {"reference_forcefield": "openff_unconstrained-2.2.1"}
+                # forcefield="espaloma-0.3.2"
             )
         elif self.lig_ff == "SMIRNOFF":
             template_generator = SMIRNOFFTemplateGenerator(
-                molecules=ligand, forcefield="openff-1.2.0"
+                molecules=ligand, 
+                # forcefield="openff-1.2.0"
             )
         elif self.lig_ff == "GAFF":
             template_generator = GAFFTemplateGenerator(
-                molecules=ligand, forcefield="gaff-2.11"
+                molecules=ligand,
             )
 
         # add the template generator to the ff
@@ -280,7 +289,19 @@ class SystemPreparation:
 
         save_system(system, f"{self.out_dir}/system.xml")
         save_pdb(modeller.topology, modeller.positions, f"{self.out_dir}/system.pdb")
-        save_amber_topology(modeller.topology, modeller.positions, self.forcefield, self.out_dir)
+        # This is why: https://parmed.github.io/ParmEd/html/openmm.html
+        parmed_system = self.forcefield.createSystem(
+            modeller.topology,
+            nonbondedMethod=PME,
+            nonbondedCutoff=self.nb_cutoff,
+            switchDistance=self.switchDistance,
+            removeCMMotion=True,
+            rigidWater=False, # DO NOT USE THIS, it will not work with parmed
+            hydrogenMass=self.hydrogenMass,
+            # constraints=app.HBonds, # DO NOT USE THIS, it will not work with parmed
+        )
+
+        save_amber_files(modeller.topology, modeller.positions, parmed_system, self.out_dir)
 
         simulation_time = time.monotonic() - start_time
         logging.info(f"Finished system preparation in {simulation_time:.2f} seconds.")

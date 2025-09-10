@@ -26,6 +26,7 @@ class Config(object):
             "amber14/tip3pfb.xml",
             "amber/tip3p_HFE_multivalent.xml",
         ],
+        hydrogenMass: float = 3.0,  # amu
         lig_ff: str = "espaloma",
         boxShape: str = "dodecahedron",
         padding: float = 1.0,
@@ -36,10 +37,11 @@ class Config(object):
         run_equilibration: bool = True,
         equilibration_scheme: str = "autopath/data/equilibration.json",
         run_sMDpulling: bool = True,
-        sMD_pulling_dist: float = 2.0,  # nm
+        sMD_pulling_dir: str = "forward",  # "forward" or "backward"
         sMD_time: int = 1,  # ns
         sMD_steps_per_move: int = 250,  # 1 ps
-        sMD_pulling_force: float = 2000,  # KJ/mol/nm2
+        sMD_dx_per_move: float = 0.001,  # nm
+        sMD_spring_cte: float = 50,  # KJ/mol/nm2/atom
         sMD_replicas: int = 5,
         sMD_autostop: bool = False,
         extract_milestones: bool = True,
@@ -48,8 +50,8 @@ class Config(object):
         mMD_time: int = 2,  # ns
         mMD_bias_factor: int = 15,
         mMD_bias_frequency: int = 2,  # ps
-        mMD_hill_height: float = 0.3,  # Kcal/mol
-        mMD_hill_width: float = 0.01,
+        mMD_hill_height: float = 1.2,  # KJ/mol
+        mMD_hill_width: float = 0.05,
     ):
 
         # General
@@ -64,6 +66,7 @@ class Config(object):
         # Preparation
         self.run_preparation = run_preparation
         self.forcefield = forcefield
+        self.hydrogenMass = hydrogenMass
         self.lig_ff = lig_ff
         self.boxShape = boxShape
         self.padding = padding
@@ -78,11 +81,12 @@ class Config(object):
 
         # Steered MD
         self.run_sMDpulling = run_sMDpulling
+        self.sMD_pulling_dir = sMD_pulling_dir
         self.sMD_time = sMD_time  # ns
         self.sMD_replicas = sMD_replicas
-        self.sMD_pulling_dist = sMD_pulling_dist
-        self.sMD_steps_per_move = sMD_steps_per_move  # 1 ps
-        self.sMD_pulling_force = sMD_pulling_force  # KJ/mol/nm2
+        self.sMD_steps_per_move = sMD_steps_per_move
+        self.sMD_dx_per_move = sMD_dx_per_move
+        self.sMD_spring_cte = sMD_spring_cte  # KJ/mol/nm2/atom
         self.sMD_autostop = sMD_autostop
 
         # Milestones

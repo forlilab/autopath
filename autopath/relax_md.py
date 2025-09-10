@@ -10,9 +10,15 @@ import openmm.unit as openmmunit
 
 # AutoPath imports
 from autopath.utils import *
-from autopath.customForces import add_flatbottom_COM_restraints
+from autopath.customForces import add_flatbottom_COM_restraints, print_current_forces
 from autopath.equilibration import warm_up_system
 
+try:
+    from openmmtools.integrators import LangevinSplittingGirsanov
+    from reweightingreporter import ReweightingReporter
+except ImportError:
+    girsanov = False
+    logging.warning("Please install openmmtools to use Girsanov reweighting.")
 
 class RelaxMD:
     def __init__(
@@ -22,16 +28,17 @@ class RelaxMD:
         pocket_atoms: list[int] = None,
         out_dir: str = "relax_md",
         is_membrane: bool = False,
-        HMR: bool = True,
+        timestep: float = 0.004, #  # 4 fs timestep
         temp: float = 300,
+        use_GReweighting: bool = False,
     ) -> None:
-
-        self.topology = topology
 
         os.makedirs(out_dir, exist_ok=True)
         self.out_dir = out_dir
 
-        self.timestep = 0.004 if HMR else 0.002
+        self.topology = topology
+
+        self.timestep = timestep * openmmunit.picoseconds
         self.temperature = temp * openmmunit.kelvin
 
         self.ligand_atoms = ligand_atoms
@@ -40,6 +47,14 @@ class RelaxMD:
 
         self.platform = select_platform("fastest")
 
+        self.use_GReweighting = use_GReweighting
+        if self.use_GReweighting:
+            try:
+                from openmmtools.integrators import LangevinSplittingGirsanov
+                from reweightingreporter import ReweightingReporter
+            except ImportError:
+                raise ImportError("Please install openmmtools to use Girsanov reweighting.")
+            
         return None
 
     def run(
@@ -54,8 +69,19 @@ class RelaxMD:
         start_time = time.monotonic()
 
         logging.debug("Setting up the integrator..")
-        integrator = LangevinMiddleIntegrator(self.temperature, 1 / openmmunit.picoseconds, self.timestep)
-        # integrator.setRandomNumberSeed(int(rep_idx))
+        if self.use_GReweighting:
+            integrator = LangevinSplittingGirsanov(
+                nstxout = 100000000,   # we dont care about this here
+                temperature = self.temperature,
+                collision_rate = 1.0/openmmunit.picoseconds,
+                timestep = self.timestep,
+                splitting = "R V O V R",        # ABOBA – reweightable
+                constraint_tolerance = 1.0e-6,
+            )
+        else:
+            integrator = LangevinMiddleIntegrator(self.temperature, 
+                                                  1.0/openmmunit.picoseconds, 
+                                                  self.timestep)
 
         # Setting Simulation object and loading the checkpoint
         simulation = Simulation(self.topology, system, integrator, self.platform)
@@ -70,15 +96,21 @@ class RelaxMD:
         startdist = get_COM_dist(simulation, self.ligand_atoms, self.pocket_atoms)
         # Add flat-bottom COM restraints to prevent ligand from drifting too far away
         logging.debug("Adding flat-bottom COM restraints..")
-        add_flatbottom_COM_restraints(system, self.ligand_atoms, self.pocket_atoms, r0=startdist)
+        add_flatbottom_COM_restraints(system, self.ligand_atoms, self.pocket_atoms, 
+                                      r0=startdist,
+                                      upper_wall=0.01, # 0.1 nm upper wall
+                                      K_flat=500, # 500 kJ/mol/nm^2
+                                      )
+        simulation.context.reinitialize(preserveState=True)
+        # print_current_forces(system)
 
         logging.debug("Minimizing..")
         simulation.minimizeEnergy()
 
         logging.debug("Warming up the system..")
         warm_up_system(simulation, integrator, 
-                       warming_steps=npt_steps*2, 
-                       timestep=0.002,# * openmmunit.picoseconds, # lower timestep for warming
+                       warming_steps=npt_steps, 
+                       timestep=0.002 * openmmunit.picoseconds, # lower timestep for warming
                        Tend=self.temperature.value_in_unit(openmmunit.kelvin))
 
         # logging.info("Minimizing..")
@@ -90,8 +122,8 @@ class RelaxMD:
 
         # adjust timestep if needed
         if self.timestep != integrator.getStepSize():
-            logging.debug(f"Adjusting timestep from {integrator.getStepSize()} to {self.timestep} ps.")
-            integrator.setStepSize(self.timestep * openmmunit.picoseconds)
+            logging.debug(f"Adjusting timestep from {integrator.getStepSize()} to {self.timestep}.")
+            integrator.setStepSize(self.timestep)
     
         simulation.context.reinitialize(preserveState=True)
         logging.debug(f"Stepsize set to {integrator.getStepSize()}")
@@ -114,6 +146,7 @@ class RelaxMD:
 
         # save stuff
         final_positions = simulation.context.getState(getPositions=True).getPositions()
+        self.topology.setPeriodicBoxVectors(simulation.context.getState(getPositions=True).getPeriodicBoxVectors()) #saves correct box vectors to the pdb
         save_simulation(simulation, f"{self.out_dir}/{run_id}_relax_checkpoint")
         save_system(system, f"{self.out_dir}/{run_id}_relax_system.xml")
         save_pdb(self.topology, final_positions, f"{self.out_dir}/{run_id}_relax.pdb")

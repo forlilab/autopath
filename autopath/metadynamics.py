@@ -20,6 +20,12 @@ from autopath.analysis import (
     plot_colvar_2D,
 )
 
+try:
+    from openmmtools.integrators import LangevinSplittingGirsanov
+    from reweightingreporter import ReweightingReporter
+except ImportError:
+    girsanov = False
+    logging.warning("Please install openmmtools to use Girsanov reweighting.")
 
 class MetadynamicsMD:
 
@@ -31,33 +37,40 @@ class MetadynamicsMD:
         restrained_atoms: list[int] = None,
         out_dir: str = "metadynamics",
         is_membrane: bool = False,
-        HMR: bool = True,
+        timestep: float = 0.004, #  # 4 fs timestep
         temp: float = 300,
+        use_GReweighting: bool = True,
         verbose: bool = True,
     ) -> None:
-
-        self.timestep = 0.004 if HMR else 0.002
-        self.temperature = temp * openmmunit.kelvin
+        
+        self.out_dir = out_dir
+        os.makedirs(self.out_dir, exist_ok=True)
 
         self.topology = topology
         self.n_atoms = self.topology.getNumAtoms()
         self.is_membrane = is_membrane
 
-        self.out_dir = out_dir
-        os.makedirs(self.out_dir, exist_ok=True)
+        self.timestep = timestep * openmmunit.picoseconds
+        self.temperature = temp * openmmunit.kelvin
 
         self.ligand_atoms = ligand_atoms
         self.pocket_atoms = pocket_atoms
         
-        # Im not exposing all options here because I want to keep it simple
         self.restrained_atoms = restrained_atoms
 
         self.platform = select_platform("fastest")
 
+        self.use_GReweighting = use_GReweighting
+        if self.use_GReweighting:
+            if not girsanov:
+                logging.error("Girsanov reweighting is enabled but openmmtools is not installed.")
+                self.use_GReweighting = False
+            logging.info("Using Girsanov reweighting for steered MD.")
+            
         # These are for debugging purposes if one wants to check the CVs over the time of the simulation
         self.verbose = verbose
-        self.record_CV = int((1/self.timestep) * 10)  # record the CVs every 10 ps
-        self.store_CV = int((1/self.timestep) * 100)  # log the stored COLVAR every 100ps
+        self.record_CV = int((1/self.timestep.value_in_unit(openmmunit.picoseconds)) * 10)  # record the CVs every 10 ps
+        self.store_CV = int((1/self.timestep.value_in_unit(openmmunit.picoseconds)) * 100)  # log the stored COLVAR every 100ps
 
         return
 
@@ -94,10 +107,11 @@ class MetadynamicsMD:
         mMD_CV: str = "com",
         mMD_time: int = 10,
         bias_factor: float = 10,
-        hill_height: float = 0.3,
-        hill_width: float = 0.01,
+        hill_height: float = 1.2, #  # 1.2 kJ/mol approx 0.5 KbT
+        hill_width: float = 0.05,
         grid_dimensions: tuple = (0.0, 1.0),
-        bias_frequency: int = 2,
+        grid_points: int = 125,
+        biasFrequency: int = 2,
         saveFrequency: int = 50,
     ) -> None:
 
@@ -113,22 +127,30 @@ class MetadynamicsMD:
         ], f"The selected colective variable {mMD_CV} is not implemented"
 
         # Calculate the number of steps required
-        mMD_steps = math.ceil(mMD_time / self.timestep * 1000.0)  # 250.000 1ns at 4fs
-        bias_frequency = int((1/self.timestep) * bias_frequency)  # deposit bias every 2 ps (250 is 1ps at 4fs timestep)
-        saveFrequency = int((1/self.timestep) * saveFrequency)  # write bias every 50ps
+        mMD_steps = math.ceil(mMD_time / self.timestep.value_in_unit(openmmunit.picoseconds) * 1000.0)  # 250.000 1ns at 4fs
+        biasFrequency = int((1/self.timestep.value_in_unit(openmmunit.picoseconds)) * biasFrequency)  # deposit bias every 2 ps (250 is 1ps at 4fs timestep)
+        saveFrequency = int((1/self.timestep.value_in_unit(openmmunit.picoseconds)) * saveFrequency)  # write bias every 50ps
 
-        hill_height = hill_height * openmmunit.kilocalories_per_mole
-
-        grid_width = hill_width / 5  # a.k.a. sigma
+        hill_height = hill_height * openmmunit.kilojoules_per_mole
         grid_min, grid_max = grid_dimensions
-        grid = int(abs(grid_min - grid_max) / grid_width)
 
         logging.info(f"Running metadynamics with Colective Variable {mMD_CV}")
-        logging.info(f"Grid boundaries are min={grid_min:.3f} - max={grid_max:.3f}")
-        logging.info(f"Sigma is {hill_width} nm and there are {grid} grid points ")
+        logging.info(f"Grid boundaries are min={grid_min:.3f} - max={grid_max:.3f} and sigma={hill_width:.3f} nm")
 
-        logging.debug("Setting up a LangevinMiddleIntegrator")
-        integrator = LangevinMiddleIntegrator(self.temperature, 1 / openmmunit.picoseconds, self.timestep)
+        logging.debug("Setting up the integrator..")
+        if self.use_GReweighting:
+            integrator = LangevinSplittingGirsanov(
+                nstxout = biasFrequency,   # 500 is 2ps at 4fs timestep
+                temperature = self.temperature,
+                collision_rate = 1.0/openmmunit.picoseconds,
+                timestep = self.timestep,
+                splitting = "R V O V R",        # ABOBA – reweightable
+                constraint_tolerance = 1.0e-6,
+            )
+        else:
+            integrator = LangevinMiddleIntegrator(self.temperature, 
+                                                  1.0/openmmunit.picoseconds, 
+                                                  self.timestep)
 
         if self.topology is None:
             if pdb_file is None:
@@ -172,9 +194,15 @@ class MetadynamicsMD:
             self.out_dir,
             f"metadynamics_{run_id}",
             mMD_steps,
-            saveFrequency,
+            biasFrequency,
         )
-
+        if self.use_GReweighting:
+            simulation.reporters.append(ReweightingReporter(f"{self.out_dir}/GR_metadynamics_{run_id}.dat", 
+                                                            biasFrequency, 
+                                                            integrator, 
+                                                            unperturebed=True,
+                                                            firtsPertubation=True,
+                                                            ))
         if mMD_CV == "com":
 
             groups = [self.pocket_atoms] + [self.ligand_atoms]
@@ -305,8 +333,8 @@ class MetadynamicsMD:
             minValue=grid_min,
             maxValue=grid_max,
             biasWidth=hill_width,
+            gridWidth=grid_points,
             periodic=False,
-            gridWidth=grid,
         )
 
         # Set up the metadynamics object
@@ -316,13 +344,17 @@ class MetadynamicsMD:
             self.temperature,
             bias_factor,
             hill_height,
-            frequency=bias_frequency,
+            frequency=biasFrequency,
             saveFrequency=saveFrequency,
             biasDir=self.out_dir,
         )
 
+        meta._force.setForceGroup(1)            # force group 1 for reweighting
+
         simulation.context.reinitialize(preserveState=True)  
         
+        # print_current_forces(system)
+
         if not self.verbose:
             # # Advance all steps at once do not record CVs
             meta.step(simulation, mMD_steps)
@@ -342,12 +374,12 @@ class MetadynamicsMD:
 
         # Create plots for all current runs
         plot_colvar(self.out_dir, mMD_CV)
-        plot_bias(self.out_dir, grid_min, grid_max, grid, mMD_CV)
-        plot_FE(self.out_dir, grid_min, grid_max, grid, mMD_CV)
+        plot_bias(self.out_dir, grid_min, grid_max, grid_points, mMD_CV)
+        plot_FE(self.out_dir, grid_min, grid_max, grid_points, mMD_CV)
 
         # Save everything
         final_positions = simulation.context.getState(getPositions=True).getPositions()
-
+        self.topology.setPeriodicBoxVectors(simulation.context.getState(getPositions=True).getPeriodicBoxVectors()) #saves correct box vectors to the pdb
         save_system(system, f"{self.out_dir}/system_mMD_{run_id}.xml")
         save_simulation(simulation, f"{self.out_dir}/mMD_checkpoint_{run_id}")
         save_pdb(self.topology, final_positions, f"{self.out_dir}/mMD_{run_id}.pdb")
@@ -371,7 +403,7 @@ class MetadynamicsMD:
         grid_dimensions_A: tuple = (0.0, 1.0),
         hill_width_B: float = 0.01,
         grid_dimensions_B: tuple = (0.0, 1.0),
-        bias_frequency: int = 2,
+        biasFrequency: int = 2,
         saveFrequency: int = 50,
     ) -> None:
 
@@ -379,7 +411,7 @@ class MetadynamicsMD:
 
         # Metadynamics time in ns
         mMD_steps = math.ceil(mMD_time / self.timestep * 1000.0)  # 250.000 1ns at 4fs
-        bias_frequency = 250 * bias_frequency  # deposit bias every 2 ps (250 is 1ns at 4fs timestep)
+        biasFrequency = 250 * biasFrequency  # deposit bias every 2 ps (250 is 1ns at 4fs timestep)
         saveFrequency = 250 * saveFrequency  # write bias every 50ps
 
         logging.debug("Setting up the integrator")
@@ -390,9 +422,7 @@ class MetadynamicsMD:
 
         if self.topology is None:
             if pdb_file is None:
-                logging.error(
-                    f"Either a PDB or a prmtop file must be provided to get the topology from"
-                )
+                logging.error(f"Either a PDB or a prmtop file must be provided to get the topology from")
                 exit(1)
             else:
                 self.topology = PDBFile(pdb_file).topology
@@ -407,11 +437,9 @@ class MetadynamicsMD:
         else:
             if pdb_file is not None:
                 logging.debug(f"Setting positions from PDB file {pdb_file}")
-                simulation.context.setPositions(pdb.positions)
+                simulation.context.setPositions(PDBFile(pdb_file).positions)
             else:
-                logging.error(
-                    f"Either a PDB or a checkpoint file must be provided to get coordinates from"
-                )
+                logging.error(f"Either a PDB or a checkpoint file must be provided to get coordinates from")
                 exit(1)
 
         # Add harmonic positional restraints to protein CA
@@ -602,7 +630,7 @@ class MetadynamicsMD:
             self.temperature,
             bias_factor,
             hill_height,
-            frequency=bias_frequency,
+            frequency=biasFrequency,
             saveFrequency=saveFrequency,
             biasDir=self.out_dir,
         )
@@ -615,7 +643,7 @@ class MetadynamicsMD:
             self.out_dir,
             f"metadynamics_{run_id}",
             mMD_steps,
-            bias_frequency,
+            biasFrequency,
         )
 
         if not self.verbose:
@@ -653,6 +681,7 @@ class MetadynamicsMD:
         )
 
         final_positions = simulation.context.getState(getPositions=True).getPositions()
+        self.topology.setPeriodicBoxVectors(simulation.context.getState(getPositions=True).getPeriodicBoxVectors()) #saves correct box vectors to the pdb
         save_system(system, f"{self.out_dir}/system_mMD_{run_id}.xml")
         save_simulation(simulation, f"{self.out_dir}/mMD_checkpoint_{run_id}")
         save_pdb(self.topology, final_positions, f"{self.out_dir}/mMD_{run_id}.pdb")

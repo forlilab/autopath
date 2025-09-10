@@ -60,7 +60,7 @@ def warm_up_system(
     to warm-up the system in the NVT ensemble.
     """
 
-    integrator.setStepSize(timestep * openmmunit.picoseconds)
+    integrator.setStepSize(timestep)
     logging.debug(f"Stepsize set to {integrator.getStepSize()}")
     simulation.context.reinitialize(preserveState=True)
 
@@ -166,29 +166,27 @@ class Equilibration:
         out_dir: str = "equilibration",
         restrained_minimization: bool = True,
         protocol_fname: str = "autopath/data/equilibration.json",
-        timestep: float = 0.004,
         save_freq: int = 6250, # 12500 is 0.05ns at 4fs timestep
         is_membrane: bool = False,
         verbose: int = 2,
-
     ) -> None:
-
-        self.system = system
-        self.topology = topology
-        self.verbose = verbose
 
         self.out_dir = out_dir
         os.makedirs(out_dir, exist_ok=True)
 
+        self.system = system
+        self.topology = topology
+
         self.is_membrane = is_membrane
 
-        # self.temperature = 100 * openmmunit.kelvin # a low value to initilize the integrator
-        self.timestep = timestep * openmmunit.picoseconds
+        # some default value, its going to be updated by the protocol
+        self.timestep = 0.004 * openmmunit.picoseconds
         self.save_freq = save_freq
 
         self.restrained_minimization = restrained_minimization
 
         self.platform = select_platform("fastest")
+        self.verbose = verbose
 
         # Load the equilibration protocol
         self.protocol = self.from_json(protocol_fname)
@@ -250,12 +248,14 @@ class Equilibration:
         start_time = time.monotonic()
 
         logging.debug("Setting up the integrator..")
-        integrator = LangevinMiddleIntegrator(
-            self.temperature, 1 / openmmunit.picoseconds, self.timestep
-        )
-        # integrator.setRandomNumberSeed(seed)
-        # integrator.setConstraintTolerance(0.00001)
-
+        # The native OpenMM integrator is faster bu cannot change splitting. 
+        # By default it is "V V R O R". If using this, remember to change the 
+        # splitting of any openmmtools integrator downstream.
+        # See this Github thread https://github.com/openmm/openmm/issues/2532
+        integrator = LangevinMiddleIntegrator(self.temperature, 
+                                        1 / openmmunit.picoseconds, 
+                                        self.timestep)
+        
         pdb = PDBFile(pdb_file)
         initial_positions = pdb.positions
         u = mda.Universe(pdb_file)
@@ -300,8 +300,9 @@ class Equilibration:
             run_restrained_minimization(simulation, list(self.components_lookup.keys()), self.minimization_scheme)
         
         if self.verbose > 0: # Save the minimized structure
-            final_positions = simulation.context.getState(getPositions=True).getPositions()
-            save_pdb(self.topology, final_positions, f"{self.out_dir}/{run_id}_minim.pdb")
+            minimized_positions = simulation.context.getState(getPositions=True).getPositions()
+            self.topology.setPeriodicBoxVectors(simulation.context.getState(getPositions=True).getPeriodicBoxVectors()) #saves correct box vectors to the pdb
+            save_pdb(self.topology, minimized_positions, f"{self.out_dir}/{run_id}_minim.pdb")
 
         # After restrained minimization remove and re-add restraints with updated reference positions
         logging.debug("Resetting harmonic restraints after minimization to update reference positions.")
@@ -309,15 +310,7 @@ class Equilibration:
         minimized_positions = simulation.context.getState(getPositions=True).getPositions()
         
         # remove existing restraint forces
-        forces_to_remove = []
-        for f_idx in range(self.system.getNumForces()):
-            force = self.system.getForce(f_idx)
-            if force.getName().startswith("k_"):
-                logging.debug(f"Removing force {force.getName()} at index {f_idx}.")
-                forces_to_remove.append(f_idx)
-
-        for f_idx in sorted(forces_to_remove, reverse=True):
-            self.system.removeForce(f_idx)
+        self.system = remove_openmm_force(self.system, "k_")
 
         # Re-add the restraints with updated positions.
         # Because the forces exist this will update them, there's no need to remove them first (I think).
@@ -336,7 +329,6 @@ class Equilibration:
             )
 
         simulation.context.reinitialize(preserveState=True)
-
         # print_current_forces(self.system)
 
         logging.info("Warming up the system..")
@@ -359,9 +351,7 @@ class Equilibration:
         )
 
         # remove the restraint forces after equilibration
-        for f_idx in sorted(forces_to_remove, reverse=True):
-            self.system.removeForce(f_idx)
-
+        self.system = remove_openmm_force(self.system, "k_")
         # print_current_forces(self.system)
 
         final_positions = simulation.context.getState(getPositions=True).getPositions()
