@@ -315,7 +315,8 @@ class GISTMD:
                 force_name=f"k_{name}",
                 force_group=num+15, #Offset by 15 to avoid overlap with other forces
             )
-               
+            simulation.context.reinitialize(preserveState=True)
+
         ions_idxs = u.select_atoms("resname NA CL K").indices
         pocket_idxs = u.select_atoms(self.pocket_selection).indices
         sel = [i for i,a in enumerate(self.topology.atoms()) if a.index in pocket_idxs]
@@ -330,11 +331,11 @@ class GISTMD:
         simulation.context.reinitialize(preserveState=True)
         logging.info("Current forces before minimization A:")
 
-        minim_scheme = [{ "name": "Water", "forces": [5.0, 5.0]},
-                        { "name": "Water_sidechain", "forces": [2.5, 0]},
-                        { "name": "Water_sidechain_backbone", "forces": [0.0, 0.0]}
-                        ]
-        run_restrained_minimization(simulation, list(self.components_lookup.keys()), minim_scheme)
+        # minim_scheme = [{ "name": "Water", "forces": [5.0, 5.0]},
+        #                 { "name": "Water_sidechain", "forces": [2.5, 0]},
+        #                 { "name": "Water_sidechain_backbone", "forces": [0.0, 0.0]}
+        #                 ]
+        run_restrained_minimization(simulation, list(self.components_lookup.keys()), self.minimization_scheme)
         
         # Save the minimized structure
         minimized_positions = simulation.context.getState(getPositions=True).getPositions()
@@ -363,7 +364,8 @@ class GISTMD:
                 force_group=num + 15,
             )
 
-        simulation.context.reinitialize(preserveState=True)
+            simulation.context.reinitialize(preserveState=True)
+
         logging.info("Current forces after minimization A:")
         print_current_forces(self.system)
 
@@ -376,8 +378,8 @@ class GISTMD:
                        )
 
         logging.info("Running second minimization..")
-        minim_scheme = [{ "name": "Stage 1", "forces": [2.5, 0.0]}]
-        run_restrained_minimization(simulation, list(self.components_lookup.keys()), minim_scheme)
+        # minim_scheme = [{ "name": "Stage 1", "forces": [0.0, 0.0]}]
+        run_restrained_minimization(simulation, list(self.components_lookup.keys()), self.minimization_scheme)
         logging.info(f"Current system's energy: {simulation.context.getState(getEnergy=True).getPotentialEnergy()}")
 
         minimized_positions = simulation.context.getState(getPositions=True).getPositions()
@@ -414,19 +416,15 @@ class GISTMD:
                 force_group=num + 15,
             )
 
-        simulation.context.reinitialize(preserveState=True)
+            simulation.context.reinitialize(preserveState=True)
 
-        logging.info("Running NPT for 1ns..")
-        equilibration_scheme = [
-        { "name": "Waters", "forces": [2.5, 1.0], "npt_flag": True, "nsteps": 250000, "stepsize": 0.002},                         
-        { "name": "Water_sidechain", "forces": [1.0, 0.0], "npt_flag": True, "nsteps": 250000, "stepsize": 0.002}
-        ]
+        logging.info("Running NPT for 2ns..")
         run_restrained_md(
             simulation,
             self.system,
             integrator,
             list(self.components_lookup.keys()),
-            equilibration_scheme,
+            self.equilibration_scheme,
             self.temperature,
             self.is_membrane,
         )
@@ -450,27 +448,27 @@ class GISTMD:
                 positions,
                 self.topology,
                 restrain_idxs,
-                restraint_force=5.0,  # some default value, will be updated during equilibration
+                restraint_force=10.0,  # GIST restrains, suggested > 2.5 kcal/mol/A^2. They used like 100 kcal/mol/A^2 in the paper
                 force_name=f"k_{name}",
                 force_group=num + 15,
             )
 
-        simulation.context.reinitialize(preserveState=True)
+            simulation.context.reinitialize(preserveState=True)
 
         logging.info("Current forces after NPT:")
         print_current_forces(self.system)
 
-        # The first 700000 steps are equilibration, the rest is production
-        logging.info("Running production NVT..")
-        simulation.step(50000000) #100ns at 2fs
+        # The first 1200000 steps are equilibration, the rest is production
+        # logging.info("Running production NVT..")
+        # simulation.step(50000000) #100ns at 2fs
         # simulation.step(500000) #1 at 2fs
 
         final_positions = simulation.context.getState(getPositions=True).getPositions()
         self.topology.setPeriodicBoxVectors(simulation.context.getState(getPositions=True).getPeriodicBoxVectors()) #saves correct box vectors to the pdb
         save_system(self.system, f"{self.out_dir}/system_{run_id}.xml")
         save_simulation(simulation, f"{self.out_dir}/checkpoint_{run_id}")
-        save_pdb(self.topology, final_positions, f"{self.out_dir}/{run_id}_final.pdb")
+        save_pdb(self.topology, final_positions, f"{self.out_dir}/{run_id}_equi.pdb")
 
-        logging.info(f"GIST MD finished in {(time.monotonic() - start_time)/60:.2f} min.")
+        logging.info(f"GIST equilibration finished in {(time.monotonic() - start_time)/60:.2f} min.")
 
         return self.system

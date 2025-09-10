@@ -15,7 +15,7 @@ class VanillaMD:
         system: str = None,
         topology: str = None,
         restrained_atoms: list[int] = None,
-        HMR: bool = True,
+        timestep: float = 0.002,
         temperature: float = 300,
         save_freq: int = 25000, # save /0.1ns
         out_dir: str = "MD",
@@ -28,7 +28,7 @@ class VanillaMD:
         # Im not exposing all options here because I want to keep it simple
         self.restrained_atoms = restrained_atoms
 
-        self.timestep = 0.004 if HMR else 0.002
+        self.timestep = timestep
         self.temperature = temperature * openmmunit.kelvin
 
         self.save_freq = save_freq
@@ -85,9 +85,7 @@ class VanillaMD:
                 14,
             )
 
-        add_reporters(
-            simulation, self.out_dir, f"MD_{run_id}", MD_steps, self.save_freq, self.verbose
-        )
+        add_reporters(simulation, self.out_dir, f"MD_{run_id}", MD_steps, self.save_freq, self.verbose)
 
         # Run the simulation
         simulation.step(MD_steps)
