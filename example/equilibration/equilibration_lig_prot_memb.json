@@ -8,9 +8,9 @@
   
   "minimization": [
     { "name": "Stage 1", "forces": [50.0, 50.0, 50.0, 50.0] },
-    { "name": "Stage 2", "forces": [10.0, 5.00, 10.0, 5.00] },
-    { "name": "Stage 3", "forces": [5.00, 2.50, 5.00, 2.50] },
-    { "name": "Stage 4", "forces": [0.00, 0.00, 1.00, 0.00] }
+    { "name": "Stage 2", "forces": [10.0, 2.50, 10.0, 2.50] },
+    { "name": "Stage 3", "forces": [5.00, 0.00, 5.00, 0.00] },
+    { "name": "Stage 4", "forces": [0.00, 0.00, 0.00, 0.00] }
   ],
   
   "warmup": {
