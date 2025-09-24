@@ -63,9 +63,10 @@ class MetadynamicsMD:
         self.use_GReweighting = use_GReweighting
         if self.use_GReweighting:
             if not girsanov:
-                logging.error("Girsanov reweighting is enabled but openmmtools is not installed.")
+                logging.error("Disabled Girsanov reweighting because openmmtools is not installed.")
                 self.use_GReweighting = False
-            logging.info("Using Girsanov reweighting for steered MD.")
+            else:
+                logging.info("Using Girsanov reweighting for steered MD.")
             
         # These are for debugging purposes if one wants to check the CVs over the time of the simulation
         self.verbose = verbose
