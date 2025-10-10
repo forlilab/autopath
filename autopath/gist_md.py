@@ -11,6 +11,7 @@ import openmm.unit as openmmunit
 
 from autopath.utils import *
 import datetime
+import math
 
 @dataclass
 class EquilibrationStep:
@@ -195,6 +196,7 @@ class GISTMD:
         timestep: float = 0.002,
         pocket_selection: str = None,
         save_freq: int = 6250, # 12500 is 0.05ns at 4fs timestep
+        MD_time: int = 100, 
         is_membrane: bool = False,
         verbose: int = 2,
 
@@ -211,6 +213,8 @@ class GISTMD:
 
         self.timestep = timestep * openmmunit.picoseconds
         self.save_freq = save_freq
+        self.MD_steps = math.ceil(MD_time / timestep * 1000.0)  # 250.000 1ns at 4fs
+
         self.pocket_selection = pocket_selection
 
         self.restrained_minimization = restrained_minimization
@@ -272,7 +276,7 @@ class GISTMD:
 
         return
 
-    def run(self, pdb_file: str = None, run_id:str=None) -> None:
+    def run(self, pdb_file: str = None, run_id:str=None, checkpoint_file:str=None) -> None:
 
         start_time = time.monotonic()
 
@@ -283,12 +287,30 @@ class GISTMD:
         # integrator.setRandomNumberSeed(seed)
         # integrator.setConstraintTolerance(0.00001)
 
+        logging.info("Starting forces:")
+        print_current_forces(self.system)
+
         pdb = PDBFile(pdb_file)
         initial_positions = pdb.positions
         u = mda.Universe(pdb_file)
 
         simulation = Simulation(self.topology, self.system, integrator, self.platform)
-        simulation.context.setPositions(initial_positions)
+        # simulation.context.setPositions(initial_positions)
+        
+        # If a checkpoint is provided, it will assume it comes from an equilibration simulation, so it will just continue
+        if checkpoint_file is not None:
+            logging.info("Loading simulation checkpoint..")
+            simulation.loadCheckpoint(checkpoint_file)
+        else:
+            logging.info("Setting initial positions..")
+            simulation.context.setPositions(initial_positions)
+
+        # simulation.context.reinitialize(preserveState=True)
+
+        # # remove existing restraint forces and the barostat
+        self.system = remove_openmm_force(self.system, "k_")
+        self.system = remove_openmm_force(self.system, "MonteCarlo")
+        simulation.context.reinitialize(preserveState=True)
 
         add_reporters(
             simulation,
@@ -299,7 +321,7 @@ class GISTMD:
             verbose=self.verbose
         )
 
-       # Add the required forces to the system
+        # Add the required forces to the system
         for num, (name, selection) in enumerate(self.components_lookup.items()):
             restrain_idxs = u.select_atoms(selection).indices
             restrain_names = [u.atoms[idx].name for idx in restrain_idxs]
@@ -311,7 +333,7 @@ class GISTMD:
                 initial_positions,
                 self.topology,
                 restrain_idxs,
-                restraint_force=15, # Some default value
+                restraint_force=100, # Some default value
                 force_name=f"k_{name}",
                 force_group=num+15, #Offset by 15 to avoid overlap with other forces
             )
@@ -330,6 +352,7 @@ class GISTMD:
 
         simulation.context.reinitialize(preserveState=True)
         logging.info("Current forces before minimization A:")
+        print_current_forces(self.system)
 
         # minim_scheme = [{ "name": "Water", "forces": [5.0, 5.0]},
         #                 { "name": "Water_sidechain", "forces": [2.5, 0]},
@@ -359,7 +382,7 @@ class GISTMD:
                 minimized_positions,
                 self.topology,
                 restrain_idxs,
-                restraint_force=10,  # some default value, will be updated during equilibration
+                restraint_force=100,  # some default value, will be updated during equilibration
                 force_name=f"k_{name}",
                 force_group=num + 15,
             )
@@ -411,7 +434,7 @@ class GISTMD:
                 positions,
                 self.topology,
                 restrain_idxs,
-                restraint_force=2.5,  # some default value, will be updated during equilibration
+                restraint_force=100,  # some default value, will be updated during equilibration
                 force_name=f"k_{name}",
                 force_group=num + 15,
             )
@@ -448,7 +471,7 @@ class GISTMD:
                 positions,
                 self.topology,
                 restrain_idxs,
-                restraint_force=10.0,  # GIST restrains, suggested > 2.5 kcal/mol/A^2. They used like 100 kcal/mol/A^2 in the paper
+                restraint_force=100.0,  # GIST restrains, suggested > 2.5 kcal/mol/A^2. They used like 100 kcal/mol/A^2 in the paper
                 force_name=f"k_{name}",
                 force_group=num + 15,
             )
@@ -459,15 +482,15 @@ class GISTMD:
         print_current_forces(self.system)
 
         # The first 1200000 steps are equilibration, the rest is production
-        # logging.info("Running production NVT..")
+        logging.info("Running production NVT..")
         # simulation.step(50000000) #100ns at 2fs
-        # simulation.step(500000) #1 at 2fs
+        simulation.step(self.MD_steps) #1 at 2fs
 
         final_positions = simulation.context.getState(getPositions=True).getPositions()
         self.topology.setPeriodicBoxVectors(simulation.context.getState(getPositions=True).getPeriodicBoxVectors()) #saves correct box vectors to the pdb
         save_system(self.system, f"{self.out_dir}/system_{run_id}.xml")
         save_simulation(simulation, f"{self.out_dir}/checkpoint_{run_id}")
-        save_pdb(self.topology, final_positions, f"{self.out_dir}/{run_id}_equi.pdb")
+        save_pdb(self.topology, final_positions, f"{self.out_dir}/{run_id}.pdb")
 
         logging.info(f"GIST equilibration finished in {(time.monotonic() - start_time)/60:.2f} min.")
 

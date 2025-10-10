@@ -157,15 +157,23 @@ class SystemPreparation:
 
         start_time = time.monotonic()
 
-        # if ligands is not None and protein is None:
-        #     if isinstance(ligands, str):
-        #         logging.info(f"Parametrizing ligand {os.path.basename(ligands)}..")
-        #         lig = self._sdf_to_mol(ligands)
-        #         ligand_topology, ligand_positions = self._parametrize_ligand(lig)
-        #         for res in ligand_topology.residues():
-        #             res.name ='UNK'
-        #         modeller = Modeller(ligand_topology, ligand_positions)
+        max_length = 0.0 * openmmunit.angstroms
+        if ligands is not None and protein is None:
+            if isinstance(ligands, str):
+                logging.info(f"Parametrizing ligand {os.path.basename(ligands)}..")
+                lig = self._sdf_to_mol(ligands)
+                ligand_topology, ligand_positions = self._parametrize_ligand(lig)
+                for res in ligand_topology.residues():
+                    res.name = 'UNK'
+                modeller = Modeller(ligand_topology, ligand_positions)
 
+            # Calculate the maximum distance between any two atoms in the molecule
+            pairwise_distances = np.linalg.norm(
+                ligand_positions[:, None] - ligand_positions, axis=2
+            )
+            max_length = np.max(pairwise_distances) * openmmunit.angstroms
+            print(max_length)
+        
         #     elif isinstance(ligands, dict):
         #         for lig_name, lig_path in ligands.items():
         #             logging.info(f"Parametrizing ligand {lig_name}..")
@@ -211,7 +219,6 @@ class SystemPreparation:
                         modeller.add(ligand_topology, ligand_positions)
 
         # CASE: Ligand and membrane only
-        max_length = 0.0 * openmmunit.angstroms
         if protein is None and self.is_membrane:
 
             # Center ligand at 0,0,0
@@ -259,7 +266,7 @@ class SystemPreparation:
                 numAdded=self.num_solvent,
                 ionicStrength=self.ionicStrength,
                 boxShape=self.boxShape,
-                padding=self.padding,
+                padding=self.padding + max_length,
             )
 
         logging.info(f"Creating the an OpenMM system..")
