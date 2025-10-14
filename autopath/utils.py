@@ -34,6 +34,7 @@ style.use("fivethirtyeight")
 from rdkit import Chem
 from rdkit.Chem.Draw import SimilarityMaps
 from rdkit.Chem.Scaffolds import MurckoScaffold
+from rdkit.Chem import AllChem
 
 from deeptime.clustering import RegularSpace
 
@@ -748,3 +749,22 @@ def find_closest_points(
     })
     
     return closest_df
+
+def assign_bondOrders(mol: Chem.Mol=None, template_smiles: str=None):
+    """Assign bond orders from a template molecule to a target molecule."""
+
+    try:
+        template_mol = Chem.MolFromSmiles(template_smiles)
+    except:
+        logging.error(f"Could not generate template molecule from {template_smiles}")
+        return mol
+    
+    # Assign bond orders from the template to the target molecule
+    new_mol = AllChem.AssignBondOrdersFromTemplate(template_mol, mol)
+    new_mol = Chem.AddHs(new_mol, addCoords=True)
+    
+    if new_mol is None:
+        logging.error(f"Could not assign bond orders from template {template_smiles}")
+        return mol
+            
+    return new_mol

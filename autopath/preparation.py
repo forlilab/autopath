@@ -22,10 +22,10 @@ from openmmforcefields.generators import (
 )
 
 # RDKit imports
-from rdkit.Chem import SDMolSupplier
+from rdkit import Chem
 
 # AutoPath imports
-from autopath.utils import add_variants, save_pdb, save_system, save_amber_files
+from autopath.utils import assign_bondOrders, add_variants, save_pdb, save_system, save_amber_files
 
 
 class SystemPreparation:
@@ -37,7 +37,6 @@ class SystemPreparation:
             "amber/tip3p_HFE_multivalent.xml",
         ],
         lig_ff: str = "espaloma",
-        allow_undefined_stereo: bool = True,
         hydrogenMass: float = 1.5, # # in amu, 1.5 is the default in OpenMM
         boxShape: str = "dodecahedron",
         padding: float = 1.2,
@@ -45,7 +44,7 @@ class SystemPreparation:
         ionicStrength: float = 0.15,
         is_membrane: bool = False,
         lipid_type: str = None,
-        out_dir: str = ".",
+        out_dir: str = "system_preparation",
     ) -> None:
 
         if lig_ff.upper() in ["ESPALOMA", "SMIRNOFF", "GAFF"]:
@@ -60,11 +59,8 @@ class SystemPreparation:
         os.makedirs(out_dir, exist_ok=True)
 
         self.forcefield = ForceField(*forcefield)
-        self.allow_undefined_stereo = allow_undefined_stereo
 
-        self.hydrogenMass = (
-    hydrogenMass * openmmunit.amu if hydrogenMass is not None else None
-) 
+        self.hydrogenMass = (hydrogenMass * openmmunit.amu if hydrogenMass is not None else None)
         self.boxShape = boxShape  # cube, dodecahedron
 
         self.padding = padding
@@ -110,16 +106,32 @@ class SystemPreparation:
         self.nb_cutoff = 1.0 * openmmunit.nanometers
         self.switchDistance = 0.9 * openmmunit.nanometers
 
-    def _sdf_to_mol(self, lig_sdf: str = None):
-        """Load ligand SDF and transform to OpenMM molecule"""
-        try:
-            rdkit_mol = SDMolSupplier(lig_sdf)[0]
-        except Exception as e:
-            logging.error(f"Something went wrong loading {lig_sdf}..\n{e}")
-            raise
+    def _ligand_to_mol(self, lig_fname: str = None, lig_smiles: str = None):
+        """Load ligand SDF/PDB and transform to OpenMM molecule"""
 
+        try:
+            if lig_fname.endswith(".pdb"):
+                rdkit_mol = Chem.MolFromPDBFile(lig_fname, removeHs=False)
+            elif lig_fname.endswith(".sdf") or lig_fname.endswith(".mol2"): # SDMolSupplier also works for mol2 files
+                rdkit_mol = Chem.SDMolSupplier(lig_fname, removeHs=False)[0]
+            else:
+                logging.error(f"Ligand file format not recognized. Please provide a .sdf or .pdb file.")
+                exit(1)
+        except Exception as e:
+            logging.error(f"Something went wrong loading {lig_fname}..\n{e}")
+            exit(1)
+            
+        # assign bond orders from SMILES if provided
+        if lig_smiles is not None:
+            rdkit_mol = assign_bondOrders(rdkit_mol, lig_smiles)
+            # save the fixed ligand
+            writer = Chem.SDWriter(lig_fname[:-4] + "_fixed.sdf")
+            for cid in range(rdkit_mol.GetNumConformers()):
+                writer.write(rdkit_mol, confId=-1)
+                    
         # Convert to OpenMM molecule
-        ligand = Molecule.from_rdkit(rdkit_mol, self.allow_undefined_stereo)
+        ligand = Molecule.from_rdkit(rdkit_mol, True)
+
         return ligand
 
     def _parametrize_ligand(self, ligand):
@@ -157,7 +169,7 @@ class SystemPreparation:
     def run(self, 
             protein: str = None, 
             variants: dict = None, 
-            ligands: Union[str, List[tuple[str, str]]] = None
+            ligands: Union[str, List[tuple[str, str, str]]] = None
             ) -> tuple[System, Topology]:
 
         start_time = time.monotonic()
@@ -165,7 +177,7 @@ class SystemPreparation:
         # if ligands is not None and protein is None:
         #     if isinstance(ligands, str):
         #         logging.info(f"Parametrizing ligand {os.path.basename(ligands)}..")
-        #         lig = self._sdf_to_mol(ligands)
+        #         lig = self._ligand_to_mol(ligands)
         #         ligand_topology, ligand_positions = self._parametrize_ligand(lig)
         #         for res in ligand_topology.residues():
         #             res.name ='UNK'
@@ -174,7 +186,7 @@ class SystemPreparation:
         #     elif isinstance(ligands, dict):
         #         for lig_name, lig_path in ligands.items():
         #             logging.info(f"Parametrizing ligand {lig_name}..")
-        #             lig = self._sdf_to_mol(lig_path)
+        #             lig = self._ligand_to_mol(lig_path)
         #             ligand_topology, ligand_positions = self._parametrize_ligand(lig)
         #             for res in ligand_topology.residues():
         #                 res.name = lig_name
@@ -200,7 +212,7 @@ class SystemPreparation:
             if ligands is not None:
                 if isinstance(ligands, str):
                     logging.info(f"Parametrizing ligand {os.path.basename(ligands)}..")
-                    lig = self._sdf_to_mol(ligands)
+                    lig = self._ligand_to_mol(ligands)
                     ligand_topology, ligand_positions = self._parametrize_ligand(lig)
                     for res in ligand_topology.residues():
                         res.name ='UNK'
@@ -209,11 +221,11 @@ class SystemPreparation:
                 elif isinstance(ligands, list):
                     used_chains = set(c.id for c in modeller.topology.chains()) if modeller else set()
                     chain_id = ord('A')
-                    for lig_name, lig_path in ligands:
+                    for lig_name, lig_path, lig_smiles in ligands:
                         while chr(chain_id) in used_chains:
                             chain_id += 1
                         logging.info(f"Parametrizing ligand {lig_name}..")
-                        lig = self._sdf_to_mol(lig_path)
+                        lig = self._ligand_to_mol(lig_path, lig_smiles)
                         ligand_topology, ligand_positions = self._parametrize_ligand(lig)
                         for chain in ligand_topology.chains():
                             chain.id = chr(chain_id)
