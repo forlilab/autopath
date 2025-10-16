@@ -37,7 +37,24 @@ def cmd_lineparser():
         dest="lig",
         required=True,
         action="store",
-        help="path to the ligand SDF file",
+        help="path to the ligand SDF/PDB file",
+    )
+    
+    parser.add_argument(
+        "-n",
+        "--resname",
+        dest="resname",
+        required=False,
+        default="UNK",
+        help="residue name of the ligand",
+    )
+    parser.add_argument(
+        "-s",
+        "--smiles",
+        dest="smiles",
+        required=False,
+        default=None,
+        help="Smiles of the ligand",
     )
     
     parser.add_argument(
@@ -48,15 +65,6 @@ def cmd_lineparser():
         action="store",
         help="path to the JSON file with the equilibration protocol",
     )
-    
-    parser.add_argument(
-        "-n",
-        "--resname",
-        dest="lig_resname",
-        required=False,
-        default="UNK",
-        help="residue name of the ligand",
-    )
     return parser.parse_args()
 
 
@@ -64,7 +72,10 @@ def main():
 
     args = cmd_lineparser()
     receptor = args.rec
-    ligand = args.lig 
+    lig_path = args.lig 
+    lig_resname = args.resname
+    lig_smiles = args.smiles
+    ligands = [(lig_resname,lig_path,lig_smiles)]
     equilibration_scheme = args.protocol # Make sure to customize the equilibration scheme as needed
     
     sys_name = os.path.splitext(os.path.basename(receptor))[0]
@@ -79,8 +90,6 @@ def main():
     ],
     )
     
-    lig_resname = "UNK"
-
     # Fix/prepare the receptor
     protein_pdb = fix_pdb(pdbfile=receptor, keep_heterogens=True, pH=7.4)
     pdb_name = os.path.splitext(os.path.basename(receptor))[0]
@@ -109,7 +118,7 @@ def main():
 
     # Variants is a dictionary which specifies the chain:resid for the variant e.g. {"A:123": "CYX"}
     # If you re-run the script and the system is already prepared comment the following line
-    # system, topo = prepare_system.run(protein=prot_path, variants=None, ligands=ligand)
+    system, topo = prepare_system.run(protein=prot_path, variants=None, ligands=ligands)
 
     ########################################################################################
     ###################################### Equilibration ###################################
@@ -130,7 +139,7 @@ def main():
         )
     
     # If you re-run the script and the system is equilibrated prepared comment the following line
-    # system_eq = equilibration.run(pdb_file=system_pdb_file, run_id=sys_name)
+    system_eq = equilibration.run(pdb_file=system_pdb_file, run_id=sys_name)
 
     system_prmtop = f"{sys_name}/system.prmtop"
     equilibrated_traj = f"{sys_name}/equilibration/trajectory_equilibration_{sys_name}.dcd"
