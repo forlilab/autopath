@@ -125,7 +125,8 @@ class SystemPreparation:
         if lig_smiles is not None:
             rdkit_mol = assign_bondOrders(rdkit_mol, lig_smiles)
             # save the fixed ligand
-            writer = Chem.SDWriter(lig_fname[:-4] + "_fixed.sdf")
+            fixed_ligfname = os.path.join(self.out_dir, os.path.basename(lig_fname), "_fixed.sdf")
+            writer = Chem.SDWriter(fixed_ligfname)
             for cid in range(rdkit_mol.GetNumConformers()):
                 writer.write(rdkit_mol, confId=-1)
                     
