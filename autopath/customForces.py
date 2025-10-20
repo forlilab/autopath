@@ -17,7 +17,7 @@ def remove_openmm_force(system: System = None, fname: str = None) -> System:
     for f_idx in range(system.getNumForces()):
         force = system.getForce(f_idx)
         if force.getName().startswith(fname):
-            logging.warning(f"Removing force {force.getName()} at index {f_idx}.")
+            # logging.warning(f"Removing force {force.getName()} at index {f_idx}.")
             forces_to_remove.append(f_idx)
 
     for f_idx in sorted(forces_to_remove, reverse=True):

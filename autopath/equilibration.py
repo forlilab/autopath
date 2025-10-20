@@ -352,7 +352,7 @@ class Equilibration:
 
         # remove the restraint forces after equilibration
         self.system = remove_openmm_force(self.system, "k_")
-        # print_current_forces(self.system)
+        print_current_forces(self.system)
 
         final_positions = simulation.context.getState(getPositions=True).getPositions()
         self.topology.setPeriodicBoxVectors(simulation.context.getState(getPositions=True).getPeriodicBoxVectors()) #saves correct box vectors to the pdb
