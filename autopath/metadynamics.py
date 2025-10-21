@@ -3,6 +3,7 @@ import math
 import time
 import logging
 import numpy as np
+from datetime import datetime
 
 from openmm import *
 from openmm.app import *
@@ -39,7 +40,7 @@ class MetadynamicsMD:
         is_membrane: bool = False,
         timestep: float = 0.004, #  # 4 fs timestep
         temp: float = 300,
-        use_GReweighting: bool = True,
+        use_GReweighting: bool = False,
         verbose: bool = True,
     ) -> None:
         
@@ -127,6 +128,10 @@ class MetadynamicsMD:
             "nc",
         ], f"The selected colective variable {mMD_CV} is not implemented"
 
+        # ensure proper formating of the file name
+        if run_id is None:
+            run_id = f'W-{datetime.now().strftime("%H%M%S")}'
+
         # Calculate the number of steps required
         mMD_steps = math.ceil(mMD_time / self.timestep.value_in_unit(openmmunit.picoseconds) * 1000.0)  # 250.000 1ns at 4fs
         biasFrequency = int((1/self.timestep.value_in_unit(openmmunit.picoseconds)) * biasFrequency)  # deposit bias every 2 ps (250 is 1ps at 4fs timestep)
@@ -153,27 +158,28 @@ class MetadynamicsMD:
                                                   1.0/openmmunit.picoseconds, 
                                                   self.timestep)
 
-        if self.topology is None:
-            if pdb_file is None:
-                logging.error(f"Either a PDB or a prmtop file must be provided to get the topology from")
-                exit(1)
-            else:
-                pdb = PDBFile(pdb_file)
-                self.topology = pdb.topology
-
         logging.debug(f"Creating the simulation for {run_id}")
         simulation = Simulation(self.topology, system, integrator, self.platform)
 
-        if checkpoint_file is not None:
-            logging.debug(f"Loading simulation checkpoint {checkpoint_file}")
+        if checkpoint_file is None and pdb_file is None:
+            logging.error("Either pdb_file or checkpoint_file must be provided to set initial positions.")
+            exit(1)
+        elif checkpoint_file is None and pdb_file is not None:
+            logging.info(f"Setting positions from PDB file {pdb_file}")
+            pdb = PDBFile(pdb_file)
+            simulation.context.setPositions(pdb.getPositions())
+            simulation.context.setPeriodicBoxVectors(*pdb.topology.getPeriodicBoxVectors())
+            simulation.context.setVelocitiesToTemperature(self.temperature)
+
+        elif checkpoint_file is not None and pdb_file is None:
+            logging.info(f"Setting positions from checkpoint {checkpoint_file}")
             simulation.loadCheckpoint(checkpoint_file)
+            simulation.integrator = integrator  # Replace the integrator with the new one
         else:
-            if pdb_file is not None:
-                logging.debug(f"Setting positions from PDB file {pdb_file}")
-                simulation.context.setPositions(PDBFile(pdb_file).positions)
-            else:
-                logging.error(f"Either a PDB or a checkpoint file must be provided to get coordinates from")
-                exit(1)
+            # if both are provided, use the checkpoint file but warn the user
+            logging.warning("Both checkpoint_file and pdb_file are provided. Using checkpoint_file.")
+            simulation.loadCheckpoint(checkpoint_file)
+            simulation.integrator = integrator
 
         # Add harmonic positional restraints to protein CA
         input_positions = simulation.context.getState(getPositions=True).getPositions()
@@ -193,12 +199,12 @@ class MetadynamicsMD:
         add_reporters(
             simulation,
             self.out_dir,
-            f"metadynamics_{run_id}",
+            f"WTMetaD_{run_id}",
             mMD_steps,
             biasFrequency,
         )
         if self.use_GReweighting:
-            simulation.reporters.append(ReweightingReporter(f"{self.out_dir}/GR_metadynamics_{run_id}.dat", 
+            simulation.reporters.append(ReweightingReporter(f"{self.out_dir}/GR_WTMetaD_{run_id}.dat", 
                                                             biasFrequency, 
                                                             integrator, 
                                                             unperturebed=True,
@@ -381,14 +387,14 @@ class MetadynamicsMD:
         # Save everything
         final_positions = simulation.context.getState(getPositions=True).getPositions()
         self.topology.setPeriodicBoxVectors(simulation.context.getState(getPositions=True).getPeriodicBoxVectors()) #saves correct box vectors to the pdb
-        save_system(system, f"{self.out_dir}/system_mMD_{run_id}.xml")
-        save_simulation(simulation, f"{self.out_dir}/mMD_checkpoint_{run_id}")
-        save_pdb(self.topology, final_positions, f"{self.out_dir}/mMD_{run_id}.pdb")
+        save_system(system, f"{self.out_dir}/WTMetaD_system_{run_id}.xml")
+        save_simulation(simulation, f"{self.out_dir}/WTMetaD_checkpoint_{run_id}")
+        save_pdb(self.topology, final_positions, f"{self.out_dir}/WTMetaD_{run_id}.pdb")
 
         simulation_time = time.monotonic() - start_time
         logging.info(f"Finished {run_id} metadynamics in {simulation_time/60:.2f} min.")
 
-        return
+        return run_id
 
     def run2D(
         self,
@@ -690,4 +696,4 @@ class MetadynamicsMD:
         simulation_time = time.monotonic() - start_time
         logging.info(f"Finished {run_id} metadynamics in {simulation_time/60:.2f} min.")
 
-        return
+        return run_id
