@@ -108,8 +108,6 @@ class SteeredMDAnalysis:
     def run_analysis(self,
                      speeds: list[float] = None,
                      temperature: float = None,
-                     dist_minmax: tuple = None,
-                     decorrelate_work: bool = False,
                      fit_GMM: bool = True
                      )-> pd.DataFrame:
         
@@ -134,10 +132,10 @@ class SteeredMDAnalysis:
             print(f'WARNING: Filtering data by speeds: {speeds}')
             raw_data = raw_data[raw_data['speed'].isin(speeds)]
 
-        if dist_minmax is not None:
-            print(f'WARNING: Filtering data by distance range: {dist_minmax}')
-            raw_data = raw_data[(raw_data[self.dist_column] >= dist_minmax[0]) & 
-                                          (raw_data[self.dist_column] <= dist_minmax[1])]
+        if self.dist_minmax is not None:
+            print(f'WARNING: Filtering data by distance range: {self.dist_minmax}')
+            raw_data = raw_data[(raw_data[self.dist_column] >= self.dist_minmax[0]) & 
+                                          (raw_data[self.dist_column] <= self.dist_minmax[1])]
 
         print('WARNING: Recalculating work from force and distance.')
         # this will overwrite the work column in the raw_data DataFrame
@@ -179,7 +177,7 @@ class SteeredMDAnalysis:
 
                 gmm_dict = self.fit_gmm_to_work_values(raw_W,
                                                         max_K=GMM_max_components,
-                                                        covariance_type='diag',
+                                                        covariance_type='spherical',
                                                         random_state=self.seed)
 
                 #These have shape (K,) for K components
@@ -241,6 +239,8 @@ class SteeredMDAnalysis:
                     'Wmean_gmm': Wmean_neq,
                     'Wdiss_gmm': Wdiss_neq,
                     'dG_gmm': Wmean_neq - Wdiss_neq,
+                    'Wdiss_Jarzynski_gmm': Wmean_neq - dG_mix_exact,
+                    'Wdiss_Jarzynski': Wmean_raw - dG_Jarzynski,
                     'varW_gmm_neq': var_neq
                 })
 
@@ -301,26 +301,75 @@ class SteeredMDAnalysis:
             raw_data.loc[raw_data['trajname'] == traj, self.work_column] = work
         
         return raw_data
-    
+        
     def bin_data(self, 
-                 raw_data: pd.DataFrame,
-                 bin_width: float=0.05, #nm
-                 min_points: int=1 # disabled by default
-                 )-> pd.DataFrame:
-                 
-        # get overall centers and edges for histogram
-        rmin, rmax = min(raw_data[self.dist_column]), max(raw_data[self.dist_column])
-        edges  = np.arange(rmin, rmax + bin_width, bin_width)
-        centers = edges[:-1] + bin_width / 2
+                raw_data: pd.DataFrame,
+                bin_width: float = 0.05,  # nm
+                min_points: int = 1,      # disabled by default
+                ) -> pd.DataFrame:
+        """
+        Binning modes:
+        - Fixed width (default): use bin_width in nm.
+        - Equal-count (quantile): if bin_width is None.
+        Returns:
+        raw_data with columns ['bin', 'r_bin'] and a np array 'centers'.
+        
+        """
+        rvals = raw_data[self.dist_column].to_numpy()
+        rmin, rmax = float(np.min(rvals)), float(np.max(rvals))
+        N = len(rvals)
+        
+        use_equal_count = True if bin_width is None else False
 
-        # Use shared edges and centers
-        raw_data['bin'] = np.digitize(raw_data[self.dist_column], edges) - 1
+        if use_equal_count:
+            # Decide number of bins
+            if (bin_width is not None) and (not np.isnan(bin_width)):
+                n_bins = max(1, int(np.ceil((rmax - rmin) / bin_width)))
+            else:
+                # default: sqrt rule is robust for quantile bins
+                n_bins = max(1, int(np.ceil(np.sqrt(N))))
+
+            # Quantile edges
+            q = np.linspace(0.0, 1.0, n_bins + 1)
+            edges = np.quantile(rvals, q)
+
+            # Ensure strictly increasing edges (collapse duplicates)
+            edges = np.unique(edges)
+            if len(edges) < 2:
+                # Degenerate: all r equal
+                eps = 1e-9
+                edges = np.array([rmin, rmin + eps])
+
+            # Provisional centers at mid-edges
+            centers = 0.5 * (edges[:-1] + edges[1:])
+        else:
+            # Fixed-width bins
+            edges = np.arange(rmin, rmax + bin_width, bin_width)
+            if len(edges) < 2:
+                edges = np.array([rmin, rmin + bin_width])
+            centers = edges[:-1] + bin_width / 2.0
+
+        # Assign bins
+        raw_data = raw_data.copy()
+        raw_data['bin'] = np.digitize(raw_data[self.dist_column].to_numpy(), edges) - 1
         raw_data = raw_data[(raw_data['bin'] >= 0) & (raw_data['bin'] < len(centers))]
 
+        # Filter bins with too few points
         raw_data = self.filter_low_count_bins(raw_data, min_points)
 
-        #these are the center each point belongs to
-        raw_data['r_bin'] = raw_data['bin'].map(lambda b: centers[b] if b >= 0 and b < len(centers) else np.nan)
+        # For equal-count, refine centers using within-bin medians (robust to skew)
+        if use_equal_count:
+            medians = []
+            for b in range(len(centers)):
+                sel = raw_data['bin'] == b
+                if sel.any():
+                    medians.append(float(raw_data.loc[sel, self.dist_column].median()))
+                else:
+                    medians.append(float(centers[b]))  # keep alignment if bin was emptied by filtering
+            centers = np.asarray(medians, dtype=float)
+
+        # these are the center each point belongs to
+        raw_data['r_bin'] = raw_data['bin'].map(lambda b: centers[b] if 0 <= b < len(centers) else np.nan)
 
         return raw_data, centers
 
