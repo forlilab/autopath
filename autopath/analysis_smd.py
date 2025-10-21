@@ -34,6 +34,8 @@ import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 # style.use("fivethirtyeight")
 
+from pymbar import timeseries
+
 import statsmodels.api as sm
 
 from collections import defaultdict
@@ -118,7 +120,7 @@ class SteeredMDAnalysis:
         
         smoothing_sigma = 2  # smoothing factor for gaussian filter
         GMM_max_components = 5 # number of GMM components to try
-        GMM_gauss_cutoff = 0.01 # # cutoff for GMM weights, below which we ignore the component
+        GMM_gauss_cutoff = 0.0 # # cutoff for GMM weights, below which we ignore the component
 
         # sometimes you wanna run the analysis with a different temperature or intervals
         if temperature is not None:
@@ -141,47 +143,43 @@ class SteeredMDAnalysis:
         # this will overwrite the work column in the raw_data DataFrame
         raw_data = self.integrate_force_dx(raw_data)
 
+        # bin the data
         self.raw_data, centers = self.bin_data(raw_data, self.bin_width, self.min_points)
 
+        # cluster trajectories into paths if specified
         if self.cluster_paths:
             self.raw_data = self.cluster_trajectories()
         else:
             self.raw_data['path'] = 1 # default to single cluster if no clustering method is specified
 
-        if decorrelate_work:
-            # decorrelate work values per bin, speed and replica using block averaging
-            # this will overwrite the work column in the raw_data DataFrame
-            print("WARNING: Decorrelating work values using block averaging.")
-            self.raw_data = self.decorrelate_work(self.raw_data, self.work_column)
-
+        # decorrelate work values using statistical inefficiency g or by replica averaging
+        # If we dont decorrelate, we should use the per-replica aggregated work. i.e. each replica contributes one work value per bin ENSEMBLE AVERAGE OVER REPLICAS
+        self.raw_data = self.decorrelated_data(use_g=True)
+    
         results = []
         gmm_results = defaultdict(dict)  # to store GMM results per bin and speed
         for (r_bin, speed), group in self.raw_data.groupby(["r_bin", "speed"]):
 
-            raw_W = group[self.work_column].values # shape (N_points,)
-
-            # If we dont decorrelate, we should use the per-replica aggregated work
-            # i.e. each replica contributes one work value per bin ENSEMBLE AVERAGE OVER REPLICAS
-            replica_W = group.groupby(["replica"])[self.work_column].mean().values # shape (N_replicas,)
-            # replica_W = raw_W
-
-            Wmean_raw = replica_W.mean()
-            var_raw = replica_W.var(ddof=1)
+            raw_W = group[self.work_column].values.astype(np.float64) # shape (N_points,)
+                        
+            Wmean_raw = raw_W.mean()
+            var_raw = raw_W.var(ddof=1)
             Wdiss_raw = 0.5 * self.beta * var_raw
 
-            # plain Jarzynski
-            dG_Jarzynski = -(1/self.beta) * np.log(np.exp(-self.beta * replica_W).mean())
-
-            dG_Jarzynski_gmm = Wdiss_gmm = Wmean_mix = np.nan
+            # plain Jarzynski on the samples
+            dG_Jarzynski = -(1/self.beta) * np.log(np.exp(-self.beta * raw_W).mean())
 
             # GMM branch
+            dG_mix_exact = Wdiss_neq = Wmean_neq = np.nan
+
             if fit_GMM:
-                if len(replica_W) < 2:
+                if len(raw_W) < 2:
                     print(f"Not enough data points for GMM fitting at r_bin={r_bin:.2f}, speed={speed:.5f}. Skipping GMM fit.")
                     continue
 
-                gmm_dict = self.fit_gmm_to_work_values(replica_W,
+                gmm_dict = self.fit_gmm_to_work_values(raw_W,
                                                         max_K=GMM_max_components,
+                                                        covariance_type='diag',
                                                         random_state=self.seed)
 
                 #These have shape (K,) for K components
@@ -199,22 +197,11 @@ class SteeredMDAnalysis:
                 w = np.where(w < GMM_gauss_cutoff, 0.0, w)
                 w /= w.sum()  # normalize weights
 
-                # Transfor the weights from the non-equilibrium populations
+                # Transfor the weights from the non-equilibrium populations.
+                # This is for path impotance, but I should use w becuase 
+                # jarzynski and dcTMD are based on equilibrium weights (I think).
                 p_eq = w * np.exp(-self.beta * dG_k)
                 p_eq /= p_eq.sum()
-
-                # p_eq = w #WARNING
-
-                # mixture mean
-                Wmean_mix = np.dot(p_eq, mu)
-                
-                # mixture cumulant estimate. Combine the dG per component
-                mix_var  = np.dot(p_eq, sig2 + (mu - Wmean_mix)**2)
-                Wdiss_gmm = 0.5 * self.beta * mix_var
-
-                # FIXME: not sure if we need these
-                # dG_diss_gmm  = np.dot(p_eq, dG_k)
-                # Wdiss_gmm = np.dot(p_eq, mu - dG_k) # = 0.5 β Σ p_eq σ²
 
                 # exact mixture Jarzynski
                 # This is the exact Jarzynski estimator for the Gaussian mixture in each bin.
@@ -222,31 +209,40 @@ class SteeredMDAnalysis:
                 # and this can be approximated by cumulant expansion to the second order, what the dcTMD paper does.
                 log_terms = -self.beta * mu + 0.5 * self.beta**2 * sig2
                 log_Z = special.logsumexp(log_terms, b=w)          # log ⟨e^{-βW}⟩
-                dG_Jarzynski_gmm = -log_Z / self.beta
+                dG_mix_exact = -log_Z / self.beta
+               
+                # non-equilibrium mean of W
+                Wmean_neq = np.dot(w, mu)
+                
+                Wdiss_neq = Wmean_neq - dG_mix_exact
+                
+                # Non-eq variance of W
+                var_neq = np.dot(w, sig2 + (mu - Wmean_neq)**2)
+                # this one should match Wdiss_neq
+                # Wdiss_neq = 0.5 * self.beta * var_neq
 
                 # Collect results in a dictionary for plotting 
                 gmm_results[r_bin][speed] = {'GMM_neq_weights': w,
-                                             'GMM_eq_weights': p_eq,
-                                             'replica_W': replica_W,
+                                            #  'GMM_eq_weights': p_eq,
+                                             'replica_W': raw_W,
                                              'GMM_means': mu,
                                              'GMM_variances': sig2,
-                                             'Wmean_mix': Wmean_mix
+                                             'Wmean_mix': Wmean_neq
                                             }
-            # build this partial dataframe
-            results.append({
-                'r_bin': r_bin,
-                'speed': speed,
-                'Wmean': Wmean_raw,
-                'Wdiss': Wdiss_raw,
-                'dG': Wmean_raw - Wdiss_raw,
-                'dG_Jarzynski': dG_Jarzynski,
-                'Wdiss_Jarzynski': Wmean_raw - dG_Jarzynski,
-                'dG_Jarzynski_gmm': dG_Jarzynski_gmm,
-                'Wdiss_Jarzynski_gmm': Wmean_mix - dG_Jarzynski_gmm,
-                'Wmean_gmm': Wmean_mix,
-                'Wdiss_gmm': Wdiss_gmm,
-                'dG_gmm': Wmean_mix - Wdiss_gmm
-            })
+                # build this partial dataframe
+                results.append({
+                    'r_bin': r_bin,
+                    'speed': speed,
+                    'Wmean': Wmean_raw,
+                    'Wdiss': Wdiss_raw,
+                    'dG': Wmean_raw - Wdiss_raw,
+                    'dG_Jarzynski': dG_Jarzynski, # exact from samples, normal Jarzynski
+                    'dG_Jarzynski_gmm': dG_mix_exact, # exact mixture Jarzynski
+                    'Wmean_gmm': Wmean_neq,
+                    'Wdiss_gmm': Wdiss_neq,
+                    'dG_gmm': Wmean_neq - Wdiss_neq,
+                    'varW_gmm_neq': var_neq
+                })
 
         results = pd.DataFrame(results)
 
@@ -557,7 +553,7 @@ class SteeredMDAnalysis:
                 info = results[r_bin][speed]
 
                 work = info['replica_W'].flatten()
-                weights = info["GMM_eq_weights"]
+                weights = info["GMM_neq_weights"]
                 means = info["GMM_means"]
                 variances = info["GMM_variances"]
                 
@@ -589,6 +585,39 @@ class SteeredMDAnalysis:
             plt.close()
         return
     
+    def decorrelated_data(self, use_g:bool=True) -> pd.DataFrame:    
+        decorrelated_data = []
+        g = None
+        for (r_bin, v), group in self.raw_data.groupby(["r_bin", "speed"]):
+            # decorrelate using the statistical inefficiency
+            if use_g:
+                work_arrays = []
+                for replica, traj in group.groupby("replica"):
+                    W = traj[self.work_column].values
+                    work_arrays.append(W)
+                # get the statistical inefficiency for this set of work arrays
+                g = timeseries.statistical_inefficiency_multiple(work_arrays, return_correlation_function=False)
+                
+            for replica, traj in group.groupby("replica"):
+                W = traj[self.work_column].values
+                if use_g:
+                    W_decorrelated = W[timeseries.subsample_correlated_data(W, g, conservative=False)]
+                else:
+                    # decorrelate by getting the mean per replica
+                    W_decorrelated = np.array([np.mean(W)])
+                decorrelated_data.append({
+                    'r_bin': r_bin,
+                    'speed': v,
+                    'replica': replica,
+                    'path': traj['path'].iloc[0],  # Get the path from the first row
+                    'trajname': traj['trajname'].iloc[0],  # Get the trajname from the first row
+                    self.work_column: W_decorrelated
+                })
+
+        decorrelated_df = pd.DataFrame(decorrelated_data)
+        decorrelated_df = decorrelated_df.explode(self.work_column, ignore_index=True)
+        return decorrelated_df
+        
     ########### FUNCTIONS BELOW ARE EXPERIMENTAL #############
     # I just keep them here for now, but they are not used in the main analysis pipeline
     ##########################################################
@@ -613,7 +642,7 @@ class SteeredMDAnalysis:
         blocks = trimmed.reshape(n_blocks, block_size)
         return blocks.mean(axis=1)
 
-    def decorrelate_work(self,
+    def _decorrelate_work(self,
                          raw_data: pd.DataFrame = None,
                          work_column = 'work(kJ/mol)'
                         )-> pd.DataFrame:
