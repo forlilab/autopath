@@ -101,7 +101,7 @@ class SteeredMD:
         # Set the initial r0 parameter
         initial_r0 = self.com_dist.getValue(simulation.context, allowReinitialization=False)
         logging.info(f"Initial COM distance: {initial_r0}")
-        simulation.context.setParameter("r0_", initial_r0)
+        simulation.context.setParameter("r0_smd", initial_r0)
 
         with open(f"{self.out_dir}/sMD_{run_id}.dat","w") as f:
             
@@ -129,7 +129,7 @@ class SteeredMD:
                 else:
                     r_end = initial_r0 + (i+1)*self.dx_per_move
 
-                simulation.context.setParameter("r0_", r_end)
+                simulation.context.setParameter("r0_smd", r_end)
 
                 delta = dist_before - r_end
                 force = - self.sMD_spring_cte * delta
@@ -342,14 +342,14 @@ class SteeredMD:
         groups = [self.groupA_atoms] + [self.groupB_atoms]
         # print(f"Adding COM force for groups: {groups[0]} (ligand) and {groups[1]} (pocket)")
         self.com_force = cvpack.CentroidFunction(
-            "0.5 * fc_pull * (distance(g1,g2)-r0_)^2",
+            "0.5 * fc_pull * (distance(g1,g2)-r0_smd)^2",
             openmmunit.kilojoules_per_mole,  # energy not force
             groups,
             weighByMass=True if len(self.groupB_atoms) > 1 else False, # avoid problems with single DUM massless atoms
             pbc=True,
         )
         
-        self.com_force.addGlobalParameter("r0_", 0)
+        self.com_force.addGlobalParameter("r0_smd", 0)
         self.com_force.addGlobalParameter('fc_pull', self.sMD_spring_cte)
         self.com_force.setForceGroup(1)  # Use a separate force group for the CV GROUP 1
         system.addForce(self.com_force)
