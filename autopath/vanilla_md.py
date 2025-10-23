@@ -18,7 +18,7 @@ class VanillaMD:
         restrained_atoms: list[int] = None,
         timestep: float = 0.004, #  # 4 fs timestep
         temperature: float = 300,
-        save_freq: int = 25000, # save /0.1ns
+        save_freq: int = 2500, # save /0.01ns
         out_dir: str = "MD",
         verbose: int = 2,
     ):
@@ -83,6 +83,8 @@ class VanillaMD:
                 "k_restraint_MD",
                 14,
             )
+            
+        simulation.context.reinitialize(preserveState=True)
 
         add_reporters(
             simulation, self.out_dir, f"MD_{run_id}", MD_steps, self.save_freq, self.verbose
