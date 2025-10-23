@@ -59,9 +59,9 @@ class SteeredMDAnalysis:
                  reference_pdb: str = None,
                  pocket_select: str = 'protein within 6.0 of resname UNK and name CA',
                  ligand_select: str = 'resname UNK and not name H*',
-                 dist_column: str = 'r_before(nm)',
-                 work_column: str = 'work(kJ/mol)',
-                 force_column: str = 'force(kJ/mol/nm)',
+                 dist_column: str = 'r_before',
+                 work_column: str = 'work',
+                 force_column: str = 'force',
                  meff_column: str = 'm_eff(dalton)',
                  seed: int = 42
                  ):
@@ -116,9 +116,7 @@ class SteeredMDAnalysis:
         and the dissipated work approximation.
         """
         
-        smoothing_sigma = 2  # smoothing factor for gaussian filter
-        GMM_max_components = 5 # number of GMM components to try
-        GMM_gauss_cutoff = 0.0 # # cutoff for GMM weights, below which we ignore the component
+        GMM_WEIGHT_CUTOFF = 0.0 # # cutoff for GMM weights, below which we ignore the component
 
         # sometimes you wanna run the analysis with a different temperature or intervals
         if temperature is not None:
@@ -156,7 +154,7 @@ class SteeredMDAnalysis:
     
         results = []
         gmm_results = defaultdict(dict)  # to store GMM results per bin and speed
-        for (r_bin, speed), group in self.raw_data.groupby(["r_bin", "speed"]):
+        for (r_bin, speed, path), group in self.raw_data.groupby(["r_bin", "speed", "path"]):
 
             raw_W = group[self.work_column].values.astype(np.float64) # shape (N_points,)
                         
@@ -172,12 +170,12 @@ class SteeredMDAnalysis:
 
             if fit_GMM:
                 if len(raw_W) < 2:
-                    print(f"Not enough data points for GMM fitting at r_bin={r_bin:.2f}, speed={speed:.5f}. Skipping GMM fit.")
+                    print(f"Not enough data points for GMM fitting at r_bin={r_bin:.2f}, speed={speed:.5f}, path={path:.2f}. Skipping GMM fit.")
                     continue
 
                 gmm_dict = self.fit_gmm_to_work_values(raw_W,
-                                                        max_K=GMM_max_components,
-                                                        covariance_type='spherical',
+                                                        max_K=5,
+                                                        covariance_type='diag',
                                                         random_state=self.seed)
 
                 #These have shape (K,) for K components
@@ -189,17 +187,17 @@ class SteeredMDAnalysis:
                 dG_k = mu - 0.5 * self.beta * sig2 # now this is exact for each Gaussian
 
                 # mask small nonequilibrium weights, which means ignore small gaussians
-                if np.any(w < GMM_gauss_cutoff):
-                    print(f'WARNING: Filtering out {len(w[w < GMM_gauss_cutoff])} components from bin {r_bin} - {speed} w/ weights {w[w < GMM_gauss_cutoff]}')
+                if np.any(w < GMM_WEIGHT_CUTOFF):
+                    print(f'WARNING: Filtering out {len(w[w < GMM_WEIGHT_CUTOFF])} components from bin {r_bin} - {speed} - {path} w/ weights {w[w < GMM_WEIGHT_CUTOFF]}')
                 
-                w = np.where(w < GMM_gauss_cutoff, 0.0, w)
+                w = np.where(w < GMM_WEIGHT_CUTOFF, 0.0, w)
                 w /= w.sum()  # normalize weights
 
                 # Transfor the weights from the non-equilibrium populations.
                 # This is for path impotance, but I should use w becuase 
                 # jarzynski and dcTMD are based on equilibrium weights (I think).
-                p_eq = w * np.exp(-self.beta * dG_k)
-                p_eq /= p_eq.sum()
+                # p_eq = w * np.exp(-self.beta * dG_k)
+                # p_eq /= p_eq.sum()
 
                 # exact mixture Jarzynski
                 # This is the exact Jarzynski estimator for the Gaussian mixture in each bin.
@@ -221,7 +219,6 @@ class SteeredMDAnalysis:
 
                 # Collect results in a dictionary for plotting 
                 gmm_results[r_bin][speed] = {'GMM_neq_weights': w,
-                                            #  'GMM_eq_weights': p_eq,
                                              'replica_W': raw_W,
                                              'GMM_means': mu,
                                              'GMM_variances': sig2,
@@ -231,6 +228,7 @@ class SteeredMDAnalysis:
                 results.append({
                     'r_bin': r_bin,
                     'speed': speed,
+                    'path': path,
                     'Wmean': Wmean_raw,
                     'Wdiss': Wdiss_raw,
                     'dG': Wmean_raw - Wdiss_raw,
@@ -246,21 +244,8 @@ class SteeredMDAnalysis:
 
         results = pd.DataFrame(results)
 
-        # # Smooth the results
-        # if smoothing_sigma is not None:
-        #     cols_to_smooth = ['Wmean_raw', 'Wdiss_raw', 'dG_Jarzynski', 'dG_Jarzynski_gmm', 'Wmean_mix', 'Wdiss_diss_gmm']
-        #     for speed, grp in results.groupby('speed'):
-        #         mask = results['speed'] == speed
-        #         for col in cols_to_smooth:
-        #             results.loc[mask, col] = gaussian_filter1d(grp[col], sigma=smoothing_sigma)
-        
-        # # Now compute the rest of the properties from the smoothed results
-        # results['dG_diss'] = results['Wmean_raw'] - results['Wdiss_raw']
-        # results['Wdiss_Jarzynski'] = results['Wmean_raw'] - results['dG_Jarzynski']
-        # results['Wdiss_Jarzynski_gmm'] = results['Wmean_mix'] - results['dG_Jarzynski_gmm']
-        # results['dG_diss_gmm'] = results['Wmean_mix'] - results['Wdiss_diss_gmm']
-
         return results, gmm_results
+
     
     def load_logs(self, log_files: list[str]) -> pd.DataFrame:
 
@@ -391,7 +376,19 @@ class SteeredMDAnalysis:
             all_data.append(df)
 
         return pd.concat(all_data)
-        
+    
+    @staticmethod
+    def smooth_columns(df: pd.DataFrame,
+                       columns: list[str],
+                       sigma: float = 2.0
+                        ) -> pd.DataFrame:
+        new_df = df.copy()
+        for (speed,path), group in df.groupby(['speed','path']):
+            for col in columns:
+                mask = (df['speed'] == speed) & (df['path'] == path)
+                new_df.loc[mask, f'{col}_smooth'] = gaussian_filter1d(group[col], sigma=sigma)
+        return new_df
+            
     def cluster_trajectories(self, do_PCA:bool=True, do_plots:bool=True):
         """Cluster trajectories using Dynamic Time Warping (DTW) and k-medoids.
         For more information on DTW see: https://doi.org/10.1073/pnas.231354212
@@ -637,7 +634,7 @@ class SteeredMDAnalysis:
     def decorrelated_data(self, use_g:bool=True) -> pd.DataFrame:    
         decorrelated_data = []
         g = None
-        for (r_bin, v), group in self.raw_data.groupby(["r_bin", "speed"]):
+        for (r_bin, v, path), group in self.raw_data.groupby(["r_bin", "speed", "path"]):
             # decorrelate using the statistical inefficiency
             if use_g:
                 work_arrays = []
@@ -658,7 +655,7 @@ class SteeredMDAnalysis:
                     'r_bin': r_bin,
                     'speed': v,
                     'replica': replica,
-                    'path': traj['path'].iloc[0],  # Get the path from the first row
+                    'path': path,
                     'trajname': traj['trajname'].iloc[0],  # Get the trajname from the first row
                     self.work_column: W_decorrelated
                 })
