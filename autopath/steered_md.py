@@ -8,9 +8,7 @@ import numpy as np
 from datetime import datetime
 
 from autopath.utils import *
-from autopath.customForces import (add_harmonic_restraints, 
-                                   print_current_forces, 
-                                   remove_openmm_force)
+from autopath.customForces import (add_harmonic_restraints, remove_openmm_force)
 
 from openmm.app import *
 import openmm.unit as openmmunit
@@ -104,12 +102,10 @@ class SteeredMD:
         simulation.context.setParameter("r0_smd", initial_r0)
 
         with open(f"{self.out_dir}/sMD_{run_id}.dat","w") as f:
+            f.write("step,r_target,r_before,r_after,NC,force,U_cvpack,m_eff\n")
             
-            f.write("step,r_target(nm),r_before(nm),r_after(nm),NC,force(kJ/mol/nm),U_cvpack(kJ/mol),work(kJ/mol),m_eff(dalton)\n")
-
-            work = 0.0 * openmmunit.kilojoules_per_mole
-            dist_after_nm = 0.0 
-            dist_before_nm = 0.0
+            r_before_nm = 0.0
+            r_after_nm = 0.0
             m_eff_dalton = 0.0
             nc_now = 0.0
             
@@ -119,63 +115,61 @@ class SteeredMD:
             # Loop over the number of moves
             for i in range(self.sMD_moves):
 
-                dist_before = self.com_dist.getValue(simulation.context, allowReinitialization=False)
-                
+                r_before = self.com_dist.getValue(simulation.context, allowReinitialization=False)
                 # m_eff_dalton = self.com_dist.getEffectiveMass(simulation.context).value_in_unit(openmmunit.dalton)
-
+                
+                # r_before_theoretical = initial_r0 + (i)*self.dx_per_move if direction == "forward" else initial_r0 - (i)*self.dx_per_move
+                
+                # print(f"sMD {run_id} {direction} - Step {i+1}/{self.sMD_moves}: r_before={r_before_nm:.4f} nm (theoretical: {r_before_theoretical.value_in_unit(openmmunit.nanometers):.4f} nm)")
                 # Compute new r_end
                 if direction == "backward":
-                    r_end = initial_r0 - (i+1)*abs(self.dx_per_move)
+                    r_target = initial_r0 - (i+1)*self.dx_per_move
                 else:
-                    r_end = initial_r0 + (i+1)*self.dx_per_move
+                    r_target = initial_r0 + (i+1)*self.dx_per_move
 
-                simulation.context.setParameter("r0_smd", r_end)
+                simulation.context.setParameter("r0_smd", r_target)
 
-                delta = dist_before - r_end
-                force = - self.sMD_spring_cte * delta
-                # print("force", force) # force in kJ/mol/nm
+                delta = r_before - r_target
+                
+                # delta_theoretical = r_before_theoretical - r_target
+                # print(f"  Target r: {r_target.value_in_unit(openmmunit.nanometers):.4f} nm, delta: {delta.value_in_unit(openmmunit.nanometers):.4f} nm (theoretical delta: {delta_theoretical.value_in_unit(openmmunit.nanometers):.4f} nm)")
+                
+                force = - self.sMD_spring_cte * delta # F = -k(x - x0) Kj/mol/nm
                 
                 # get the potential energy of the spring from the COM CV
-                U_cvpack = self.com_force.getValue(simulation.context, allowReinitialization=False)
+                U_cvpack = self.com_force.getValue(simulation.context, allowReinitialization=False) # kJ/mols
                 # sigma = np.sqrt((2*U_cvpack/self.sMD_spring_cte).value_in_unit(openmmunit.nanometers**2))
                 # print(f'delta: {delta.value_in_unit(openmmunit.nanometers):.4f} nm, sigma: {sigma:.4f} nm')
                 
                 # increment the work -v do not use (dist_after - dist_before), use the expected displacement dx_per_move
                 # Usually prefer the real displacement and integrate the force over it after.
-                work += force * self.dx_per_move # kJ/mol
 
                 # run for steps_per_move
                 simulation.step(self.steps_per_move)
 
                 # actual distance after
-                if self.verbose > 0:
-                    dist_after_nm = self.com_dist.getValue(simulation.context, allowReinitialization=False).value_in_unit(openmmunit.nanometers)
+                # if self.verbose > 0:
+                r_after_nm = self.com_dist.getValue(simulation.context, allowReinitialization=False).value_in_unit(openmmunit.nanometers)
                 
                 #log everything
-                r_end_nm = r_end.value_in_unit(openmmunit.nanometers)
-                dist_before_nm = dist_before.value_in_unit(openmmunit.nanometers)
+                r_target_nm = r_target.value_in_unit(openmmunit.nanometers)
+                r_before_nm = r_before.value_in_unit(openmmunit.nanometers)
                 force_kjmnm = force.value_in_unit(openmmunit.kilojoules_per_mole / openmmunit.nanometer)
                 U_cvpack_kjm = U_cvpack.value_in_unit(openmmunit.kilojoules_per_mole)
-                work_kjmol = work.value_in_unit(openmmunit.kilojoules_per_mole)
 
                 # Check if the ligand is unbound. Only for forward pulling
                 if direction == "forward" and self.autostop_freq is not None:
                     if i%self.autostop_freq == 0:
                         nc_now = self.nc_cv.getValue(simulation.context, allowReinitialization=False).value_in_unit(openmmunit.dimensionless)
-                        print(f"Step {i+1}/{self.sMD_moves}: r_target={r_end_nm:.2f} nm, r_before={dist_before_nm:.2f} nm, r_after={dist_after_nm:.2f} nm, nc={nc_now}")
-                        
+                        print(f"Step {i+1}/{self.sMD_moves}: r_target={r_target_nm:.2f} nm, r_before={r_before_nm:.2f} nm, r_after={r_after_nm:.2f} nm, nc={nc_now}")
+
                         if nc_now < 1:
-                            f.write(f"{i},{r_end_nm},{dist_before_nm},{dist_after_nm},{nc_now},{force_kjmnm},{U_cvpack_kjm},{work_kjmol},{m_eff_dalton}\n")
+                            f.write(f"{i},{r_target_nm},{r_before_nm},{r_after_nm},{nc_now},{force_kjmnm},{U_cvpack_kjm},{m_eff_dalton}\n")
                             logging.warning(f"Stopping pulling at step {i} because n_contacts={nc_now}.")
                             break
                         
             # with open(f"{self.out_dir}/sMD_{run_id}_{direction}.dat","w") as f:
-                f.write(f"{i},{r_end_nm},{dist_before_nm},{dist_after_nm},{nc_now},{force_kjmnm},{U_cvpack_kjm},{work_kjmol},{m_eff_dalton}\n")
-
-
-        # Log final COM distance
-        final_dist_nm = self.com_dist.getValue(simulation.context, allowReinitialization=False).value_in_unit(openmmunit.nanometers)
-        logging.info(f"Final COM distance: {final_dist_nm:.2f} nm")
+                f.write(f"{i},{r_target_nm},{r_before_nm},{r_after_nm},{nc_now},{force_kjmnm},{U_cvpack_kjm},{m_eff_dalton}\n")
 
         # Save final positions
         final_positions = simulation.context.getState(getPositions=True).getPositions()
@@ -330,17 +324,16 @@ class SteeredMD:
         #run a super short simulation to ensure the system is stable after temp reset
         simulation.step(50/self.timestep.value_in_unit(openmmunit.picoseconds))  # 50 ps
         
-        try:
-            simulation.integrator.reset()  # Reset the integrator. Only openmmtools integrators have this method    
-        except AttributeError:
-            logging.warning("Integrator does not have reset method. This is expected for standard OpenMM integrators.")
+        # try:
+        #     simulation.integrator.reset()  # Reset the integrator. Only openmmtools integrators have this method    
+        # except AttributeError:
+        #     logging.warning("Integrator does not have reset method. This is expected for standard OpenMM integrators.")
 
         simulation.context.setTime(0)  # reset simulation time
         simulation.context.setStepCount(0)  # reset step count
         
         # Add COM force to the ligand and pocket groups with a harmonic potential shape
         groups = [self.groupA_atoms] + [self.groupB_atoms]
-        # print(f"Adding COM force for groups: {groups[0]} (ligand) and {groups[1]} (pocket)")
         self.com_force = cvpack.CentroidFunction(
             "0.5 * fc_pull * (distance(g1,g2)-r0_smd)^2",
             openmmunit.kilojoules_per_mole,  # energy not force
