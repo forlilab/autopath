@@ -38,6 +38,37 @@ from rdkit.Chem import AllChem
 
 from deeptime.clustering import RegularSpace
 
+def setup_logging(logfile: str = 'autopath.log',
+                  log_level: str = "INFO", 
+                  ) -> logging.Logger:
+    """Set up logging for the application at the entry point, i.e. cli scripts."""
+
+    allowed_log_levels = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
+    if log_level.upper() not in allowed_log_levels:
+        raise ValueError(f"Invalid log level: {log_level}. It should be one of {allowed_log_levels}")
+    
+    os.makedirs(os.path.dirname(logfile), exist_ok=True)
+
+    logger = logging.getLogger("autopath")
+    logger.setLevel(log_level.upper())
+
+    # Prevent duplicate handlers if setup_logging is called multiple times
+    if logger.handlers:
+        return logger  
+
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    file_handler = logging.FileHandler(logfile, mode="a")
+    file_handler.setFormatter(formatter)
+
+    logger.addHandler(stream_handler)
+    logger.addHandler(file_handler)
+    logger.propagate = False
+
+    return logger
+
 def save_model(model, filename):
     with open(filename, 'wb') as file:
         pickle.dump(model, file)
