@@ -49,12 +49,12 @@ class SteeredMDAnalysis:
     def __init__(self, 
                  log_files: list[str] = None,
                  sysname: str = None,
-                 bin_width: float = 0.05, #nm
-                 min_points: int = 10,
+                 n_bins: float = 100,
                  temperature: float = 300, #K
                  timestep: float = 0.004, #ps
-                 dist_minmax: tuple = (0.0, 2.5), #nm
+                 dist_minmax: tuple = None, #nm
                  cluster_paths: bool = True,
+                 cluster_range: tuple = None, #nm
                  trajectories: list[str] = None,
                  reference_pdb: str = None,
                  pocket_select: str = 'protein within 6.0 of resname UNK and name CA',
@@ -62,7 +62,6 @@ class SteeredMDAnalysis:
                  dist_column: str = 'r_before',
                  work_column: str = 'work',
                  force_column: str = 'force',
-                 meff_column: str = 'm_eff(dalton)',
                  seed: int = 42
                  ):
 
@@ -82,6 +81,7 @@ class SteeredMDAnalysis:
         self.timestep = timestep
 
         self.cluster_paths = cluster_paths
+        self.cluster_range = cluster_range
         self.trajectories = trajectories
         if cluster_paths and (trajectories is None or len(trajectories) == 0):
             raise ValueError("Clustering paths is enabled, but no trajectories provided.")
@@ -94,11 +94,10 @@ class SteeredMDAnalysis:
         self.dist_column = dist_column
         self.work_column = work_column
         self.force_column = force_column
-        self.meff_column = meff_column
+        self.meff_column = 'm_eff'
 
-        self.bin_width = bin_width
+        self.n_bins = n_bins
         self.dist_minmax = dist_minmax  # default min/max for distance bins
-        self.min_points = min_points  # minimum points per bin to keep it
         self.log_files = log_files
 
         self.seed = seed
@@ -135,13 +134,13 @@ class SteeredMDAnalysis:
             raw_data = raw_data[(raw_data[self.dist_column] >= self.dist_minmax[0]) & 
                                           (raw_data[self.dist_column] <= self.dist_minmax[1])]
 
-        print('WARNING: Recalculating work from force and distance.')
         # this will overwrite the work column in the raw_data DataFrame
         raw_data = self.integrate_force_dx(raw_data)
 
         # bin the data
-        self.raw_data, centers = self.bin_data(raw_data, self.bin_width, self.min_points)
-
+        self.raw_data, centers = self.bin_data(raw_data, self.n_bins, 
+                                               use_quantiles=True,
+                                               min_points=1)
         # cluster trajectories into paths if specified
         if self.cluster_paths:
             self.raw_data = self.cluster_trajectories()
@@ -150,11 +149,11 @@ class SteeredMDAnalysis:
 
         # decorrelate work values using statistical inefficiency g or by replica averaging
         # If we dont decorrelate, we should use the per-replica aggregated work. i.e. each replica contributes one work value per bin ENSEMBLE AVERAGE OVER REPLICAS
-        self.raw_data = self.decorrelated_data(use_g=True)
-    
+        self.decorrelated_data = self.decorrelate_work_data(use_g=True)
+
         results = []
         gmm_results = defaultdict(dict)  # to store GMM results per bin and speed
-        for (r_bin, speed, path), group in self.raw_data.groupby(["r_bin", "speed", "path"]):
+        for (r_bin, speed, path), group in self.decorrelated_data.groupby(["r_bin", "speed", "path"]):
 
             raw_W = group[self.work_column].values.astype(np.float64) # shape (N_points,)
                         
@@ -174,7 +173,7 @@ class SteeredMDAnalysis:
                     continue
 
                 gmm_dict = self.fit_gmm_to_work_values(raw_W,
-                                                        max_K=5,
+                                                        max_K=3,
                                                         covariance_type='diag',
                                                         random_state=self.seed)
 
@@ -286,75 +285,56 @@ class SteeredMDAnalysis:
             raw_data.loc[raw_data['trajname'] == traj, self.work_column] = work
         
         return raw_data
-        
-    def bin_data(self, 
+    
+    def bin_data(self,
                 raw_data: pd.DataFrame,
-                bin_width: float = 0.05,  # nm
-                min_points: int = 1,      # disabled by default
-                ) -> pd.DataFrame:
+                n_bins: int,
+                use_quantiles: bool = True,
+                min_points: int = 1       # drop bins with < min_points
+                ) -> tuple[pd.DataFrame, np.ndarray]:
         """
-        Binning modes:
-        - Fixed width (default): use bin_width in nm.
-        - Equal-count (quantile): if bin_width is None.
-        Returns:
-        raw_data with columns ['bin', 'r_bin'] and a np array 'centers'.
-        
+        Bins self.dist_column into n_bins using pd.cut (equal width) or pd.qcut (equal count).
+        After optional filtering of low-count bins, bins are reindexed to 0..M-1 and centers
+        are returned only for surviving bins. 'r_bin' holds the center for each row.
+
+        Returns
+        -------
+        raw_data : DataFrame with columns ['bin', 'r_bin'] added
+        centers  : np.ndarray of bin centers aligned with bin indices 0..M-1
         """
         rvals = raw_data[self.dist_column].to_numpy()
-        rmin, rmax = float(np.min(rvals)), float(np.max(rvals))
-        N = len(rvals)
-        
-        use_equal_count = True if bin_width is None else False
-
-        if use_equal_count:
-            # Decide number of bins
-            if (bin_width is not None) and (not np.isnan(bin_width)):
-                n_bins = max(1, int(np.ceil((rmax - rmin) / bin_width)))
-            else:
-                # default: sqrt rule is robust for quantile bins
-                n_bins = max(1, int(np.ceil(np.sqrt(N))))
-
-            # Quantile edges
-            q = np.linspace(0.0, 1.0, n_bins + 1)
-            edges = np.quantile(rvals, q)
-
-            # Ensure strictly increasing edges (collapse duplicates)
-            edges = np.unique(edges)
-            if len(edges) < 2:
-                # Degenerate: all r equal
-                eps = 1e-9
-                edges = np.array([rmin, rmin + eps])
-
-            # Provisional centers at mid-edges
-            centers = 0.5 * (edges[:-1] + edges[1:])
-        else:
-            # Fixed-width bins
-            edges = np.arange(rmin, rmax + bin_width, bin_width)
-            if len(edges) < 2:
-                edges = np.array([rmin, rmin + bin_width])
-            centers = edges[:-1] + bin_width / 2.0
-
-        # Assign bins
         raw_data = raw_data.copy()
-        raw_data['bin'] = np.digitize(raw_data[self.dist_column].to_numpy(), edges) - 1
-        raw_data = raw_data[(raw_data['bin'] >= 0) & (raw_data['bin'] < len(centers))]
 
-        # Filter bins with too few points
-        raw_data = self.filter_low_count_bins(raw_data, min_points)
+        if use_quantiles:
+            # equal-count bins
+            codes, edges = pd.qcut(rvals, q=n_bins, labels=False, retbins=True, duplicates='drop', precision=3)
+        else:
+            # equal-width bins
+            codes, edges = pd.cut(rvals, bins=n_bins, labels=False, include_lowest=True, right=False, retbins=True, precision=3)
 
-        # For equal-count, refine centers using within-bin medians (robust to skew)
-        if use_equal_count:
-            medians = []
-            for b in range(len(centers)):
-                sel = raw_data['bin'] == b
-                if sel.any():
-                    medians.append(float(raw_data.loc[sel, self.dist_column].median()))
-                else:
-                    medians.append(float(centers[b]))  # keep alignment if bin was emptied by filtering
-            centers = np.asarray(medians, dtype=float)
+        # assign bins; drop anything not assigned (NaN)
+        raw_data['bin'] = pd.Series(codes, index=raw_data.index, dtype='Int64')
+        raw_data = raw_data.dropna(subset=['bin']).copy()
+        raw_data['bin'] = raw_data['bin'].astype(int)
+
+        # pre-centers from edges
+        centers = 0.5 * (edges[:-1] + edges[1:])
+
+        # # optional filter: remove bins with toso few points
+        # if min_points > 1:
+        #     counts = raw_data['bin'].value_counts()
+        #     keep = set(counts[counts >= min_points].index.tolist())
+        #     raw_data = raw_data[raw_data['bin'].isin(keep)].copy()
+
+        # reindex surviving bins to 0..M-1 and shrink centers accordingly
+        present_bins = np.sort(raw_data['bin'].unique())
+        bin_map = {old: i for i, old in enumerate(present_bins)}
+        raw_data['bin'] = raw_data['bin'].map(bin_map)
+        centers = np.asarray(centers)[present_bins]
 
         # these are the center each point belongs to
         raw_data['r_bin'] = raw_data['bin'].map(lambda b: centers[b] if 0 <= b < len(centers) else np.nan)
+        # carry over
 
         return raw_data, centers
 
@@ -362,7 +342,9 @@ class SteeredMDAnalysis:
         """Filter low count bins per speed. This function filters out bins 
         that have fewer than `min_points` data points for each speed.
         """
-
+        #TODO add this to bin_data and group by path too.
+        # Im not dropping bins any more
+        
         all_data = []
         for speed in raw_data['speed'].unique():
 
@@ -379,10 +361,12 @@ class SteeredMDAnalysis:
     
     @staticmethod
     def smooth_columns(df: pd.DataFrame,
-                       columns: list[str],
+                       columns: list[str]=None,
                        sigma: float = 2.0
                         ) -> pd.DataFrame:
         new_df = df.copy()
+        if columns is None or len(columns) == 0:
+            columns = [c for c in df.columns if c not in ['speed','path','r_bin','replica','trajname']]
         for (speed,path), group in df.groupby(['speed','path']):
             for col in columns:
                 mask = (df['speed'] == speed) & (df['path'] == path)
@@ -437,7 +421,7 @@ class SteeredMDAnalysis:
         # df[self.dist_column] = df['trajname'].map(trajname_map)
 
         # # filter by r_bin
-        # df = df[(df['r_bin'] >= 1.2) & (df['r_bin'] <= 2.5)]
+        # df = df[(df['r_bin'] >= 0.75) & (df['r_bin'] <= 1.5)]
 
         distances = df.iloc[:, 2:].values
         scaler = StandardScaler()
@@ -461,6 +445,17 @@ class SteeredMDAnalysis:
         stacked = [paths[traj_name] for traj_name in paths.keys()]
 
         distmatrix = dtw_ndim.distance_matrix_fast(s=stacked, ndim=stacked[0].shape[1])
+        
+        # if self.cluster_range is not None:
+        #     # filter by distance range
+        #     valid_indices = []
+        #     for i, traj_name in enumerate(paths.keys()):
+        #         traj_df = distance_df[distance_df["trajname"] == traj_name]
+        #         r_values = traj_df[self.dist_column].values
+        #         if np.any((r_values >= self.cluster_range[0]) & (r_values <= self.cluster_range[1])):
+        #             valid_indices.append(i)
+        #     distmatrix = distmatrix[np.ix_(valid_indices, valid_indices)]
+        #     paths = {list(paths.keys())[i]: paths[list(paths.keys())[i]] for i in valid_indices}
 
         if do_plots:
             # sort the distance matrix by the average distance of each trajectory for plotting
@@ -487,7 +482,7 @@ class SteeredMDAnalysis:
         print(f"Found {K} paths with Silhouette score {silloutte_scores[K]:.2f}")
         
         if do_plots:
-            plt.figure(figsize=(5, 4))
+            plt.figure(figsize=(6, 5))
             sns.lineplot(x=list(silloutte_scores.keys()), y=list(silloutte_scores.values()))
             plt.axvline(x=K, color='red', linestyle='--', label=f'Optimal K={K}')
             plt.xlabel("Number of paths"); plt.ylabel("Silhouette score")
@@ -525,7 +520,7 @@ class SteeredMDAnalysis:
 
     @staticmethod
     def fit_gmm_to_work_values(raw_work,
-                                max_K:int=5, 
+                                max_K:int=3, 
                                 max_iter:int=1000,
                                 covariance_type:str='spherical',
                                 random_state:int=42
@@ -540,7 +535,7 @@ class SteeredMDAnalysis:
         scores = []
         models = []
 
-        for n in range(1, max_K):
+        for n in range(1, max_K+1):
             if n > n_samples:
                 break  # can't fit more components than points
 
@@ -550,7 +545,7 @@ class SteeredMDAnalysis:
                 max_iter=max_iter,
                 init_params="k-means++",
                 random_state=random_state,
-                reg_covar=1e-6  # regularization to avoid singular covariance matrices
+                # reg_covar=1e-6  # regularization to avoid singular covariance matrices
             )
             gmm.fit(raw_work)
             models.append(gmm)
@@ -626,12 +621,12 @@ class SteeredMDAnalysis:
             
             fig.suptitle(f"GMM Fits at speed = {speed:.5f}", fontsize=16)
             plt.tight_layout(rect=[0, 0, 1, 0.95])
-            plt.show()
             plt.savefig(f'{outdir}/gmm_fits_speed_{speed:.5f}.png', dpi=300, bbox_inches='tight')
+            plt.show()
             plt.close()
         return
     
-    def decorrelated_data(self, use_g:bool=True) -> pd.DataFrame:    
+    def decorrelate_work_data(self, use_g:bool=True) -> pd.DataFrame:    
         decorrelated_data = []
         g = None
         for (r_bin, v, path), group in self.raw_data.groupby(["r_bin", "speed", "path"]):
@@ -647,21 +642,36 @@ class SteeredMDAnalysis:
             for replica, traj in group.groupby("replica"):
                 W = traj[self.work_column].values
                 if use_g:
-                    W_decorrelated = W[timeseries.subsample_correlated_data(W, g, conservative=False)]
+                    indices = timeseries.subsample_correlated_data(W, g, conservative=False)
+                    W_decorrelated = W[indices]
+                    # Use iloc to select rows by integer position
+                    selected_rows = traj.iloc[indices]
                 else:
                     # decorrelate by getting the mean per replica
                     W_decorrelated = np.array([np.mean(W)])
-                decorrelated_data.append({
-                    'r_bin': r_bin,
-                    'speed': v,
-                    'replica': replica,
+                    # For mean, take the first row as representative
+                    selected_rows = traj.iloc[[0]]
+                
+                # Append each decorrelated point with its corresponding metadata
+                for idx, w_val in enumerate(W_decorrelated):
+                    row = selected_rows.iloc[idx]
+                    decorrelated_data.append({
+                        'r_bin': r_bin,
+                        'r_target': row['r_target'],
+                        'r_before': row['r_before'],
+                        'r_after': row['r_after'],
+                        'NC': row['NC'],
+                        'force': row['force'],
+                        'U_cvpack': row['U_cvpack'],
+                        self.work_column: w_val,
+                        'speed': v,
+                        'replica': replica,
+                        'trajname': traj['trajname'].iloc[0],
                     'path': path,
-                    'trajname': traj['trajname'].iloc[0],  # Get the trajname from the first row
-                    self.work_column: W_decorrelated
                 })
 
         decorrelated_df = pd.DataFrame(decorrelated_data)
-        decorrelated_df = decorrelated_df.explode(self.work_column, ignore_index=True)
+        decorrelated_df = decorrelated_df.explode([self.work_column, 'r_target', 'r_before', 'r_after', 'NC', 'force', 'U_cvpack'], ignore_index=True)
         return decorrelated_df
         
     ########### FUNCTIONS BELOW ARE EXPERIMENTAL #############
@@ -892,9 +902,10 @@ class SteeredMDAnalysis:
 
         return result_df
 
+    
     def extrapolate_to_v0(self,
                             df: pd.DataFrame = None,
-                            param_cols: list[str]=['Wdiss_diss_gmm'],
+                            param_cols: list[str]=['Wdiss_gmm'],
                             speeds: list[float] = None,
                             mixed_models: bool = False
                             ) -> pd.DataFrame:
@@ -903,16 +914,13 @@ class SteeredMDAnalysis:
         This method groups the data by speed and fits a linear regression to the
         param vs speed for each bin."""
 
-        if df is None:
-            df = self.estimate_dG_Cumulative()
-
         # Filter out speeds if provided. You could only want to fit specific (low) speeds
         if speeds is not None:
             df = df[df['speed'].isin(speeds)]
 
-        if df['speed'].nunique() < 2:
-            print("Not enough speeds for extrapolation.")
-            return pd.DataFrame()
+        # if df['speed'].nunique() < 2:
+        #     print("Not enough speeds for extrapolation.")
+        #     return pd.DataFrame()
         
         # FIXME 
         if mixed_models:
@@ -936,16 +944,14 @@ class SteeredMDAnalysis:
             results = []
             for param_col in param_cols:
                 _df = []
-                for r_bin, group in df.groupby('r_bin'):
+                for (r_bin, path), group in df.groupby(['r_bin','path']):
                     speeds = group['speed'].values
                     means = group[param_col].values
-
-                    # if len(speeds) < 2:
-                    #     continue
 
                     lr_results = linregress(speeds, means)
                     _df.append({
                         'r_bin': r_bin,
+                        'path': path,
                         f"{param_col}_v0_intercept": lr_results.intercept,
                         f"{param_col}_v0_slope": lr_results.slope,
                         f"{param_col}_v0_intercept_se": lr_results.intercept_stderr,
@@ -961,7 +967,7 @@ class SteeredMDAnalysis:
 
             results = pd.concat(results, axis=1)
             # drop duplicate 'r_bin' adn speed columns
-            results = results.loc[:, ~results.columns.duplicated()]
+            # results = results.loc[:, ~results.columns.duplicated()]
 
         # Calculate the diffusion coefficient D(x) using the friction coefficient F(x)
         # df['D(x)'] = self.kB * self.temp / df['F(x)']
