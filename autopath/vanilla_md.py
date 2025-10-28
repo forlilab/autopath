@@ -43,6 +43,7 @@ class VanillaMD:
     def run(
         self,
         checkpoint_file: str = None,
+        pdb_file: str = None,
         run_id: str = None,
         MD_time: int = 10,
         restart_velocities: bool = False,
@@ -62,8 +63,22 @@ class VanillaMD:
         simulation = Simulation(self.topology, self.system, integrator, self.platform)
 
         # If a checkpoint is provided, it will assume it comes from an equilibration simulation, so it will just continue
-        if checkpoint_file is not None:
-            logging.info("Loading simulation checkpoint..")
+        if checkpoint_file is None and pdb_file is None:
+            logging.error("Either pdb_file or checkpoint_file must be provided to set initial positions.")
+            exit(1)
+        elif checkpoint_file is None and pdb_file is not None:
+            logging.info(f"Setting positions from PDB file {pdb_file}")
+            pdb = PDBFile(pdb_file)
+            simulation.context.setPositions(pdb.getPositions())
+            simulation.context.setPeriodicBoxVectors(*pdb.topology.getPeriodicBoxVectors())
+            simulation.context.setVelocitiesToTemperature(self.temperature)
+
+        elif checkpoint_file is not None and pdb_file is None:
+            logging.info(f"Setting positions from checkpoint {checkpoint_file}")
+            simulation.loadCheckpoint(checkpoint_file)
+        else:
+            # if both are provided, use the checkpoint file but warn the user
+            logging.warning("Both checkpoint_file and pdb_file are provided. Using checkpoint_file.")
             simulation.loadCheckpoint(checkpoint_file)
 
         # Reset velocities to temperature
