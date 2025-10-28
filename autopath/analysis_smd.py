@@ -24,6 +24,7 @@ from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.metrics import silhouette_score
 from sklearn.mixture import GaussianMixture
 from scipy.stats import norm
+
 import math
 
 import seaborn as sns
@@ -59,13 +60,11 @@ class SteeredMDAnalysis:
                  reference_pdb: str = None,
                  pocket_select: str = 'protein within 6.0 of resname UNK and name CA',
                  ligand_select: str = 'resname UNK and not name H*',
-                 dist_column: str = 'r_before',
-                 work_column: str = 'work',
-                 force_column: str = 'force',
                  seed: int = 42
                  ):
 
         """Initialize the SteeredMDAnalysis class with log files and parameters."""
+        
         if log_files is None or len(log_files) == 0:
             raise ValueError("No log files provided for analysis.")
         
@@ -75,9 +74,11 @@ class SteeredMDAnalysis:
 
         self.outdir = os.path.dirname(log_files[0])  # Output directory is the same as the first log file
 
-        self.temp = temperature # Kelvin
-        self.kB = 0.0083144621 # kJ/(mol*K)
-        self.beta = 1.0 / (self.kB * self.temp)
+        self.temp = temperature
+        self.R = 0.008314462618  # kJ/(mol*K)
+        self.RT = self.R * self.temp
+        self.beta = 1.0 / self.RT
+                
         self.timestep = timestep
 
         self.cluster_paths = cluster_paths
@@ -91,10 +92,8 @@ class SteeredMDAnalysis:
         self.ligand_select = ligand_select
         self.pocket_select = pocket_select
 
-        self.dist_column = dist_column
-        self.work_column = work_column
-        self.force_column = force_column
-        self.meff_column = 'm_eff'
+        self.work_column = 'work'
+        self.force_column = 'force'
 
         self.n_bins = n_bins
         self.dist_minmax = dist_minmax  # default min/max for distance bins
@@ -105,6 +104,7 @@ class SteeredMDAnalysis:
         return
 
     def run_analysis(self,
+                     use_target_grid: bool = True,
                      speeds: list[float] = None,
                      temperature: float = None,
                      fit_GMM: bool = True
@@ -117,13 +117,22 @@ class SteeredMDAnalysis:
         
         GMM_WEIGHT_CUTOFF = 0.0 # # cutoff for GMM weights, below which we ignore the component
 
-        # sometimes you wanna run the analysis with a different temperature or intervals
+        # r_target is the theoretical target distance grid, the one that dcTMD uses
+        # r_before is the actual distance before applying the constraint force. This one requires
+        # binning because different replicas will have different grids.
+        if use_target_grid:
+            self.dist_column = 'r_target'
+        else:
+            self.dist_column = 'r_before'
+
+        # assemble the master dataframe loading log files
+        raw_data = self.load_logs(self.log_files)
+
+        # sometimes you wanna run the analysis with a different temperature or exlude some speeds
         if temperature is not None:
             self.temp = temperature
-            self.beta = 1.0 / (self.kB * self.temp)
-
-        # assemble the master dataframe
-        raw_data = self.load_logs(self.log_files)
+            self.RT = self.R * self.temp
+            self.beta = 1.0 / self.RT
 
         if speeds is not None:
             print(f'WARNING: Filtering data by speeds: {speeds}')
@@ -134,13 +143,16 @@ class SteeredMDAnalysis:
             raw_data = raw_data[(raw_data[self.dist_column] >= self.dist_minmax[0]) & 
                                           (raw_data[self.dist_column] <= self.dist_minmax[1])]
 
-        # this will overwrite the work column in the raw_data DataFrame
+        # Integrate force to get work
         raw_data = self.integrate_force_dx(raw_data)
 
         # bin the data
-        self.raw_data, centers = self.bin_data(raw_data, self.n_bins, 
-                                               use_quantiles=True,
-                                               min_points=1)
+        if use_target_grid:
+            self.raw_data = raw_data # no binning when using target grid
+        else:
+            self.raw_data, centers = self.bin_data(raw_data, self.n_bins, 
+                                                   use_quantiles=True, min_points=1)
+            
         # cluster trajectories into paths if specified
         if self.cluster_paths:
             self.raw_data = self.cluster_trajectories()
@@ -149,32 +161,46 @@ class SteeredMDAnalysis:
 
         # decorrelate work values using statistical inefficiency g or by replica averaging
         # If we dont decorrelate, we should use the per-replica aggregated work. i.e. each replica contributes one work value per bin ENSEMBLE AVERAGE OVER REPLICAS
-        self.decorrelated_data = self.decorrelate_work_data(use_g=True)
-
+        if use_target_grid:
+            # ensure 'step' exists (per-trajectory running index)
+            if "step" not in self.raw_data.columns:
+                self.raw_data = (self.raw_data.sort_values(["trajname"])
+                                .assign(step=lambda d: d.groupby("trajname").cumcount()))
+            self.processed_data = self.build_common_target_grid(self.raw_data)
+            x_col = "r_target_grid" # x-axis coordinate
+            group_keys = ["step", "speed", "path"]  # integer key avoids fragmentation
+        else:
+            self.processed_data = self.decorrelate_work_data(use_g=True)
+            x_col = "r_bin"
+            group_keys = ["r_bin", "speed", "path"]  # no 'step' on the binning path
+                
         results = []
-        gmm_results = defaultdict(dict)  # to store GMM results per bin and speed
-        for (r_bin, speed, path), group in self.decorrelated_data.groupby(["r_bin", "speed", "path"]):
+        gmm_results = defaultdict(dict)  # to store GMM results for plotting
+        for (coord, speed, path), group in self.processed_data.groupby(group_keys):
+            
+            r_coord = float(group[x_col].iloc[0])
 
-            raw_W = group[self.work_column].values.astype(np.float64) # shape (N_points,)
-                        
+            raw_W = group[self.work_column].astype(float).values
+
             Wmean_raw = raw_W.mean()
             var_raw = raw_W.var(ddof=1)
             Wdiss_raw = 0.5 * self.beta * var_raw
 
             # plain Jarzynski on the samples
-            dG_Jarzynski = -(1/self.beta) * np.log(np.exp(-self.beta * raw_W).mean())
-
+            dG_Jarzynski = -(1.0/self.beta) * (
+                special.logsumexp(-self.beta * raw_W) - np.log(raw_W.size)
+            )
+            
             # GMM branch
-            dG_mix_exact = Wdiss_neq = Wmean_neq = np.nan
-
+            dG_mix_exact = Wdiss_neq = Wmean_neq = var_neq= np.nan
             if fit_GMM:
                 if len(raw_W) < 2:
-                    print(f"Not enough data points for GMM fitting at r_bin={r_bin:.2f}, speed={speed:.5f}, path={path:.2f}. Skipping GMM fit.")
+                    print(f"Not enough data points for GMM fitting at r_bin={r_coord:.2f}, speed={speed:.5f}, path={path:.2f}. Skipping GMM fit.")
                     continue
 
                 gmm_dict = self.fit_gmm_to_work_values(raw_W,
                                                         max_K=3,
-                                                        covariance_type='diag',
+                                                        covariance_type='spherical',
                                                         random_state=self.seed)
 
                 #These have shape (K,) for K components
@@ -187,25 +213,26 @@ class SteeredMDAnalysis:
 
                 # mask small nonequilibrium weights, which means ignore small gaussians
                 if np.any(w < GMM_WEIGHT_CUTOFF):
-                    print(f'WARNING: Filtering out {len(w[w < GMM_WEIGHT_CUTOFF])} components from bin {r_bin} - {speed} - {path} w/ weights {w[w < GMM_WEIGHT_CUTOFF]}')
-                
+                    print(f'WARNING: Filtering out {np.sum(w < GMM_WEIGHT_CUTOFF)} '
+                        f'components at grid={r_coord:.3f}, v={speed:.5g}, path={path}.')
+                           
                 w = np.where(w < GMM_WEIGHT_CUTOFF, 0.0, w)
                 w /= w.sum()  # normalize weights
 
                 # Transfor the weights from the non-equilibrium populations.
                 # This is for path impotance, but I should use w becuase 
                 # jarzynski and dcTMD are based on equilibrium weights (I think).
-                # p_eq = w * np.exp(-self.beta * dG_k)
+                # p_eq = w * np.exp(-self.RT * dG_k)
                 # p_eq /= p_eq.sum()
 
                 # exact mixture Jarzynski
                 # This is the exact Jarzynski estimator for the Gaussian mixture in each bin.
                 # If k=1 this collapses to the exact Jarzynski estimator for the single gaussian
                 # and this can be approximated by cumulant expansion to the second order, what the dcTMD paper does.
-                log_terms = -self.beta * mu + 0.5 * self.beta**2 * sig2
-                log_Z = special.logsumexp(log_terms, b=w)          # log ⟨e^{-βW}⟩
-                dG_mix_exact = -log_Z / self.beta
-               
+                log_terms = -self.beta * mu + 0.5 * (self.beta**2) * sig2
+                log_Z = special.logsumexp(log_terms, b=w) # log ⟨e^{-βW}⟩
+                dG_mix_exact = -(1.0/self.beta) * log_Z
+                
                 # non-equilibrium mean of W
                 Wmean_neq = np.dot(w, mu)
                 
@@ -217,29 +244,29 @@ class SteeredMDAnalysis:
                 # Wdiss_neq = 0.5 * self.beta * var_neq
 
                 # Collect results in a dictionary for plotting 
-                gmm_results[r_bin][speed] = {'GMM_neq_weights': w,
+                gmm_results[r_coord][speed] = {'GMM_neq_weights': w,
                                              'replica_W': raw_W,
                                              'GMM_means': mu,
                                              'GMM_variances': sig2,
                                              'Wmean_mix': Wmean_neq
                                             }
-                # build this partial dataframe
-                results.append({
-                    'r_bin': r_bin,
-                    'speed': speed,
-                    'path': path,
-                    'Wmean': Wmean_raw,
-                    'Wdiss': Wdiss_raw,
-                    'dG': Wmean_raw - Wdiss_raw,
-                    'dG_Jarzynski': dG_Jarzynski, # exact from samples, normal Jarzynski
-                    'dG_Jarzynski_gmm': dG_mix_exact, # exact mixture Jarzynski
-                    'Wmean_gmm': Wmean_neq,
-                    'Wdiss_gmm': Wdiss_neq,
-                    'dG_gmm': Wmean_neq - Wdiss_neq,
-                    'Wdiss_Jarzynski_gmm': Wmean_neq - dG_mix_exact,
-                    'Wdiss_Jarzynski': Wmean_raw - dG_Jarzynski,
-                    'varW_gmm_neq': var_neq
-                })
+            # build this partial dataframe
+            results.append({
+                'r_coord': r_coord,
+                'speed': speed,
+                'path': path,
+                'Wmean': Wmean_raw,
+                'Wdiss': Wdiss_raw,
+                'dG': Wmean_raw - Wdiss_raw,
+                'dG_Jarzynski': dG_Jarzynski, # exact from samples, normal Jarzynski
+                'dG_Jarzynski_gmm': dG_mix_exact, # exact mixture Jarzynski
+                'Wmean_gmm': Wmean_neq,
+                'Wdiss_gmm': Wdiss_neq,
+                'dG_gmm': Wmean_neq - Wdiss_neq,
+                'Wdiss_Jarzynski_gmm': Wmean_neq - dG_mix_exact,
+                'Wdiss_Jarzynski': Wmean_raw - dG_Jarzynski,
+                'varW_gmm_neq': var_neq
+            })
 
         results = pd.DataFrame(results)
 
@@ -277,7 +304,6 @@ class SteeredMDAnalysis:
     
     def integrate_force_dx(self, raw_data) -> pd.DataFrame:
         """Integrate the force over distance to compute work done.
-        This will overwrite the work column in the raw_data DataFrame.
         """
         grouped = raw_data.groupby("trajname")
         for traj, group in grouped:
@@ -285,7 +311,24 @@ class SteeredMDAnalysis:
             raw_data.loc[raw_data['trajname'] == traj, self.work_column] = work
         
         return raw_data
-    
+
+    def build_common_target_grid(self, raw_data: pd.DataFrame) -> pd.DataFrame:
+        """Trim each (speed, path) group so all replicas share the same number of frames.
+        This is required to build a common target grid across replicas.
+        """
+        df = raw_data.copy()            
+        new = []
+        for (speed, path), g in df.groupby(["speed", "path"], sort=False):
+            # Intersection length across replicas
+            nmin = g.groupby("trajname")["step"].max().add(1).min()
+            gg = g[g["step"] < nmin].copy()
+            # average grid (for reference/plots)
+            grid = gg.pivot_table(index="step", values="r_target", aggfunc="mean").reset_index()
+            gg = gg.merge(grid, on="step", suffixes=("", "_mean"))
+            gg["r_target_grid"] = gg["r_target_mean"].values
+            new.append(gg.drop(columns=["r_target_mean"]))
+        return pd.concat(new, ignore_index=True)
+
     def bin_data(self,
                 raw_data: pd.DataFrame,
                 n_bins: int,
@@ -423,7 +466,7 @@ class SteeredMDAnalysis:
         # # filter by r_bin
         # df = df[(df['r_bin'] >= 0.75) & (df['r_bin'] <= 1.5)]
 
-        distances = df.iloc[:, 2:].values
+        distances = df.iloc[:,2:].values
         scaler = StandardScaler()
         distances = scaler.fit_transform(distances)  # Scale the distances
 
@@ -433,8 +476,8 @@ class SteeredMDAnalysis:
             print(f'The first 2 PC explain {sum(pca.explained_variance_ratio_)*100:.2f}% of the variance')
 
         distance_df = pd.DataFrame(distances)
-        distance_df.insert(0, "frame", df['frame'])
-        distance_df.insert(1, "trajname", df['trajname'])
+        distance_df.insert(0,"frame", df['frame'])
+        distance_df.insert(1,"trajname", df['trajname'])
 
         # Create a distance matrix using DTW
         paths = defaultdict(np.ndarray)
@@ -444,7 +487,7 @@ class SteeredMDAnalysis:
 
         stacked = [paths[traj_name] for traj_name in paths.keys()]
 
-        distmatrix = dtw_ndim.distance_matrix_fast(s=stacked, ndim=stacked[0].shape[1])
+        distmatrix = dtw_ndim.distance_matrix_fast(s=stacked)#, ndim=stacked[0].shape[1])
         
         # if self.cluster_range is not None:
         #     # filter by distance range
@@ -667,13 +710,33 @@ class SteeredMDAnalysis:
                         'speed': v,
                         'replica': replica,
                         'trajname': traj['trajname'].iloc[0],
-                    'path': path,
+                        'path': path,
                 })
 
-        decorrelated_df = pd.DataFrame(decorrelated_data)
-        decorrelated_df = decorrelated_df.explode([self.work_column, 'r_target', 'r_before', 'r_after', 'NC', 'force', 'U_cvpack'], ignore_index=True)
+        decorrelated_df = pd.DataFrame(decorrelated_data)          
         return decorrelated_df
         
+    @staticmethod
+    def friction_from_wdiss(df: pd.DataFrame, 
+                            wdiss_col:str='Wdiss', # could use smoothed column here
+                            x_col:str='r_coord',
+                            use_spline:bool=True) -> pd.DataFrame:
+        rows = []
+        for (speed, path), g in df.groupby(["speed","path"], sort=False):
+            g = g.sort_values(x_col)
+            if use_spline:
+                # Use a cubic spline fit for derivative
+                spline = UnivariateSpline(g[x_col].values, g[wdiss_col].values, k=3)
+                Gamma = spline.derivative()(g[x_col].values) / speed
+            else:
+                dWdiss_dx = np.gradient(g[wdiss_col].values, g[x_col].values)
+                Gamma = dWdiss_dx / speed
+            rows.append(pd.DataFrame({x_col: g[x_col].values,
+                                    "Gamma": Gamma,
+                                    "speed": speed, 
+                                    "path": path}))
+        return pd.concat(rows, ignore_index=True)   
+
     def extrapolate_to_v0(self,
                             df: pd.DataFrame = None,
                             param_cols: list[str]=['Wdiss_gmm'],
@@ -689,58 +752,59 @@ class SteeredMDAnalysis:
         if speeds is not None:
             df = df[df['speed'].isin(speeds)]
 
-        # if df['speed'].nunique() < 2:
-        #     print("Not enough speeds for extrapolation.")
-        #     return pd.DataFrame()
+        if df['speed'].nunique() < 2:
+            print("Not enough speeds for extrapolation.")
+            return pd.DataFrame()
         
-        # FIXME 
-        if mixed_models:
-            results = []
-            df = df.dropna(subset=[param_col])
-            model  = smf.mixedlm(f"{param_col} ~ speed", df,
-                                groups=df["r_bin"],
-                                re_formula="~speed")
-            result = model.fit(reml=False)
-            for r_bin, rand_eff in result.random_effects.items():
-                intercept = result.fe_params["Intercept"] + rand_eff["Group"]
-                slope = result.fe_params["speed"] + rand_eff["speed"]
-                results.append({
-                "r_bin": r_bin,
-                f"{param_col}_v0_intercept": intercept,
-                f"{param_col}_v0_slope": slope,
-                "R2": 1.0
-            })
-                
-        else:
-            results = []
-            for param_col in param_cols:
-                _df = []
-                for (r_bin, path), group in df.groupby(['r_bin','path']):
-                    speeds = group['speed'].values
-                    means = group[param_col].values
+        results = []
+        for param_col in param_cols:
+            # FIXME 
+            if mixed_models:
+                df = df.dropna(subset=[param_col])
+                model  = smf.mixedlm(f"{param_col} ~ speed", df,
+                                    groups=df["r_bin"],
+                                    re_formula="~speed")
+                result = model.fit(reml=False)
+                for r_bin, rand_eff in result.random_effects.items():
+                    intercept = result.fe_params["Intercept"] + rand_eff["Group"]
+                    slope = result.fe_params["speed"] + rand_eff["speed"]
+                    results.append({
+                    "r_bin": r_bin,
+                    f"{param_col}_v0_intercept": intercept,
+                    f"{param_col}_v0_slope": slope,
+                    "R2": 1.0
+                })
+                    
+            else:
+                results = []
+                for param_col in param_cols:
+                    _df = []
+                    for (r_bin, path), group in df.groupby(['r_bin','path']):
+                        speeds = group['speed'].values
+                        means = group[param_col].values
 
-                    lr_results = linregress(speeds, means)
-                    _df.append({
-                        'r_bin': r_bin,
-                        'path': path,
-                        f"{param_col}_v0_intercept": lr_results.intercept,
-                        f"{param_col}_v0_slope": lr_results.slope,
-                        f"{param_col}_v0_intercept_se": lr_results.intercept_stderr,
-                        f"{param_col}_v0_slope_se": lr_results.stderr,
-                        'R2': lr_results.rvalue**2,
-                        'n_speeds': len(speeds)
-                    })
+                        lr_results = linregress(speeds, means)
+                        _df.append({
+                            'r_bin': r_bin,
+                            'path': path,
+                            f"{param_col}_v0_intercept": lr_results.intercept,
+                            f"{param_col}_v0_slope": lr_results.slope,
+                            f"{param_col}_v0_intercept_se": lr_results.intercept_stderr,
+                            f"{param_col}_v0_slope_se": lr_results.stderr,
+                            'R2': lr_results.rvalue**2,
+                            'n_speeds': len(speeds)
+                        })
 
-                if len(_df) == 0:
-                    print(f"No valid extrapolation results found for {param_col}.")
+                    if len(_df) == 0:
+                        print(f"No valid extrapolation results found for {param_col}.")
 
-                results.append(pd.DataFrame(_df))
+                    results.append(pd.DataFrame(_df))
 
-            results = pd.concat(results, axis=1)
-            # drop duplicate 'r_bin' adn speed columns
-            # results = results.loc[:, ~results.columns.duplicated()]
+                results = pd.concat(results, axis=1)
+                # drop duplicate 'r_bin' adn speed columns
+                # results = results.loc[:, ~results.columns.duplicated()]
 
-        # Calculate the diffusion coefficient D(x) using the friction coefficient F(x)
-        # df['D(x)'] = self.kB * self.temp / df['F(x)']
+            # Calculate the diffusion coefficient D(x) using the friction coefficient F(x)
+            # df['D(x)'] = self.R * self.temp / df['F(x)']
 
         return results
