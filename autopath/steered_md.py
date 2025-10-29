@@ -41,6 +41,7 @@ class SteeredMD:
         use_NVT: bool = False,  # Use NVT ensemble
         use_GReweighting: bool = False,
         out_dir: str = None,
+        platform: str = "fastest",
         verbose: int = 0,
     ):
         self.system = system
@@ -69,7 +70,7 @@ class SteeredMD:
             else:
                 logging.info("Using Girsanov reweighting for steered MD.")
 
-        self.platform = select_platform("fastest")
+        self.platform = select_platform(platform)
 
         return None
 

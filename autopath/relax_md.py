@@ -30,6 +30,7 @@ class RelaxMD:
         is_membrane: bool = False,
         timestep: float = 0.004, #  # 4 fs timestep
         temp: float = 300,
+        platform: str = "fastest",
         use_GReweighting: bool = False,
     ) -> None:
 
@@ -45,7 +46,7 @@ class RelaxMD:
         self.pocket_atoms = pocket_atoms
         self.is_membrane = is_membrane
 
-        self.platform = select_platform("fastest")
+        self.platform = select_platform(platform)
 
         self.use_GReweighting = use_GReweighting
         if self.use_GReweighting:

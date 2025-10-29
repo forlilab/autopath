@@ -20,6 +20,7 @@ class VanillaMD:
         temperature: float = 300,
         save_freq: int = 2500, # save /0.01ns
         out_dir: str = "MD",
+        platform: str = "fastest",
         verbose: int = 2,
     ):
         self.out_dir = out_dir
@@ -36,7 +37,7 @@ class VanillaMD:
         self.save_freq = save_freq
 
         self.verbose = verbose
-        self.platform = select_platform("fastest")
+        self.platform = select_platform(platform)
 
         return
 

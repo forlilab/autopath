@@ -168,6 +168,7 @@ class Equilibration:
         protocol_fname: str = "autopath/data/equilibration.json",
         save_freq: int = 6250, # 12500 is 0.05ns at 4fs timestep
         is_membrane: bool = False,
+        platform: str = "fastest",
         verbose: int = 2,
     ) -> None:
 
@@ -185,7 +186,7 @@ class Equilibration:
 
         self.restrained_minimization = restrained_minimization
 
-        self.platform = select_platform("fastest")
+        self.platform = select_platform(platform)
         self.verbose = verbose
 
         # Load the equilibration protocol

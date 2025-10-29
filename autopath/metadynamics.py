@@ -41,6 +41,7 @@ class MetadynamicsMD:
         timestep: float = 0.004, #  # 4 fs timestep
         temp: float = 300,
         use_GReweighting: bool = False,
+        platform: str = "fastest",
         verbose: bool = True,
     ) -> None:
         
@@ -59,7 +60,7 @@ class MetadynamicsMD:
         
         self.restrained_atoms = restrained_atoms
 
-        self.platform = select_platform("fastest")
+        self.platform = select_platform(platform)
 
         self.use_GReweighting = use_GReweighting
         if self.use_GReweighting:
