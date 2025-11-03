@@ -42,6 +42,7 @@ class SteeredMD:
         use_GReweighting: bool = False,
         out_dir: str = None,
         platform: str = "fastest",
+        save_freq: int = None,
         verbose: int = 0,
     ):
         self.system = system
@@ -58,7 +59,7 @@ class SteeredMD:
 
         self.verbose = verbose
         self.autostop_freq = autostop_freq  # In moves. Stop pulling if the ligand is unbound
-
+        self.save_freq = save_freq  # In steps, for writing DCD
         self.use_NVT = use_NVT
 
         self.integrator_friction = 1.0 / openmmunit.picoseconds  # Friction coefficient for Langevin integrator
@@ -81,16 +82,17 @@ class SteeredMD:
                              ):
         """Run the pulling process in a single direction (forward or backward) for a single replica."""
         
-        # log every 2ps.
-        logperiod = int(2/self.timestep.value_in_unit(openmmunit.picoseconds))
+        if self.save_freq is None:
+            self.save_freq = self.steps_per_move
+            
         add_reporters(simulation, self.out_dir, f"sMD_{run_id}",
             total_steps=self.sMD_moves*self.steps_per_move, # total steps 
-            logperiod=logperiod,  
+            logperiod=self.save_freq, # steps
             verbose=0 #verbose level
         )
 
         if self.use_GReweighting:
-            simulation.reporters.append(ReweightingReporter(f"{self.out_dir}/sMDGR_{run_id}.dat", 
+            simulation.reporters.append(ReweightingReporter(f"{self.out_dir}/sMD_{run_id}.dat", 
                                                             self.steps_per_move, 
                                                             simulation.integrator, 
                                                             unperturebed=True,
