@@ -152,10 +152,13 @@ class SteeredMDAnalysis:
         else:
             self.raw_data, centers = self.bin_data(raw_data, self.n_bins, 
                                                    use_quantiles=True, min_points=1)
-            
+        
         # cluster trajectories into paths if specified
         if self.cluster_paths:
-            self.raw_data = self.cluster_trajectories()
+            # self.raw_data = self.cluster_trajectories()
+            self.raw_data, labels_dict, medoid_names = self.cluster_raw_traces(self.raw_data, r_range=self.cluster_range, outdir=self.outdir)
+            print('Clustering results:')
+            print(self.raw_data.groupby(['path', 'speed'])[['trajname']].nunique())
         else:
             self.raw_data['path'] = 1 # default to single cluster if no clustering method is specified
 
@@ -174,6 +177,9 @@ class SteeredMDAnalysis:
             x_col = "r_bin"
             group_keys = ["r_bin", "speed", "path"]  # no 'step' on the binning path
                 
+        # self.processed_data['work'] = self.processed_data['work'] * self.beta
+        # self.processed_data['work'] = self.processed_data['work'] / 2.476  # convert to KT
+
         results = []
         gmm_results = defaultdict(dict)  # to store GMM results for plotting
         for (coord, speed, path), group in self.processed_data.groupby(group_keys):
@@ -488,26 +494,10 @@ class SteeredMDAnalysis:
         stacked = [paths[traj_name] for traj_name in paths.keys()]
 
         distmatrix = dtw_ndim.distance_matrix_fast(s=stacked)#, ndim=stacked[0].shape[1])
-        
-        # if self.cluster_range is not None:
-        #     # filter by distance range
-        #     valid_indices = []
-        #     for i, traj_name in enumerate(paths.keys()):
-        #         traj_df = distance_df[distance_df["trajname"] == traj_name]
-        #         r_values = traj_df[self.dist_column].values
-        #         if np.any((r_values >= self.cluster_range[0]) & (r_values <= self.cluster_range[1])):
-        #             valid_indices.append(i)
-        #     distmatrix = distmatrix[np.ix_(valid_indices, valid_indices)]
-        #     paths = {list(paths.keys())[i]: paths[list(paths.keys())[i]] for i in valid_indices}
 
         if do_plots:
-            # sort the distance matrix by the average distance of each trajectory for plotting
-            avg_distances = distmatrix.mean(axis=1)
-            sorted_indices = np.argsort(avg_distances)
-            sorted_distances = distmatrix[sorted_indices][:, sorted_indices]
-
             plt.figure(figsize=(6, 5))
-            sns.heatmap(sorted_distances, cmap="viridis")
+            sns.heatmap(distmatrix, cmap="viridis")
             plt.title("DTW Distance Matrix")
             plt.tight_layout()
             plt.savefig(f"{outdir}/{self.sysname}_distmatrix.png")
@@ -685,7 +675,7 @@ class SteeredMDAnalysis:
             for replica, traj in group.groupby("replica"):
                 W = traj[self.work_column].values
                 if use_g:
-                    indices = timeseries.subsample_correlated_data(W, g, conservative=False)
+                    indices = timeseries.subsample_correlated_data(W, g, conservative=True)
                     W_decorrelated = W[indices]
                     # Use iloc to select rows by integer position
                     selected_rows = traj.iloc[indices]
@@ -718,7 +708,7 @@ class SteeredMDAnalysis:
         
     @staticmethod
     def friction_from_wdiss(df: pd.DataFrame, 
-                            wdiss_col:str='Wdiss', # could use smoothed column here
+                            w_col:str='Wdiss', # could use smoothed column here
                             x_col:str='r_coord',
                             use_spline:bool=True) -> pd.DataFrame:
         rows = []
@@ -726,10 +716,10 @@ class SteeredMDAnalysis:
             g = g.sort_values(x_col)
             if use_spline:
                 # Use a cubic spline fit for derivative
-                spline = UnivariateSpline(g[x_col].values, g[wdiss_col].values, k=3)
+                spline = UnivariateSpline(g[x_col].values, g[w_col].values, k=3)
                 Gamma = spline.derivative()(g[x_col].values) / speed
             else:
-                dWdiss_dx = np.gradient(g[wdiss_col].values, g[x_col].values)
+                dWdiss_dx = np.gradient(g[w_col].values, g[x_col].values)
                 Gamma = dWdiss_dx / speed
             rows.append(pd.DataFrame({x_col: g[x_col].values,
                                     "Gamma": Gamma,
@@ -808,3 +798,94 @@ class SteeredMDAnalysis:
             # df['D(x)'] = self.R * self.temp / df['F(x)']
 
         return results
+    
+    def cluster_raw_traces(self,
+                           data:pd.DataFrame, 
+                           r_range:tuple=None,
+                           columns:list=['work', 'force', 'r_before'], 
+                           use_silhouette:bool=True,
+                           outdir:str='.',
+                           seed:int=42):
+        
+        df = data.copy()
+        
+        for col in columns:
+            if col not in df.columns:
+                raise ValueError(f"Column {col} not found in dataframe.")
+
+        # columns = columns + ['lag']
+        df['lag'] = df['r_target'] - df['r_before']
+        
+        data_struct = defaultdict(np.ndarray)
+        for trajname in df.groupby("trajname").groups.keys():
+            traj_df = df[df["trajname"]==trajname]
+            if r_range is not None:
+                traj_df = traj_df[(traj_df["r_target"]>=float(r_range[0])) 
+                                  & (traj_df["r_target"]<=float(r_range[1]))]
+
+            if traj_df.shape[0] < 2:
+                print(f"Skipping trajectory {trajname} due to insufficient data points in range.")
+                continue
+            # Scale the work and force columns to [0,1] range because they depend on pulling speed
+            if 'force' in columns:
+                traj_df['force'] = MinMaxScaler().fit_transform(traj_df['force'].values.reshape(-1,1))
+            if 'work' in columns:
+                traj_df['work'] = MinMaxScaler().fit_transform(traj_df['work'].values.reshape(-1,1))
+            if 'lag' in columns:
+                traj_df['lag'] = MinMaxScaler().fit_transform(traj_df['lag'].values.reshape(-1,1))
+            data_struct[trajname] = traj_df[columns].to_numpy()
+        vectors_stacked = [data_struct[traj_name] for traj_name in data_struct.keys()]
+        names = list(data_struct.keys())
+
+        scaler = StandardScaler(with_mean=True, with_std=True)
+        scaler.fit(np.vstack(vectors_stacked))
+        vectors_stacked_scaled = [scaler.transform(arr) for arr in vectors_stacked]
+
+        distmatrix = dtw_ndim.distance_matrix_fast(s=vectors_stacked_scaled)#, ndim=stacked[0].shape[1])
+        sns.heatmap(distmatrix, cmap="viridis")
+        plt.xlabel("Trajectory index"); plt.ylabel("Trajectory index")
+        plt.title("DTW Distance Matrix for Raw Traces")
+        plt.tight_layout()
+        plt.savefig(f"{outdir}/{self.sysname}_rawtrace_distmatrix.png")
+        plt.show()
+        plt.close()
+
+        scores = {}
+        for i in range(2,10):
+            c = kmedoids.fasterpam(distmatrix, i, random_state=seed)
+            if use_silhouette:
+                scores[i] = silhouette_score(distmatrix, c.labels, 
+                                             random_state=seed, metric="precomputed")
+            else:
+                scores[i] = c.loss
+                
+        K = max(scores, key=scores.get)
+        print(f"Found {K} paths with score {scores[K]:.2f}")
+
+        plt.figure(figsize=(6, 5))
+        sns.lineplot(x=list(scores.keys()), y=list(scores.values()))
+        plt.title(f"Optimal number of paths: {K}")
+        plt.axvline(x=K, color='red', linestyle='--', label=f'Optimal K={K}')
+        plt.xlabel("Number of clusters"); plt.ylabel("Silhouette score" if use_silhouette else "Loss")
+        plt.savefig(f"{outdir}/{self.sysname}_elbowplot.png")
+        plt.show()
+        plt.close()
+
+        # K-Medoids clustering using the optimal number of paths
+        cluster = kmedoids.fasterpam(distmatrix, K, random_state=seed)
+
+        labels_dict = {k: v for k, v in zip(names, cluster.labels)}
+        medoid_indices = cluster.medoids
+        medoid_names = [names[idx] for idx in medoid_indices]
+        print("Medoid trajectories:", medoid_names)
+        print(f"cluster counts:")
+        unique, counts = np.unique(cluster.labels, return_counts=True)
+        for u, c in zip(unique, counts):
+            print(f"  Cluster {u}: {c} trajectories")
+
+        trajname_map = pd.DataFrame({"trajname": list(data_struct.keys()),
+                        "cluster": cluster.labels}).set_index('trajname')['cluster'].to_dict()
+        data['path'] = df['trajname'].map(trajname_map)
+        
+        #statistics by cluster
+        return data, labels_dict, medoid_names
