@@ -41,15 +41,22 @@ def plot_atomic_rmsf(u, lig_resname:str='UNK', outname:str='rmsf.png', log_rmsf:
         outname = outname.replace('.svg', '.png')
         drawer = rdMolDraw2D.MolDraw2DCairo(300, 300)
 
-    lig_select = u.select_atoms(f'resname {lig_resname}')
-    r = RMSF(atomgroup=lig_select).run()
-    probe_mol = lig_select.convert_to('RDKIT')
+    lig_full = u.select_atoms(f'resname {lig_resname}')
+    lig_ha = u.select_atoms(f'resname {lig_resname} and not name H*')
+    r = RMSF(atomgroup=lig_ha).run()
+    probe_mol = lig_full.convert_to('RDKIT')
     probe_mol.Compute2DCoords()
-    # probe_mol = Chem.RemoveHs(probe_mol)
+    probe_mol = Chem.RemoveHs(probe_mol)
     assert len(r.rmsf) == probe_mol.GetNumAtoms(), "Mismatch between RMSF length and atom count"
 
-    fig = SimilarityMaps.GetSimilarityMapFromWeights(mol=probe_mol, weights=r.rmsf.tolist(), draw2d=drawer,
-                                                    scaling=1.0, step=0.01, alpha=0.3, contourLines=5,) 
+    fig = SimilarityMaps.GetSimilarityMapFromWeights(mol=probe_mol, 
+                                                     weights=r.rmsf.tolist(), 
+                                                     draw2d=drawer,
+                                                     scale=1.0,
+                                                     step=0.1,
+                                                     alpha=0.5, 
+                                                     contourLines=5
+                                                     ) 
     fig.FinishDrawing()
     if outname.endswith('.svg'):
         fig = fig.GetDrawingText()
@@ -64,7 +71,6 @@ def plot_atomic_rmsf(u, lig_resname:str='UNK', outname:str='rmsf.png', log_rmsf:
         with open(f'{log_fname}.csv', 'w') as f:
             for res_id, rmsf_value in enumerate(r.rmsf):
                 f.write(f'{res_id},{rmsf_value:.3f}\n')
-        
     return
 
 def plot_rmsd(rmsd_df:pd.DataFrame=None,
