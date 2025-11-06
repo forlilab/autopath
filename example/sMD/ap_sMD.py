@@ -40,7 +40,7 @@ def main():
     
     N_REPS = 50 # how many pulling replicates to run
     DIRECTION = 'forward' # 'forward' or 'backward'
-    SPEED = 0.0001 #nm/ps
+    SPEED = 0.0005 #nm/ps
     sMD_spring_cte_per_atom = 50 * 4.184  # KJ/mol/nm2, converted from kcal. This affects thermal fluctuations
 
     ligand_resname = "UNK"  # Change this to your ligand residue name

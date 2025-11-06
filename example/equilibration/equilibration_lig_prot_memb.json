@@ -8,14 +8,14 @@
   
   "minimization": [
     { "name": "Stage 1", "forces": [50.0, 50.0, 50.0, 50.0] },
-    { "name": "Stage 2", "forces": [10.0, 2.50, 10.0, 2.50] },
-    { "name": "Stage 3", "forces": [5.00, 0.00, 5.00, 0.00] },
+    { "name": "Stage 2", "forces": [5.00, 1.00, 5.00, 0.00] },
+    { "name": "Stage 3", "forces": [1.00, 0.00, 0.00, 0.00] },
     { "name": "Stage 4", "forces": [0.00, 0.00, 0.00, 0.00] }
   ],
   
   "warmup": {
     "T_initial": 100.0,
-    "T_final": 310.0,
+    "T_final": 300.0,
     "T_step": 5.0,
     "npt_flag": false,
     "nsteps": 100000,
@@ -30,6 +30,6 @@
     { "name": "Stage 5", "forces": [0.50, 0.50, 1.00, 0.50], "npt_flag": true, "nsteps": 125000, "stepsize": 0.004 },
     { "name": "Stage 6", "forces": [0.25, 0.25, 0.50, 0.25], "npt_flag": true, "nsteps": 125000, "stepsize": 0.004 },
     { "name": "Stage 7", "forces": [0.10, 0.00, 0.25, 0.00], "npt_flag": true, "nsteps": 125000, "stepsize": 0.004 },
-    { "name": "Stage 8", "forces": [0.00, 0.00, 0.00, 0.00], "npt_flag": true, "nsteps": 125000, "stepsize": 0.004 }
+    { "name": "Stage 8", "forces": [0.00, 0.00, 0.00, 0.00], "npt_flag": true, "nsteps": 12500000, "stepsize": 0.004 }
   ]
 }

@@ -7,7 +7,7 @@ import mdtraj as md
 
 from autopath import SystemPreparation, Equilibration, SteeredMD
 from autopath.analysis import plot_atomic_rmsf
-from autopath.utils import fix_pdb, save_pdb, load_system, align_trajectory, calculate_com_distance, compute_rmsd
+from autopath.utils import fix_pdb, save_pdb, load_system, setup_logging, compute_rmsd
 from openmm.app import PDBFile
 
 def cmd_lineparser():
@@ -82,15 +82,10 @@ def main():
     sys_name = os.path.splitext(os.path.basename(receptor))[0]
     os.makedirs(sys_name, exist_ok=True)
 
-    logging.basicConfig(
-    level="INFO",
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(f"{sys_name}/{sys_name}.log", mode="a"),
-        logging.StreamHandler(),
-    ],
-    )
-    
+    # Setup logging
+    setup_logging(logfile=f"{sys_name}/{sys_name}.log", log_level="INFO")
+    logging.info("Starting equilibration process")
+
     # Fix/prepare the receptor
     protein_pdb = fix_pdb(pdbfile=receptor, keep_heterogens=True, pH=7.4)
     pdb_name = os.path.splitext(os.path.basename(receptor))[0]
@@ -119,7 +114,7 @@ def main():
 
     # Variants is a dictionary which specifies the chain:resid for the variant e.g. {"A:123": "CYX"}
     # If you re-run the script and the system is already prepared comment the following line
-    system, topo = prepare_system.run(protein=prot_path, variants=None, ligands=ligands)
+    # system, topo = prepare_system.run(protein=prot_path, variants=None, ligands=ligands)
 
     ########################################################################################
     ###################################### Equilibration ###################################
@@ -140,7 +135,7 @@ def main():
         )
     
     # If you re-run the script and the system is equilibrated prepared comment the following line
-    system_eq = equilibration.run(pdb_file=system_pdb_file, run_id=sys_name)
+    # system_eq = equilibration.run(pdb_file=system_pdb_file, run_id=sys_name)
         
     ########################################################################################
     ###################################### Post-processing #################################
@@ -150,7 +145,7 @@ def main():
     equilibrated_traj = f"{sys_name}/equilibration/equilibration_{sys_name}.dcd"
     
     # Wrap, align and save the clean trajectory
-    traj = md.load(equilibrated_traj, top=system_prmtop)
+    traj = md.load(equilibrated_traj, top=system_pdb_file)
     traj = traj.center_coordinates()
     traj = traj.image_molecules()
     try: # if there's no protein
@@ -163,7 +158,7 @@ def main():
     logging.info(f"Aligned trajectory saved to {equilibrated_traj.replace('.dcd', '_aligned.dcd')}")
     
     # Calculate RMSD and RMSF of the ligand
-    u_eq = mda.Universe(system_prmtop, equilibrated_traj.replace(".dcd", "_aligned.dcd"), in_memory=True)
+    u_eq = mda.Universe(system_pdb_file, equilibrated_traj.replace(".dcd", "_aligned.dcd"), in_memory=True)
     lig_rmsd_equilibration = compute_rmsd(u_eq, u_eq,
                                           alig_select="backbone", 
                                           groupselections={"ligand":f"resname {lig_resname} and not name H*", 
