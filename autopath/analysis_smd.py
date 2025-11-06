@@ -1,5 +1,8 @@
 import os
 import glob
+import shutil
+from typing import Dict, List, Optional, Tuple
+from pathlib import Path
 import numpy as np
 import pandas as pd
 
@@ -16,7 +19,9 @@ from dtaidistance import dtw_ndim
 import kmedoids
 
 import MDAnalysis as mda
-from MDAnalysis.analysis.distances import distance_array
+from MDAnalysis.analysis.distances import distance_array  
+from MDAnalysis.analysis import align, density
+
 import tqdm
 
 from sklearn.decomposition import PCA
@@ -155,10 +160,20 @@ class SteeredMDAnalysis:
         
         # cluster trajectories into paths if specified
         if self.cluster_paths:
-            # self.raw_data = self.cluster_trajectories()
-            self.raw_data, labels_dict, medoid_names = self.cluster_raw_traces(self.raw_data, r_range=self.cluster_range, outdir=self.outdir)
+            self.raw_data, labels_dict, medoid_names = self.cluster_trajectories()
+            # self.raw_data, labels_dict, medoid_names = self.cluster_raw_traces(self.raw_data, r_range=self.cluster_range, outdir=self.outdir)
             print('Clustering results:')
             print(self.raw_data.groupby(['path', 'speed'])[['trajname']].nunique())
+            # generate pymol sesh for the paths
+            paths = {}
+            for trajname in medoid_names:
+                for traj in self.trajectories:
+                    if trajname == os.path.basename(traj)[:-4]:
+                        #{'path_0': [(protein_pdb, traj1), (protein_pdb, traj2)], ...}
+                        paths[f'path_{labels_dict[trajname]}'] = [(self.reference_pdb, traj)]
+            outdir = os.path.join(self.outdir,'path_clustering')
+            self.make_unbinding_paths_pml(paths, outdir=outdir)
+
         else:
             self.raw_data['path'] = 1 # default to single cluster if no clustering method is specified
 
@@ -545,11 +560,15 @@ class SteeredMDAnalysis:
             plt.show()
             plt.close()
 
+        names = [os.path.basename(name).replace('.dcd', '').replace('traj', 'log') for name in paths.keys()]
+        medoid_names = [names[medoid] for medoid in cluster.medoids]
+        labels_dict = {k: v for k, v in zip(names, cluster.labels)}
+
         trajname_map = pd.DataFrame({"trajname": list(paths.keys()),
                         "cluster": cluster.labels}).set_index('trajname')['cluster'].to_dict()
         raw_data['path'] = raw_data['trajname'].map(trajname_map)
 
-        return raw_data
+        return raw_data, labels_dict, medoid_names
 
     @staticmethod
     def fit_gmm_to_work_values(raw_work,
@@ -889,3 +908,102 @@ class SteeredMDAnalysis:
         
         #statistics by cluster
         return data, labels_dict, medoid_names
+
+    def make_unbinding_paths_pml(self, 
+        paths: Dict[str, List[Tuple[str, str]]],
+        outdir: str = "unbinding_paths_vis",
+        align_sel: str = "protein and backbone",
+        grid_spacing: float = 1.0,
+        cartoon_color: str = "palecyan",
+        sample_stride: int = 1,
+    ) -> str:
+        """Generate ligand-path density maps and a PyMOL .pml that uses only relative paths."""
+                
+        level = 0.000003
+        surface_transparency = 0.35
+        cartoon_transparency = 0.25
+        
+        os.makedirs(outdir, exist_ok=True)
+        outdir = Path(outdir)
+        protein_pdb = self.reference_pdb
+        ligand_sel = self.ligand_select
+        # Copy the reference PDB into OUTDIR so the .pml can run anywhere
+        prot_copy = outdir / os.path.basename(protein_pdb)
+        shutil.copy2(protein_pdb, prot_copy)
+
+        protein_abs = str(prot_copy.resolve())
+        u_ref = mda.Universe(protein_abs)
+
+        default_palette = ["deepsalmon", "marine", "forest", "violetpurple", "gold", "tv_red", "tv_blue"]
+        path_colors = {name: default_palette[i % len(default_palette)] for i, name in enumerate(paths)}
+
+        dx_files_rel = {}
+        for path_name, traj_list in paths.items():
+            dens_sum = None
+            total_frames = 0
+
+            for top, traj in traj_list:
+                # if not aligned, align to reference
+                u = mda.Universe(top, traj)
+                align.AlignTraj(u, u_ref, select=align_sel, in_memory=True).run()
+
+                lig = u.select_atoms(ligand_sel)
+                if lig.n_atoms == 0:
+                    raise ValueError(f"No atoms found for '{ligand_sel}' in {traj}.")
+
+                da = density.DensityAnalysis(lig, delta=grid_spacing,padding=20.0)
+                da.run(step=sample_stride)
+                rho = da.results.density
+
+                dens_sum = rho if dens_sum is None else dens_sum._replace(grid=dens_sum.grid + rho.grid) or dens_sum
+                total_frames += len(u.trajectory[::sample_stride])
+
+            # Normalize and write DX
+            if total_frames > 0:
+                dens_sum.grid /= float(total_frames)
+
+            dx_path = str((outdir / f"{path_name}_ligand_density.dx").resolve())
+            dens_sum.export(dx_path)
+            dx_files_rel[path_name] = dx_path
+
+        # dx_05 = np.quantile(dens_sum.grid, 0.05)
+        # print(f"0.05 quantile of last path density: {dx_05}")
+        
+        # Write the .pml using ONLY filenames (relative to outdir)
+        pml_path = os.path.join(outdir, "unbinding_paths.pml")
+        with open(pml_path, "w") as pml:
+            pml.write("# Relative-path PyMOL visualization for ligand unbinding paths\n")
+            pml.write("reinitialize\n")
+            pml.write("bg_color white\n")
+            pml.write("set ray_opaque_background, 0\n")
+            pml.write("set antialias, 2\n")
+            pml.write("set specular, 0.2\n")
+            pml.write("set ray_shadow, off\n")
+            pml.write(f"set cartoon_transparency, {cartoon_transparency:.2f}\n")
+            pml.write(f"load {protein_abs}, prot\n")
+            pml.write("hide everything, prot\n")
+            pml.write("show cartoon, prot\n")
+            pml.write(f"color {cartoon_color}, prot\n")
+
+            for path_name, dx_filename in dx_files_rel.items():
+                map_obj = f"map_{path_name}"
+                surf_obj = f"surf_{path_name}"
+                col = path_colors[path_name]
+                pml.write(f"load {dx_filename}, {map_obj}\n")
+                pml.write(f'map_double {map_obj}\n')
+                pml.write(f"isosurface {surf_obj}, {map_obj}, {level}\n")
+                pml.write(f"color {col}, {surf_obj}\n")
+                pml.write(f"set transparency, {surface_transparency:.2f}, {surf_obj}\n")
+                pml.write(f"set two_sided_lighting, on, {surf_obj}\n")
+
+            pml.write(f"select lig_ref, ({ligand_sel}) and prot\n")
+            pml.write("if sele count lig_ref > 0:\n")
+            pml.write("    create lig, lig_ref\n")
+            pml.write("    show spheres, lig\n")
+            pml.write("    color lightpink, lig\n")
+            pml.write("    set sphere_transparency, 0.35, lig\n")
+            pml.write("orient lig\n")
+            pml.write("zoom prot, 10.0\n")
+            # pml.write("png preview.png, ray=1, dpi=300\n")
+
+        return str(pml_path)
