@@ -34,7 +34,7 @@ class SystemPreparation:
         forcefield: list = [
             "amber14-all.xml",
             "amber14/tip3pfb.xml",
-            "amber/tip3p_HFE_multivalent.xml",
+            "amber/tip3pfb_HFE_multivalent.xml",
         ],
         lig_ff: str = "espaloma",
         hydrogenMass: float = 1.5, # # in amu, 1.5 is the default in OpenMM
@@ -44,7 +44,7 @@ class SystemPreparation:
         ionicStrength: float = 0.15,
         is_membrane: bool = False,
         lipid_type: str = None,
-        out_dir: str = "system_preparation",
+        out_dir: str = "system",
     ) -> None:
 
         if lig_ff.upper() in ["ESPALOMA", "SMIRNOFF", "GAFF"]:

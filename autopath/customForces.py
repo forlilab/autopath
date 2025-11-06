@@ -8,6 +8,7 @@ import openmm.unit as openmmunit
 def print_current_forces(system: System = None) -> None:
     for index, fc in enumerate(system.getForces()):
         logging.info(f"Force Index:{index} | Name: {fc.getName()} | Group: {fc.getForceGroup()}")
+        print(f"Force Index:{index} | Name: {fc.getName()} | Group: {fc.getForceGroup()}")
     return
 
 def remove_openmm_force(system: System = None, fname: str = None) -> System:

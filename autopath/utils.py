@@ -354,7 +354,7 @@ def add_variants(modeller: Modeller, variants_dict: dict = None) -> Modeller:
 def get_pocket_atoms(u:mda.Universe, 
                      pocket_selection:str, 
                      ligand_selection:str,
-                     cutoff: float = 5.0
+                     cutoff: float = 6.0
                      ) -> mda.AtomGroup:
     """Get the pocket atoms based on a user provided selection 
     or the ligand residue name and some default heuristics."""
@@ -371,12 +371,12 @@ def get_pocket_atoms(u:mda.Universe,
         pocket_atoms_indices = [atom.index for atom in pocket_atoms]
     # If no custom selection, use the ligand residue name to define the pocket
     elif ligand_selection is not None:
-        backbone_names = ["N", "CA", "C", "O"]
+        # backbone_names = ["N", "CA", "C", "O"]
         ligand = u.select_atoms(ligand_selection)
         protein_residues = u.select_atoms(f"protein and around {cutoff} group ligand", ligand=ligand).residues
         pocket_atoms_indices = [atom.index for res in protein_residues 
                                 for atom in res.atoms
-                                if atom.name in backbone_names]
+                                if atom.name in ['CA']]
         
     if len(pocket_atoms_indices) == 0:
         logging.error(f"No atoms found for the provided pocket selection")
@@ -419,11 +419,11 @@ def get_ligand_anchor_atoms(
     u,
     lig_resname: str,
     pocket_sel: str = "protein and around 5 resname UNK and not name H*",
-    mode: str = "com",
+    mode: str = "ha",
     frames: int = 100,
     n_atoms: int = 5,
-    reduce_before: bool = True,
-    expand_rings: bool = True,
+    reduce_before: bool = False,
+    expand_rings: bool = False,
     out_dir: str = None,
     verbose: bool = True,
 ):
@@ -437,10 +437,13 @@ def get_ligand_anchor_atoms(
     reduce_before : bool
         If True, reduce ligand to Murcko scaffold before anchor selection.
     """
-
+    # FIXME this is buggy
+    
     img_name = f"{out_dir}/pulling_{lig_resname}_{mode}.png"
 
-    ligand_full = u.select_atoms(f"resname {lig_resname} and not name H*")
+    ligand_full = u.select_atoms(f"resname {lig_resname}")
+    ligand_ha = u.select_atoms(f"resname {lig_resname} and not name H*")
+
     if ligand_full.n_atoms == 0:
         raise ValueError(f"No atoms found for ligand {lig_resname}.")
 
@@ -450,6 +453,7 @@ def get_ligand_anchor_atoms(
     else:
         ligand = ligand_full
         mol = ligand_full.convert_to("RDKIT")
+        mol = Chem.RemoveAllHs(mol)
         highlight_rdk_indices = []
 
     u.trajectory[-1]  # Ensure we are at the last frame
@@ -523,6 +527,7 @@ def get_ligand_anchor_atoms(
         expanded_mda_indices = [ligand_full.atoms[i].index for i in expanded_rdk_indices]
         anchor = list(set(anchor).union(expanded_mda_indices))
         print(f"[get_ligand_anchor_atoms] Expanded to include rings: {expanded_mda_indices}")
+
 
     # Draw 2D image with highlights
     try:

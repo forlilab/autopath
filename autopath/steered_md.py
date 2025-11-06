@@ -191,7 +191,7 @@ class SteeredMD:
         run_id: str = None,
         checkpoint_file: str = None,
         pdb_file: str = None,
-        pulling_direction: str = "backward",
+        pulling_direction: str = "forward",
     ):
         """Main method to run steered MD in both directions (forward and backward)."""
 
