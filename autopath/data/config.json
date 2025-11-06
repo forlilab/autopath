@@ -3,42 +3,45 @@
         "VS_mode": false,
         "pdb_path": null,
         "do_fix_pdb": true,
-        "pocket_selection":"protein and (around 5 resname UNK) and name CA",
+        "pocket_selection": "same residue as protein and (around 4 resname UNK) and (not name H*)",
+        "use_murcko_scaffold": true,
         "temperature": 300,
         "random_state": 42
 },
     "preparation": {
         "run_preparation": true,
         "forcefield": ["amber14/protein.ff14SB.xml", "amber14/tip3pfb.xml", "amber/tip3p_HFE_multivalent.xml"],
+        "hydrogenMass": 3.0,
         "lig_ff": "espaloma",
         "boxShape": "dodecahedron",
-        "padding": 1.0,
-        "ionicStrength": 0.0
+        "padding": 1.2,
+        "ionicStrength": 0.15
     },
 
     "equilibration": {
         "run_equilibration": true,
-        "equilibration_scheme": "autopath/data/equilibration.json"
+        "equilibration_scheme": "autopath/data/equilibration_lig_prot_memb.json"
     },
 
     "sMD": {
         "run_sMDpulling": true,
-        "sMD_pulling_dist": 1.0,
+        "sMD_pulling_dir": "forward",
         "sMD_time": 1,
-        "sMD_replicas": 5,
-        "sMD_steps_per_move": 250,
-        "sMD_pulling_force": 20000
+        "sMD_replicas": 3,
+        "sMD_steps_per_move": null,
+        "sMD_dx_per_move": 0.001,
+        "sMD_spring_cte": 50
     },
     "milestones": {
         "extract_milestones": true,
-        "n_milestones": 10
+        "n_milestones": 3
     },
     "metadynamics": {
         "run_metadynamics": true,
-        "mMD_walkers": 5,
         "mMD_time": 2,
-        "mMD_bias_factor": 5,
-        "mMD_hill_height": 0.3,
+        "mMD_bias_factor": 15,
+        "mMD_bias_frequency": 2,
+        "mMD_hill_height": 1.2,
         "mMD_hill_width": 0.05
     }
 }

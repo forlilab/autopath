@@ -64,34 +64,34 @@ def main():
         # Preparation
         run_preparation=config.run_preparation,
         forcefield=config.forcefield,
+        hydrogenMass=config.hydrogenMass,
         lig_ff=config.lig_ff,
         boxShape=config.boxShape,
         padding=config.padding,
         ionicStrength=config.ionicStrength,
         variants=config.variants,
         is_membrane=config.is_membrane,
-        lipid_type=config.lipid_type
+        lipid_type=config.lipid_type,
         # Equilibration
         run_equilibration=config.run_equilibration,
         equilibration_scheme=config.equilibration_scheme,
         # Steered MD
         run_sMDpulling=config.run_sMDpulling,
-        sMD_pulling_dist=config.sMD_pulling_dist,
+        sMD_pulling_dir=config.sMD_pulling_dir,
         sMD_time=config.sMD_time,
         sMD_replicas=config.sMD_replicas,
         sMD_steps_per_move=config.sMD_steps_per_move,
-        sMD_pulling_force=config.sMD_pulling_force,
+        sMD_dx_per_move=config.sMD_dx_per_move,
+        sMD_spring_cte=config.sMD_spring_cte,
         sMD_autostop=config.sMD_autostop,
         # Milestones
         extract_milestones=config.extract_milestones,
         n_milestones=config.n_milestones,
-        run_relax=config.run_relax,
-        relax_steps=config.relax_steps,
         # Metadynamics
         run_metadynamics=config.run_metadynamics,
-        mMD_walkers=config.mMD_walkers,
         mMD_time=config.mMD_time,
         mMD_bias_factor=config.mMD_bias_factor,
+        mMD_bias_frequency=config.mMD_bias_frequency,
         mMD_hill_height=config.mMD_hill_height,
         mMD_hill_width=config.mMD_hill_width,
     )

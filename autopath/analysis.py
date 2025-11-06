@@ -16,9 +16,6 @@ from matplotlib.collections import LineCollection
 
 from rdkit import Chem
 from rdkit.Chem.Draw import SimilarityMaps
-from rdkit.Chem.Draw import rdMolDraw2D
-from rdkit.Chem import Draw
-
 import MDAnalysis as mda
 from MDAnalysis.analysis.rms import RMSF
 from rdkit.Chem import rdMolDescriptors
@@ -89,13 +86,20 @@ def plot_atomic_rmsf(u, lig_resname:str='UNK', outname:str='rmsf.png', log_rmsf:
         This function does not return any value. It saves the RMSF plot and optionally logs the RMSF values.
     """
 
-    lig_select = u.select_atoms(f'resname {lig_resname}')
-    r = RMSF(atomgroup=lig_select).run()
-    probe_mol = lig_select.convert_to('RDKIT')
+    if outname.endswith('.svg'):
+        drawer = rdMolDraw2D.MolDraw2DSVG(300, 300)
+    else:
+        # Default to PNG if the file extension is not SVG
+        outname = outname.replace('.svg', '.png')
+        drawer = rdMolDraw2D.MolDraw2DCairo(300, 300)
+
+    lig_full = u.select_atoms(f'resname {lig_resname}')
+    lig_ha = u.select_atoms(f'resname {lig_resname} and not name H*')
+    r = RMSF(atomgroup=lig_ha).run()
+    probe_mol = lig_full.convert_to('RDKIT')
     probe_mol.Compute2DCoords()
     probe_mol = Chem.RemoveHs(probe_mol)
-    drawer = rdMolDraw2D.MolDraw2DCairo(300, 300) 
-    fig = SimilarityMaps.GetSimilarityMapFromWeights(probe_mol, r.rmsf, drawer, step=0.01, alpha=0.3, contourLines=5) 
+    fig = SimilarityMaps.GetSimilarityMapFromWeights(probe_mol, r.rmsf, step=0.01, alpha=0.3, contourLines=5) 
     fig.savefig(outname, bbox_inches='tight')
     
     # Optionally, log the RMSF values for further analysis
@@ -104,7 +108,6 @@ def plot_atomic_rmsf(u, lig_resname:str='UNK', outname:str='rmsf.png', log_rmsf:
         with open(f'{log_fname}.csv', 'w') as f:
             for res_id, rmsf_value in enumerate(r.rmsf):
                 f.write(f'{res_id},{rmsf_value:.3f}\n')
-        
     return
 
 def plot_rmsd(rmsd_df:pd.DataFrame=None,
@@ -666,39 +669,35 @@ def plot_sMD_statistics(files: list = None, sys_name:str=None, out_dir:str=None,
     data = _extract_sMD_statistics(files)
 
     plt.figure(figsize=(6, 5))
-    sns.lineplot(data, x="r0", y="work", hue="replica")
-    plt.xlabel("r0 dist (nm)")
-    plt.ylabel("Work (KJ/mol/nm)")
-    plt.title(f'r0 vs Work - {sys_name}')
-    plt.tight_layout()
-    plt.savefig(f"{out_dir}/{sys_name}-r0_vs_work.png")
-    plt.close()
-
-    plt.figure(figsize=(6, 5))
-    sns.lineplot(data, x="r0", y="force")  # , hue='replica')
-    plt.xlabel("r0 dist (nm)")
-    plt.ylabel("Force (KJ/mol/nm^2)")
-    plt.title(f'r0 vs Force - {sys_name}')
-    plt.tight_layout()
-    plt.savefig(f"{out_dir}/{sys_name}-r0_vs_force.png")
-    plt.close()
-
-    plt.figure(figsize=(6, 5))
     sns.lineplot(data, x="com_dist", y="work", hue="replica")
-    plt.xlabel("COM dist (nm)")
-    plt.ylabel("Work (KJ/mol/nm)")
+    plt.xlabel("COM dist (nm)");    plt.ylabel("Work (KJ/mol/nm)")
     plt.title(f'COM vs Work - {sys_name}')
     plt.tight_layout()
     plt.savefig(f"{out_dir}/{sys_name}-com_vs_work.png")
     plt.close()
 
+    plt.figure(figsize=(6, 5))
+    sns.lineplot(data, x="com_dist", y="force", hue='replica')
+    plt.xlabel("COM dist (nm)");    plt.ylabel("Force (KJ/mol)")
+    plt.title(sys_name)
+    plt.tight_layout()
+    plt.savefig(f"{out_dir}/{sys_name}-com_vs_force.png")
+    plt.close()
+    
     # plt.figure(figsize=(6, 5))
-    # sns.lineplot(data, x="com_dist", y="force")  # , hue='replica')
-    # plt.xlabel("COM dist (nm)")
-    # plt.ylabel("Force (KJ/mol)")
-    # plt.title(sys_name)
+    # sns.lineplot(data, x="r0", y="work", hue="replica")
+    # plt.xlabel("r0 dist (nm)");    # plt.ylabel("Work (KJ/mol/nm)")
+    # plt.title(f'r0 vs Work - {sys_name}')
     # plt.tight_layout()
-    # plt.savefig(f"{out_dir}/{sys_name}-com_vs_force.png")
+    # plt.savefig(f"{out_dir}/{sys_name}-r0_vs_work.png")
+    # plt.close()
+
+    # plt.figure(figsize=(6, 5))
+    # sns.lineplot(data, x="r0", y="force")  # , hue='replica')
+    # plt.xlabel("r0 dist (nm)");    # plt.ylabel("Force (KJ/mol/nm^2)")
+    # plt.title(f'r0 vs Force - {sys_name}')
+    # plt.tight_layout()
+    # plt.savefig(f"{out_dir}/{sys_name}-r0_vs_force.png")
     # plt.close()
 
     # plt.figure(figsize=(6,4))

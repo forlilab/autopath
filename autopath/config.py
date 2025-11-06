@@ -16,7 +16,8 @@ class Config(object):
         VS_mode: bool = False,
         pdb_path: str = None,
         do_fix_pdb: bool = True,
-        pocket_selection: str = "protein and (around 3 resname UNK) and (not name H*)",
+        pocket_selection: str = "same residue as protein and (around 4 resname UNK) and (not name H*)",
+        use_murcko_scaffold: bool = True,
         temperature: float = 300,
         random_state: int = 42,
         run_preparation: bool = True,
@@ -25,31 +26,31 @@ class Config(object):
             "amber14/tip3pfb.xml",
             "amber/tip3p_HFE_multivalent.xml",
         ],
+        hydrogenMass: float = 3.0,  # amu
         lig_ff: str = "espaloma",
         boxShape: str = "dodecahedron",
         padding: float = 1.0,
-        ionicStrength: float = 0.0,
+        ionicStrength: float = 0.15,
         is_membrane: bool = False,
         lipid_type: str = None,
         variants: dict = None,
         run_equilibration: bool = True,
         equilibration_scheme: str = "autopath/data/equilibration.json",
         run_sMDpulling: bool = True,
-        sMD_pulling_dist: float = 0.5,  # nm
+        sMD_pulling_dir: str = "forward",  # "forward" or "backward"
         sMD_time: int = 1,  # ns
         sMD_steps_per_move: int = 250,  # 1 ps
-        sMD_pulling_force: float = 20000,  # KJ/mol/nm2
+        sMD_dx_per_move: float = 0.001,  # nm
+        sMD_spring_cte: float = 50,  # KJ/mol/nm2/atom
         sMD_replicas: int = 5,
         sMD_autostop: bool = False,
         extract_milestones: bool = True,
-        n_milestones: int = 10,
-        run_relax: bool = True,
-        relax_steps: int = 25000,
+        n_milestones: int = 5,
         run_metadynamics: bool = True,
-        mMD_walkers: int = 10,
-        mMD_time: int = 1,  # ns
-        mMD_bias_factor: int = 3,
-        mMD_hill_height: float = 0.3,  # Kcal/mol
+        mMD_time: int = 2,  # ns
+        mMD_bias_factor: int = 15,
+        mMD_bias_frequency: int = 2,  # ps
+        mMD_hill_height: float = 1.2,  # KJ/mol
         mMD_hill_width: float = 0.05,
     ):
 
@@ -58,12 +59,14 @@ class Config(object):
         self.pdb_path = pdb_path
         self.do_fix_pdb = do_fix_pdb
         self.pocket_selection = pocket_selection
+        self.use_murcko_scaffold = use_murcko_scaffold
         self.temperature = temperature
         self.random_state = random_state
 
         # Preparation
         self.run_preparation = run_preparation
         self.forcefield = forcefield
+        self.hydrogenMass = hydrogenMass
         self.lig_ff = lig_ff
         self.boxShape = boxShape
         self.padding = padding
@@ -78,24 +81,23 @@ class Config(object):
 
         # Steered MD
         self.run_sMDpulling = run_sMDpulling
+        self.sMD_pulling_dir = sMD_pulling_dir
         self.sMD_time = sMD_time  # ns
         self.sMD_replicas = sMD_replicas
-        self.sMD_pulling_dist = sMD_pulling_dist
-        self.sMD_steps_per_move = sMD_steps_per_move  # 1 ps
-        self.sMD_pulling_force = sMD_pulling_force  # KJ/mol/nm2
+        self.sMD_steps_per_move = sMD_steps_per_move
+        self.sMD_dx_per_move = sMD_dx_per_move
+        self.sMD_spring_cte = sMD_spring_cte  # KJ/mol/nm2/atom
         self.sMD_autostop = sMD_autostop
 
         # Milestones
         self.extract_milestones = extract_milestones
         self.n_milestones = n_milestones
-        self.run_relax = run_relax
-        self.relax_steps = relax_steps
 
         # Metadynamics
         self.run_metadynamics = run_metadynamics
-        self.mMD_walkers = mMD_walkers
         self.mMD_time = mMD_time
         self.mMD_bias_factor = mMD_bias_factor
+        self.mMD_bias_frequency = mMD_bias_frequency
         self.mMD_hill_height = mMD_hill_height
         self.mMD_hill_width = mMD_hill_width
 

@@ -23,10 +23,10 @@ from openmmforcefields.generators import (
 )
 
 # RDKit imports
-from rdkit.Chem import SDMolSupplier
+from rdkit import Chem
 
 # AutoPath imports
-from autopath.utils import add_variants, save_pdb, save_system, save_amber_topology
+from autopath.utils import assign_bondOrders, add_variants, save_pdb, save_system, save_amber_files
 
 
 class SystemPreparation:
@@ -34,17 +34,14 @@ class SystemPreparation:
         self,
         forcefield: list = [
             "amber14-all.xml",
-            "amber14/tip3pfb.xml",
-            "amber/tip3p_HFE_multivalent.xml",
-            '/gpfs/home/abarkdull/Forli/Manually_Prepared_Dataset/LILAC_DB_Non_Redundant/4zdy/charmm_gui/heme_params.xml'
+            "amber14/tip3pfb.xml"
         ],
         lig_ff: str = "espaloma",
-        allow_undefined_stereo: bool = True,
-        hydrogenMass: float = 3,
+        hydrogenMass: float = 1.5, # # in amu, 1.5 is the default in OpenMM
         boxShape: str = "dodecahedron",
-        padding: float = 1.0,
+        padding: float = 1.2,
         num_solvent: int = None,
-        ionicStrength: float = 0.0,
+        ionicStrength: float = 0.15,
         is_membrane: bool = False,
         lipid_type: str = None,
         ligand_com_z: float = 2.5, #nm
@@ -65,22 +62,27 @@ class SystemPreparation:
         os.makedirs(out_dir, exist_ok=True)
 
         self.forcefield = ForceField(*forcefield)
-        self.allow_undefined_stereo = allow_undefined_stereo
 
         self.hydrogenMass = (
     hydrogenMass * openmmunit.amu if hydrogenMass is not None else None
 )
         self.boxShape = boxShape  # cube, dodecahedron
 
-        if num_solvent is not None and padding is not None:
-            logging.error(
-                "The arguments 'num_solvent' and 'padding' are incompatible. Please specify only one."
-            )
-            exit(1)
-        if padding is not None:
-            self.padding = padding * openmmunit.nanometers
+        self.padding = padding
         self.num_solvent = num_solvent
-
+        if self.padding is not None:
+            self.padding = self.padding * openmmunit.nanometers
+            if num_solvent is not None:
+                logging.warning("Both 'num_solvent' and 'padding' were specified. 'padding' will be ignored.")
+                self.num_solvent = num_solvent
+                self.padding = None
+        elif self.num_solvent is not None:
+            self.num_solvent = num_solvent
+            self.padding = None
+        else:
+            logging.error("Either 'num_solvent' or 'padding' must be specified.")
+            exit(1)
+            
         self.ionicStrength = ionicStrength * openmmunit.molar
 
         self.is_membrane = is_membrane
@@ -122,32 +124,52 @@ class SystemPreparation:
         self.nb_cutoff = 1.0 * openmmunit.nanometers
         self.switchDistance = 0.9 * openmmunit.nanometers
 
-    def _sdf_to_mol(self, lig_sdf: str = None):
-        """Load ligand SDF and transform to OpenMM molecule"""
-        try:
-            rdkit_mol = SDMolSupplier(lig_sdf)[0]
-        except Exception as e:
-            logging.error(f"Something went wrong loading {lig_sdf}..\n{e}")
-            raise
+    def _ligand_to_mol(self, lig_fname: str = None, lig_smiles: str = None):
+        """Load ligand SDF/PDB and transform to OpenMM molecule"""
 
+        try:
+            if lig_fname.endswith(".pdb"):
+                rdkit_mol = Chem.MolFromPDBFile(lig_fname, removeHs=False)
+            elif lig_fname.endswith(".sdf") or lig_fname.endswith(".mol2"): # SDMolSupplier also works for mol2 files
+                rdkit_mol = Chem.SDMolSupplier(lig_fname, removeHs=False)[0]
+            else:
+                logging.error(f"Ligand file format not recognized. Please provide a .sdf or .pdb file.")
+                exit(1)
+        except Exception as e:
+            logging.error(f"Something went wrong loading {lig_fname}..\n{e}")
+            exit(1)
+            
+        # assign bond orders from SMILES if provided
+        if lig_smiles is not None:
+            rdkit_mol = assign_bondOrders(rdkit_mol, lig_smiles)
+            # save the fixed ligand
+            fixed_ligfname = os.path.join(self.out_dir, os.path.basename(lig_fname), "_fixed.sdf")
+            writer = Chem.SDWriter(fixed_ligfname)
+            for cid in range(rdkit_mol.GetNumConformers()):
+                writer.write(rdkit_mol, confId=-1)
+                    
         # Convert to OpenMM molecule
-        ligand = Molecule.from_rdkit(rdkit_mol, self.allow_undefined_stereo)
+        ligand = Molecule.from_rdkit(rdkit_mol, True)
+
         return ligand
 
     def _parametrize_ligand(self, ligand):
 
         if self.lig_ff == "ESPALOMA":
             template_generator = EspalomaTemplateGenerator(
-                molecules=ligand, forcefield="espaloma-0.3.2"
+                molecules=ligand, 
+                # template_generator_kwargs = {"reference_forcefield": "openff_unconstrained-2.2.1"}
+                # forcefield="espaloma-0.3.2"
             )
 
         elif self.lig_ff == "SMIRNOFF":
             template_generator = SMIRNOFFTemplateGenerator(
-                molecules=ligand, forcefield="openff-1.2.0"
+                molecules=ligand, 
+                # forcefield="openff-1.2.0"
             )
         elif self.lig_ff == "GAFF":
             template_generator = GAFFTemplateGenerator(
-                molecules=ligand, forcefield="gaff-2.11"
+                molecules=ligand,
             )
 
         # add the template generator to the ff
@@ -221,7 +243,7 @@ class SystemPreparation:
             if ligands is not None:
                 if isinstance(ligands, str):
                     logging.info(f"Parametrizing ligand {os.path.basename(ligands)}..")
-                    lig = self._sdf_to_mol(ligands)
+                    lig = self._ligand_to_mol(ligands)
                     ligand_topology, ligand_positions = self._parametrize_ligand(lig)
                     for res in ligand_topology.residues():
                         res.name ='UNK'
@@ -234,7 +256,7 @@ class SystemPreparation:
                         while chr(chain_id) in used_chains:
                             chain_id += 1
                         logging.info(f"Parametrizing ligand {lig_name}..")
-                        lig = self._sdf_to_mol(lig_path)
+                        lig = self._ligand_to_mol(lig_path, lig_smiles)
                         ligand_topology, ligand_positions = self._parametrize_ligand(lig)
                         for chain in ligand_topology.chains():
                             chain.id = chr(chain_id)
@@ -245,6 +267,7 @@ class SystemPreparation:
                         chain_id += 1
 
         # CASE: Ligand and membrane only
+        max_length = 0.0 * openmmunit.angstroms
         if protein is None and self.is_membrane:
 
             # Center ligand at 0,0,0
@@ -448,9 +471,19 @@ class SystemPreparation:
         os.makedirs(self.out_dir, exist_ok=True)
         save_system(system, f"{self.out_dir}/system.xml")
         save_pdb(modeller.topology, modeller.positions, f"{self.out_dir}/system.pdb")
-        save_amber_topology(
-            modeller.topology, modeller.positions, self.forcefield, self.out_dir
+        # This is why: https://parmed.github.io/ParmEd/html/openmm.html
+        openmm_system = self.forcefield.createSystem(
+            modeller.topology,
+            nonbondedMethod=PME,
+            nonbondedCutoff=self.nb_cutoff,
+            switchDistance=self.switchDistance,
+            removeCMMotion=True,
+            rigidWater=False, # DO NOT USE THIS, it will not work with parmed
+            hydrogenMass=self.hydrogenMass,
+            # constraints=app.HBonds, # DO NOT USE THIS, it will not work with parmed
         )
+
+        save_amber_files(modeller.topology, modeller.positions, openmm_system, self.out_dir)
 
         simulation_time = time.monotonic() - start_time
         logging.info(f"Finished system preparation in {simulation_time:.2f} seconds.")

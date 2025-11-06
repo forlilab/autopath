@@ -20,22 +20,54 @@ import parmed
 import pickle
 
 import MDAnalysis as mda
-from MDAnalysis.analysis import align
-from MDAnalysis.transformations import wrap
-from MDAnalysis.core.universe import Universe
 from MDAnalysis.analysis.rms import RMSD, RMSF
 from scipy.spatial.distance import cdist
+from MDAnalysis.analysis.distances import distance_array
+
+from scipy.spatial import KDTree
 
 import seaborn as sns
 import matplotlib.pyplot as plt
 import matplotlib.style as style
 style.use("fivethirtyeight")
 
-import pytraj as pt
-
 from rdkit import Chem
 from rdkit.Chem.Draw import SimilarityMaps
+from rdkit.Chem.Scaffolds import MurckoScaffold
+from rdkit.Chem import AllChem
 
+from deeptime.clustering import RegularSpace
+
+def setup_logging(logfile: str = 'autopath.log',
+                  log_level: str = "INFO", 
+                  ) -> logging.Logger:
+    """Set up logging for the application at the entry point, i.e. cli scripts."""
+
+    allowed_log_levels = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
+    if log_level.upper() not in allowed_log_levels:
+        raise ValueError(f"Invalid log level: {log_level}. It should be one of {allowed_log_levels}")
+    
+    os.makedirs(os.path.dirname(logfile), exist_ok=True)
+
+    logger = logging.getLogger("autopath")
+    logger.setLevel(log_level.upper())
+
+    # Prevent duplicate handlers if setup_logging is called multiple times
+    if logger.handlers:
+        return logger  
+
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    file_handler = logging.FileHandler(logfile, mode="a")
+    file_handler.setFormatter(formatter)
+
+    logger.addHandler(stream_handler)
+    logger.addHandler(file_handler)
+    logger.propagate = False
+
+    return logger
 
 def save_model(model, filename):
     with open(filename, 'wb') as file:
@@ -55,6 +87,8 @@ def align_trajectory(
     strip_mask: str = None,  #':HOH,NA,CL,K,POP'
     out_fname: str = None,
 ) -> None:
+
+    import pytraj as pt
 
     ptraj = pt.iterload(traj_file, prmtop_file, stride=stride)
     ptraj = ptraj.autoimage()
@@ -172,33 +206,28 @@ def load_system(system_path: str) -> System:
         exit(1)
     return system
 
-
-def save_amber_topology(
+def save_amber_files(
     topology: app.Topology = None,
     positions: list = None,
-    forcefield: app.ForceField = None,
+    system: System = None,
     out_path: str = None,
 ) -> None:
 
+    """Saves the OpenMM system and topology to AMBER format files.
+    https://parmed.github.io/ParmEd/html/openmm.html
+    If system is None, it will not save the data from system but still will save the topology and positions. 
+    """
     os.makedirs(out_path, exist_ok=True)
-    new_system = forcefield.createSystem(
-        topology,
-        nonbondedMethod=app.PME,
-        nonbondedCutoff=10 * openmmunit.angstrom,
-        removeCMMotion=False,
-        rigidWater=False,
-        hydrogenMass=3.0 * openmmunit.amu,
-    )
 
     parmed_structure = parmed.openmm.topsystem.load_topology(
-        topology, new_system, positions
+        topology, system, positions
     )
 
     parmed_structure.save(f"{out_path}/system.prmtop", overwrite=True, format="amber")
-    parmed_structure.save(f"{out_path}/system.rst7", overwrite=True, format="rst7")
+    if positions is not None:
+        parmed_structure.save(f"{out_path}/system.rst7", overwrite=True, format="rst7")
 
     return
-
 
 def select_platform(platform_name: str = None, device_index: str = "0"):
 
@@ -251,9 +280,9 @@ def add_reporters(
 
     simulation.reporters.append(
         DCDReporter(
-            f"{out_dir}/trajectory_{suffix}.dcd",
+            f"{out_dir}/{suffix}.dcd",
             reportInterval=logperiod,
-            enforcePeriodicBox=False,  # WARNING this compromises autoimaging afterwards in some cases
+            enforcePeriodicBox=None,  # WARNING this compromises autoimaging afterwards in some cases
         )
     )
 
@@ -261,7 +290,7 @@ def add_reporters(
 
         simulation.reporters.append(
             StateDataReporter(
-                f"{out_dir}/statistics_{suffix}.csv",
+                f"{out_dir}/{suffix}.csv",
                 logperiod,
                 step=True,
                 time=True,
@@ -332,6 +361,201 @@ def add_variants(modeller: Modeller, variants_dict: dict = None) -> Modeller:
 
     return modeller 
 
+def get_pocket_atoms(u:mda.Universe, 
+                     pocket_selection:str, 
+                     ligand_selection:str,
+                     cutoff: float = 6.0
+                     ) -> mda.AtomGroup:
+    """Get the pocket atoms based on a user provided selection 
+    or the ligand residue name and some default heuristics."""
+
+    u.trajectory[-1]  # set pointer to last frame if its a trajectory
+
+    if pocket_selection is None and ligand_selection is None:
+        logging.error("No pocket selection or ligand residue name provided.")
+        return []
+
+    # If a custom pocket selection is provided, use it directly
+    if pocket_selection is not None:
+        pocket_atoms = u.select_atoms(pocket_selection)
+        pocket_atoms_indices = [atom.index for atom in pocket_atoms]
+    # If no custom selection, use the ligand residue name to define the pocket
+    elif ligand_selection is not None:
+        # backbone_names = ["N", "CA", "C", "O"]
+        ligand = u.select_atoms(ligand_selection)
+        protein_residues = u.select_atoms(f"protein and around {cutoff} group ligand", ligand=ligand).residues
+        pocket_atoms_indices = [atom.index for res in protein_residues 
+                                for atom in res.atoms
+                                if atom.name in ['CA']]
+        
+    if len(pocket_atoms_indices) == 0:
+        logging.error(f"No atoms found for the provided pocket selection")
+        return []
+    else:
+        # convert to MDAnalysis AtomGroup
+        pocket_atoms = u.select_atoms(f"index {' '.join(map(str, pocket_atoms_indices))}")
+        return pocket_atoms
+
+def reduce_to_murcko_scaffold(u, lig_resname: str, img_name: str = None):
+    """
+    Reduce ligand atoms to their Murcko scaffold representation.
+
+    Returns
+    -------
+    reduced_ligand : MDAnalysis.AtomGroup
+    highlight_rdk_indices : list of int (for RDKit visualization)
+    mol : RDKit Mol object (with Hs removed and 2D coords)
+    """
+    if img_name is None:
+        img_name = f"ligand_{lig_resname}_murcko.png"
+
+    ligand_all = u.select_atoms(f"resname {lig_resname}")
+    mol = ligand_all.convert_to('RDKIT')
+    sel_atoms = mol.GetAtoms()
+
+    try:
+        murcko = MurckoScaffold.GetScaffoldForMol(mol)
+        murcko_match = mol.GetSubstructMatch(murcko)
+        murcko_atom_names = [sel_atoms[i].GetProp('_MDAnalysis_name') for i in murcko_match]
+        reduced_ligand = u.select_atoms(f'resname {lig_resname} and name {" ".join(murcko_atom_names)}')
+
+        return reduced_ligand, murcko_match, mol
+
+    except Exception as e:
+        logging.warning(f"Could not extract Murcko scaffold: {e}")
+        return u.select_atoms(f'resname {lig_resname} and not name H*'), [], mol
+
+def get_ligand_anchor_atoms(
+    u,
+    lig_resname: str,
+    pocket_sel: str = "protein and around 5 resname UNK and not name H*",
+    mode: str = "ha",
+    frames: int = 100,
+    n_atoms: int = 5,
+    reduce_before: bool = False,
+    expand_rings: bool = False,
+    out_dir: str = None,
+    verbose: bool = True,
+):
+    """
+    Select anchor atoms in the ligand for pulling and optionally visualize them.
+
+    If mode="murcko", returns Murcko scaffold atoms.
+
+    Parameters
+    ----------
+    reduce_before : bool
+        If True, reduce ligand to Murcko scaffold before anchor selection.
+    """
+    # FIXME this is buggy
+    
+    img_name = f"{out_dir}/pulling_{lig_resname}_{mode}.png"
+
+    ligand_full = u.select_atoms(f"resname {lig_resname}")
+    ligand_ha = u.select_atoms(f"resname {lig_resname} and not name H*")
+
+    if ligand_full.n_atoms == 0:
+        raise ValueError(f"No atoms found for ligand {lig_resname}.")
+
+    # Reduce first if requested
+    if reduce_before:
+        ligand, highlight_rdk_indices, mol = reduce_to_murcko_scaffold(u, lig_resname, img_name)
+    else:
+        ligand = ligand_full
+        mol = ligand_full.convert_to("RDKIT")
+        mol = Chem.RemoveAllHs(mol)
+        highlight_rdk_indices = []
+
+    u.trajectory[-1]  # Ensure we are at the last frame
+    pocket = u.select_atoms(pocket_sel)
+    anchor = []
+
+    if mode == 'lig_ha':
+        ligand_ha = u.select_atoms(f"resname {lig_resname} and not name H*")
+        anchor =[ligand_ha.atoms[i].index for i in range(len(ligand_ha))]
+        # mol = ligand_full.convert_to("RDKIT")
+        # sel_atoms = mol.GetAtoms()
+
+    if mode == "murcko":
+        ligand, anchor_indices, mol = reduce_to_murcko_scaffold(u, lig_resname, img_name)
+        anchor = [ligand.atoms[i].index for i in range(len(ligand))]
+
+    elif mode == "lig_com":
+        com = ligand.center_of_mass()
+        dists = np.linalg.norm(ligand.positions - com, axis=1)
+        anchor = ligand.atoms[np.argsort(dists)[:n_atoms]].indices
+
+    elif mode == "pocket_closest":
+        pocket_com = pocket.center_of_mass()
+        dists = np.linalg.norm(ligand.positions - pocket_com, axis=1)
+        anchor = ligand.atoms[np.argsort(dists)[:n_atoms]].indices
+
+    elif mode == "contacts":
+        contact_counts = np.zeros(len(ligand))
+        for ts in u.trajectory[:frames]:
+            dmat = distance_array(ligand.positions, pocket.positions)
+            contacts = (dmat < 3.5).any(axis=1)
+            contact_counts += contacts
+        top_indices = np.argsort(contact_counts)[-n_atoms:]
+        anchor = ligand.atoms[top_indices].indices
+
+    elif mode == "inertia":
+        coords = ligand.positions - ligand.center_of_mass()
+        inertia_tensor = np.dot(coords.T, coords)
+        eigvals, eigvecs = np.linalg.eigh(inertia_tensor)
+        principal_axis = eigvecs[:, np.argmin(eigvals)]
+        projections = np.dot(coords, principal_axis)
+        anchor = ligand.atoms[np.argsort(projections)[:n_atoms]].indices
+        # anchor = ligand.atoms[np.argsort(projections)[-n_atoms:]].indices
+
+    elif mode == "weighted_com":
+        contact_counts = np.zeros(len(ligand))
+        for ts in u.trajectory[:frames]:
+            dmat = distance_array(ligand.positions, pocket.positions)
+            contacts = (dmat < 3.5).any(axis=1)
+            contact_counts += contacts
+        top_indices = np.argsort(contact_counts)[-n_atoms:]
+        anchor_coords = ligand.positions[top_indices]
+        anchor_com = anchor_coords.mean(axis=0)
+        dists = np.linalg.norm(ligand.positions - anchor_com, axis=1)
+        anchor = ligand.atoms[np.argsort(dists)[:n_atoms]].indices
+
+    # else:
+    #     raise ValueError(f"Unknown mode '{mode}'")
+
+    if expand_rings:
+        rdk_anchor_indices = []
+        idx_map = {a.index: i for i, a in enumerate(ligand_full.atoms)}
+        for idx in anchor:
+            if idx in idx_map:
+                rdk_anchor_indices.append(idx_map[idx])
+        ring_info = mol.GetRingInfo()
+        anchor_rings = [set(ring) for ring in ring_info.AtomRings() if any(i in ring for i in rdk_anchor_indices)]
+        expanded_rdk_indices = set()
+        for ring in anchor_rings:
+            expanded_rdk_indices.update(ring)
+        expanded_mda_indices = [ligand_full.atoms[i].index for i in expanded_rdk_indices]
+        anchor = list(set(anchor).union(expanded_mda_indices))
+        print(f"[get_ligand_anchor_atoms] Expanded to include rings: {expanded_mda_indices}")
+
+
+    # Draw 2D image with highlights
+    try:
+        idx_map = {a.index: i for i, a in enumerate(ligand_full.atoms)}
+        highlight_rdk_indices = [idx_map[i] for i in anchor if i in idx_map]
+        Chem.rdDepictor.Compute2DCoords(mol)
+        mol = Chem.RemoveHs(mol)
+        img = Chem.Draw.MolToImage(mol, size=(300, 300), highlightAtoms=highlight_rdk_indices)
+        img.save(img_name)
+    except Exception as e:
+        logging.warning(f"Could not generate 2D image with highlights: {e}")
+
+    if verbose:
+        print(f"[get_ligand_anchor_atoms] Anchor atoms selected ({mode}): {anchor}")
+
+    return anchor
+
+
 def get_protein_ha(topology: app.Topology, lig_name: str = "UNK") -> Tuple[list, list]:
 
     ATOMSET = set(("HOH", "WAT", "POP", "K", "CL", "NA", lig_name))
@@ -358,7 +582,7 @@ def get_protein_ha(topology: app.Topology, lig_name: str = "UNK") -> Tuple[list,
 
 
 def get_ligand_ha(topology: app.Topology, lig_name: str = "UNK") -> Tuple[list, list]:
-    """get names for all non-hydrogen ligand atoms"""
+    """get indices and names for all non-hydrogen ligand atoms"""
 
     residues = topology.residues()
     lig_ha_idx = []
@@ -367,11 +591,6 @@ def get_ligand_ha(topology: app.Topology, lig_name: str = "UNK") -> Tuple[list, 
         if r.name == lig_name:
             lig_ha_names = [a.name for a in r.atoms() if not a.name.startswith("H")]
             lig_ha_idx = [a.index for a in r.atoms() if not a.name.startswith("H")]
-
-    # mg_names = [a.name for a in topology.atoms() if a.name == "MG"]
-    # mg_idx = [a.index for a in topology.atoms() if a.name == "MG"]
-    # lig_ha_idx.extend(mg_idx)
-    # lig_ha_names.extend(mg_names)
 
     return lig_ha_idx, lig_ha_names
 
@@ -390,57 +609,63 @@ def get_pocket_ha(topology: app.Topology, pocket_resid: list[int] = None) -> lis
 
     return pocket_ha_idx
 
-def get_COM_dist(simulation, groupA:list[int]=None, groupB:list[int]=None, weighByMass:bool=True) -> float:
+def get_center(positions, atoms, group, weighByMass):
+    """Calculate the center of mass (COM) or center of geometry (COG) for a group of atoms in OpenMM."""
+
+    group_positions = positions[group]  # Get positions for the group
+
+    if weighByMass:
+        masses = np.array([atom.element.mass.value_in_unit(openmmunit.dalton) for atom in atoms if atom.index in group])
+        if sum(masses) == 0:
+            logging.warning("All atoms in the group have zero mass. Using simple mean instead.")
+            masses = None
+        center = np.average(group_positions, axis=0, weights=masses)  # Weighted average for COM
+    else:
+        center = np.mean(group_positions, axis=0)  # Simple mean for COG
+    return center
+    
+def get_COM_dist(simulation, 
+                 groupA:list[int]=None, 
+                 groupB:list[int]=None,
+                 weighByMass:bool=True
+                 ) -> float:
+    """Calculate the distance between the centers of mass (COM) or centers of geometry (COG) of two groups of atoms in OpenMM."""
     
     # Get positions
     state = simulation.context.getState(getPositions=True, getVelocities=False)
     positions = state.getPositions(asNumpy=True) / openmmunit.nanometers
     atoms = [atom for atom in simulation.topology.atoms()]
 
-    # Function to calculate center (COM or COG)
-    def _get_center(group, weighByMass):
-        group_positions = positions[group]  # Get positions for the group
-
-        if weighByMass:
-            masses = np.array([atom.element.mass.value_in_unit(openmmunit.dalton) for atom in atoms if atom.index in group])
-            center = np.average(group_positions, axis=0, weights=masses)  # Weighted average for COM
-        else:
-            center = np.mean(group_positions, axis=0)  # Simple mean for COG
-        return center
-
     # Calculate centers for both groups and their distance
-    centerA = _get_center(groupA, weighByMass)
-    centerB = _get_center(groupB, weighByMass)
+    centerA = get_center(positions, atoms, groupA, weighByMass)
+    centerB = get_center(positions, atoms, groupB, weighByMass)
     dist = np.linalg.norm(centerA - centerB)
 
     return dist  # Unitless, but effectively in nanometers because.... openMM
 
 
-def calculate_com_distance(
-    u, ligand_atoms=None, pocket_atoms=None, weighByMass: bool = True
-) -> pd.DataFrame:
-    # Distance will be in Angstroms because of MDanalysis
+def calculate_com_distance(u, ligand_atoms=None, pocket_atoms=None, weighByMass: bool = True, wrap: bool = True) -> np.ndarray:
+    """ Calculate the distance between the center of mass (COM) or center of geometry (COG) between two atom groups in an MDAnalysis Universe."""
     distances = []
     for ts in u.trajectory:
         if weighByMass:
-            lig_com = ligand_atoms.center_of_mass(wrap=True)
-            prot_com = pocket_atoms.center_of_mass(wrap=True)
+            lig_com = ligand_atoms.center_of_mass(wrap=wrap)
+            prot_com = pocket_atoms.center_of_mass(wrap=wrap)
         else:
-            lig_com = ligand_atoms.center_of_geometry(wrap=True)
-            prot_com = pocket_atoms.center_of_geometry(wrap=True)
+            lig_com = ligand_atoms.center_of_geometry(wrap=wrap)
+            prot_com = pocket_atoms.center_of_geometry(wrap=wrap)
 
         distances.append(np.linalg.norm(prot_com - lig_com))
 
-    return pd.DataFrame(distances, columns=["com_d"], index=range(len(distances)))
+    return np.array(distances) # Distance will be in Angstroms because of MDanalysis
 
-def compute_rmsd(u, u_ref,
-                    alig_select:str='backbone', 
-                    groupselections={}, 
-                    save_aligned=False,
-                    aligned_filename='aligned_trajectory.dcd',
-                    do_plot=True,
-                    out_dir=None
-                    ) -> pd.DataFrame:
+def compute_rmsd(u, 
+                u_ref,
+                alig_select:str='backbone', 
+                groupselections:dict={}, 
+                aligned_fname:str=None,
+                plots_outdir:str=None,
+                ) -> pd.DataFrame:
     r = RMSD(u, 
              u_ref,
              select=alig_select,
@@ -451,423 +676,65 @@ def compute_rmsd(u, u_ref,
     columns = ['frame','time (ps)', f'RMSD_selected_alignment'] + [f'RMSD_{group}' for group in groupselections.keys()]
     rmsd_df = pd.DataFrame(rmsd_results, columns=columns)
 
-    if save_aligned:
-        with mda.Writer(aligned_filename, n_atoms=u.atoms.n_atoms) as W:
+    if aligned_fname is not None:
+        # Align the trajectory to the reference and save it
+        with mda.Writer(aligned_fname, n_atoms=u.atoms.n_atoms) as W:
             for ts in u.trajectory:
                 W.write(u.atoms)
 
-    if do_plot:
-        
+    if plots_outdir is not None:
         plt.figure(figsize=(10, 5))
         for col in columns[3:]:
             sns.lineplot(x='frame', y=col, data=rmsd_df)
             plt.xlabel('Frame');            plt.ylabel(f'RMSD (A)')
             plt.title(f'{col} RMSD')
             plt.tight_layout()
-            plt.savefig(f'{out_dir}/{col}.png')
+            plt.savefig(f'{plots_outdir}/rmsd_{col}.png')
             plt.close()
 
     return rmsd_df
 
-def plot_atomic_rmsf(u, lig_resname:str='UNK', outname:str='rmsf.png', log_rmsf:bool=False):
+def match_cluster_centroids(X:np.ndarray, centroids:np.ndarray, N:int=1):
+    """A function to find the N closest points to each centroid in the dataset X.
+    Centroids may not be real data points, so we need to find the closest real data points to them.
     """
-    Draws a RMSF (Root Mean Square Fluctuation) plot for a specified ligand and saves it as an image file.
-    Parameters:
-    -----------
-    u : MDAnalysis.Universe
-        The MDAnalysis universe object containing the molecular dynamics trajectory and topology.
-    lig_resname : str, optional
-        The residue name of the ligand to analyze (default is 'UNK').
-    outname : str, optional
-        The name of the output image file where the RMSF plot will be saved (default is 'rmsf.png').
-    log_rmsf : bool, optional
-        If True, logs the RMSF values to a CSV file with the same name as the output image (default is False).
-    Returns:
-    --------
-    None
-        This function does not return any value. It saves the RMSF plot and optionally logs the RMSF values.
-    """
+    kdtree = KDTree(X)
+    closest_points = []
+    for centroid in centroids:
+        _, indices = kdtree.query(centroid, k=N)
+        closest_points.append(indices)
 
-    lig_select = u.select_atoms(f'resname {lig_resname}')
-    r = RMSF(atomgroup=lig_select).run()
-    probe_mol = lig_select.convert_to('RDKIT')
-    probe_mol.Compute2DCoords()
-    probe_mol = Chem.RemoveHs(probe_mol)
-    fig = SimilarityMaps.GetSimilarityMapFromWeights(probe_mol, r.rmsf, step=0.01, alpha=0.3, contourLines=5) 
-    fig.savefig(outname, bbox_inches='tight')
-    
-    # Optionally, log the RMSF values for further analysis
-    if log_rmsf:
-        log_fname = os.path.splitext(outname)[0]
-        with open(f'{log_fname}.csv', 'w') as f:
-            for res_id, rmsf_value in enumerate(r.rmsf):
-                f.write(f'{res_id},{rmsf_value:.3f}\n')
-    return
+    return closest_points
 
-# def print_current_forces(system: System = None) -> None:
-#     for index, fc in enumerate(system.getForces()):
-#         logging.info(
-#             f"Force Index:{index} | Name: {fc.getName()} | Group: {fc.getForceGroup()}"
-#         )
-#     return
+def cluster_sMD_trajectories(u: mda.Universe, X:np.ndarray, 
+                             n_clusters:int, 
+                             min_dist:float,
+                             out_dir:str
+                             ) -> Tuple[np.ndarray, np.ndarray]:
 
-def print_current_forces(system):
-    """
-    Print a summary of all forces in an OpenMM system and the system's box vectors.
-    """
+    # cluster_estimator = KMeans(n_clusters=5)
+    cluster_estimator = RegularSpace(dmin=min_dist, max_centers=n_clusters)
+    fitted_model = cluster_estimator.fit(X).fetch_model()
+    cluster_centers = fitted_model.cluster_centers
+    labels = fitted_model.transform(X)
 
-    print("\n--- Force Summary ---")
-    for idx, force in enumerate(system.getForces()):
-        print(f"\n  Force {idx + 1}: {type(force).__name__}")
+    # sort the array by the second column (COM distance) so milestone 0 is the closest
+    sorted_indices = np.argsort(cluster_centers[:, 1])
+    sorted_cluster_centers = cluster_centers[sorted_indices]
+    closest_frames = match_cluster_centroids(X, sorted_cluster_centers) 
 
-        if isinstance(force, HarmonicBondForce):
-            print(f"    Number of bonds: {force.getNumBonds()}")
+    # for i, idx in enumerate(closest_frames):
+    #     dist = np.linalg.norm(X[idx] - cluster_centers[i])
+    #     logging.info(f"Cluster {i}: Closest frame is {idx} (distance = {dist:.3f})")
 
-        elif isinstance(force, HarmonicAngleForce):
-            print(f"    Number of angles: {force.getNumAngles()}")
+    # Write each representative frame to a PDB
+    u.trajectory[0]  # reset
+    for i, frame_index in enumerate(closest_frames):
+        u.trajectory[frame_index]
+        with mda.Writer(os.path.join(f"{out_dir}", f"milestone_{i+1}_frame_{frame_index}.pdb"), u.atoms.n_atoms) as W:
+            W.write(u.atoms)
 
-        elif isinstance(force, PeriodicTorsionForce):
-            print(f"    Number of torsions: {force.getNumTorsions()}")
-
-        elif isinstance(force, NonbondedForce):
-            print(f"    Number of particles: {force.getNumParticles()}")
-            print(f"    Cutoff distance: {force.getCutoffDistance()}")
-            if force.getUseSwitchingFunction():
-                print(f"    Switching distance: {force.getSwitchingDistance()}")
-            print(f"    Nonbonded method: {force.getNonbondedMethod()}")
-
-        elif isinstance(force, CustomExternalForce):
-            print(f"    Number of particles with restraint: {force.getNumParticles()}")
-            print(f"    Energy function: {force.getEnergyFunction()}")
-
-            # Global parameters
-            num_globals = force.getNumGlobalParameters()
-            if num_globals > 0:
-                print("    Global parameters:")
-                for p in range(num_globals):
-                    name = force.getGlobalParameterName(p)
-                    value = force.getGlobalParameterDefaultValue(p)
-                    # Convert with units
-                    value_quantity = value * unit.kilojoules_per_mole / unit.nanometers**2
-                    value_converted = value_quantity.in_units_of(
-                        unit.kilocalories_per_mole / unit.angstroms**2
-                    )
-                    print(f"      {name} = {value_converted}")
-
-        elif isinstance(force, MonteCarloMembraneBarostat):
-            print(f"    Default pressure: {force.getDefaultPressure()}")
-            print(f"    Default surface tension: {force.getDefaultSurfaceTension()}")
-            print(f"    Default temperature: {force.getDefaultTemperature()}")
-            print(f"    Frequency: {force.getFrequency()}")
-            print(f"    XY mode: {force.getXYMode()}")
-            print(f"    Z mode: {force.getZMode()}")
-            print(f"    Random seed: {force.getRandomNumberSeed()}")
-
-        elif isinstance(force, CustomCentroidBondForce):
-            print(f"    Number of groups: {force.getNumGroups()}")
-            print(f"    Number of bonds: {force.getNumBonds()}")
-            print(f"    Energy function: {force.getEnergyFunction()}")
-
-            # Global parameters
-            num_globals = force.getNumGlobalParameters()
-            if num_globals > 0:
-                print("    Global parameters:")
-                for p in range(num_globals):
-                    name = force.getGlobalParameterName(p)
-                    value = force.getGlobalParameterDefaultValue(p)
-                    print(f"      {name} = {value}")
-
-            # Per-bond parameters
-            num_bond_params = force.getNumPerBondParameters()
-            if num_bond_params > 0:
-                print("    Per-bond parameters:")
-                param_names = [force.getPerBondParameterName(pp) for pp in range(num_bond_params)]
-                print(f"      Names: {param_names}")
-                for b in range(min(5, force.getNumBonds())):
-                    groups, params = force.getBondParameters(b)
-                    print(f"      Bond {b}: groups={groups}, params={params}")
-
-        else:
-            print("    (No specific summary for this force type)")
-
-    # Print box vectors
-    print("\n--- Box Vectors ---")
-    a, b, c = system.getDefaultPeriodicBoxVectors()
-    print(f"  a = {a}")
-    print(f"  b = {b}")
-    print(f"  c = {c}")
-
-def _remove_force(force_name: str = None, system: System = None, simulation=None):
-    """Remove a force from an OpenMM system based on its name."""
-    counter = 0
-    for index, fc in enumerate(system.getForces()):
-        if fc.getName() == force_name:
-            simulation.context.getSystem().removeForce(index)
-            logging.info(f"Removing existing {force_name} force")
-            counter += 1
-            print_current_forces(system)
-    if counter == 0:
-        logging.warning(f"No force was removed, check that {force_name} exist")
-        print_current_forces(system)
-
-    return
-
-
-def add_COM_force(
-    system: System = None,
-    group_A: list = None,
-    group_B: list = None,
-    fc_pull=None,
-    r0=None,
-    force_group: Optional[int] = 15,
-):
-    force = CustomCentroidBondForce(2, "0.5 * fc_pull * (distance(g1,g2)-r0_COM_force)^2")
-    force.addGlobalParameter("r0_COM_force", r0)
-    force.addPerBondParameter("fc_pull")
-
-    # Provide equal weights for each atom (non-zero)
-    weights_A = [1.0 for _ in group_A]
-    weights_B = [1.0 for _ in group_B]
-
-    force.addGroup(group_A, weights_A)
-    force.addGroup(group_B, weights_B)
-
-    force.addBond([0, 1], [fc_pull])
-    force.setUsesPeriodicBoundaryConditions(True)
-    force.setForceGroup(force_group)
-    system.addForce(force)
-
-    return
-
-
-def add_harmonic_restraints(
-    system: System = None,
-    positions: list = None,
-    topology: app.Topology = None,
-    atom_idx_list: list[int] = None,
-    restraint_force: int = 5,
-    force_name: str = "k",
-    force_group: int = 12,
-):
-    """
-    Function to add positional harmonic restraints to a set of atoms
-    """
-
-    atoms = topology.atoms()
-
-    force = CustomExternalForce(f"{force_name}*periodicdistance(x, y, z, x0, y0, z0)^2")
-    force_amount = (
-        restraint_force * openmmunit.kilocalories_per_mole / openmmunit.angstroms**2
-    )
-    force.addGlobalParameter(force_name, force_amount)
-    force.addPerParticleParameter("x0")
-    force.addPerParticleParameter("y0")
-    force.addPerParticleParameter("z0")
-
-    counter = 0
-    for i, (atom_crd, atom) in enumerate(zip(positions, atoms)):
-        if atom.index in atom_idx_list:
-            force.addParticle(i, atom_crd.value_in_unit(openmmunit.nanometers))
-            counter += 1
-    logging.info(f"{counter} atoms will be restrained")
-    force.setName(force_name)
-    force.setForceGroup(force_group)
-    system.addForce(force)
-
-    return
-
-def add_flatbottom_XY_restraints(
-    system: System = None,
-    simulation: app.Simulation = None,
-    restrain_indexes: List[int] = None,
-    r0: float = None,
-    upper_wall: float = 0.1,
-    K_flat: float = 200,
-    force_group: Optional[int] = 31,
-):
-    
-    initial_positions = simulation.context.getState(getPositions=True).getPositions()
-
-    # Define the flat-bottom restraint potential
-    fb_eq = """
-    k_flat/2 * max(sqrt((x - x0)^2 + (y - y0)^2) - upper_wall, r0)^2
-    """
-    # fb_eq = """
-    # (k_flat/2)*max(periodicdistance(x, y, x0, y0) - upper_wall, r0)^2
-    # """
-
-    # Create the CustomExternalForce object
-    upper_wall_rest = CustomExternalForce(fb_eq)
-
-    # Get the initial positions of the ligand atoms
-    ligand_positions = [initial_positions[index] for index in restrain_indexes]
-
-    # Add per-particle parameters for the reference position
-    upper_wall_rest.addPerParticleParameter("x0")
-    upper_wall_rest.addPerParticleParameter("y0")
-
-    # Add global parameters
-    upper_wall_rest.addGlobalParameter("upper_wall", upper_wall * openmmunit.nanometer)
-    upper_wall_rest.addGlobalParameter("r0", r0 * openmmunit.nanometer)
-    upper_wall_rest.addGlobalParameter("k_flat", K_flat * openmmunit.kilojoules_per_mole)
-
-    # Assign the reference coordinates to each particle
-    for particle, positions in zip(restrain_indexes, ligand_positions):
-        upper_wall_rest.addParticle(particle, [positions.x, positions.y])
-
-    # Set the force group
-    upper_wall_rest.setForceGroup(force_group)
-
-    # Add the force to the system
-    system.addForce(upper_wall_rest)
-
-    return None
-
-def add_funnel_restraints(
-    system: System,
-    host_index: List[int],
-    guest_index: List[int],
-    k_xy: Optional[openmmunit.Quantity] = 10.0
-    * openmmunit.kilocalorie_per_mole
-    / openmmunit.angstrom**2,
-    z_cc: Optional[openmmunit.Quantity] = 11.0 * openmmunit.angstrom,
-    alpha: Optional[openmmunit.Quantity] = 35.0 * openmmunit.degrees,
-    R_cylinder: Optional[openmmunit.Quantity] = 1.0 * openmmunit.angstrom,
-    force_group: Optional[int] = 10,
-):
-    """
-    Applies a funnel potential restraint to a guest molecule.
-    Limongelli, V., Bonomi, M., & Parrinello, M. (2013). Funnel metadynamics as accurate binding free-energy method. Proceedings of the National Academy of Sciences, 110(16), 6358-6363.
-    https://github.com/jeff231li/funnel_potential
-    """
-
-    # Funnel potential string expression
-    funnel = CustomCentroidBondForce(
-        2,
-        "U_funnel + U_cylinder;"
-        "U_funnel = step(z_cc - abs(r_z))*step(r_xy - R_funnel)*Wall_funnel;"
-        "U_cylinder = step(abs(r_z) - z_cc)*step(r_xy - R_cylinder)*Wall_cylinder;"
-        "Wall_funnel = 0.5 * k_xy * (r_xy - R_funnel)^2;"
-        "Wall_cylinder = 0.5 * k_xy * (r_xy - R_cylinder)^2;"
-        "R_funnel = (z_cc-abs(r_z))*tan(alpha) + R_cylinder;"
-        "r_xy = sqrt((x2 - x1)^2 + (y2 - y1)^2);"
-        "r_z = z2 - z1;",
-    )
-    funnel.setUsesPeriodicBoundaryConditions(False)
-    funnel.setForceGroup(force_group)
-
-    # Funnel parameters
-    funnel.addGlobalParameter("k_xy", k_xy)
-    funnel.addGlobalParameter("z_cc", z_cc)
-    funnel.addGlobalParameter("alpha", alpha)
-    funnel.addGlobalParameter("R_cylinder", R_cylinder)
-
-    # Add host and guest indices
-    g1 = funnel.addGroup(host_index, [1.0 for i in range(len(host_index))])
-    g2 = funnel.addGroup(guest_index, [1.0 for i in range(len(guest_index))])
-
-    # Add bond
-    funnel.addBond([g1, g2], [])
-
-    # Add force to system
-    system.addForce(funnel)
-
-    return
-
-
-def add_flatbottom_centroid_Z_restraint(
-    system,
-    group1_atoms: List[int],
-    group2_atoms: List[int],
-    upper_wall: Optional[openmmunit.Quantity] = 40.0 * openmmunit.angstrom,
-    k_flat:  Optional[openmmunit.Quantity] = 10.0
-    * openmmunit.kilocalorie_per_mole
-    / openmmunit.angstrom**2,
-    force_group: Optional[int] = 31
-):
-    """
-    Add a flat-bottom restraint along Z between centroids of two atom groups.
-    
-    Parameters:
-    - system: OpenMM System object
-    - group1_atoms: list of atom indices for the first group
-    - group2_atoms: list of atom indices for the second group
-    - upper_wall: radius (in nm) within which no force is applied
-    - k_flat: force constant (in kJ/mol/nm^2)
-    - force_group: OpenMM force group to assign this force to
-    """
-    # Define the flat-bottom potential along Z
-    restraint = CustomCentroidBondForce(2, """
-        step(d - upper_wall) * 0.5 * k_flat * (d - upper_wall)^2;
-        d = pointdistance(0, 0, z1, 0, 0, z2)
-    """)
-    
-    # Add global parameters
-    restraint.addGlobalParameter("upper_wall", upper_wall)
-    restraint.addGlobalParameter("k_flat", k_flat)
-    
-
-    
-    # Add the groups
-    g1 = restraint.addGroup(group1_atoms, [1.0 for i in range(len(group1_atoms))])
-    g2 = restraint.addGroup(group2_atoms, [1.0 for i in range(len(group2_atoms))])
-
-    # Add the restraint between the centroids
-    restraint.addBond([g1, g2], []) 
-    
-    # Set force group
-    if force_group is not None:
-        restraint.setForceGroup(force_group)
-    
-    # Enable periodic boundary conditions
-    restraint.setUsesPeriodicBoundaryConditions(False)
-    
-    # Add force to the system
-    system.addForce(restraint)
-
-
-
-def add_cylindrical_restraints(
-    system: System,
-    host_index: List[int],
-    guest_index: List[int],
-    k_xy: Optional[openmmunit.Quantity] = 7.0
-    * openmmunit.kilocalorie_per_mole
-    / openmmunit.angstrom**2,
-    R_cylinder: Optional[openmmunit.Quantity] = 10.0 * openmmunit.angstrom,
-    force_group: Optional[int] = 10,
-):
-    """
-    Applies a cylindrical restraint to a guest molecule, allowing it to move freely in the Z direction
-    but restricting its motion in the XY plane.
-
-    """
-
-    # Cylindrical restraint potential string expression
-    cylindrical_restraint = CustomCentroidBondForce(
-        2,
-        "U_cylinder;"
-        "U_cylinder = step(r_xy - R_cylinder) * 0.5 * k_xy * (r_xy - R_cylinder)^2;"
-        "r_xy = pointdistance(x1, y1, 0, x2, y2, 0);"
-    )
-    cylindrical_restraint.setUsesPeriodicBoundaryConditions(False)
-    cylindrical_restraint.setForceGroup(force_group)
-
-    # Cylindrical restraint parameters
-    cylindrical_restraint.addGlobalParameter("k_xy", k_xy)
-    cylindrical_restraint.addGlobalParameter("R_cylinder", R_cylinder)
-
-    # Add host and guest indices
-    g1 = cylindrical_restraint.addGroup(host_index, [1.0 for i in range(len(host_index))])
-    g2 = cylindrical_restraint.addGroup(guest_index, [1.0 for i in range(len(guest_index))])
-
-    # Add bond
-    cylindrical_restraint.addBond([g1, g2], [])
-
-    # Add force to system
-    system.addForce(cylindrical_restraint)
-
-    return
+    return labels, sorted_cluster_centers
 
 def find_closest_points(
     out_dir, x_min, x_max, x_grid_points, x_name, 
@@ -928,3 +795,22 @@ def find_closest_points(
     })
     
     return closest_df
+
+def assign_bondOrders(mol: Chem.Mol=None, template_smiles: str=None):
+    """Assign bond orders from a template molecule to a target molecule."""
+
+    try:
+        template_mol = Chem.MolFromSmiles(template_smiles)
+    except:
+        logging.error(f"Could not generate template molecule from {template_smiles}")
+        return mol
+    
+    # Assign bond orders from the template to the target molecule
+    new_mol = AllChem.AssignBondOrdersFromTemplate(template_mol, mol)
+    new_mol = Chem.AddHs(new_mol, addCoords=True)
+    
+    if new_mol is None:
+        logging.error(f"Could not assign bond orders from template {template_smiles}")
+        return mol
+            
+    return new_mol

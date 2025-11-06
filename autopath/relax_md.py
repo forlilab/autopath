@@ -10,57 +10,82 @@ import openmm.unit as openmmunit
 
 # AutoPath imports
 from autopath.utils import *
+from autopath.customForces import add_flatbottom_COM_restraints, print_current_forces
 from autopath.equilibration import warm_up_system
 
+try:
+    from openmmtools.integrators import LangevinSplittingGirsanov
+    from reweightingreporter import ReweightingReporter
+except ImportError:
+    girsanov = False
+    logging.warning("Please install openmmtools to use Girsanov reweighting.")
 
 class RelaxMD:
     def __init__(
         self,
-        system: str = None,
         topology: str = None,
-        lig_name: str = "UNK",
-        out_dir: str = "relax_md",
+        ligand_atoms: list[int] = None,
         pocket_atoms: list[int] = None,
-        use_flat_bottom_rest: bool = False,
-        HMR: bool = True,
+        out_dir: str = "relax_md",
+        is_membrane: bool = False,
+        timestep: float = 0.004, #  # 4 fs timestep
         temp: float = 300,
+        platform: str = "fastest",
+        use_GReweighting: bool = False,
     ) -> None:
-
-        self.system = system
-        self.topology = topology
 
         os.makedirs(out_dir, exist_ok=True)
         self.out_dir = out_dir
 
-        self.timestep = 0.004 if HMR else 0.002
+        self.topology = topology
+
+        self.timestep = timestep * openmmunit.picoseconds
         self.temperature = temp * openmmunit.kelvin
 
-        self.ligand_ha_idx, self.lig_ha_names = get_ligand_ha(self.topology, lig_name)
+        self.ligand_atoms = ligand_atoms
         self.pocket_atoms = pocket_atoms
-        self.use_flat_bottom_rest = use_flat_bottom_rest
+        self.is_membrane = is_membrane
 
-        self.platform = select_platform("fastest")
+        self.platform = select_platform(platform)
 
+        self.use_GReweighting = use_GReweighting
+        if self.use_GReweighting:
+            try:
+                from openmmtools.integrators import LangevinSplittingGirsanov
+                from reweightingreporter import ReweightingReporter
+            except ImportError:
+                raise ImportError("Please install openmmtools to use Girsanov reweighting.")
+            
         return None
 
     def run(
         self,
+        system: str = None,
         checkpoint_file: str = None,
         pdb_file: str = None,
         run_id: str = None,
-        md_steps: int = 25000,
+        npt_steps: int = 25000,
     ) -> Tuple[float, float]:
 
         start_time = time.monotonic()
 
         logging.debug("Setting up the integrator..")
-        integrator = LangevinMiddleIntegrator(
-            self.temperature, 1 / openmmunit.picoseconds, self.timestep
-        )
-        # integrator.setRandomNumberSeed(int(rep_idx))
+        if self.use_GReweighting:
+            integrator = LangevinSplittingGirsanov(
+                nstxout = 100000000,   # we dont care about this here
+                temperature = self.temperature,
+                collision_rate = 1.0/openmmunit.picoseconds,
+                timestep = self.timestep,
+                splitting = "R V O V R",        # ABOBA – reweightable
+                constraint_tolerance = 1.0e-6,
+            )
+        else:
+            integrator = LangevinMiddleIntegrator(self.temperature, 
+                                                  1.0/openmmunit.picoseconds, 
+                                                  self.timestep)
 
         # Setting Simulation object and loading the checkpoint
-        simulation = Simulation(self.topology, self.system, integrator, self.platform)
+        simulation = Simulation(self.topology, system, integrator, self.platform)
 
         if checkpoint_file is not None:
             logging.debug("Loading simulation checkpoint..")
@@ -69,48 +94,69 @@ class RelaxMD:
             initial_positions = PDBFile(pdb_file).positions
             simulation.context.setPositions(initial_positions)
 
-        startdist = get_COG_dist(simulation, self.ligand_ha_idx, self.pocket_atoms)
-
-        if self.use_flat_bottom_rest:
-            add_flatbottom_COM_restraints(
-                self.system, self.ligand_ha_idx, self.pocket_atoms, startdist
-            )
+        startdist = get_COM_dist(simulation, self.ligand_atoms, self.pocket_atoms)
+        # Add flat-bottom COM restraints to prevent ligand from drifting too far away
+        logging.debug("Adding flat-bottom COM restraints..")
+        add_flatbottom_COM_restraints(system, self.ligand_atoms, self.pocket_atoms, 
+                                      r0=startdist,
+                                      upper_wall=0.01, # 0.1 nm upper wall
+                                      K_flat=500, # 500 kJ/mol/nm^2
+                                      )
+        simulation.context.reinitialize(preserveState=True)
+        # print_current_forces(system)
 
         logging.debug("Minimizing..")
         simulation.minimizeEnergy()
 
         logging.debug("Warming up the system..")
-        warm_up_system(
-            simulation, integrator, warming_steps=md_steps, timestep=self.timestep
-        )
+        warm_up_system(simulation, integrator, 
+                       warming_steps=npt_steps, 
+                       timestep=0.002 * openmmunit.picoseconds, # lower timestep for warming
+                       Tend=self.temperature.value_in_unit(openmmunit.kelvin))
 
-        logging.debug("Minimizing..")
-        simulation.minimizeEnergy()
+        # logging.info("Minimizing..")
+        # simulation.minimizeEnergy()
 
-        if self.use_flat_bottom_rest:
-            # Remove the force before saving
-            simulation.context.getSystem().removeForce(
-                simulation.context.getSystem().getNumForces() - 1
-            )
+        logging.debug("Running short NPT..")
+        # Add barostat to the system
+        system = add_barostat(system, self.temperature, is_membrane=self.is_membrane)
+
+        # adjust timestep if needed
+        if self.timestep != integrator.getStepSize():
+            logging.debug(f"Adjusting timestep from {integrator.getStepSize()} to {self.timestep}.")
+            integrator.setStepSize(self.timestep)
+    
+        simulation.context.reinitialize(preserveState=True)
+        logging.debug(f"Stepsize set to {integrator.getStepSize()}")
+
+        # run npt simulation
+        simulation.step(npt_steps) #0.1 ns
+
+        # remove existing restraint forces
+        forces_to_remove = []
+        for f_idx in range(system.getNumForces()):
+            force = system.getForce(f_idx)
+            if force.getName().startswith("k_flat_com"):
+                logging.debug(f"Removing force {force.getName()} at index {f_idx}.")
+                forces_to_remove.append(f_idx)
+
+        for f_idx in sorted(forces_to_remove, reverse=True):
+            system.removeForce(f_idx)
+
+        # print_current_forces(system)
 
         # save stuff
         final_positions = simulation.context.getState(getPositions=True).getPositions()
+        self.topology.setPeriodicBoxVectors(simulation.context.getState(getPositions=True).getPeriodicBoxVectors()) #saves correct box vectors to the pdb
         save_simulation(simulation, f"{self.out_dir}/{run_id}_relax_checkpoint")
-        save_system(self.system, f"{self.out_dir}/{run_id}_relax_system.xml")
-        save_pdb(
-            self.topology,
-            final_positions,
-            f"{self.out_dir}/{run_id}_relax.pdb",
-        )
+        save_system(system, f"{self.out_dir}/{run_id}_relax_system.xml")
+        save_pdb(self.topology, final_positions, f"{self.out_dir}/{run_id}_relax.pdb")
 
         # Get COM distance
-        finaldist = get_COG_dist(simulation, self.ligand_ha_idx, self.pocket_atoms)
+        finaldist = get_COM_dist(simulation, self.ligand_atoms, self.pocket_atoms)
 
-        logging.info(
-            f"{run_id} - Initial:{startdist:.3f} nm - Final:{finaldist:.3f} nm"
-        )
+        logging.info(f"{run_id} - Initial:{startdist:.3f} nm - Final:{finaldist:.3f} nm")
 
         simulation_time = time.monotonic() - start_time
         logging.info(f"Finished {run_id} relaxation in {simulation_time/60:.2f} min.")
-
-        return startdist, finaldist
+        return system
