@@ -284,7 +284,7 @@ class Equilibration:
                 initial_positions,
                 self.topology,
                 restrain_idxs,
-                restraint_force=15, # Some default value
+                restraint_force=10,#15, # Some default value
                 force_name=f"k_{name}",
                 force_group=num+15, #Offset by 15 to avoid overlap with other forces
             )
@@ -330,7 +330,7 @@ class Equilibration:
                 minimized_positions,
                 self.topology,
                 restrain_idxs,
-                restraint_force=15,  # some default value, will be updated during equilibration
+                restraint_force=10,#15,  # some default value, will be updated during equilibration
                 force_name=f"k_{name}",
                 force_group=num + 15,
             )

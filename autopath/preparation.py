@@ -36,6 +36,7 @@ class SystemPreparation:
             "amber14-all.xml",
             "amber14/tip3pfb.xml",
             "amber/tip3p_HFE_multivalent.xml",
+            '/gpfs/home/abarkdull/Forli/Manually_Prepared_Dataset/LILAC_DB_Non_Redundant/4zdy/charmm_gui/heme_params.xml'
         ],
         lig_ff: str = "espaloma",
         allow_undefined_stereo: bool = True,
@@ -48,6 +49,7 @@ class SystemPreparation:
         lipid_type: str = None,
         ligand_com_z: float = 2.5, #nm
         add_cylindrical_restraint: bool = False,
+        dummy_atom_position: Optional[List[float]] = None,
         out_dir: str = ".",
     ) -> None:
         print(f'lig_ff: {lig_ff}')
@@ -85,6 +87,7 @@ class SystemPreparation:
         self.lipid_type = lipid_type
         self.ligand_com_z = ligand_com_z
         self.add_cylindrical_restraint = add_cylindrical_restraint
+        self.dummy_atom_position = dummy_atom_position
         self._available_lipids = [
             # Original lipids
             "POPC",
@@ -137,6 +140,7 @@ class SystemPreparation:
             template_generator = EspalomaTemplateGenerator(
                 molecules=ligand, forcefield="espaloma-0.3.2"
             )
+
         elif self.lig_ff == "SMIRNOFF":
             template_generator = SMIRNOFFTemplateGenerator(
                 molecules=ligand, forcefield="openff-1.2.0"
@@ -178,6 +182,10 @@ class SystemPreparation:
                 modeller = Modeller(ligand_topology, ligand_positions)
 
             elif isinstance(ligands, list):
+                # Start with an empty modeller (no protein, no ligand yet)
+                modeller = Modeller(Topology(), [])
+                used_chains = set()
+
                 chain_id = ord('A')
                 for lig_name, lig_path in ligands:
                     while chr(chain_id) in used_chains:
@@ -246,22 +254,6 @@ class SystemPreparation:
 
             lig_com = lig_com.value_in_unit(openmmunit.nanometer)
 
-            dummy_position = openmm.Vec3(
-                lig_com[0],
-                lig_com[1],
-                0,
-            )
-
-            # Ensure dummy_position is a Quantity with units
-            dummy_position_quantity = openmmunit.Quantity(
-                dummy_position, openmmunit.angstrom
-            )
-
-            # # Create a new topology for the dummy atom
-            dummy_topology = app.Topology()
-            dummy_chain = dummy_topology.addChain()
-            dummy_residue = dummy_topology.addResidue("DUM", dummy_chain)
-            dummy_atom = dummy_topology.addAtom("DUM", element.sodium, dummy_residue)
 
             # Calculate the maximum distance between any two atoms in the molecule
             # pairwise_distances = np.linalg.norm(
@@ -350,6 +342,10 @@ class SystemPreparation:
                 padding=self.padding,
             )
 
+
+
+
+
         logging.info(f"Creating an OpenMM system..")
         system = self.forcefield.createSystem(
             modeller.topology,
@@ -403,7 +399,40 @@ class SystemPreparation:
         # positions_np = modeller.positions.value_in_unit(unit.nanometer)
         # translated_positions_vec3 = [Vec3(pos[0], pos[1], pos[2] + half_z_nm) for pos in positions_np]
         # modeller.positions = translated_positions_vec3 * unit.nanometer
-        
+    
+        if self.dummy_atom_position is not None:
+            #add dummy atom
+            scaled_position = [coord * 10 for coord in self.dummy_atom_position]  # multiply each by 10
+            dummy_position_vec3 = Vec3(*scaled_position)
+
+            # Ensure dummy_position is a Quantity with units
+            dummy_position_quantity = unit.Quantity(dummy_position_vec3, unit.angstrom)
+            nonbonded = [f for f in system.getForces() if isinstance(f, NonbondedForce)][0]
+            positions = modeller.getPositions()
+            positions.append(dummy_position_quantity)
+            dummyIndex = system.addParticle(0.0) #0 mass
+            nonbonded.addParticle(0.0, 1.0, 0.0) #0 charge, 0 sigma (VDWR), 0 epsilon (interaction strength)
+            dummy_topology = Topology()
+            dummy_chain = dummy_topology.addChain()
+            dummy_residue = dummy_topology.addResidue('DUM', dummy_chain)
+            dummy_atom = dummy_topology.addAtom('DUM', element.sodium, dummy_residue) # this has to be an ion otherwise i get an issue when tring to greate a prmtop file bc there is no typename that matches an unbonded carbon
+            modeller.add(dummy_topology, [dummy_position_quantity])
+
+            #pin the dummy atom in place
+            dummy_position_nm = modeller.getPositions()[-1].value_in_unit(unit.nanometer)
+            print(f'dummy_position_nm: {dummy_position_nm}')
+            x0_dum, y0_dum, z0_dum = dummy_position_nm.x, dummy_position_nm.y, dummy_position_nm.z
+
+            # Define a harmonic potential centered at the dummy's initial position
+            pin_force = CustomExternalForce(
+                # "100000000000.0 * ((x - x0)^2 + (y - y0)^2 + (z - z0)^2)"
+                "100000000000.0 * periodicdistance(x, y, z, x0_dum, y0_dum, z0_dum)"
+            )
+            pin_force.addGlobalParameter("x0_dum", x0_dum)
+            pin_force.addGlobalParameter("y0_dum", y0_dum)
+            pin_force.addGlobalParameter("z0_dum", z0_dum)
+            pin_force.addParticle(dummyIndex, [])  # Apply only to dummy
+            system.addForce(pin_force)
 
         if self.add_cylindrical_restraint:
             print("Applying cylindrical restraint to ligand...")

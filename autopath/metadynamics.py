@@ -84,7 +84,7 @@ class MetadynamicsMD:
         assert mMD_CV in [
             "com",
             "com_z",
-            "com_x_y",            
+            "com_x_y_distance",            
             "rmsd",
             "rmsd_states",
             "nc",
@@ -198,7 +198,7 @@ class MetadynamicsMD:
                 weighByMass=False,
                 pbc=True,
             )
-        if mMD_CV == "com_x_y":
+        if mMD_CV == "com_x_y_distance":
 
             groups = [self.pocket_atoms] + [self.ligand_atoms]
 
@@ -354,6 +354,9 @@ class MetadynamicsMD:
         cv2: str = "lmz",
         atom1: list = None, #these are the two atoms in the delta z calculation....make this more clear somehow?
         atom2: list = None, #these are the two atoms in the delta z calculation....make this more clear somehow?
+        reference_points: list = None, 
+        # reference_points defines the vector/axis for com_distance_along_vector
+        # Example: [[x_start, y_start, z_start], [x_end, y_end, z_end]]
         rmsd_1_reference_positions: list = None,
         rmsd_1_group: list = None,
         rmsd_2_reference_positions: list = None,
@@ -361,12 +364,12 @@ class MetadynamicsMD:
     ) -> None:
 
         # Validate cv1
-        if cv1 not in ["com_z", 'com', "rmsd"]:
-            logging.error(f"Invalid value for cv1: '{cv2}'. Must be 'com_z', 'com' or 'rmsd'.")
+        if cv1 not in ["com_z", 'com', "rmsd", "com_distance_along_vector", "com_z_distance"]:
+            logging.error(f"Invalid value for cv1: '{cv2}'. Must be 'com_z', 'com' or 'rmsd' or 'com_distance_along_vector'.")
 
         # Validate cv2
-        if cv2 not in ["lmz", "dz", "rmsd", 'nc']:
-            logging.error(f"Invalid value for cv2: '{cv2}'. Must be 'lmz', 'dz', 'rmsd', or  'nc'.")
+        if cv2 not in ["lmz", "dz", "rmsd", 'nc', 'proj_vec', 'com_x_y_distance']:
+            logging.error(f"Invalid value for cv2: '{cv2}'. Must be 'lmz', 'dz', 'rmsd', or  'nc' or 'proj_vec.")
 
         # Require atom1 and atom2 if using distance-based CV
             if cv2 == "dz":
@@ -442,6 +445,75 @@ class MetadynamicsMD:
         grid_min_B, grid_max_B = grid_dimensions_B
         grid_B = round(abs(grid_min_B - grid_max_B) / grid_width_B)
 
+
+
+        ##################### com distance along vector CV (cv1) #################################
+
+        if cv1 == "com_distance_along_vector":
+            groups = [self.ligand_atoms]
+            print(f'Ligand group: {groups}')
+
+            a, b, c = simulation.context.getState(getPositions=False, getVelocities=False, getEnergy=False).getPeriodicBoxVectors()
+            box_x = a[0].value_in_unit(unit.nanometer)  # x-length
+            box_y = b[1].value_in_unit(unit.nanometer)  # y-length
+            box_z = c[2].value_in_unit(unit.nanometer)  # z-length
+
+            for i in range(system.getNumForces()):
+                f = system.getForce(i)
+                if hasattr(f, "setGlobalParameterDefaultValue"):
+                    for j in range(f.getNumGlobalParameters()):
+                        name = f.getGlobalParameterName(j)
+                        if name == "box_x":
+                            f.setGlobalParameterDefaultValue(j, box_x)
+                        elif name == "box_y":
+                            f.setGlobalParameterDefaultValue(j, box_y)
+                        elif name == "box_z":
+                            f.setGlobalParameterDefaultValue(j, box_z)
+
+            # reference points (in nm)
+            p1 = np.array(reference_points[0])
+            p2 = np.array(reference_points[1])
+
+            # displacement vector with PBC
+            dp = p2 - p1
+            dp_norm = np.linalg.norm(dp)
+            ux, uy, uz = dp / dp_norm
+
+            # Expression for displacement between COM (x1,y1,z1) and reference p1 with PBC
+            dx = f"(x1 - {p1[0]} - box_x*floor((x1 - {p1[0]})/box_x + 0.5))"
+            dy = f"(y1 - {p1[1]} - box_y*floor((y1 - {p1[1]})/box_y + 0.5))"
+            dz = f"(z1 - {p1[2]} - box_z*floor((z1 - {p1[2]})/box_z + 0.5))"
+
+            # projection along reference unit vector
+            proj_expr = f"({ux})*{dx} + ({uy})*{dy} + ({uz})*{dz}"
+
+            # Wrap as CV
+            com_along_vec_cv = cvpack.CentroidFunction(
+                proj_expr,
+                openmmunit.nanometer,
+                groups,
+                weighByMass=True,
+                pbc=True,
+                box_x = box_x,
+                box_y = box_y,
+                box_z = box_z,
+            )
+
+            # Bias variable for metadynamics
+            grid_width_A = hill_width_A / 5
+            grid_min_A, grid_max_A = grid_dimensions_A
+            grid_A = round(abs(grid_min_A - grid_max_A) / grid_width_A)
+
+            cv1_BiasVariable = BiasVariable(
+                com_along_vec_cv,
+                minValue=grid_min_A,
+                maxValue=grid_max_A,
+                biasWidth=hill_width_A,
+                periodic=False,
+                gridWidth=grid_A,
+            )
+
+
         ##################### Z depth CV (cv1) #################################
 
         if cv1 == "com_z":
@@ -451,7 +523,7 @@ class MetadynamicsMD:
 
             #add z size parameter
             _, _, c = simulation.context.getState(getPositions=False, getVelocities=False, getEnergy=False).getPeriodicBoxVectors()
-            zsize = c[2].value_in_unit(openmmunit.nanometers)
+            box_z = c[2].value_in_unit(openmmunit.nanometers)
 
 
             groups = [self.ligand_atoms] + [dummy_atom]
@@ -459,13 +531,13 @@ class MetadynamicsMD:
             COM_Z = cvpack.CentroidFunction(
                 # f"z1-z2",
                 # f"z1",
-                "select(step((z1 - z2)/zsize - floor((z1 - z2)/zsize) - 0.5), -1, 1) * pointdistance(0, 0, z1, 0, 0, z2)",
-                # "select(step((z1 - 0)/zsize - floor((z1 - 0)/zsize) - 0.5), -1, 1) * pointdistance(0, 0, z1, 0, 0, 0)",
+                "select(step((z1 - z2)/box_z - floor((z1 - z2)/box_z) - 0.5), -1, 1) * pointdistance(0, 0, z1, 0, 0, z2)",
+                # "select(step((z1 - 0)/box_z - floor((z1 - 0)/box_z) - 0.5), -1, 1) * pointdistance(0, 0, z1, 0, 0, 0)",
                 openmmunit.nanometers,
                 groups,
                 weighByMass=False,
                 pbc=True,
-                zsize = zsize
+                box_z = box_z
             )
 
 
@@ -485,12 +557,17 @@ class MetadynamicsMD:
             num_atoms = system.getNumParticles()
 
             # Instantiate the RMSD collective variable
-            rmsd_cv = cvpack.RMSD(
-                referencePositions=rmsd_1_reference_positions,
-                group=rmsd_1_group,
-                numAtoms=num_atoms,  
-                name='rmsd_1'
-            )
+            if rmsd_1_reference_positions is not None:
+                rmsd_cv = cvpack.RMSD(
+                    referencePositions=rmsd_1_reference_positions,
+                    group=rmsd_1_group,
+                    numAtoms=num_atoms,  
+                    name='rmsd_1'
+                )
+            else:
+                print('biasing RMSD from input position')
+                rmsd_cv = cvpack.RMSD(input_positions, rmsd_1_group, num_atoms)
+
             cv1_BiasVariable = BiasVariable(
                 rmsd_cv,
                 minValue=grid_min_A,
@@ -520,6 +597,29 @@ class MetadynamicsMD:
                 periodic=False, 
                 gridWidth=grid_A,
         )  
+
+        ##################### com_x_y_distance CV (cv2) #################################
+        if cv1 == "com_z_distance":
+
+            groups = [self.pocket_atoms] + [self.ligand_atoms]
+
+            com_x_y_distance_cv = cvpack.CentroidFunction(
+                f"sqrt(pointdistance(0,0,z1,0,0,z2)^2)",
+                openmmunit.nanometers,
+                groups,
+                weighByMass=False,
+                pbc=True,
+            )
+
+
+            cv1_BiasVariable = BiasVariable(
+                com_x_y_distance_cv,
+                minValue=grid_min_A,
+                maxValue=grid_max_A,
+                biasWidth=hill_width_A,
+                periodic=False, 
+                gridWidth=grid_A,
+        ) 
         ##################### Lipophilicity moment CV (cv2) #################################
 
         # get crippen contribution list
@@ -617,6 +717,73 @@ class MetadynamicsMD:
                 gridWidth=grid_B,
             )
 
+        ##################### end-to-end distance projection along vector(cv2) #################################
+        if cv2 == "proj_vec":
+            # Groups: two atoms defining molecular vector
+            groups = [[atom1], [atom2]]
+            print(f'groups: {groups}')
+
+            #get box vectors
+            a, b, c = simulation.context.getState(getPositions=False, getVelocities=False, getEnergy=False).getPeriodicBoxVectors()
+            box_x = a[0].value_in_unit(unit.nanometer)  # x-length
+            box_y = b[1].value_in_unit(unit.nanometer)  # y-length
+            box_z = c[2].value_in_unit(unit.nanometer)  # z-length
+            
+            for i in range(system.getNumForces()):
+                f = system.getForce(i)
+                if hasattr(f, "setGlobalParameterDefaultValue"):
+                    for j in range(f.getNumGlobalParameters()):
+                        name = f.getGlobalParameterName(j)
+                        if name == "box_x":
+                            f.setGlobalParameterDefaultValue(j, box_x)
+                        elif name == "box_y":
+                            f.setGlobalParameterDefaultValue(j, box_y)
+                        elif name == "box_z":
+                            f.setGlobalParameterDefaultValue(j, box_z)
+
+            # Reference vector endpoints (in nm)
+            p1 = np.array(reference_points[0])
+            p2 = np.array(reference_points[1])
+            dp = p2 - p1
+            dp /= np.linalg.norm(dp)   # normalize
+            ux, uy, uz = dp
+
+            # PBC-aware displacement for atom2 - atom1
+            dx = "(x2 - x1)"
+            dy = "(y2 - y1)"
+            dz = "(z2 - z1)"
+
+            # Dot product projection, normalized by molecular vector length
+            proj_expr = (
+                f"(({ux})*{dx} + ({uy})*{dy} + ({uz})*{dz})"
+                f" / sqrt({dx}*{dx} + {dy}*{dy} + {dz}*{dz})"
+            )
+
+            # Wrap as CV
+            proj_cv = cvpack.CentroidFunction(
+                proj_expr,
+                openmmunit.dimensionless,
+                groups,
+                weighByMass=False,
+                pbc=True,
+                box_x = box_x,
+                box_y = box_y,
+                box_z = box_z,
+            )
+
+            # Bias setup
+            grid_width_B = hill_width_B / 5
+            grid_min_B, grid_max_B = grid_dimensions_B
+            grid_B = round(abs(grid_min_B - grid_max_B) / grid_width_B)
+
+            cv2_BiasVariable = BiasVariable(
+                proj_cv,
+                minValue=grid_min_B,
+                maxValue=grid_max_B,
+                biasWidth=hill_width_B,
+                periodic=False,
+                gridWidth=grid_B,
+            )
 
         ##################### RMSD CV (cv2) #################################
         if cv2 == "rmsd":
@@ -624,19 +791,25 @@ class MetadynamicsMD:
             num_atoms = system.getNumParticles()
 
             # Instantiate the RMSD collective variable
-            rmsd_cv = cvpack.RMSD(
-                referencePositions=rmsd_2_reference_positions,
-                group=rmsd_2_group,
-                numAtoms=num_atoms,  
-                name=name
-            )
+            if rmsd_2_reference_positions is not None:
+                rmsd_cv = cvpack.RMSD(
+                    referencePositions=rmsd_2_reference_positions,
+                    group=rmsd_2_group,
+                    numAtoms=num_atoms,  
+                    name=name
+                )
+
+            else:
+                print('biasing RMSD from input position')
+                rmsd_cv = cvpack.RMSD(input_positions, rmsd_2_group, num_atoms)
+
             cv2_BiasVariable = BiasVariable(
                 rmsd_cv,
-                minValue=grid_min_A,
-                maxValue=grid_max_A,
-                biasWidth=hill_width_A,
+                minValue=grid_min_B,
+                maxValue=grid_max_B,
+                biasWidth=hill_width_B,
                 periodic=False, 
-                gridWidth=grid_A,
+                gridWidth=grid_B,
         )    
 
 
@@ -658,12 +831,36 @@ class MetadynamicsMD:
 
             cv2_BiasVariable = BiasVariable(
                 nc_cv,
-                minValue=grid_min_A,
-                maxValue=grid_max_A,
-                biasWidth=hill_width_A,
+                minValue=grid_min_B,
+                maxValue=grid_max_B,
+                biasWidth=hill_width_B,
                 periodic=False, 
-                gridWidth=grid_A,
+                gridWidth=grid_B,
         )    
+
+
+        ##################### com_x_y_distance CV (cv2) #################################
+        if cv2 == "com_x_y_distance":
+
+            groups = [self.pocket_atoms] + [self.ligand_atoms]
+
+            com_x_y_distance_cv = cvpack.CentroidFunction(
+                f"sqrt(pointdistance(x1,y1,0,x2,y2,0)^2)",
+                openmmunit.nanometers,
+                groups,
+                weighByMass=False,
+                pbc=True,
+            )
+
+
+            cv2_BiasVariable = BiasVariable(
+                com_x_y_distance_cv,
+                minValue=grid_min_B,
+                maxValue=grid_max_B,
+                biasWidth=hill_width_B,
+                periodic=False, 
+                gridWidth=grid_B,
+        ) 
 
      ##############################################################
         meta = Metadynamics(
@@ -710,8 +907,18 @@ class MetadynamicsMD:
             meta.step(simulation, self.record_CV)
             if cv1 == "com_z":
                 _, _, c = simulation.context.getState(getPositions=False, getVelocities=False, getEnergy=False).getPeriodicBoxVectors()
-                zsize = c[2].value_in_unit(openmmunit.nanometers)
-                simulation.context.setParameter('zsize', zsize)
+                box_z = c[2].value_in_unit(openmmunit.nanometers)
+                simulation.context.setParameter('box_z', box_z)
+            if cv1 == "com_distance_along_vector" or cv2 == "proj_vec":
+                a, b, c = simulation.context.getState(getPositions=False, getVelocities=False, getEnergy=False).getPeriodicBoxVectors()
+                box_x = a[0].value_in_unit(unit.nanometer)  # x-length
+                box_y = b[1].value_in_unit(unit.nanometer)  # y-length
+                box_z = c[2].value_in_unit(unit.nanometer)  # z-length
+
+                simulation.context.setParameter('box_x', box_x)
+                simulation.context.setParameter('box_y', box_y)
+                simulation.context.setParameter('box_z', box_z)
+
             current_cvs = meta.getCollectiveVariables(simulation)
             colvar_array = np.append(colvar_array, [current_cvs], axis=0)
 

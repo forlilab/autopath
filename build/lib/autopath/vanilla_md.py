@@ -90,7 +90,41 @@ class VanillaMD:
         )
 
         # Run the simulation
-        simulation.step(MD_steps)
+        # simulation.step(MD_steps)
+        for i in range(0, int(MD_steps), 25000):
+            # Get energy of cylindrical restraint (force group 10)
+            state = simulation.context.getState(getEnergy=True, groups={10})
+            cylinder_energy = state.getPotentialEnergy()
+
+            # Get positions
+            state_pos = simulation.context.getState(getPositions=True)
+            positions = state_pos.getPositions(asNumpy=True)
+
+            # Extract UNK atoms (assumes you have a list of indices for UNK)
+            unk_indices = [atom.index for atom in self.topology.atoms() if atom.residue.name == "UNK"]
+            unk_positions_nm = positions[unk_indices].value_in_unit(unit.nanometer)
+
+            # Compute centroid in nm
+            centroid_nm = np.mean(unk_positions_nm, axis=0)
+
+            # Convert to Å
+            centroid_A = centroid_nm * 10.0
+
+            print(f"Step {i:>8}: cylindrical restraint energy = {cylinder_energy}, "
+                f"UNK centroid (Å) = {centroid_A}")
+
+            a, b, c = simulation.context.getState(getPositions=False, getVelocities=False, getEnergy=False).getPeriodicBoxVectors()
+            box_x = a[0].value_in_unit(unit.nanometer)  # x-length
+            box_y = b[1].value_in_unit(unit.nanometer)  # y-length
+            box_z = c[2].value_in_unit(unit.nanometer)  # z-length
+
+            simulation.context.setParameter('box_x', box_x)
+            simulation.context.setParameter('box_y', box_y)
+            simulation.context.setParameter('box_z', box_z)
+
+            # Advance MD
+            simulation.step(25000)
+      
 
         # save stuff
         final_positions = simulation.context.getState(getPositions=True).getPositions()
