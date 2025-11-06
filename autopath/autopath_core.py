@@ -40,9 +40,10 @@ class AutoPath:
         forcefield: list = [
             "amber14-all.xml",
             "amber14/tip3pfb.xml",
-            "amber/tip3p_HFE_multivalent.xml",
+            "amber/tip3pfb_HFE_multivalent.xml",
         ],
-        hydrogenMass: float = 3.0,  # amu
+        hydrogenMass: float = 1.5,  # amu
+        timestep: float = 0.004,  # ps
         lig_ff: str = "espaloma",
         boxShape: str = "dodecahedron",
         padding: float = 1.2,
@@ -60,7 +61,7 @@ class AutoPath:
         sMD_steps_per_move: int = None,
         sMD_dx_per_move: float = 0.001,  # nm, this is the displacement per move
         sMD_spring_cte: float = None,  # KJ/mol/nm2
-        sMD_autostop_freq: int = 10, #moves
+        sMD_autostop_freq: int = 50, #moves
         extract_milestones: bool = True,
         n_milestones: int = 5,
         relax_steps: int = 25000,
@@ -80,6 +81,7 @@ class AutoPath:
         self.run_preparation = run_preparation
         self.forcefield = forcefield
         self.hydrogenMass = hydrogenMass
+        self.timestep = timestep
         self.lig_ff = lig_ff
         self.boxShape = boxShape
         self.padding = padding
@@ -147,7 +149,7 @@ class AutoPath:
             ],
         )
 
-        # logger = logging.getLogger('autopath_core')
+        logger = logging.getLogger('autopath_core')
 
         logging.info(f"Processing system {sys_name}")
 
@@ -173,17 +175,17 @@ class AutoPath:
             system, topology = prepare_system.run(self.protein_file, self.variants, ligand_file)
 
         system = load_system(f"{sys_name}/system.xml")
-        try:
-            topology = AmberPrmtopFile(prmtop_file).topology
-        except Exception as e:
-            logging.error(f"Error loading topology from {prmtop_file}: {e}")
-            topology = PDBFile(solvated_system_pdb).topology
+        # try:
+        #     topology = AmberPrmtopFile(prmtop_file).topology
+        # except Exception as e:
+        #     logging.error(f"Error loading topology from {prmtop_file}: {e}")
+        topology = PDBFile(solvated_system_pdb).topology
 
         ##############################################################################################
         ##################################### System equilibration ###################################
         ##############################################################################################
         #FIXME: this is a temporary solution, new parmed fails to save prmtops
-        prmtop_file = f"{sys_name}/system.pdb" 
+        # prmtop_file = f"{sys_name}/system.pdb" 
         
         equilibrated_traj = f"{sys_name}/equilibration/equilibration_{sys_name}.dcd"
         equilibrated_chk = f"{sys_name}/equilibration/checkpoint_equil_{sys_name}.chk"
@@ -198,13 +200,13 @@ class AutoPath:
                                 restrained_minimization=True,
                                 is_membrane=self.is_membrane,
                                 protocol_fname=self.protocol_fname,
-                                save_freq=12500 # for 2fs
+                                # platform='fastest'
                                 )
             
             equilibrated_system = equilibration.run(solvated_system_pdb, run_id=sys_name)
         
             #Wrap, align and save the clean trajectory
-            traj = md.load(equilibrated_traj, top=prmtop_file)
+            traj = md.load(equilibrated_traj, top=solvated_system_pdb)
             traj = traj.center_coordinates()
             traj = traj.image_molecules()
             try: # if there's no protein
@@ -223,7 +225,7 @@ class AutoPath:
         lig_anchor_mode_atoms = 5
 
         equilibrated_traj = equilibrated_traj.replace(".dcd", "_aligned.dcd")
-        u_eq = mda.Universe(prmtop_file, equilibrated_traj, in_memory=True)
+        u_eq = mda.Universe(equilibrated_pdb, equilibrated_traj, in_memory=True)
 
         rmsd = compute_rmsd(u_eq, u_eq,
                             alig_select="backbone", 
@@ -264,22 +266,21 @@ class AutoPath:
         # final_com = calculate_com_distance(u_eq, ligand_atoms, pocket_atoms, wrap=False)[-1] /10 # convert to nm
         # logging.info(f"COM distance after equilibration is: {final_com:.2f} nm")
 
-        u_eq.trajectory[-1]  # set pointer to last frame
-        restrained_atoms = u_eq.select_atoms("group pocket_atoms and name CA", pocket_atoms=pocket_atoms)
-        restrained_atoms_indices = [atom.index for atom in restrained_atoms]
-        restrained_atoms_full_names = [f"{atom.resname}_{atom.resid}_{atom.index}" for atom in restrained_atoms]
-        logging.info(f"Restrained atoms are: {', '.join(set(restrained_atoms_full_names))}")
+        # u_eq.trajectory[-1]  # set pointer to last frame
+        # restrained_atoms = u_eq.select_atoms("group pocket_atoms and name CA", pocket_atoms=pocket_atoms)
+        # restrained_atoms_indices = [atom.index for atom in restrained_atoms]
+        # restrained_atoms_full_names = [f"{atom.resname}_{atom.resid}_{atom.index}" for atom in restrained_atoms]
+        # logging.info(f"Restrained atoms are: {', '.join(set(restrained_atoms_full_names))}")
 
         ##############################################################################################
         ##################################### Steered MD simulations #################################
         ##############################################################################################
         
-        sMD_timestep = 0.002  # ps
-        sMD_collision_frequency = 1  # ps^-1
-
-        sMD_outdir = f"{sys_name}/sMD_{lig_anchor_mode}_{sMD_timestep}ps_{sMD_collision_frequency}ps_200stm"
+        # sMD_collision_frequency = 1  # ps^-1
+        # sMD_outdir = f"{sys_name}/sMD_{lig_anchor_mode}_{sMD_timestep}ps_{sMD_collision_frequency}ps_200stm"
         # in this paper they used 80 kcal·mol−1? units don match tho. Ziada et al 2022.
-        sMD_spring_cte_per_atom = 80 * 4.184  # KJ/mol/nm2, converted from kcal. This affects thermal fluctuations
+        sMD_spring_cte_per_atom = 50 * 4.184  # KJ/mol/nm2, converted from kcal. This affects thermal fluctuations
+        sMD_outdir=f"{sys_name}/sMD"
         
         if self.run_sMDpulling:
             equilibrated_system = load_system(f"{sys_name}/equilibration/system_equil_{sys_name}.xml")
@@ -298,8 +299,9 @@ class AutoPath:
                 groupB_atoms=pocket_atom_indices,
                 # restrained_atoms=restrained_atoms_indices, #NO RESTRAINTS IN SMD
                 restart_velocities=True,
-                sMD_autostop_freq=self.sMD_autostop_freq,
-                timestep=sMD_timestep,
+                autostop_freq=self.sMD_autostop_freq,
+                timestep=self.timestep,
+                temperature=self.temperature,
                 out_dir=sMD_outdir,
             )
 
@@ -307,13 +309,13 @@ class AutoPath:
                 for i in range(reps):
                     try:
                         sMD.run(
-                            # checkpoint_file=equilibrated_chk,
-                            pdb_file=equilibrated_pdb,
+                            checkpoint_file=equilibrated_chk,
+                            # pdb_file=equilibrated_pdb,
                             pulling_speed=speed,  # nm/ps
-                            steps_per_move=self.sMD_steps_per_move,
+                            # steps_per_move=self.sMD_steps_per_move,
                             dx_per_move=self.sMD_dx_per_move,  # nm, this is the displacement per move
                             sMD_spring_cte=sMD_spring_cte,
-                            rep_suffix=f'replica-{i+1}_v{speed}',
+                            # run_id=f'replica-{i+1}_v{speed}',
                             pulling_direction=self.sMD_pulling_dir,  # "forward" or "backward"',
                         )
                     except Exception as e:  
@@ -323,7 +325,7 @@ class AutoPath:
             # # Load and align the sMD trajectories
             # sMD_trajs = glob(f"{sMD_outdir}/sMD_traj_replica-*_*_*.dcd")
             # for traj_file in sMD_trajs:
-            #     traj = md.load(traj_file, top=prmtop_file)
+            #     traj = md.load(traj_file, top=solvated_system_pdb)
             #     traj = traj.center_coordinates()
             #     traj = traj.image_molecules()
             #     try:
@@ -469,7 +471,7 @@ class AutoPath:
         # Load and align the WTMetaD trajectories
         WTMetaD_trajs = glob(f"{sys_name}/metadynamics/trajectory_metadynamics_milestone_*_frame_*.dcd")
         for traj_file in WTMetaD_trajs:
-            traj = md.load(traj_file, top=prmtop_file)
+            traj = md.load(traj_file, top=solvated_system_pdb)
             traj = traj.center_coordinates()
             traj = traj.image_molecules()
             try: # if there's no protein
