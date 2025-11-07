@@ -272,7 +272,7 @@ def add_reporters(
         DCDReporter(
             f"{out_dir}/{suffix}.dcd",
             reportInterval=logperiod,
-            enforcePeriodicBox=None,  # WARNING this compromises autoimaging afterwards in some cases
+            enforcePeriodicBox=False,  # WARNING this compromises autoimaging afterwards in some cases
         )
     )
 

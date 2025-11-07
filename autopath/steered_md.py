@@ -342,7 +342,7 @@ class SteeredMD:
             openmmunit.kilojoules_per_mole,  # energy not force
             groups,
             weighByMass=True if len(self.groupB_atoms) > 1 else False, # avoid problems with single DUM massless atoms
-            pbc=True,
+            pbc=False,
         )
         
         self.com_force.addGlobalParameter("r0_smd", 0)
@@ -356,7 +356,7 @@ class SteeredMD:
             openmmunit.nanometers,  # distance not energy
             groups,
             weighByMass=True if len(self.groupB_atoms) > 2 else False, # avoid problems with single DUM massless atoms
-            pbc=True,
+            pbc=False,
         )
         
         self.com_dist.setForceGroup(3)  # Use a separate force group for the CV GROUP 3
