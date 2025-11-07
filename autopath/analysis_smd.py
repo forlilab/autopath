@@ -1000,3 +1000,72 @@ class SteeredMDAnalysis:
             # pml.write("png preview.png, ray=1, dpi=300\n")
 
         return str(pml_path)
+    
+    @staticmethod
+    def plot_work_profiles(
+        results: pd.DataFrame,
+        r_coord: str = 'r_coord',
+        cols_to_plot: list = ['Wmean', 'dG', 'Wdiss'],
+        title_suffix: str = 'dcTMD',
+        outdir: str = 'work_profiles'
+    ):
+        speeds = sorted(results['speed'].unique())
+        fig, ax = plt.subplots(
+            figsize=(12, 4),
+            ncols=len(speeds),
+            nrows=1,
+            sharey=True,
+            sharex=True
+        )
+        axes = ax.flatten() if len(speeds) > 1 else [ax]
+
+        legend_handles, legend_labels = None, None
+
+        for i, speed in enumerate(speeds):
+            speed_df = results.loc[results['speed'] == speed, [r_coord, 'path', 'speed'] + cols_to_plot]
+
+            # Long format: metric is {Wmean, dG, Wdiss}, value = corresponding y
+            long_df = speed_df.melt(
+                id_vars=[r_coord, 'path', 'speed'],
+                value_vars=cols_to_plot,
+                var_name=title_suffix,
+                value_name='value'
+            )
+
+            sns.lineplot(
+                data=long_df,
+                x=r_coord, y='value',
+                hue=title_suffix, style='path',
+                estimator=None, errorbar=None,  # don't aggregate across paths
+                ax=axes[i]
+            )
+
+            axes[i].set_title(f'Speed: {speed} nm/ps', fontsize=12)
+            axes[i].set_xlabel(f'{r_coord} (nm)')
+            if i == 0:
+                axes[i].set_ylabel('dG (kJ/mol)')
+            else:
+                axes[i].set_ylabel('')
+
+            # Capture legend once, then remove per-axes legends
+            if legend_handles is None:
+                legend_handles, legend_labels = axes[i].get_legend_handles_labels()
+            axes[i].legend_.remove()
+
+        # Figure-level legend combining hue (metrics) and style (paths)
+        if legend_handles:
+            fig.legend(
+                legend_handles, legend_labels,
+                title='',
+                bbox_to_anchor=(1.01, 0.8), loc='upper left',
+                borderaxespad=0.0
+            )
+
+        # plt.title(f'Work Profiles {title_suffix}', fontsize=16)
+        plt.tight_layout()
+        os.makedirs(outdir, exist_ok=True)
+        outfile = os.path.join(outdir, f"work_profiles_{title_suffix}.png")
+        plt.savefig(outfile, bbox_inches='tight', dpi=300)
+        plt.show()
+        plt.close()
+        return
