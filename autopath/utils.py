@@ -696,10 +696,11 @@ def match_cluster_centroids(X:np.ndarray, centroids:np.ndarray, N:int=1):
 
     return closest_points
 
-def cluster_sMD_trajectories(u: mda.Universe, X:np.ndarray, 
-                             n_clusters:int, 
-                             min_dist:float,
-                             out_dir:str
+def cluster_sMD_trajectories(u: mda.Universe, 
+                             X:np.ndarray, 
+                             n_clusters:int = 5, 
+                             min_dist:float = 2.0,
+                             out_dir:str = None
                              ) -> Tuple[np.ndarray, np.ndarray]:
 
     # cluster_estimator = KMeans(n_clusters=5)

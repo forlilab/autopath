@@ -63,7 +63,7 @@ class SteeredMDAnalysis:
                  cluster_range: tuple = None, #nm
                  trajectories: list[str] = None,
                  reference_pdb: str = None,
-                 pocket_select: str = 'protein within 6.0 of resname UNK and name CA',
+                 pocket_select: str = '(protein within 6.0 of resname UNK) and name CA',
                  ligand_select: str = 'resname UNK and not name H*',
                  seed: int = 42
                  ):
@@ -155,13 +155,15 @@ class SteeredMDAnalysis:
         if use_target_grid:
             self.raw_data = raw_data # no binning when using target grid
         else:
-            self.raw_data, centers = self.bin_data(raw_data, self.n_bins, 
-                                                   use_quantiles=True, min_points=1)
+            self.raw_data, centers = self.bin_data(raw_data, 
+                                                   self.n_bins, 
+                                                   use_quantiles=True, 
+                                                   min_points=1)
         
         # cluster trajectories into paths if specified
         if self.cluster_paths:
-            self.raw_data, labels_dict, medoid_names = self.cluster_trajectories()
-            # self.raw_data, labels_dict, medoid_names = self.cluster_raw_traces(self.raw_data, r_range=self.cluster_range, outdir=self.outdir)
+            # self.raw_data, labels_dict, medoid_names = self.cluster_trajectories()
+            self.raw_data, labels_dict, medoid_names = self.cluster_raw_traces(self.raw_data, r_range=self.cluster_range, outdir=self.outdir)
             print('Clustering results:')
             print(self.raw_data.groupby(['path', 'speed'])[['trajname']].nunique())
             # generate pymol sesh for the paths
@@ -216,12 +218,12 @@ class SteeredMDAnalysis:
             dG_mix_exact = Wdiss_neq = Wmean_neq = var_neq= np.nan
             if fit_GMM:
                 if len(raw_W) < 2:
-                    print(f"Not enough data points for GMM fitting at r_bin={r_coord:.2f}, speed={speed:.5f}, path={path:.2f}. Skipping GMM fit.")
+                    # print(f"Not enough data points for GMM fitting at r_bin={r_coord:.2f}, speed={speed:.5f}, path={path:.2f}. Skipping GMM fit.")
                     continue
 
                 gmm_dict = self.fit_gmm_to_work_values(raw_W,
                                                         max_K=3,
-                                                        covariance_type='spherical',
+                                                        covariance_type='diag',
                                                         random_state=self.seed)
 
                 #These have shape (K,) for K components
@@ -442,7 +444,7 @@ class SteeredMDAnalysis:
         For more information on DTW see: https://doi.org/10.1073/pnas.231354212
                                          https://dtaidistance.readthedocs.io/en/latest/index.html
         """
-
+        #FIXME hardcoded traj extension .xtc
         raw_data = self.raw_data.copy()
 
         outdir = os.path.join(self.outdir,'path_clustering')
@@ -477,16 +479,6 @@ class SteeredMDAnalysis:
             df = pd.concat(df_list, ignore_index=True)
             df.to_csv(distance_file, index=False)
 
-        # Ensure the keys in trajname_map align with the values in df['trajname']
-        # trajname_map = raw_data.set_index('trajname')[self.work_column].to_dict()
-        # df[self.work_column] = df['trajname'].map(trajname_map)
-        # df.dropna(inplace=True) # Ensure no NaN values in work column
-        # trajname_map = raw_data.set_index('trajname')[self.dist_column].to_dict()
-        # df[self.dist_column] = df['trajname'].map(trajname_map)
-
-        # # filter by r_bin
-        # df = df[(df['r_bin'] >= 0.75) & (df['r_bin'] <= 1.5)]
-
         distances = df.iloc[:,2:].values
         scaler = StandardScaler()
         distances = scaler.fit_transform(distances)  # Scale the distances
@@ -516,7 +508,7 @@ class SteeredMDAnalysis:
             plt.title("DTW Distance Matrix")
             plt.tight_layout()
             plt.savefig(f"{outdir}/{self.sysname}_distmatrix.png")
-            plt.show()
+            # plt.show()
             plt.close()
 
         # Find optimal number of paths using Elbow method and Silhouette score
@@ -537,7 +529,7 @@ class SteeredMDAnalysis:
             plt.title(f"Optimal number of paths: {K}")
             plt.tight_layout()
             plt.savefig(f"{outdir}/{self.sysname}_elbowplot.png")
-            plt.show()
+            # plt.show()
             plt.close()
 
         # K-Medoids clustering using the optimal number of paths
@@ -557,7 +549,7 @@ class SteeredMDAnalysis:
             plt.xlabel("PC1");  plt.ylabel("PC2")
             plt.tight_layout()
             plt.savefig(f"{outdir}/{self.sysname}_clustering_K-{K}.png")
-            plt.show()
+            # plt.show()
             plt.close()
 
         names = [os.path.basename(name).replace('.dcd', '').replace('traj', 'log') for name in paths.keys()]
@@ -674,7 +666,7 @@ class SteeredMDAnalysis:
             fig.suptitle(f"GMM Fits at speed = {speed:.5f}", fontsize=16)
             plt.tight_layout(rect=[0, 0, 1, 0.95])
             plt.savefig(f'{outdir}/gmm_fits_speed_{speed:.5f}.png', dpi=300, bbox_inches='tight')
-            plt.show()
+            # plt.show()
             plt.close()
         return
     
@@ -866,11 +858,12 @@ class SteeredMDAnalysis:
         plt.title("DTW Distance Matrix for Raw Traces")
         plt.tight_layout()
         plt.savefig(f"{outdir}/{self.sysname}_rawtrace_distmatrix.png")
-        plt.show()
+        # plt.show()
         plt.close()
 
+        K_MAX = min(5, df.groupby("trajname").ngroups)
         scores = {}
-        for i in range(2,10):
+        for i in range(2,K_MAX+1):
             c = kmedoids.fasterpam(distmatrix, i, random_state=seed)
             if use_silhouette:
                 scores[i] = silhouette_score(distmatrix, c.labels, 
@@ -887,7 +880,7 @@ class SteeredMDAnalysis:
         plt.axvline(x=K, color='red', linestyle='--', label=f'Optimal K={K}')
         plt.xlabel("Number of clusters"); plt.ylabel("Silhouette score" if use_silhouette else "Loss")
         plt.savefig(f"{outdir}/{self.sysname}_elbowplot.png")
-        plt.show()
+        # plt.show()
         plt.close()
 
         # K-Medoids clustering using the optimal number of paths

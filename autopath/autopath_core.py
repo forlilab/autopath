@@ -66,11 +66,11 @@ class AutoPath:
         n_milestones: int = 5,
         relax_steps: int = 25000,
         run_metadynamics: bool = True,
-        mMD_bias_factor: int = 12,
+        mMD_bias_factor: int = 10,
         mMD_bias_frequency: int = 2,  # ps
-        mMD_hill_height: float = 0.3,  # Kcal/mol approx 0.5KT
-        mMD_hill_width: float = 0.02,
-        mMD_time: int = 3,  # ns
+        mMD_hill_height: float = 1.2,  # kJ/mol approx 0.5KT
+        mMD_hill_width: float = 0.05,
+        mMD_time: int = 10,  # ns
     ):
         # General
         self.pocket_selection = pocket_selection
@@ -175,18 +175,19 @@ class AutoPath:
             system, topology = prepare_system.run(self.protein_file, self.variants, ligand_file)
 
         system = load_system(f"{sys_name}/system.xml")
+        topology = PDBFile(solvated_system_pdb).topology
+
+        #FIXME: this is a temporary solution, new parmed fails to save prmtops
+        # prmtop_file = f"{sys_name}/system.pdb" 
         # try:
         #     topology = AmberPrmtopFile(prmtop_file).topology
         # except Exception as e:
         #     logging.error(f"Error loading topology from {prmtop_file}: {e}")
-        topology = PDBFile(solvated_system_pdb).topology
 
         ##############################################################################################
         ##################################### System equilibration ###################################
         ##############################################################################################
-        #FIXME: this is a temporary solution, new parmed fails to save prmtops
-        # prmtop_file = f"{sys_name}/system.pdb" 
-        
+
         equilibrated_traj = f"{sys_name}/equilibration/equilibration_{sys_name}.dcd"
         equilibrated_chk = f"{sys_name}/equilibration/checkpoint_equil_{sys_name}.chk"
         equilibrated_pdb = f"{sys_name}/equilibration/{sys_name}_equilibrated.pdb"
@@ -312,43 +313,70 @@ class AutoPath:
                             checkpoint_file=equilibrated_chk,
                             # pdb_file=equilibrated_pdb,
                             pulling_speed=speed,  # nm/ps
-                            # steps_per_move=self.sMD_steps_per_move,
                             dx_per_move=self.sMD_dx_per_move,  # nm, this is the displacement per move
                             sMD_spring_cte=sMD_spring_cte,
-                            # run_id=f'replica-{i+1}_v{speed}',
-                            pulling_direction=self.sMD_pulling_dir,  # "forward" or "backward"',
+                            pulling_direction=self.sMD_pulling_dir,
                         )
                     except Exception as e:  
                         logging.error(f"Error during sMD pulling for speed {speed} nm/ps, replica {i+1}: {e}")
                         continue
                     
-            # # Load and align the sMD trajectories
-            # sMD_trajs = glob(f"{sMD_outdir}/sMD_traj_replica-*_*_*.dcd")
-            # for traj_file in sMD_trajs:
-            #     traj = md.load(traj_file, top=solvated_system_pdb)
-            #     traj = traj.center_coordinates()
-            #     traj = traj.image_molecules()
-            #     try:
-            #         backbone = traj.topology.select("backbone")
-            #         traj = traj.superpose(traj[0], atom_indices=backbone)
-            #     except Exception as e:
-            #         logging.warning(f"Superposition failed: {e}. Proceeding without superposition.")
-            #     traj.save(traj_file.replace(".dcd", "_aligned.dcd"))
-            #     os.remove(traj_file) # remove the dcds
+        # Load and align the sMD trajectories
+        sMD_trajs = glob(f"{sMD_outdir}/sMD_replica-*_*_*.dcd")
+        for traj_file in sMD_trajs:
+            traj = md.load(traj_file, top=solvated_system_pdb)
+            traj = traj.center_coordinates()
+            traj = traj.image_molecules()
+            try:
+                backbone = traj.topology.select("backbone")
+                traj = traj.superpose(traj[0], atom_indices=backbone)
+            except Exception as e:
+                logging.warning(f"Superposition failed: {e}. Proceeding without superposition.")
+            traj.save(traj_file.replace(".dcd", ".xtc"))
+            # os.remove(traj_file) # remove the dcds
+
+        ##############################################################################################
+        ###################################### sMD Analysis #######################################
+        ##############################################################################################
+        from autopath.analysis_smd import SteeredMDAnalysis
+        
+        logs = glob(f"{sMD_outdir}/sMD_*_*_forward.dat")
+        trajs = glob(f"{sMD_outdir}/sMD_*_*_forward.xtc")
+        smd = SteeredMDAnalysis(logs, 
+                                sys_name, 
+                                # dist_minmax=(0.0, 1.4), #nm                        
+                                cluster_paths=True,
+                                # cluster_range=(0.0,1.2),
+                                trajectories=trajs,
+                                reference_pdb=equilibrated_pdb,
+                                # pocket_select="protein and resid 189 192 195 214 215 219 and name CA", # my own selection
+                                pocket_select='(protein within 6.0 of resname UNK) and name CA',
+                                ligand_select=f'resname {lig_resname} and not name H*',
+                                timestep=self.timestep,
+                                temperature=self.temperature,
+                                )
+        
+        results, gmm_results = smd.run_analysis(use_target_grid=True,
+                                                # speeds=[0.001, 0.005],
+                                                fit_GMM=False)
+        smd.processed_data.to_csv(f"{sMD_outdir}/sMD_data_processed.csv")
+        smd.raw_data.to_csv(f"{sMD_outdir}/sMD_data_raw.csv")
+        results.to_csv(f"{sMD_outdir}/sMD_analysis_results.csv")
 
         ##############################################################################################
         ###################################### Extract Milestones ####################################
         ##############################################################################################
 
         milestones_outdir = f"{sys_name}/milestones"
-        min_dist = 6 # minimum distance between clusters of milestones
+        min_dist = 2.0 # minimum distance between clusters of milestones
         
         if self.extract_milestones:
             
             os.makedirs(milestones_outdir, exist_ok=True)
 
-            sMD_trajs = glob(f"{sMD_outdir}/sMD_traj_replica-*_*_*.dcd")
-            sMD_trajs = [t for t in sMD_trajs if not t.endswith("_aligned.dcd")]
+            sMD_trajs = glob(f"{sMD_outdir}/sMD_replica-*_*_*.xtc")
+            print(f"Found {len(sMD_trajs)} sMD trajectories for milestone extraction.")
+            # sMD_trajs = [t for t in sMD_trajs if not t.endswith("_aligned.dcd")]
 
             if len(sMD_trajs) == 0:
                 logging.error("No sMD trajectories found. Please check the sMD pulling step.")
@@ -356,9 +384,8 @@ class AutoPath:
             
             #TODO move outside 
             # use the same pocket selection as in the equilibration, but create a new atomgroup for this Universe
-            u_sMD = mda.Universe(prmtop_file, sMD_trajs)
+            u_sMD = mda.Universe(solvated_system_pdb, sMD_trajs)
             pocket_atoms = u_sMD.select_atoms(f'index {" ".join(map(str, pocket_atom_indices))}')
-            # ligand_atoms = u_sMD.select_atoms(f'index {" ".join(map(str, ligand_atoms_indices))}')
             ligand_atoms_full = u_sMD.select_atoms(f'resname {lig_resname} and not name H*')
             ligand_atoms_full_indices = [atom.index for atom in ligand_atoms_full]
             
@@ -367,13 +394,13 @@ class AutoPath:
             rmsd = compute_rmsd(u_sMD, u_sMD, 
                                 alig_select=f"resname {lig_resname} and not name H*",
                                 groupselections={'ligand': f"resname {lig_resname} and not name H*"},
-                                out_dir=milestones_outdir)
+                                plots_outdir=None)
             rmsd['COM'] = coms
             X = rmsd[['RMSD_ligand', 'COM']].values
 
             # I didn't use the wrapped trajs for COM distances to avoid imaging artifacts
-            sMD_trajs_aligned = [traj.replace(".dcd", "_aligned.dcd") for traj in sMD_trajs]
-            u_sMD_aligned = mda.Universe(prmtop_file, sMD_trajs_aligned)
+            sMD_trajs_aligned = [traj.replace(".dcd", ".xtc") for traj in sMD_trajs]
+            u_sMD_aligned = mda.Universe(solvated_system_pdb, sMD_trajs_aligned)
 
             labels, sorted_cluster_centers = cluster_sMD_trajectories(u_sMD_aligned, X, 
                                                                       n_clusters=self.n_milestones,
@@ -382,7 +409,7 @@ class AutoPath:
 
             # Plot the clustering results
             plt.figure(figsize=(6, 5))
-            sns.scatterplot(x=rmsd['RMSD_ligand'], y=rmsd['COM'], hue=labels, palette='viridis')
+            sns.scatterplot(x=rmsd['RMSD_ligand'], y=rmsd['COM'], hue=labels, palette='viridis', s=30, alpha=0.4)
             plt.scatter(sorted_cluster_centers[:, 0], sorted_cluster_centers[:, 1], color='red', marker='x', s=100, label='Cluster Centers')
             plt.xlabel('RMSD (A)'); plt.ylabel('COM Distance (A)')
             plt.title(f"{sys_name} sMD clustering")
@@ -404,9 +431,15 @@ class AutoPath:
                             }
 
         if self.run_metadynamics:
-
-            min_com = final_com * 0.75
-            max_com = final_com + self.sMD_pulling_dist
+            try:
+                smd_raw = pd.read_csv(f"{sMD_outdir}/sMD_data_raw.csv")
+                min_com = smd_raw['r_before'].min() * 0.75  # nm
+                max_com = smd_raw['r_before'].max() * 1.1 # nm
+            except Exception as e:
+                logging.error(f"Error loading sMD raw data: {e}")
+                logging.warning("Using default min and max COM distances for metadynamics: 0.0 and 3.0 nm.")
+                min_com = 0.0
+                max_com = 3.0
 
             milestones = glob(f'{milestones_outdir}/milestone_*.pdb')           
             if len(milestones) == 0:
@@ -421,6 +454,7 @@ class AutoPath:
                 ligand_atoms=ligand_atoms_full_indices, # use all atoms
                 pocket_atoms=pocket_atom_indices,
                 out_dir=milestones_outdir,
+                is_membrane=self.is_membrane,
                 temp=self.temperature,
             )
 
@@ -428,7 +462,10 @@ class AutoPath:
                 topology=topology,
                 ligand_atoms=ligand_atoms_indices,
                 pocket_atoms=pocket_atom_indices,
-                restrained_atoms=restrained_atoms_indices,
+                restrained_atoms=None,
+                is_membrane=self.is_membrane,
+                timestep=self.timestep,
+                temp=self.temperature,
                 out_dir=f"{sys_name}/metadynamics",
             )
 
@@ -479,8 +516,8 @@ class AutoPath:
                 traj = traj.superpose(traj[0], atom_indices=backbone)
             except Exception as e:
                 logging.warning(f"Superposition failed: {e}. Proceeding without superposition.")
-            traj.save(traj_file.replace(".dcd", "_aligned.dcd"))
-            # os.remove(traj_file) # remove the dcd
+            traj.save(traj_file.replace(".dcd", "_aligned.xtc"))
+            os.remove(traj_file) # remove the dcd
 
         simulation_time = time.monotonic() - start_time
         logging.info(f"Finished AutoPath simulation in {simulation_time/60:.2f} min.")

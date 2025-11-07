@@ -114,7 +114,7 @@ def main():
 
     # Variants is a dictionary which specifies the chain:resid for the variant e.g. {"A:123": "CYX"}
     # If you re-run the script and the system is already prepared comment the following line
-    # system, topo = prepare_system.run(protein=prot_path, variants=None, ligands=ligands)
+    system, topo = prepare_system.run(protein=prot_path, variants=None, ligands=ligands)
 
     ########################################################################################
     ###################################### Equilibration ###################################
@@ -135,7 +135,7 @@ def main():
         )
     
     # If you re-run the script and the system is equilibrated prepared comment the following line
-    # system_eq = equilibration.run(pdb_file=system_pdb_file, run_id=sys_name)
+    system_eq = equilibration.run(pdb_file=system_pdb_file, run_id=sys_name)
         
     ########################################################################################
     ###################################### Post-processing #################################
@@ -153,12 +153,12 @@ def main():
         traj = traj.superpose(traj[0], atom_indices=backbone)
     except Exception as e:
         logging.warning(f"Superposition failed: {e}. Proceeding without superposition.")
-    traj.save(equilibrated_traj.replace(".dcd", "_aligned.dcd"))
-    # os.remove(equilibrated_traj)
-    logging.info(f"Aligned trajectory saved to {equilibrated_traj.replace('.dcd', '_aligned.dcd')}")
-    
+    traj.save(equilibrated_traj.replace(".dcd", "_aligned.xtc"))
+    os.remove(equilibrated_traj)
+    logging.info(f"Aligned trajectory saved to {equilibrated_traj.replace('.dcd', '_aligned.xtc')}")
+
     # Calculate RMSD and RMSF of the ligand
-    u_eq = mda.Universe(system_pdb_file, equilibrated_traj.replace(".dcd", "_aligned.dcd"), in_memory=True)
+    u_eq = mda.Universe(system_pdb_file, equilibrated_traj.replace(".dcd", "_aligned.xtc"), in_memory=True)
     lig_rmsd_equilibration = compute_rmsd(u_eq, u_eq,
                                           alig_select="backbone", 
                                           groupselections={"ligand":f"resname {lig_resname} and not name H*", 

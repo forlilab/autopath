@@ -18,7 +18,7 @@ class VanillaMD:
         restrained_atoms: list[int] = None,
         timestep: float = 0.004, #  # 4 fs timestep
         temperature: float = 300,
-        save_freq: int = 2500, # save /0.01ns
+        save_freq: int = 25000, # save /0.1ns
         out_dir: str = "MD",
         platform: str = "fastest",
         verbose: int = 2,
@@ -68,18 +68,18 @@ class VanillaMD:
             logging.error("Either pdb_file or checkpoint_file must be provided to set initial positions.")
             exit(1)
         elif checkpoint_file is None and pdb_file is not None:
-            logging.info(f"Setting positions from PDB file {pdb_file}")
+            logging.info(f"Setting positions and box vectors from PDB file {pdb_file}")
             pdb = PDBFile(pdb_file)
             simulation.context.setPositions(pdb.getPositions())
             simulation.context.setPeriodicBoxVectors(*pdb.topology.getPeriodicBoxVectors())
             simulation.context.setVelocitiesToTemperature(self.temperature)
 
         elif checkpoint_file is not None and pdb_file is None:
-            logging.info(f"Setting positions from checkpoint {checkpoint_file}")
+            logging.info(f"Loading checkpoint from {checkpoint_file}")
             simulation.loadCheckpoint(checkpoint_file)
         else:
             # if both are provided, use the checkpoint file but warn the user
-            logging.warning("Both checkpoint_file and pdb_file are provided. Using checkpoint_file.")
+            logging.warning("Both checkpoint_file and pdb_file were provided. Using checkpoint_file.")
             simulation.loadCheckpoint(checkpoint_file)
 
         # Reset velocities to temperature
