@@ -292,8 +292,6 @@ class Equilibration:
             )
         
         simulation.context.reinitialize(preserveState=True)
-        print('Forces before minimization and resetting restraints:')
-        print_current_forces(self.system)
         
         logging.info(f"Current system's energy: {simulation.context.getState(getEnergy=True).getPotentialEnergy()}")
         if not self.restrained_minimization:
@@ -333,8 +331,7 @@ class Equilibration:
             )
 
         simulation.context.reinitialize(preserveState=True)
-        print('Forces after minimization and resetting restraints:')
-        print_current_forces(self.system)
+        # print_current_forces(self.system)
 
         logging.info("Warming up the system..")
         warm_up_system(simulation, integrator, 
@@ -344,11 +341,6 @@ class Equilibration:
                        warming_steps=self.warm_up_steps
                        )
         
-        # remove existing restraint forces
-        self.system = remove_openmm_force(self.system, "k_")
-
-        # warm_positions = simulation.context.getState(getPositions=True).getPositions()
-
         logging.info("Running restrained equilibration protocol..")
         run_restrained_md(
             simulation,
@@ -363,7 +355,6 @@ class Equilibration:
         # remove the restraint forces after equilibration
         self.system = remove_openmm_force(self.system, "k_")
         simulation.context.reinitialize(preserveState=True)
-        print_current_forces(self.system)
 
         final_positions = simulation.context.getState(getPositions=True).getPositions()
         self.topology.setPeriodicBoxVectors(simulation.context.getState(getPositions=True).getPeriodicBoxVectors()) #saves correct box vectors to the pdb
