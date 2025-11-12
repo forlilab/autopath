@@ -46,6 +46,9 @@ import statsmodels.api as sm
 
 from collections import defaultdict
 
+import warnings
+warnings.filterwarnings("ignore", category=RuntimeWarning)
+
 class SteeredMDAnalysis:
     """Class to analyze Steered Molecular Dynamics (sMD) data, mostly within the dcTMD framework.
     For more information on the dcTMD see...
@@ -65,6 +68,7 @@ class SteeredMDAnalysis:
                  reference_pdb: str = None,
                  pocket_select: str = '(protein within 6.0 of resname UNK) and name CA',
                  ligand_select: str = 'resname UNK and not name H*',
+                 pulling_direction: str = 'forward', # 'forward' or 'backward'
                  seed: int = 42
                  ):
 
@@ -104,6 +108,10 @@ class SteeredMDAnalysis:
         self.dist_minmax = dist_minmax  # default min/max for distance bins
         self.log_files = log_files
 
+        if self.pulling_direction not in ['forward', 'backward']:
+            raise ValueError("pulling_direction must be either 'forward' or 'backward'.")
+
+        self.pulling_direction = pulling_direction
         self.seed = seed
 
         return
@@ -160,6 +168,20 @@ class SteeredMDAnalysis:
                                                    use_quantiles=True, 
                                                    min_points=1)
         
+        # filter out trajectories that did not reach close contact
+        to_drop = []
+        for traj_name, traj_data in self.raw_data.groupby('trajname'):
+            if self.pulling_direction == 'forward':
+                if traj_data["r_after"].min() < 0.1:
+                    print(f'WARNING: Dropping {traj_name}, min distance {traj_data["r_before"].min():.2f} nm')
+                    to_drop.append(traj_name)
+            else:  # backward pulling
+                if traj_data["r_after"].min() > 0.1:
+                    print(f'WARNING: Dropping {traj_name}, min distance {traj_data["r_before"].min():.2f} nm')
+                    to_drop.append(traj_name)
+        
+        self.raw_data = self.raw_data[~self.raw_data['trajname'].isin(to_drop)]
+        
         # cluster trajectories into paths if specified
         if self.cluster_paths:
             # self.raw_data, labels_dict, medoid_names = self.cluster_trajectories()
@@ -179,6 +201,7 @@ class SteeredMDAnalysis:
         else:
             self.raw_data['path'] = 1 # default to single cluster if no clustering method is specified
 
+        
         # decorrelate work values using statistical inefficiency g or by replica averaging
         # If we dont decorrelate, we should use the per-replica aggregated work. i.e. each replica contributes one work value per bin ENSEMBLE AVERAGE OVER REPLICAS
         if use_target_grid:
@@ -199,10 +222,22 @@ class SteeredMDAnalysis:
 
         results = []
         gmm_results = defaultdict(dict)  # to store GMM results for plotting
-        for (coord, speed, path), group in self.processed_data.groupby(group_keys):
+        
+        to_drop = []
+        for path in self.processed_data.groupby(['path'])[['trajname']].nunique().iterrows():
+            if path[1]['trajname'] < 3:
+                to_drop.append(path[0])
+        if to_drop:
+            print(f'WARNING: Dropping paths: {to_drop} due to insufficient number of trajectories (<3).')
+        
+        processed_data = self.processed_data[~self.processed_data['path'].isin(to_drop)]
+
+        for (coord, speed, path), group in processed_data.groupby(group_keys):
             
             r_coord = float(group[x_col].iloc[0])
-
+            
+            #coord is the index
+            # print(f'analyzing coord={coord:.2f}, r_bin={r_coord:.2f}, speed={speed:.5f}, path={path} with {len(group)} points.')
             raw_W = group[self.work_column].astype(float).values
 
             Wmean_raw = raw_W.mean()
@@ -432,10 +467,10 @@ class SteeredMDAnalysis:
                         ) -> pd.DataFrame:
         new_df = df.copy()
         if columns is None or len(columns) == 0:
-            columns = [c for c in df.columns if c not in ['speed','path','r_bin','replica','trajname']]
-        for (speed,path), group in df.groupby(['speed','path']):
+            columns = [c for c in new_df.columns if c not in ['speed','path','r_coord','r_bin','replica','trajname']]
+        for (speed, path), group in df.groupby(['speed','path']):
             for col in columns:
-                mask = (df['speed'] == speed) & (df['path'] == path)
+                mask = (new_df['speed'] == speed) & (new_df['path'] == path)
                 new_df.loc[mask, f'{col}_smooth'] = gaussian_filter1d(group[col], sigma=sigma)
         return new_df
             
@@ -470,7 +505,7 @@ class SteeredMDAnalysis:
             df_list = []
             for traj_name, distances in all_distances.items():
                 num_frames = distances.shape[0]
-                traj_name = traj_name.replace('.dcd', '').replace('traj', 'log') 
+                traj_name = traj_name.replace('.xtc', '').replace('traj', 'log') 
                 frame_numbers = np.arange(num_frames)
                 traj_df = pd.DataFrame(distances, columns=[f"dist_{i}" for i in range(distances.shape[1])])
                 traj_df.insert(0, "frame", frame_numbers)
@@ -552,7 +587,7 @@ class SteeredMDAnalysis:
             # plt.show()
             plt.close()
 
-        names = [os.path.basename(name).replace('.dcd', '').replace('traj', 'log') for name in paths.keys()]
+        names = [os.path.basename(name).replace('.xtc', '').replace('traj', 'log') for name in paths.keys()]
         medoid_names = [names[medoid] for medoid in cluster.medoids]
         labels_dict = {k: v for k, v in zip(names, cluster.labels)}
 
@@ -813,7 +848,7 @@ class SteeredMDAnalysis:
     def cluster_raw_traces(self,
                            data:pd.DataFrame, 
                            r_range:tuple=None,
-                           columns:list=['work', 'force', 'r_before'], 
+                           columns:list=['work', 'r_before'], 
                            use_silhouette:bool=True,
                            outdir:str='.',
                            seed:int=42):
@@ -824,8 +859,8 @@ class SteeredMDAnalysis:
             if col not in df.columns:
                 raise ValueError(f"Column {col} not found in dataframe.")
 
-        # columns = columns + ['lag']
-        df['lag'] = df['r_target'] - df['r_before']
+        columns = columns + ['lag']
+        df['lag'] = df['r_target'] - df['r_after']
         
         data_struct = defaultdict(np.ndarray)
         for trajname in df.groupby("trajname").groups.keys():
@@ -863,7 +898,7 @@ class SteeredMDAnalysis:
 
         K_MAX = min(5, df.groupby("trajname").ngroups)
         scores = {}
-        for i in range(2,K_MAX+1):
+        for i in range(2, K_MAX):
             c = kmedoids.fasterpam(distmatrix, i, random_state=seed)
             if use_silhouette:
                 scores[i] = silhouette_score(distmatrix, c.labels, 
@@ -938,7 +973,7 @@ class SteeredMDAnalysis:
             for top, traj in traj_list:
                 # if not aligned, align to reference
                 u = mda.Universe(top, traj)
-                align.AlignTraj(u, u_ref, select=align_sel, in_memory=True).run()
+                # align.AlignTraj(u, u_ref, select=align_sel, in_memory=True).run()
 
                 lig = u.select_atoms(ligand_sel)
                 if lig.n_atoms == 0:
