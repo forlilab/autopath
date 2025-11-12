@@ -105,14 +105,14 @@ class SteeredMD:
         simulation.context.setParameter("r0_smd", initial_r0)
 
         with open(f"{self.out_dir}/sMD_{run_id}.dat","w") as f:
-            f.write("step,r_target,r_before,r_after,NC,force,U_cvpack,m_eff\n")
+            f.write("step,time,r_target,r_before,r_after,NC,force,U_cvpack,m_eff\n")
             
             r_before_nm = 0.0
             r_after_nm = 0.0
             m_eff_dalton = 0.0
             nc_now = 0.0
             
-            if self.autostop_freq is not None:
+            if self.autostop_freq is not None and direction == "forward":
                 nc_now = self.nc_cv.getValue(simulation.context, allowReinitialization=False).value_in_unit(openmmunit.dimensionless)
             
             # Loop over the number of moves
@@ -154,6 +154,8 @@ class SteeredMD:
                 # if self.verbose > 0:
                 r_after_nm = self.com_dist.getValue(simulation.context, allowReinitialization=False).value_in_unit(openmmunit.nanometers)
                 
+                time_now = simulation.context.getState().getTime().value_in_unit(openmmunit.picoseconds)
+                
                 #log everything
                 r_target_nm = r_target.value_in_unit(openmmunit.nanometers)
                 r_before_nm = r_before.value_in_unit(openmmunit.nanometers)
@@ -161,19 +163,25 @@ class SteeredMD:
                 U_cvpack_kjm = U_cvpack.value_in_unit(openmmunit.kilojoules_per_mole)
 
                 # Check if the ligand is unbound. Only for forward pulling
-                if direction == "forward" and self.autostop_freq is not None:
-                    if i%self.autostop_freq == 0:
+                # Check the distance is 0 for the backward pulling
+                if self.autostop_freq is not None and i%self.autostop_freq == 0:
+                    if direction == "forward":
                         nc_now = self.nc_cv.getValue(simulation.context, allowReinitialization=False).value_in_unit(openmmunit.dimensionless)
                         print(f"Step {i+1}/{self.sMD_moves}: r_target={r_target_nm:.2f} nm, r_before={r_before_nm:.2f} nm, r_after={r_after_nm:.2f} nm, nc={nc_now}")
-
                         if nc_now < 1:
-                            f.write(f"{i},{r_target_nm},{r_before_nm},{r_after_nm},{nc_now},{force_kjmnm},{U_cvpack_kjm},{m_eff_dalton}\n")
+                            f.write(f"{i},{time_now},{r_target_nm},{r_before_nm},{r_after_nm},{nc_now},{force_kjmnm},{U_cvpack_kjm},{m_eff_dalton}\n")
                             logging.warning(f"Stopping pulling at step {i} because n_contacts={nc_now}.")
                             break
-                        
-            # with open(f"{self.out_dir}/sMD_{run_id}_{direction}.dat","w") as f:
-                f.write(f"{i},{r_target_nm},{r_before_nm},{r_after_nm},{nc_now},{force_kjmnm},{U_cvpack_kjm},{m_eff_dalton}\n")
-
+                    else:
+                        print(f"Step {i+1}/{self.sMD_moves}: r_target={r_target_nm:.2f} nm, r_before={r_before_nm:.2f} nm, r_after={r_after_nm:.2f} nm")
+                        # if (r_target_nm - r_before_nm) > 0.1:
+                        if r_before_nm < 0.05:
+                            f.write(f"{i},{time_now},{r_target_nm},{r_before_nm},{r_after_nm},{nc_now},{force_kjmnm},{U_cvpack_kjm},{m_eff_dalton}\n")
+                            logging.warning(f"Stopping backward pulling at step {i} with r_target={r_target_nm:.2f} nm and r_before={r_before_nm:.2f} nm.")
+                            # logging.warning(f"Stopping backward pulling at step {i} because r_after={r_after_nm:.2f} nm.")
+                            break
+                f.write(f"{i},{time_now},{r_target_nm},{r_before_nm},{r_after_nm},{nc_now},{force_kjmnm},{U_cvpack_kjm},{m_eff_dalton}\n")
+                
         # Save final positions
         final_positions = simulation.context.getState(getPositions=True).getPositions()
         self.topology.setPeriodicBoxVectors(simulation.context.getState(getPositions=True).getPeriodicBoxVectors()) #saves correct box vectors to the pdb
@@ -182,12 +190,12 @@ class SteeredMD:
     
 
     def run(self,
-        max_displacement: float = 3.0,  # nm
+        max_displacement: float = 5.0,  # nm
         # max_time: float = 2000,  # ps
         # steps_per_move: int = None,
         dx_per_move: float = 0.001,  # nm
         pulling_speed: float = 0.001,  # nm/ps equi 1 nm/ns 1 m/s
-        sMD_spring_cte: int = 1000, # kJ/mol/nm^2
+        sMD_spring_cte: int = 10000, # kJ/mol/nm^2
         run_id: str = None,
         checkpoint_file: str = None,
         pdb_file: str = None,
@@ -223,7 +231,8 @@ class SteeredMD:
         
         # self.sMD_moves = params['sMD_moves']
         self.dx_per_move = dx_per_move * openmmunit.nanometers   # Quantity with units
-        self.steps_per_move = int(round(dx_per_move / pulling_speed / self.timestep.value_in_unit(openmmunit.picoseconds)))
+        self.steps_per_move = max(1, int(round(dx_per_move / pulling_speed / self.timestep.value_in_unit(openmmunit.picoseconds))))
+
         self.sMD_moves = int(math.ceil(self.max_displacement / dx_per_move))
         
         #print summary of the pulling parameters
@@ -300,7 +309,7 @@ class SteeredMD:
         
         # Get the subset of protein atoms close to the ligand
         subset_protein_HA, subset_protein_residues = self._get_pocket_atoms(simulation, cutoff=0.5)
-        if self.autostop_freq is not None:
+        if self.autostop_freq is not None and pulling_direction == "forward":
             forces = {f.getName(): f for f in system.getForces()}
             self.nc_cv = cvpack.NumberOfContacts(
                 self.groupA_atoms,
@@ -342,7 +351,7 @@ class SteeredMD:
             openmmunit.kilojoules_per_mole,  # energy not force
             groups,
             weighByMass=True if len(self.groupB_atoms) > 1 else False, # avoid problems with single DUM massless atoms
-            pbc=False,
+            pbc=True,
         )
         
         self.com_force.addGlobalParameter("r0_smd", 0)
@@ -356,7 +365,7 @@ class SteeredMD:
             openmmunit.nanometers,  # distance not energy
             groups,
             weighByMass=True if len(self.groupB_atoms) > 2 else False, # avoid problems with single DUM massless atoms
-            pbc=False,
+            pbc=True,
         )
         
         self.com_dist.setForceGroup(3)  # Use a separate force group for the CV GROUP 3
