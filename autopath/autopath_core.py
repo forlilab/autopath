@@ -303,6 +303,7 @@ class AutoPath:
                 autostop_freq=self.sMD_autostop_freq,
                 timestep=self.timestep,
                 temperature=self.temperature,
+                # save_freq=2500,  # every 10 ps if timestep=0.004 ps
                 out_dir=sMD_outdir,
             )
 
@@ -323,6 +324,9 @@ class AutoPath:
                     
         # Load and align the sMD trajectories
         sMD_trajs = glob(f"{sMD_outdir}/sMD_replica-*_*_*.dcd")
+        logging.info(f"Found {len(sMD_trajs)} sMD trajectories to align.")
+        print(f"Found {len(sMD_trajs)} sMD trajectories to align.")
+        
         for traj_file in sMD_trajs:
             traj = md.load(traj_file, top=solvated_system_pdb)
             traj = traj.center_coordinates()
@@ -333,7 +337,7 @@ class AutoPath:
             except Exception as e:
                 logging.warning(f"Superposition failed: {e}. Proceeding without superposition.")
             traj.save(traj_file.replace(".dcd", ".xtc"))
-            # os.remove(traj_file) # remove the dcds
+            os.remove(traj_file) # remove the dcds
 
         ##############################################################################################
         ###################################### sMD Analysis #######################################
@@ -341,13 +345,16 @@ class AutoPath:
         from autopath.analysis_smd import SteeredMDAnalysis
         
         logs = glob(f"{sMD_outdir}/sMD_*_*_forward.dat")
-        trajs = glob(f"{sMD_outdir}/sMD_*_*_forward.xtc")
+        sMD_trajs = glob(f"{sMD_outdir}/sMD_*_*_forward.xtc")
+        logging.info(f"Found {len(sMD_trajs)} sMD trajectories for analysis.")
+        print(f"Found {len(sMD_trajs)} sMD trajectories for analysis.")
+        
         smd = SteeredMDAnalysis(logs, 
                                 sys_name, 
                                 # dist_minmax=(0.0, 1.4), #nm                        
                                 cluster_paths=True,
                                 # cluster_range=(0.0,1.2),
-                                trajectories=trajs,
+                                trajectories=sMD_trajs,
                                 reference_pdb=equilibrated_pdb,
                                 # pocket_select="protein and resid 189 192 195 214 215 219 and name CA", # my own selection
                                 pocket_select='(protein within 6.0 of resname UNK) and name CA',
@@ -369,7 +376,13 @@ class AutoPath:
 
         milestones_outdir = f"{sys_name}/milestones"
         min_dist = 2.0 # minimum distance between clusters of milestones
-        
+    
+        # use the same pocket selection as in the equilibration, but create a new atomgroup for this Universe
+        u_sMD = mda.Universe(solvated_system_pdb, sMD_trajs)
+        pocket_atoms = u_sMD.select_atoms(f'index {" ".join(map(str, pocket_atom_indices))}')
+        ligand_atoms_full = u_sMD.select_atoms(f'resname {lig_resname} and not name H*')
+        ligand_atoms_full_indices = [atom.index for atom in ligand_atoms_full]
+            
         if self.extract_milestones:
             
             os.makedirs(milestones_outdir, exist_ok=True)
@@ -381,14 +394,7 @@ class AutoPath:
             if len(sMD_trajs) == 0:
                 logging.error("No sMD trajectories found. Please check the sMD pulling step.")
                 exit(1)
-            
-            #TODO move outside 
-            # use the same pocket selection as in the equilibration, but create a new atomgroup for this Universe
-            u_sMD = mda.Universe(solvated_system_pdb, sMD_trajs)
-            pocket_atoms = u_sMD.select_atoms(f'index {" ".join(map(str, pocket_atom_indices))}')
-            ligand_atoms_full = u_sMD.select_atoms(f'resname {lig_resname} and not name H*')
-            ligand_atoms_full_indices = [atom.index for atom in ligand_atoms_full]
-            
+        
             # calculate some features for clustering
             coms = calculate_com_distance(u_sMD, ligand_atoms_full, pocket_atoms, wrap=False)
             rmsd = compute_rmsd(u_sMD, u_sMD, 
