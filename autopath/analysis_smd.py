@@ -108,7 +108,7 @@ class SteeredMDAnalysis:
         self.dist_minmax = dist_minmax  # default min/max for distance bins
         self.log_files = log_files
 
-        if self.pulling_direction not in ['forward', 'backward']:
+        if pulling_direction not in ['forward', 'backward']:
             raise ValueError("pulling_direction must be either 'forward' or 'backward'.")
 
         self.pulling_direction = pulling_direction
@@ -184,8 +184,8 @@ class SteeredMDAnalysis:
         
         # cluster trajectories into paths if specified
         if self.cluster_paths:
-            # self.raw_data, labels_dict, medoid_names = self.cluster_trajectories()
-            self.raw_data, labels_dict, medoid_names = self.cluster_raw_traces(self.raw_data, r_range=self.cluster_range, outdir=self.outdir)
+            self.raw_data, labels_dict, medoid_names = self.cluster_trajectories()
+            # self.raw_data, labels_dict, medoid_names = self.cluster_raw_traces(self.raw_data, r_range=self.cluster_range, outdir=self.outdir)
             print('Clustering results:')
             print(self.raw_data.groupby(['path', 'speed'])[['trajname']].nunique())
             # generate pymol sesh for the paths
@@ -228,7 +228,7 @@ class SteeredMDAnalysis:
             if path[1]['trajname'] < 3:
                 to_drop.append(path[0])
         if to_drop:
-            print(f'WARNING: Dropping paths: {to_drop} due to insufficient number of trajectories (<3).')
+            print(f'WARNING: Dropping paths: {to_drop} due to insufficient number of trajectories ({path[1]['trajname']}).')
         
         processed_data = self.processed_data[~self.processed_data['path'].isin(to_drop)]
 
@@ -873,12 +873,9 @@ class SteeredMDAnalysis:
                 print(f"Skipping trajectory {trajname} due to insufficient data points in range.")
                 continue
             # Scale the work and force columns to [0,1] range because they depend on pulling speed
-            if 'force' in columns:
-                traj_df['force'] = MinMaxScaler().fit_transform(traj_df['force'].values.reshape(-1,1))
-            if 'work' in columns:
-                traj_df['work'] = MinMaxScaler().fit_transform(traj_df['work'].values.reshape(-1,1))
-            if 'lag' in columns:
-                traj_df['lag'] = MinMaxScaler().fit_transform(traj_df['lag'].values.reshape(-1,1))
+            # if 'force' in columns:
+            #     traj_df['force'] = MinMaxScaler().fit_transform(traj_df['force'].values.reshape(-1,1))
+            # if 'work' in columns:
             data_struct[trajname] = traj_df[columns].to_numpy()
         vectors_stacked = [data_struct[traj_name] for traj_name in data_struct.keys()]
         names = list(data_struct.keys())
