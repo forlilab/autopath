@@ -201,7 +201,6 @@ class SteeredMDAnalysis:
         else:
             self.raw_data['path'] = 1 # default to single cluster if no clustering method is specified
 
-        
         # decorrelate work values using statistical inefficiency g or by replica averaging
         # If we dont decorrelate, we should use the per-replica aggregated work. i.e. each replica contributes one work value per bin ENSEMBLE AVERAGE OVER REPLICAS
         if use_target_grid:
@@ -758,8 +757,8 @@ class SteeredMDAnalysis:
                             x_col:str='r_coord',
                             use_spline:bool=True) -> pd.DataFrame:
         rows = []
-        for (speed, path), g in df.groupby(["speed","path"], sort=False):
-            g = g.sort_values(x_col)
+        for (speed, path), g in df.groupby(["speed","path"]):
+            g = g.sort_values(x_col, ascending=False)
             if use_spline:
                 # Use a cubic spline fit for derivative
                 spline = UnivariateSpline(g[x_col].values, g[w_col].values, k=3)
