@@ -227,16 +227,18 @@ class AutoPath:
 
         equilibrated_traj = equilibrated_traj.replace(".dcd", "_aligned.dcd")
         u_eq = mda.Universe(equilibrated_pdb, equilibrated_traj, in_memory=True)
-
-        rmsd = compute_rmsd(u_eq, u_eq,
-                            alig_select="backbone", 
-                            groupselections={"ligand":f"resname {lig_resname} and not name H*", 
-                                            "protein":'protein and not name H*'},
-                            plots_outdir=f"{sys_name}/equilibration"
-                            )
-        rmsd.to_csv(f"{sys_name}/equilibration/{sys_name}_ligand_rmsd.csv", index=False)
-        plot_atomic_rmsf(u_eq, outname=f"{sys_name}/equilibration/{sys_name}_RMSF.png", log_rmsf=True)
-        
+        try:
+            rmsd = compute_rmsd(u_eq, u_eq,
+                                alig_select="backbone", 
+                                groupselections={"ligand":f"resname {lig_resname} and not name H*", 
+                                                "protein":'protein and not name H*'},
+                                plots_outdir=f"{sys_name}/equilibration"
+                                )
+            rmsd.to_csv(f"{sys_name}/equilibration/{sys_name}_ligand_rmsd.csv", index=False)
+            plot_atomic_rmsf(u_eq, outname=f"{sys_name}/equilibration/{sys_name}_RMSF.png", log_rmsf=True)
+        except Exception as e:
+            logging.error(f"Error computing RMSD/RMSF: {e}")
+            pass
         # Equilibration VS checkpoint
         # if self.equilibration_checkpoint:
         #     final_rmsd = lig_rmsd_equilibration[-1:].values
@@ -356,8 +358,7 @@ class AutoPath:
                                 # cluster_range=(0.0,1.2),
                                 trajectories=sMD_trajs,
                                 reference_pdb=equilibrated_pdb,
-                                # pocket_select="protein and resid 189 192 195 214 215 219 and name CA", # my own selection
-                                pocket_select='(protein within 6.0 of resname UNK) and name CA',
+                                pocket_select='(protein around 6.0 resname UNK) and name CA',
                                 ligand_select=f'resname {lig_resname} and not name H*',
                                 timestep=self.timestep,
                                 temperature=self.temperature,
