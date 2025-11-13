@@ -66,7 +66,7 @@ class SteeredMDAnalysis:
                  cluster_range: tuple = None, #nm
                  trajectories: list[str] = None,
                  reference_pdb: str = None,
-                 pocket_select: str = '(protein within 6.0 of resname UNK) and name CA',
+                 pocket_select: str = 'protein and (around 6.0 resname UNK) and name CA',
                  ligand_select: str = 'resname UNK and not name H*',
                  pulling_direction: str = 'forward', # 'forward' or 'backward'
                  seed: int = 42
@@ -184,8 +184,8 @@ class SteeredMDAnalysis:
         
         # cluster trajectories into paths if specified
         if self.cluster_paths:
-            self.raw_data, labels_dict, medoid_names = self.cluster_trajectories()
-            # self.raw_data, labels_dict, medoid_names = self.cluster_raw_traces(self.raw_data, r_range=self.cluster_range, outdir=self.outdir)
+            # self.raw_data, labels_dict, medoid_names = self.cluster_trajectories()
+            self.raw_data, labels_dict, medoid_names = self.cluster_raw_traces(self.raw_data, r_range=self.cluster_range, outdir=self.outdir)
             print('Clustering results:')
             print(self.raw_data.groupby(['path', 'speed'])[['trajname']].nunique())
             # generate pymol sesh for the paths

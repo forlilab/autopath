@@ -359,7 +359,7 @@ class AutoPath:
                                 # cluster_range=(0.0,1.2),
                                 trajectories=sMD_trajs,
                                 reference_pdb=equilibrated_pdb,
-                                pocket_select='(protein around 6.0 resname UNK) and name CA',
+                                pocket_select='protein and (around 6.0 resname UNK) and name CA',
                                 ligand_select=f'resname {lig_resname} and not name H*',
                                 timestep=self.timestep,
                                 temperature=self.temperature,
