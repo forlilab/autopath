@@ -367,8 +367,8 @@ def get_pocket_atoms(u:mda.Universe,
 
     # If a custom pocket selection is provided, use it directly
     if pocket_selection is not None:
-        pocket_atoms = u.select_atoms(pocket_selection)
-        pocket_atoms_indices = [atom.index for atom in pocket_atoms]
+        # pocket_atoms = u.select_atoms(pocket_selection)
+        pocket_atoms_indices = [atom.index for atom in pocket_selection]
     # If no custom selection, use the ligand residue name to define the pocket
     elif ligand_selection is not None:
         # backbone_names = ["N", "CA", "C", "O"]

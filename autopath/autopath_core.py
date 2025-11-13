@@ -239,6 +239,7 @@ class AutoPath:
         except Exception as e:
             logging.error(f"Error computing RMSD/RMSF: {e}")
             pass
+        
         # Equilibration VS checkpoint
         # if self.equilibration_checkpoint:
         #     final_rmsd = lig_rmsd_equilibration[-1:].values
@@ -246,19 +247,19 @@ class AutoPath:
         #         logging.warning(f"Simulation for ligand {sys_name} terminated because ligand RMSD={final_rmsd:.2f} > {self.eq_checkpoint_cutoff}")
         #         exit(1)
 
-        pocket_atoms = get_pocket_atoms(u_eq, self.pocket_selection, f"resname {lig_resname}")
+        pocket_atoms = get_pocket_atoms(u_eq, None, f"resname {lig_resname}")
         pocket_atom_indices = [atom.index for atom in pocket_atoms]
         pocket_residues = [f"{atom.resname}_{atom.resid}" for atom in pocket_atoms]
         # logging.info(f"Pocket residues are: {', '.join(set(pocket_residues))}")
         print(f"Pocket residues are: {', '.join(set(pocket_residues))}")
 
-        # write out the pocket atoms to a pdb
-        with mda.Writer(f"{sys_name}/pocket_definition.pdb", u_eq.atoms.n_atoms) as W:
-            W.write(pocket_atoms)
-        with mda.Writer(f"{sys_name}/pocket_prote.pdb", u_eq.atoms.n_atoms) as W:
-            W.write(u_eq.select_atoms(f'protein'))
-        with mda.Writer(f"{sys_name}/pocket_lig.pdb", u_eq.atoms.n_atoms) as W:
-            W.write(u_eq.select_atoms(f'resname {lig_resname}'))
+        # # write out the pocket atoms to a pdb
+        # with mda.Writer(f"{sys_name}/pocket_definition.pdb", u_eq.atoms.n_atoms) as W:
+        #     W.write(pocket_atoms)
+        # with mda.Writer(f"{sys_name}/pocket_prote.pdb", u_eq.atoms.n_atoms) as W:
+        #     W.write(u_eq.select_atoms(f'protein'))
+        # with mda.Writer(f"{sys_name}/pocket_lig.pdb", u_eq.atoms.n_atoms) as W:
+        #     W.write(u_eq.select_atoms(f'resname {lig_resname}'))
     
         ligand_atoms_indices = get_ligand_anchor_atoms(u_eq, lig_resname, 
                                                        mode=lig_anchor_mode, 
