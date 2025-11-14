@@ -265,7 +265,7 @@ class SteeredMDAnalysis:
 
                 gmm_dict = self.fit_gmm_to_work_values(raw_W,
                                                         max_K=3,
-                                                        covariance_type='diag',
+                                                        covariance_type='spherical',
                                                         random_state=self.seed)
 
                 #These have shape (K,) for K components
@@ -977,7 +977,7 @@ class SteeredMDAnalysis:
             for top, traj in traj_list:
                 # if not aligned, align to reference
                 u = mda.Universe(top, traj)
-                # align.AlignTraj(u, u_ref, select=align_sel, in_memory=True).run()
+                align.AlignTraj(u, u_ref, select=align_sel, in_memory=True).run()
 
                 lig = u.select_atoms(ligand_sel)
                 if lig.n_atoms == 0:
