@@ -283,7 +283,7 @@ class AutoPath:
         # sMD_collision_frequency = 1  # ps^-1
         # sMD_outdir = f"{sys_name}/sMD_{lig_anchor_mode}_{sMD_timestep}ps_{sMD_collision_frequency}ps_200stm"
         # in this paper they used 80 kcal·mol−1? units don match tho. Ziada et al 2022.
-        sMD_spring_cte_per_atom = 50 * 4.184  # KJ/mol/nm2, converted from kcal. This affects thermal fluctuations
+        sMD_spring_cte_per_atom = 100 * 4.184  # KJ/mol/nm2, converted from kcal. This affects thermal fluctuations
         sMD_outdir=f"{sys_name}/sMD"
         
         if self.run_sMDpulling:
@@ -356,7 +356,7 @@ class AutoPath:
                                 sys_name, 
                                 # dist_minmax=(0.0, 1.4), #nm                        
                                 cluster_paths=True,
-                                # cluster_range=(0.0,1.2),
+                                cluster_range=(0.0, 1.1),
                                 trajectories=sMD_trajs,
                                 reference_pdb=equilibrated_pdb,
                                 pocket_select='protein and (around 6.0 resname UNK) and name CA',
@@ -389,7 +389,7 @@ class AutoPath:
             
             os.makedirs(milestones_outdir, exist_ok=True)
 
-            sMD_trajs = glob(f"{sMD_outdir}/sMD_replica-*_*_*.xtc")
+            # sMD_trajs = glob(f"{sMD_outdir}/sMD_replica-*_*_*.xtc")
             print(f"Found {len(sMD_trajs)} sMD trajectories for milestone extraction.")
             # sMD_trajs = [t for t in sMD_trajs if not t.endswith("_aligned.dcd")]
 
@@ -407,8 +407,10 @@ class AutoPath:
             X = rmsd[['RMSD_ligand', 'COM']].values
 
             # I didn't use the wrapped trajs for COM distances to avoid imaging artifacts
-            sMD_trajs_aligned = [traj.replace(".dcd", ".xtc") for traj in sMD_trajs]
-            u_sMD_aligned = mda.Universe(solvated_system_pdb, sMD_trajs_aligned)
+            # sMD_trajs_aligned = [traj.replace(".dcd", ".xtc") for traj in sMD_trajs]
+            
+            # CAREFULL: mdanalysis scrambles the residues names. Ig using pdb for topo fucks up waters here 
+            u_sMD_aligned = mda.Universe(prmtop_file, sMD_trajs)
 
             labels, sorted_cluster_centers = cluster_sMD_trajectories(u_sMD_aligned, X, 
                                                                       n_clusters=self.n_milestones,
@@ -449,7 +451,7 @@ class AutoPath:
                 min_com = 0.0
                 max_com = 3.0
 
-            milestones = glob(f'{milestones_outdir}/milestone_*.pdb')           
+            milestones = glob(f'{milestones_outdir}/milestone_*_*_*.pdb')           
             if len(milestones) == 0:
                 logging.error("No milestones found. Please check the milestone extraction step.")
                 exit(1)
@@ -464,6 +466,7 @@ class AutoPath:
                 out_dir=milestones_outdir,
                 is_membrane=self.is_membrane,
                 temp=self.temperature,
+                timestep=self.timestep
             )
 
             WTMetaD = MetadynamicsMD(
@@ -490,7 +493,7 @@ class AutoPath:
                     logging.info(f'Relaxing milestone {milestone_name}')
                     try:
                         system = load_system(f"{sys_name}/system.xml")
-                        milestone_system = milestone_relax.run(pdb_file=milestone, system=system, run_id=milestone_name)
+                        milestone_system = milestone_relax.run(system=system, pdb_file=milestone, run_id=milestone_name)
                     except Exception as e:
                         logging.error(f"Error relaxing {milestone_name}: {e}")
                         continue

@@ -758,7 +758,7 @@ class SteeredMDAnalysis:
                             use_spline:bool=True) -> pd.DataFrame:
         rows = []
         for (speed, path), g in df.groupby(["speed","path"]):
-            g = g.sort_values(x_col, ascending=False)
+            g = g.sort_values(x_col, ascending=True)
             if use_spline:
                 # Use a cubic spline fit for derivative
                 spline = UnivariateSpline(g[x_col].values, g[w_col].values, k=3)

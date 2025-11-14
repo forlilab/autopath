@@ -722,7 +722,9 @@ def cluster_sMD_trajectories(u: mda.Universe,
     u.trajectory[0]  # reset
     for i, frame_index in enumerate(closest_frames):
         u.trajectory[frame_index]
-        with mda.Writer(os.path.join(f"{out_dir}", f"milestone_{i+1}_frame_{frame_index}.pdb"), u.atoms.n_atoms) as W:
+        with mda.Writer(os.path.join(f"{out_dir}", 
+                                    f"milestone_{i+1}_frame_{frame_index}.pdb",
+                                    ), reindex=True) as W:
             W.write(u.atoms)
 
     return labels, sorted_cluster_centers
