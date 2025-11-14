@@ -182,11 +182,17 @@ class SteeredMDAnalysis:
         
         self.raw_data = self.raw_data[~self.raw_data['trajname'].isin(to_drop)]
         
+        if self.cluster_paths == None:
+            self.raw_data['path'] = 1 # default to single cluster if no clustering method is specified
         # cluster trajectories into paths if specified
-        if self.cluster_paths:
-            # self.raw_data, labels_dict, medoid_names = self.cluster_trajectories()
+        elif self.cluster_paths == 'geometric':
+            self.raw_data, labels_dict, medoid_names = self.cluster_trajectories()
+        elif self.cluster_paths == 'traces':
             self.raw_data, labels_dict, medoid_names = self.cluster_raw_traces(self.raw_data, r_range=self.cluster_range, outdir=self.outdir)
-            print('Clustering results:')
+        else:
+            print(f'ERROR: Unknown clustering method {self.cluster_paths}. No clustering will be performed.')
+   
+        if self.raw_data['path'].nunique() > 1:
             print(self.raw_data.groupby(['path', 'speed'])[['trajname']].nunique())
             # generate pymol sesh for the paths
             paths = {}
@@ -197,9 +203,6 @@ class SteeredMDAnalysis:
                         paths[f'path_{labels_dict[trajname]}'] = [(self.reference_pdb, traj)]
             outdir = os.path.join(self.outdir,'path_clustering')
             self.make_unbinding_paths_pml(paths, outdir=outdir)
-
-        else:
-            self.raw_data['path'] = 1 # default to single cluster if no clustering method is specified
 
         # decorrelate work values using statistical inefficiency g or by replica averaging
         # If we dont decorrelate, we should use the per-replica aggregated work. i.e. each replica contributes one work value per bin ENSEMBLE AVERAGE OVER REPLICAS
