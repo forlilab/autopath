@@ -69,6 +69,7 @@ class SteeredMDAnalysis:
                  pocket_select: str = 'protein and (around 6.0 resname UNK) and name CA',
                  ligand_select: str = 'resname UNK and not name H*',
                  pulling_direction: str = 'forward', # 'forward' or 'backward'
+                 outdir: str = None,
                  seed: int = 42
                  ):
 
@@ -77,11 +78,15 @@ class SteeredMDAnalysis:
         if log_files is None or len(log_files) == 0:
             raise ValueError("No log files provided for analysis.")
         
-        if sysname is None:
+        if sysname is not None:
+            self.sysname = sysname
+        else:
             sysname = log_files[0].split('/')[0]  # Extract system name from the first log file path
-        self.sysname = sysname
 
-        self.outdir = os.path.dirname(log_files[0])  # Output directory is the same as the first log file
+        if outdir is not None:
+            self.outdir = outdir
+        else:
+            self.outdir = os.path.dirname(log_files[0])  # Output directory is the same as the first log file
 
         self.temp = temperature
         self.R = 0.008314462618  # kJ/(mol*K)
