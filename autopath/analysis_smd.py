@@ -227,7 +227,7 @@ class SteeredMDAnalysis:
             if path[1]['trajname'] < 3:
                 to_drop.append(path[0])
         if to_drop:
-            print(f'WARNING: Dropping paths: {to_drop} due to insufficient number of trajectories ({path[1]['trajname']}).')
+            print(f"WARNING: Dropping paths: {to_drop} due to insufficient number of trajectories ({path[1]['trajname']}).")
         
         processed_data = self.processed_data[~self.processed_data['path'].isin(to_drop)]
 
