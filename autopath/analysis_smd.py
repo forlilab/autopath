@@ -86,8 +86,9 @@ class SteeredMDAnalysis:
         if outdir is not None:
             self.outdir = outdir
         else:
-            self.outdir = os.path.dirname(log_files[0])  # Output directory is the same as the first log file
-
+            self.outdir = os.path.join(os.path.dirname(log_files[0]), 'analysis')  # Output directory is the same as the first log file
+        os.makedirs(self.outdir, exist_ok=True)
+        
         self.temp = temperature
         self.R = 0.008314462618  # kJ/(mol*K)
         self.RT = self.R * self.temp
