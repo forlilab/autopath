@@ -58,11 +58,11 @@ class SteeredMDAnalysis:
     def __init__(self, 
                  log_files: list[str] = None,
                  sysname: str = None,
-                 n_bins: float = 100,
+                 n_bins: int = 50,
                  temperature: float = 300, #K
                  timestep: float = 0.004, #ps
                  dist_minmax: tuple = None, #nm
-                 cluster_paths: bool = True,
+                 cluster_paths: bool = False,
                  cluster_range: tuple = None, #nm
                  trajectories: list[str] = None,
                  reference_pdb: str = None,
@@ -81,7 +81,7 @@ class SteeredMDAnalysis:
         if sysname is not None:
             self.sysname = sysname
         else:
-            sysname = log_files[0].split('/')[0]  # Extract system name from the first log file path
+            self.sysname = log_files[0].split('/')[0]  # Extract system name from the first log file path
 
         if outdir is not None:
             self.outdir = outdir
@@ -110,7 +110,7 @@ class SteeredMDAnalysis:
         self.work_column = 'work'
         self.force_column = 'force'
 
-        self.n_bins = n_bins
+        self.n_bins = int(n_bins)
         self.dist_minmax = dist_minmax  # default min/max for distance bins
         self.log_files = log_files
 
@@ -142,10 +142,10 @@ class SteeredMDAnalysis:
         if use_target_grid:
             self.dist_column = 'r_target'
         else:
-            self.dist_column = 'r_before'
+            self.dist_column = 'r_before'  # binned distance before applying constraint
 
         # assemble the master dataframe loading log files
-        raw_data = self.load_logs(self.log_files)
+        raw_data = self.load_logs()
 
         # sometimes you wanna run the analysis with a different temperature or exlude some speeds
         if temperature is not None:
@@ -165,86 +165,73 @@ class SteeredMDAnalysis:
         # Integrate force to get work
         raw_data = self.integrate_force_dx(raw_data)
 
-        # bin the data
-        if use_target_grid:
-            self.raw_data = raw_data # no binning when using target grid
-        else:
-            self.raw_data, centers = self.bin_data(raw_data, 
-                                                   self.n_bins, 
-                                                   use_quantiles=True, 
-                                                   min_points=1)
+        # bin the data if not using target grid
+        if not use_target_grid:
+            raw_data, centers = self.bin_data(raw_data, 
+                                            self.n_bins, 
+                                            use_quantiles=True, 
+                                            min_points=1)
+        
+        
+        # export the raw data after work calculation and save it to csv     
+        self.raw_data = raw_data
+        self.raw_data.to_csv(f"{self.outdir}/sMD_data_raw.csv")
         
         # filter out trajectories that did not reach close contact
         to_drop = []
-        for traj_name, traj_data in self.raw_data.groupby('trajname'):
+        for traj_name, traj_data in raw_data.groupby('trajname'):
             if self.pulling_direction == 'forward':
                 if traj_data["r_after"].min() < 0.1:
-                    print(f'WARNING: Dropping {traj_name}, min distance {traj_data["r_before"].min():.2f} nm')
+                    print(f'WARNING: Dropping {traj_name}, min distance {traj_data["r_after"].min():.2f} nm')
                     to_drop.append(traj_name)
             else:  # backward pulling
                 if traj_data["r_after"].min() > 0.1:
-                    print(f'WARNING: Dropping {traj_name}, min distance {traj_data["r_before"].min():.2f} nm')
+                    print(f'WARNING: Dropping {traj_name}, min distance {traj_data["r_after"].min():.2f} nm')
                     to_drop.append(traj_name)
+                    
+        processed_data = raw_data[~raw_data['trajname'].isin(to_drop)]
         
-        self.raw_data = self.raw_data[~self.raw_data['trajname'].isin(to_drop)]
-        
-        if self.cluster_paths == None:
-            self.raw_data['path'] = 1 # default to single cluster if no clustering method is specified
-        # cluster trajectories into paths if specified
-        elif self.cluster_paths == 'geometric':
-            self.raw_data, labels_dict, medoid_names = self.cluster_trajectories()
-        elif self.cluster_paths == 'traces':
-            self.raw_data, labels_dict, medoid_names = self.cluster_raw_traces(self.raw_data, r_range=self.cluster_range, outdir=self.outdir)
+        # cluster the pulling paths if requested
+        if self.cluster_paths == False:
+            processed_data['path'] = 1 # default to single cluster if no clustering method is specified            
         else:
-            print(f'ERROR: Unknown clustering method {self.cluster_paths}. No clustering will be performed.')
-   
-        if self.raw_data['path'].nunique() > 1:
-            print(self.raw_data.groupby(['path', 'speed'])[['trajname']].nunique())
-            # generate pymol sesh for the paths
-            paths = {}
-            for trajname in medoid_names:
-                for traj in self.trajectories:
-                    if trajname == os.path.basename(traj)[:-4]:
-                        #{'path_0': [(protein_pdb, traj1), (protein_pdb, traj2)], ...}
-                        paths[f'path_{labels_dict[trajname]}'] = [(self.reference_pdb, traj)]
-            outdir = os.path.join(self.outdir,'path_clustering')
-            self.make_unbinding_paths_pml(paths, outdir=outdir)
+            processed_data = self.find_paths_smd(processed_data, recompute_geom=False, do_plots=True)
+        
+        # filter out paths with too few trajectories
+        to_drop = []
+        for path in processed_data.groupby(['path'])[['trajname']].nunique().iterrows():
+            if path[1]['trajname'] <= 3:
+                to_drop.append(path[0])
+                print(f"WARNING: Dropping path: {path[0]} due to insufficient number of trajectories ({path[1].trajname}).")        
+        processed_data = processed_data[~processed_data['path'].isin(to_drop)]
 
         # decorrelate work values using statistical inefficiency g or by replica averaging
         # If we dont decorrelate, we should use the per-replica aggregated work. i.e. each replica contributes one work value per bin ENSEMBLE AVERAGE OVER REPLICAS
         if use_target_grid:
-            # ensure 'step' exists (per-trajectory running index)
-            if "step" not in self.raw_data.columns:
-                self.raw_data = (self.raw_data.sort_values(["trajname"])
-                                .assign(step=lambda d: d.groupby("trajname").cumcount()))
-            self.processed_data = self.build_common_target_grid(self.raw_data)
-            x_col = "r_target_grid" # x-axis coordinate
+            # # ensure 'step' exists (per-trajectory running index)
+            # if "step" not in processed_data.columns:
+            #     processed_data = (processed_data.sort_values(["trajname"])
+            #                     .assign(step=lambda d: d.groupby("trajname").cumcount()))
+            processed_data = self.build_common_target_grid(processed_data)
             group_keys = ["step", "speed", "path"]  # integer key avoids fragmentation
         else:
-            self.processed_data = self.decorrelate_work_data(use_g=True)
-            x_col = "r_bin"
-            group_keys = ["r_bin", "speed", "path"]  # no 'step' on the binning path
+            processed_data = self.decorrelate_work_data(processed_data, use_g=True)
+            group_keys = ["r_coord", "speed", "path"]  # no 'step' on the binning path
                 
-        # self.processed_data['work'] = self.processed_data['work'] * self.beta
-        # self.processed_data['work'] = self.processed_data['work'] / 2.476  # convert to KT
-
+        # processed_data['work'] = processed_data['work'] * self.beta
+        # processed_data['work'] = processed_data['work'] / 2.476  # convert to KT
+        
+        self.processed_data = processed_data
+        self.processed_data.to_csv(f"{self.outdir}/sMD_data_processed.csv")
+        
         results = []
         gmm_results = defaultdict(dict)  # to store GMM results for plotting
         
-        to_drop = []
-        for path in self.processed_data.groupby(['path'])[['trajname']].nunique().iterrows():
-            if path[1]['trajname'] < 3:
-                to_drop.append(path[0])
-        if to_drop:
-            print(f"WARNING: Dropping paths: {to_drop} due to insufficient number of trajectories ({path[1]['trajname']}).")
-        
-        processed_data = self.processed_data[~self.processed_data['path'].isin(to_drop)]
-
         for (coord, speed, path), group in processed_data.groupby(group_keys):
             
-            r_coord = float(group[x_col].iloc[0])
+            r_coord = float(group['r_coord'].iloc[0])
             
-            #coord is the index
+            #coord is the index or step, r_coord is the actual distance value
             # print(f'analyzing coord={coord:.2f}, r_bin={r_coord:.2f}, speed={speed:.5f}, path={path} with {len(group)} points.')
             raw_W = group[self.work_column].astype(float).values
 
@@ -266,7 +253,7 @@ class SteeredMDAnalysis:
 
                 gmm_dict = self.fit_gmm_to_work_values(raw_W,
                                                         max_K=3,
-                                                        covariance_type='spherical',
+                                                        covariance_type='diag',
                                                         random_state=self.seed)
 
                 #These have shape (K,) for K components
@@ -310,14 +297,16 @@ class SteeredMDAnalysis:
                 # Wdiss_neq = 0.5 * self.beta * var_neq
 
                 # Collect results in a dictionary for plotting 
-                gmm_results[r_coord][speed] = {'GMM_neq_weights': w,
-                                             'replica_W': raw_W,
-                                             'GMM_means': mu,
-                                             'GMM_variances': sig2,
-                                             'Wmean_mix': Wmean_neq
+                key = (float(coord), int(path))                
+                gmm_results[key][speed] = {'GMM_neq_weights': w,
+                                            'replica_W': raw_W,
+                                            'GMM_means': mu,
+                                            'GMM_variances': sig2,
+                                            'Wmean_mix': Wmean_neq
                                             }
             # build this partial dataframe
             results.append({
+                'step': coord,
                 'r_coord': r_coord,
                 'speed': speed,
                 'path': path,
@@ -338,13 +327,12 @@ class SteeredMDAnalysis:
 
         return results, gmm_results
 
-    
-    def load_logs(self, log_files: list[str]) -> pd.DataFrame:
+    def load_logs(self) -> pd.DataFrame:
 
         # compile raw log files
         count = 0
         raw_data = []
-        for fn in log_files:
+        for fn in self.log_files:
             try:
                 base = os.path.basename(fn)[:-4]  # remove .dat extension
                 # print(f"Loading {base}...")
@@ -373,6 +361,8 @@ class SteeredMDAnalysis:
         """
         grouped = raw_data.groupby("trajname")
         for traj, group in grouped:
+            # group = group.sort_values(by=self.dist_column)
+            group = group.sort_values(by='time')  # ensure sorted by time
             work = cumulative_trapezoid(group[self.force_column], group[self.dist_column], initial=0.0)
             raw_data.loc[raw_data['trajname'] == traj, self.work_column] = work
         
@@ -391,7 +381,7 @@ class SteeredMDAnalysis:
             # average grid (for reference/plots)
             grid = gg.pivot_table(index="step", values="r_target", aggfunc="mean").reset_index()
             gg = gg.merge(grid, on="step", suffixes=("", "_mean"))
-            gg["r_target_grid"] = gg["r_target_mean"].values
+            gg["r_coord"] = gg["r_target_mean"].values
             new.append(gg.drop(columns=["r_target_mean"]))
         return pd.concat(new, ignore_index=True)
 
@@ -404,11 +394,11 @@ class SteeredMDAnalysis:
         """
         Bins self.dist_column into n_bins using pd.cut (equal width) or pd.qcut (equal count).
         After optional filtering of low-count bins, bins are reindexed to 0..M-1 and centers
-        are returned only for surviving bins. 'r_bin' holds the center for each row.
+        are returned only for surviving bins. 'r_coord' holds the center for each row.
 
         Returns
         -------
-        raw_data : DataFrame with columns ['bin', 'r_bin'] added
+        raw_data : DataFrame with columns ['bin', 'r_coord'] added
         centers  : np.ndarray of bin centers aligned with bin indices 0..M-1
         """
         rvals = raw_data[self.dist_column].to_numpy()
@@ -416,10 +406,10 @@ class SteeredMDAnalysis:
 
         if use_quantiles:
             # equal-count bins
-            codes, edges = pd.qcut(rvals, q=n_bins, labels=False, retbins=True, duplicates='drop', precision=3)
+            codes, edges = pd.qcut(rvals, q=n_bins, labels=False, retbins=True, duplicates='drop', precision=2)
         else:
             # equal-width bins
-            codes, edges = pd.cut(rvals, bins=n_bins, labels=False, include_lowest=True, right=False, retbins=True, precision=3)
+            codes, edges = pd.cut(rvals, bins=n_bins, labels=False, include_lowest=True, right=False, retbins=True, precision=2)
 
         # assign bins; drop anything not assigned (NaN)
         raw_data['bin'] = pd.Series(codes, index=raw_data.index, dtype='Int64')
@@ -442,8 +432,7 @@ class SteeredMDAnalysis:
         centers = np.asarray(centers)[present_bins]
 
         # these are the center each point belongs to
-        raw_data['r_bin'] = raw_data['bin'].map(lambda b: centers[b] if 0 <= b < len(centers) else np.nan)
-        # carry over
+        raw_data['r_coord'] = raw_data['bin'].map(lambda b: centers[b] if 0 <= b < len(centers) else np.nan)
 
         return raw_data, centers
 
@@ -481,129 +470,6 @@ class SteeredMDAnalysis:
                 mask = (new_df['speed'] == speed) & (new_df['path'] == path)
                 new_df.loc[mask, f'{col}_smooth'] = gaussian_filter1d(group[col], sigma=sigma)
         return new_df
-            
-    def cluster_trajectories(self, do_PCA:bool=True, do_plots:bool=True):
-        """Cluster trajectories using Dynamic Time Warping (DTW) and k-medoids.
-        For more information on DTW see: https://doi.org/10.1073/pnas.231354212
-                                         https://dtaidistance.readthedocs.io/en/latest/index.html
-        """
-        #FIXME hardcoded traj extension .xtc
-        raw_data = self.raw_data.copy()
-
-        outdir = os.path.join(self.outdir,'path_clustering')
-        os.makedirs(outdir, exist_ok=True)
-        distance_file = f"{outdir}/{self.sysname}_raw_distances.csv"
-
-        if os.path.exists(distance_file):
-            df = pd.read_csv(distance_file)
-            print(f"Loaded raw distances from {distance_file}")
-        else:
-            all_distances = {}
-            for traj in tqdm.tqdm(self.trajectories, desc="Calculating distances.."):
-                u = mda.Universe(self.reference_pdb, traj)
-                pocket_atoms = u.select_atoms(self.pocket_select)
-                ligand_atoms = u.select_atoms(self.ligand_select)
-                data_array = np.zeros((len(u.trajectory),(len(pocket_atoms)*len(ligand_atoms))))
-                for ts in u.trajectory:
-                    distances = distance_array(pocket_atoms, ligand_atoms, 
-                                                result=np.ndarray((len(pocket_atoms), len(ligand_atoms))))
-                    data_array[ts.frame] = distances.flatten() / 10.0  # Convert to nm
-                all_distances[os.path.basename(traj)] = data_array
-                
-            df_list = []
-            for traj_name, distances in all_distances.items():
-                num_frames = distances.shape[0]
-                traj_name = traj_name.replace('.xtc', '').replace('traj', 'log') 
-                frame_numbers = np.arange(num_frames)
-                traj_df = pd.DataFrame(distances, columns=[f"dist_{i}" for i in range(distances.shape[1])])
-                traj_df.insert(0, "frame", frame_numbers)
-                traj_df.insert(1, "trajname", traj_name)
-                df_list.append(traj_df)
-            df = pd.concat(df_list, ignore_index=True)
-            df.to_csv(distance_file, index=False)
-
-        distances = df.iloc[:,2:].values
-        scaler = StandardScaler()
-        distances = scaler.fit_transform(distances)  # Scale the distances
-
-        if do_PCA:
-            pca = PCA(n_components=2, random_state=self.seed)
-            distances = pca.fit_transform(distances)
-            print(f'The first 2 PC explain {sum(pca.explained_variance_ratio_)*100:.2f}% of the variance')
-
-        distance_df = pd.DataFrame(distances)
-        distance_df.insert(0,"frame", df['frame'])
-        distance_df.insert(1,"trajname", df['trajname'])
-
-        # Create a distance matrix using DTW
-        paths = defaultdict(np.ndarray)
-        for traj_name in distance_df.groupby("trajname").groups:
-            traj_df = distance_df[distance_df["trajname"] == traj_name]
-            paths[traj_name] = traj_df.iloc[:, 2:].values
-
-        stacked = [paths[traj_name] for traj_name in paths.keys()]
-
-        distmatrix = dtw_ndim.distance_matrix_fast(s=stacked)#, ndim=stacked[0].shape[1])
-
-        if do_plots:
-            plt.figure(figsize=(6, 5))
-            sns.heatmap(distmatrix, cmap="viridis")
-            plt.title("DTW Distance Matrix")
-            plt.tight_layout()
-            plt.savefig(f"{outdir}/{self.sysname}_distmatrix.png")
-            # plt.show()
-            plt.close()
-
-        # Find optimal number of paths using Elbow method and Silhouette score
-        maxK = min(5, len(paths))
-        silloutte_scores = {}
-        for i in range(2,maxK):
-            c = kmedoids.fasterpam(distmatrix, i) # c.loss
-            silloutte_scores[i] = silhouette_score(distmatrix, c.labels, metric="precomputed")
-
-        K = max(silloutte_scores, key=silloutte_scores.get)
-        print(f"Found {K} paths with Silhouette score {silloutte_scores[K]:.2f}")
-        
-        if do_plots:
-            plt.figure(figsize=(6, 5))
-            sns.lineplot(x=list(silloutte_scores.keys()), y=list(silloutte_scores.values()))
-            plt.axvline(x=K, color='red', linestyle='--', label=f'Optimal K={K}')
-            plt.xlabel("Number of paths"); plt.ylabel("Silhouette score")
-            plt.title(f"Optimal number of paths: {K}")
-            plt.tight_layout()
-            plt.savefig(f"{outdir}/{self.sysname}_elbowplot.png")
-            # plt.show()
-            plt.close()
-
-        # K-Medoids clustering using the optimal number of paths
-        cluster = kmedoids.fasterpam(distmatrix, K, random_state=self.seed)
-
-        # visualize the medoids in the PCA space
-        if do_PCA and do_plots:
-            plt.figure(figsize=(6, 5))
-            sns.scatterplot(data=distance_df, x=distance_df.iloc[:, 2], y=distance_df.iloc[:, 3], alpha=0.2, c='gray', s=2, linewidth=0)
-            for medoid in cluster.medoids:
-                medoid_name = list(paths.keys())[medoid]
-                distance_df_medoid = distance_df[distance_df["trajname"] == medoid_name]
-                sns.scatterplot(data=distance_df_medoid, x=distance_df_medoid.iloc[:, 2], y=distance_df_medoid.iloc[:, 3], 
-                                label=medoid_name, alpha=1, s=25, linewidth=0#, edgecolor='black', st
-                                                                                )
-            plt.title(f"Medoids in PCA space for {K} paths")
-            plt.xlabel("PC1");  plt.ylabel("PC2")
-            plt.tight_layout()
-            plt.savefig(f"{outdir}/{self.sysname}_clustering_K-{K}.png")
-            # plt.show()
-            plt.close()
-
-        names = [os.path.basename(name).replace('.xtc', '').replace('traj', 'log') for name in paths.keys()]
-        medoid_names = [names[medoid] for medoid in cluster.medoids]
-        labels_dict = {k: v for k, v in zip(names, cluster.labels)}
-
-        trajname_map = pd.DataFrame({"trajname": list(paths.keys()),
-                        "cluster": cluster.labels}).set_index('trajname')['cluster'].to_dict()
-        raw_data['path'] = raw_data['trajname'].map(trajname_map)
-
-        return raw_data, labels_dict, medoid_names
 
     @staticmethod
     def fit_gmm_to_work_values(raw_work,
@@ -654,6 +520,159 @@ class SteeredMDAnalysis:
         }
         return augmented_data
         
+    def plot_gmm_per_speed_overlay_paths(
+        self,
+        results: dict,
+        ncols: int = 8,
+        figsize: tuple = (22, 4),
+        outdir: str | None = None,
+        hist_bins: int = 30,
+        path_order: list[int] | None = None,   # optional explicit ordering of paths
+        gray_range: tuple[float, float] = (0.20, 0.80),  # darkest..lightest gray
+    ):
+        """
+        Overlay work histograms + GMM PDFs for ALL paths in the same panel (one panel per r_bin).
+        'results' must be keyed by (r_bin, path) -> { speed: info_dict }.
+        Each info_dict must contain 'replica_W', 'GMM_neq_weights', 'GMM_means', 'GMM_variances'.
+        """
+
+        if outdir is None:
+            outdir = os.path.join(os.getcwd(), self.sysname)
+        os.makedirs(outdir, exist_ok=True)
+
+        # Collect speeds and r_bins present
+        all_speeds = sorted({s for sd in results.values() for s in sd.keys()})
+        all_rbins  = sorted({k[0] for k in results.keys()})
+        all_paths  = sorted({k[1] for k in results.keys()})
+        # Optional explicit path order; otherwise use sorted unique paths
+        if path_order is None:
+            path_order = list(all_paths)
+
+        # Build grayscale palette for the number of paths we will display
+        def build_gray_map(paths: list[int]) -> dict[int, tuple[float,float,float]]:
+            n = max(1, len(paths))
+            gmin, gmax = gray_range
+            shades = np.linspace(gmin, gmax, n)
+            return {p: (g, g, g) for p, g in zip(paths, shades)}
+
+        for spd in all_speeds:
+            # r_bins with at least one path having data at this speed
+            rbins_present = []
+            for rbin in all_rbins:
+                has_any = False
+                for p in path_order:
+                    info = results.get((rbin, p), {}).get(spd, None)
+                    if info is None:
+                        continue
+                    work = info.get("replica_W", np.array([]))
+                    if isinstance(work, list):
+                        work = np.concatenate([np.asarray(w).ravel() for w in work]) if work else np.array([])
+                    work = np.asarray(work).ravel()
+                    if work.size > 0:
+                        has_any = True
+                        break
+                if has_any:
+                    rbins_present.append(rbin)
+
+            if not rbins_present:
+                continue
+
+            rbins_present = sorted(rbins_present)
+            nplots = len(rbins_present)
+            nrows  = math.ceil(nplots / ncols)
+
+            fig, axes = plt.subplots(
+                nrows, ncols,
+                figsize=(figsize[0], figsize[1] * nrows),
+                sharex=False, sharey=False, squeeze=False
+            )
+            axes = axes.flatten()
+
+            # Determine which paths actually appear at this speed to set colors consistently
+            paths_this_speed = sorted({p for (r,p), sd in results.items() if spd in sd})
+            # Maintain user-specified order but drop missing
+            paths_this_speed = [p for p in path_order if p in paths_this_speed]
+            gray_map = build_gray_map(paths_this_speed)
+
+            for ax, rbin in zip(axes, rbins_present):
+                # Collect per-path data in this (speed, rbin)
+                per_path = {}
+                all_work_for_xlim = []
+                for p in paths_this_speed:
+                    info = results.get((rbin, p), {}).get(spd, None)
+                    if info is None:
+                        continue
+                    work = info.get("replica_W", np.array([]))
+                    if isinstance(work, list):
+                        work = np.concatenate([np.asarray(w).ravel() for w in work]) if work else np.array([])
+                    work = np.asarray(work).ravel()
+                    if work.size == 0:
+                        continue
+                    per_path[p] = dict(
+                        work=work,
+                        weights=np.asarray(info["GMM_neq_weights"]),
+                        means=np.asarray(info["GMM_means"]),
+                        variances=np.asarray(info["GMM_variances"]),
+                    )
+                    all_work_for_xlim.append(work)
+
+                if not per_path:
+                    ax.set_visible(False)
+                    continue
+
+                wmin = min(float(w.min()) for w in all_work_for_xlim)
+                wmax = max(float(w.max()) for w in all_work_for_xlim)
+                if not np.isfinite(wmin) or not np.isfinite(wmax) or np.isclose(wmin, wmax):
+                    ax.axvline(wmin, color='k', lw=1, alpha=0.7)
+                    ax.set_title(f"r_bin={rbin:.2f} (degenerate)")
+                    continue
+
+                x = np.linspace(wmin, wmax, 256)
+
+                # Overlay: histogram + components + total per path
+                for p in paths_this_speed:
+                    if p not in per_path:
+                        continue
+                    color = gray_map[p]
+                    dat   = per_path[p]
+                    work, weights, means, variances = dat["work"], dat["weights"], dat["means"], dat["variances"]
+
+                    # Histogram
+                    ax.hist(work, bins=hist_bins, density=True, alpha=0.35, color=color, label=f"path {p}")
+
+                    # Mixture components (solid) and total (dashed)
+                    stds = np.sqrt(np.clip(variances, 1e-12, None))
+                    for w, m, s in zip(weights, means, stds):
+                        if w <= 0:
+                            continue
+                        ax.plot(x, w * norm.pdf(x, loc=m, scale=s), lw=1.5, color=color)
+                    total_pdf = np.sum([w * norm.pdf(x, loc=m, scale=s)
+                                        for w, m, s in zip(weights, means, stds)], axis=0)
+                    ax.plot(x, total_pdf, ls="--", lw=2, color=color)
+
+                ax.set_title(f"r_bin={rbin:.2f}")
+                ax.set_xlabel("Work (kJ/mol)")
+                ax.set_ylabel("Density")
+
+            # Hide leftover axes
+            for ax in axes[nplots:]:
+                ax.set_visible(False)
+
+            # One legend for all paths
+            handles, labels = [], []
+            for p in paths_this_speed:
+                ph = plt.Line2D([0], [0], color=gray_map[p], lw=6)
+                handles.append(ph)
+                labels.append(f"path {p}")
+            if handles:
+                fig.legend(handles, labels, loc="upper right", frameon=False)
+
+            fig.suptitle(f"GMM fits at speed = {spd:.5f}  (overlaid paths)", fontsize=16)
+            plt.tight_layout(rect=[0, 0, 1, 0.95])
+            out_path = os.path.join(outdir, f"gmm_fits_overlay_speed_{spd:.5f}.png")
+            plt.savefig(out_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            return      
 
     def plot_gmm_per_speed(self, results, ncols=8, figsize=(22, 4), outdir:str=None):
         """
@@ -692,12 +711,12 @@ class SteeredMDAnalysis:
                 
                 for w, m, v in zip(weights, means, variances):
                     pdf_comp = w * norm.pdf(x, loc=m, scale=np.sqrt(v))
-                    ax.plot(x, pdf_comp, lw=2)
+                    # ax.plot(x, pdf_comp, lw=2)
                 
                 # Plot total mixture PDF
                 total_pdf = np.sum([w * norm.pdf(x, loc=m, scale=np.sqrt(v))
                                     for w, m, v in zip(weights, means, variances)], axis=0)
-                ax.plot(x, total_pdf, "k--", lw=2)
+                # ax.plot(x, total_pdf, "k--", lw=2)
                 
                 ax.set_title(f"r_bin={r_bin:.2f}")
                 ax.set_xlabel("Work (kJ/mol)")
@@ -713,10 +732,12 @@ class SteeredMDAnalysis:
             plt.close()
         return
     
-    def decorrelate_work_data(self, use_g:bool=True) -> pd.DataFrame:    
+    def decorrelate_work_data(self, 
+                              data: pd.DataFrame,
+                              use_g:bool=True) -> pd.DataFrame:    
         decorrelated_data = []
         g = None
-        for (r_bin, v, path), group in self.raw_data.groupby(["r_bin", "speed", "path"]):
+        for (r_bin, v, path), group in data.groupby(["r_coord", "speed", "path"]):
             # decorrelate using the statistical inefficiency
             if use_g:
                 work_arrays = []
@@ -729,7 +750,7 @@ class SteeredMDAnalysis:
             for replica, traj in group.groupby("replica"):
                 W = traj[self.work_column].values
                 if use_g:
-                    indices = timeseries.subsample_correlated_data(W, g, conservative=True)
+                    indices = timeseries.subsample_correlated_data(W, g, conservative=False)
                     W_decorrelated = W[indices]
                     # Use iloc to select rows by integer position
                     selected_rows = traj.iloc[indices]
@@ -743,7 +764,7 @@ class SteeredMDAnalysis:
                 for idx, w_val in enumerate(W_decorrelated):
                     row = selected_rows.iloc[idx]
                     decorrelated_data.append({
-                        'r_bin': r_bin,
+                        'r_coord': r_bin,
                         'r_target': row['r_target'],
                         'r_before': row['r_before'],
                         'r_after': row['r_after'],
@@ -757,7 +778,7 @@ class SteeredMDAnalysis:
                         'path': path,
                 })
 
-        decorrelated_df = pd.DataFrame(decorrelated_data)          
+        decorrelated_df = pd.DataFrame(decorrelated_data)      
         return decorrelated_df
         
     @staticmethod
@@ -782,11 +803,12 @@ class SteeredMDAnalysis:
         return pd.concat(rows, ignore_index=True)   
 
     def extrapolate_to_v0(self,
-                            df: pd.DataFrame = None,
-                            param_cols: list[str]=['Wdiss_gmm'],
-                            speeds: list[float] = None,
-                            mixed_models: bool = False
-                            ) -> pd.DataFrame:
+                        df: pd.DataFrame = None,
+                        x_col:str='r_coord',
+                        param_cols: list[str]=['Wdiss_gmm'],
+                        speeds: list[float] = None,
+                        mixed_models: bool = False
+                        ) -> pd.DataFrame:
 
         """Extrapolate a given parameter to zero speed using linear regression. 
         This method groups the data by speed and fits a linear regression to the
@@ -806,14 +828,14 @@ class SteeredMDAnalysis:
             if mixed_models:
                 df = df.dropna(subset=[param_col])
                 model  = smf.mixedlm(f"{param_col} ~ speed", df,
-                                    groups=df["r_bin"],
+                                    groups=df[x_col],
                                     re_formula="~speed")
                 result = model.fit(reml=False)
                 for r_bin, rand_eff in result.random_effects.items():
                     intercept = result.fe_params["Intercept"] + rand_eff["Group"]
                     slope = result.fe_params["speed"] + rand_eff["speed"]
                     results.append({
-                    "r_bin": r_bin,
+                    x_col: r_bin,
                     f"{param_col}_v0_intercept": intercept,
                     f"{param_col}_v0_slope": slope,
                     "R2": 1.0
@@ -823,13 +845,13 @@ class SteeredMDAnalysis:
                 results = []
                 for param_col in param_cols:
                     _df = []
-                    for (r_bin, path), group in df.groupby(['r_bin','path']):
+                    for (r_bin, path), group in df.groupby([x_col,'path']):
                         speeds = group['speed'].values
                         means = group[param_col].values
 
                         lr_results = linregress(speeds, means)
                         _df.append({
-                            'r_bin': r_bin,
+                            x_col: r_bin,
                             'path': path,
                             f"{param_col}_v0_intercept": lr_results.intercept,
                             f"{param_col}_v0_slope": lr_results.slope,
@@ -845,103 +867,422 @@ class SteeredMDAnalysis:
                     results.append(pd.DataFrame(_df))
 
                 results = pd.concat(results, axis=1)
-                # drop duplicate 'r_bin' adn speed columns
-                # results = results.loc[:, ~results.columns.duplicated()]
-
-            # Calculate the diffusion coefficient D(x) using the friction coefficient F(x)
-            # df['D(x)'] = self.R * self.temp / df['F(x)']
 
         return results
+        
+    def plot_extrapolated_param(self, 
+                                df: pd.DataFrame = None, 
+                                param: str = 'Wdiss',
+                                x_col: str = 'step',
+                                ):
+        """Plot the extrapolated parameter vs x_col with R2 color mapping and error bands.
+        
+        If a 'path' column is present, creates one subplot per path in a single figure.
+        """
+        outfname = os.path.join(self.outdir, f'{self.sysname}_{param}_extrapolated.png')
+        color_col = 'R2'  # Column for color mapping
+        se_col = f'se_{param}'
+
+        if df is None or df.empty:
+            return
+
+        # Figure out x for the whole df (only used if x_col not present)
+        if x_col in df.columns:
+            x_global = df[x_col]
+        else:
+            x_global = df.index
+
+        # Normalize R2 for colormap across all paths
+        norm = mcolors.Normalize(vmin=df[color_col].min(), vmax=df[color_col].max())
+        cmap = cm.get_cmap('coolwarm')
+
+        # Determine paths
+        if 'path' in df.columns:
+            paths = sorted(df['path'].unique())
+        else:
+            paths = [None]  # single "path" (no splitting)
+
+        n_paths = len(paths)
+        fig, axes = plt.subplots(
+            n_paths, 1,
+            figsize=(6, 4 * n_paths),
+            sharex=True if x_col in df.columns else False
+        )
+        if n_paths == 1:
+            axes = [axes]  # make iterable
+
+        for ax, path_val in zip(axes, paths):
+            if path_val is not None:
+                df_p = df[df['path'] == path_val].copy()
+            else:
+                df_p = df.copy()
+
+            # Sort by x for nice plotting
+            if x_col in df_p.columns:
+                df_p = df_p.sort_values(x_col)
+                x = df_p[x_col]
+            else:
+                df_p = df_p.sort_index()
+                x = df_p.index
+
+            y = df_p[param].values
+            yerr = df_p[se_col].values if se_col in df_p.columns else None
+
+            # Plot shaded error bands and colored lines segment-wise
+            for i in range(len(df_p) - 1):
+                # x may be Series or Index
+                xi = x.iloc[i:i+2] if hasattr(x, 'iloc') else x[i:i+2]
+                yi = y[i:i+2]
+                yerri = yerr[i:i+2] if yerr is not None else None
+                r2_val = df_p[color_col].iloc[i]
+
+                color = cmap(norm(r2_val))
+                ax.plot(xi, yi, color=color, lw=3)
+
+                if yerri is not None:
+                    ax.fill_between(xi, yi - yerri, yi + yerri, color=color, alpha=0.4)
+
+            # Ax labels/titles per subplot
+            ax.set_xlabel(x_col)
+            ax.set_ylabel(param)
+            if path_val is not None:
+                ax.set_title(f'{self.sysname} - {param} vs. {x_col} (path {path_val})')
+            else:
+                ax.set_title(f'{self.sysname} - {param} vs. {x_col}')
+            ax.grid(True)
+
+        # Add a single colorbar for the whole figure
+        sm = cm.ScalarMappable(cmap=cmap, norm=norm)
+        sm.set_array([])
+        cbar_ax = fig.add_axes([1.0, 0.15, 0.02, 0.7])  # Position for colorbar
+        cbar = fig.colorbar(sm, orientation='vertical', cax=cbar_ax)
     
-    def cluster_raw_traces(self,
-                           data:pd.DataFrame, 
-                           r_range:tuple=None,
-                           columns:list=['work', 'r_before'], 
-                           use_silhouette:bool=True,
-                           outdir:str='.',
-                           seed:int=42):
-        
-        df = data.copy()
-        
-        for col in columns:
-            if col not in df.columns:
-                raise ValueError(f"Column {col} not found in dataframe.")
+        cbar.set_label('$R^2$ of extrapolation')
 
-        columns = columns + ['lag']
-        df['lag'] = df['r_target'] - df['r_after']
-        
-        data_struct = defaultdict(np.ndarray)
-        for trajname in df.groupby("trajname").groups.keys():
-            traj_df = df[df["trajname"]==trajname]
-            if r_range is not None:
-                traj_df = traj_df[(traj_df["r_target"]>=float(r_range[0])) 
-                                  & (traj_df["r_target"]<=float(r_range[1]))]
+        plt.tight_layout()
+        plt.savefig(outfname, dpi=300)
+        plt.show()
+        plt.close()
 
-            if traj_df.shape[0] < 2:
-                print(f"Skipping trajectory {trajname} due to insufficient data points in range.")
+        return
+
+    def get_geom_features(self, 
+                          recompute: bool = False,
+                          trajectories: list[str] = None,
+                          topology: str = None,
+                          group_A: str = None,
+                          group_B: str = None,
+                          stride: int = 1,
+                          outdir: str = None
+                          ) -> pd.DataFrame:
+        """
+        Compute (or load) geometric distance features between pocket and ligand.
+
+        Returns a DataFrame with columns:
+            ['trajname', 'step', 'time'] + dist_* feature columns
+
+        'step' is the frame index; 'time' is taken from the trajectory if available,
+        otherwise time = step.
+        """
+        
+        distance_file = f"{outdir}/{self.sysname}_raw_distances.csv"
+
+        if (not recompute) and os.path.exists(distance_file):
+            df = pd.read_csv(distance_file)
+            return df
+
+        if trajectories is None:
+            trajectories = self.trajectories
+        if topology is None:
+            topology = self.reference_pdb
+        if group_A is None:
+            group_A = self.pocket_select
+        if group_B is None:
+            group_B = self.ligand_select
+
+        all_rows = []
+
+        for traj in tqdm.tqdm(trajectories, desc="Calculating distances.."):
+            u = mda.Universe(topology, traj)
+            
+            pocket_atoms = u.select_atoms(group_A)
+            ligand_atoms = u.select_atoms(group_B)
+            if ligand_atoms.n_atoms == 0 or pocket_atoms.n_atoms == 0:
+                print(f"Warning: No atoms found for selection in trajectory {traj}. Skipping.")
                 continue
-            # Scale the work and force columns to [0,1] range because they depend on pulling speed
-            # if 'force' in columns:
-            #     traj_df['force'] = MinMaxScaler().fit_transform(traj_df['force'].values.reshape(-1,1))
-            # if 'work' in columns:
-            data_struct[trajname] = traj_df[columns].to_numpy()
-        vectors_stacked = [data_struct[traj_name] for traj_name in data_struct.keys()]
-        names = list(data_struct.keys())
+            
+            traj_name = self.traj_to_log_name(traj)
+        
+            for ts in u.trajectory[::stride]:
+                distances = distance_array(
+                    pocket_atoms, ligand_atoms,
+                    result=np.ndarray((len(pocket_atoms), len(ligand_atoms)))
+                )
+                dist_flat = distances.flatten() / 10.0  # nm
+                time_ps = getattr(ts, "time", ts.frame)  # ts.time in ps
 
+                row = {
+                    "trajname": traj_name,
+                    "step": ts.frame,   # index within this trajectory
+                    "time": time_ps,
+                }
+                for i, v in enumerate(dist_flat):
+                    row[f"dist_{i}"] = v
+                all_rows.append(row)
+
+        df = pd.DataFrame(all_rows)
+        df.to_csv(distance_file, index=False)
+        return df
+    
+    @staticmethod
+    def traj_to_log_name(traj_path: str) -> str:
+        """
+        Map a trajectory file path to the corresponding trajname used in raw_data.
+        """
+        base = os.path.basename(traj_path)
+        root, ext = os.path.splitext(base)
+        log_name = root.replace('traj', 'log')
+        return log_name
+    
+    @staticmethod
+    def build_merged_features(raw_data: pd.DataFrame,
+                            geom_df: pd.DataFrame,
+                            tolerance_ps: float | None = None) -> pd.DataFrame:
+        """
+        Merge geometry features (coarse) with raw_data (fine-grained) using time,
+        done *per trajectory* to avoid merge_asof sorting headaches.
+
+        Returns one row per geometry frame, augmented with nearest raw_data row.
+        """
+
+        for name, df in (("geom_df", geom_df), ("raw_data", raw_data)):
+            if 'trajname' not in df.columns:
+                raise ValueError(f"{name} is missing 'trajname' column")
+            if 'time' not in df.columns:
+                raise ValueError(f"{name} is missing 'time' column")
+
+        g = geom_df.copy()
+        r = raw_data.copy()
+
+        g['time'] = pd.to_numeric(g['time'], errors='coerce')
+        r['time'] = pd.to_numeric(r['time'], errors='coerce')
+
+        g = g.dropna(subset=['time'])
+        r = r.dropna(subset=['time'])
+
+        merged_chunks = []
+
+        # only trajectories present in both
+        common_traj = sorted(set(g['trajname'].unique()) & set(r['trajname'].unique()))
+
+        for traj in common_traj:
+            g_traj = g[g['trajname'] == traj].sort_values('time').reset_index(drop=True)
+            r_traj = r[r['trajname'] == traj].sort_values('time').reset_index(drop=True)
+
+            if len(g_traj) == 0 or len(r_traj) == 0:
+                continue
+
+            kwargs = dict(
+                left=g_traj,
+                right=r_traj,
+                on='time',
+                direction='nearest',
+                allow_exact_matches=True,
+            )
+            if tolerance_ps is not None:
+                kwargs['tolerance'] = tolerance_ps
+
+            merged_traj = pd.merge_asof(**kwargs)
+            merged_traj['trajname'] = traj  # ensure trajname is set
+            merged_chunks.append(merged_traj)
+
+        if not merged_chunks:
+            raise RuntimeError("No trajectories could be merged. Check trajname/time consistency.")
+
+        merged = pd.concat(merged_chunks, ignore_index=True)
+        return merged
+
+    def cluster_time_series(self,
+                            feature_df: pd.DataFrame,
+                            feature_cols: list,
+                            r_coord: str = 'r_target',
+                            r_range: tuple = None,
+                            use_silhouette: bool = True,
+                            max_k: int = 5,
+                            seed: int = 42,
+                            outdir: str = '.',
+                            method: str = 'full'):
+
+        """
+        Cluster trajectories using Dynamic Time Warping (DTW) and k-medoids.
+        For more information on DTW see: https://doi.org/10.1073/pnas.231354212
+                                         https://dtaidistance.readthedocs.io/en/latest/index.html
+        """
+        print(feature_df.columns)
+        df = feature_df.copy()
+
+        # r-range filtering
+        if r_range is not None:
+            low, high = map(float, r_range)
+            df = df[(df[r_coord] >= low) & (df[r_coord] <= high)]
+
+        # Build per-trajectory arrays
+        data_struct = {}
+        for trajname, traj_df in df.groupby("trajname"):
+            traj_df = traj_df.sort_values('time')
+            if traj_df.shape[0] < 2:
+                print(f"Skipping trajectory {trajname} due to insufficient data points.")
+                continue
+            data_struct[trajname] = traj_df[feature_cols].to_numpy()
+
+        if len(data_struct) < 2:
+            raise RuntimeError("Not enough trajectories with data to cluster.")
+
+        names = list(data_struct.keys())
+        vectors_stacked = [data_struct[name] for name in names]
+
+        # Scale features across all frames / trajectories
         scaler = StandardScaler(with_mean=True, with_std=True)
         scaler.fit(np.vstack(vectors_stacked))
         vectors_stacked_scaled = [scaler.transform(arr) for arr in vectors_stacked]
 
-        distmatrix = dtw_ndim.distance_matrix_fast(s=vectors_stacked_scaled)#, ndim=stacked[0].shape[1])
+        # DTW distance matrix
+        distmatrix = dtw_ndim.distance_matrix_fast(s=vectors_stacked_scaled)
+
+        plt.figure(figsize=(6, 5))
         sns.heatmap(distmatrix, cmap="viridis")
         plt.xlabel("Trajectory index"); plt.ylabel("Trajectory index")
-        plt.title("DTW Distance Matrix for Raw Traces")
+        plt.title(f"DTW Distance Matrix ({method})")
         plt.tight_layout()
-        plt.savefig(f"{outdir}/{self.sysname}_rawtrace_distmatrix.png")
-        # plt.show()
+        plt.savefig(os.path.join(outdir, f"distmatrix_{method}.png"))
         plt.close()
 
-        K_MAX = min(5, df.groupby("trajname").ngroups)
+        # Choose K
+        K_MAX = min(max_k, len(names))
+        if K_MAX < 2:
+            raise RuntimeError("Not enough trajectories to form at least 2 clusters.")
+
         scores = {}
-        for i in range(2, K_MAX):
-            c = kmedoids.fasterpam(distmatrix, i, random_state=seed)
+        for k in range(2, K_MAX + 1):
+            c = kmedoids.fasterpam(distmatrix, k, random_state=seed)
             if use_silhouette:
-                scores[i] = silhouette_score(distmatrix, c.labels, 
-                                             random_state=seed, metric="precomputed")
+                scores[k] = silhouette_score(distmatrix, c.labels, metric="precomputed")
             else:
-                scores[i] = c.loss
-                
+                scores[k] = -c.loss  # higher is better if we flip the sign
+
         K = max(scores, key=scores.get)
         print(f"Found {K} paths with score {scores[K]:.2f}")
 
+        # elbow plot, comment out if not do_plots
         plt.figure(figsize=(6, 5))
         sns.lineplot(x=list(scores.keys()), y=list(scores.values()))
         plt.title(f"Optimal number of paths: {K}")
         plt.axvline(x=K, color='red', linestyle='--', label=f'Optimal K={K}')
-        plt.xlabel("Number of clusters"); plt.ylabel("Silhouette score" if use_silhouette else "Loss")
-        plt.savefig(f"{outdir}/{self.sysname}_elbowplot.png")
-        # plt.show()
+        plt.xlabel("Number of clusters")
+        plt.ylabel("Silhouette score" if use_silhouette else "Score")
+        plt.tight_layout()
+        plt.savefig(os.path.join(outdir, f"elbowplot_{method}.png"))
         plt.close()
 
-        # K-Medoids clustering using the optimal number of paths
+        # Final clustering
         cluster = kmedoids.fasterpam(distmatrix, K, random_state=seed)
 
-        labels_dict = {k: v for k, v in zip(names, cluster.labels)}
+        labels_dict = {name: label for name, label in zip(names, cluster.labels)}
         medoid_indices = cluster.medoids
         medoid_names = [names[idx] for idx in medoid_indices]
+
         print("Medoid trajectories:", medoid_names)
-        print(f"cluster counts:")
+        print("cluster counts:")
         unique, counts = np.unique(cluster.labels, return_counts=True)
         for u, c in zip(unique, counts):
-            print(f"  Cluster {u}: {c} trajectories")
+            print(f" Cluster {u}: {c} trajectories")
 
-        trajname_map = pd.DataFrame({"trajname": list(data_struct.keys()),
-                        "cluster": cluster.labels}).set_index('trajname')['cluster'].to_dict()
-        data['path'] = df['trajname'].map(trajname_map)
+        # Map cluster labels back to full df (including any rows filtered out earlier)
+        trajname_map = pd.DataFrame(
+            {"trajname": names, "cluster": cluster.labels}
+        ).set_index('trajname')['cluster'].to_dict()
+
+        return feature_df, labels_dict, trajname_map, medoid_names, vectors_stacked_scaled
+
+    def find_paths_smd(self, data: pd.DataFrame,
+                            do_plots: bool = True, 
+                            recompute_geom: bool = False) -> pd.DataFrame:
+
+        outdir = os.path.join(self.outdir, 'path_clustering')
+        os.makedirs(outdir, exist_ok=True)
         
-        #statistics by cluster
-        return data, labels_dict, medoid_names
+        traces_feat = geom_feat = None
+        
+        if self.cluster_paths not in ['geometric', 'traces', 'full']:
+            raise ValueError("cluster_paths must be one of: False, 'geometric', 'traces', 'full'")
+        
+        if self.cluster_paths == 'geometric':
+            feature_df = self.get_geom_features(recompute=recompute_geom, outdir=outdir)
+            feature_cols = [c for c in feature_df.columns if c.startswith('dist_')]
+        elif self.cluster_paths == 'traces':
+            feature_df = data.copy()
+            feature_df['lag'] = feature_df['r_target'] - feature_df['r_after']
+            feature_cols = ['r_before','work','lag']  # or ['work','lag']
+        else:  # 'full'
+            geom_feat = self.get_geom_features(recompute=recompute_geom, outdir=outdir)
+            traces_feat = data.copy()
+            traces_feat['lag'] = traces_feat['r_target'] - traces_feat['r_after']
+            feature_df = self.build_merged_features(traces_feat, geom_feat)
+            geom_cols = [c for c in feature_df.columns if c.startswith('dist_')]
+            trace_cols = ['force','lag']
+            feature_cols = geom_cols + trace_cols
+            
+        feature_df, labels_dict, trajname_map, medoid_names, vectors_stacked_scaled = self.cluster_time_series(
+                    feature_df, feature_cols, r_range=self.cluster_range, outdir=outdir, method=self.cluster_paths, seed=self.seed)
+        # finally map back to raw_data
+        feature_df['path'] = feature_df['trajname'].map(trajname_map)
+        data['path'] = data['trajname'].map(trajname_map)
+        
+        print(data.groupby(['path', 'speed'])[['trajname']].nunique())
+        if do_plots: 
+            # generate pymol sesh for the paths
+            paths = {}
+            for trajname in medoid_names:
+                for traj in self.trajectories:
+                    if trajname == os.path.basename(traj)[:-4]:
+                        #{'path_0': [(protein_pdb, traj1), (protein_pdb, traj2)], ...}
+                        trajcode = trajname.split('_')[1]
+                        paths[f'path_{labels_dict[trajname]}_{trajcode}'] = [(self.reference_pdb, traj)]
 
+            self.make_unbinding_paths_pml(paths, outdir=outdir)
+            # generate PCA plot of the clustered paths
+            
+            # Get the minimum number of frames across all trajectories
+            min_len = min(arr.shape[0] for arr in vectors_stacked_scaled)
+
+            # Trim all arrays to this length
+            vectors_trimmed = [arr[:min_len, :] for arr in vectors_stacked_scaled]
+
+            # Stack for PCA
+            X = np.vstack(vectors_trimmed)   # shape (N_traj * min_len, d)
+
+            from sklearn.decomposition import PCA
+            pca = PCA(n_components=2)
+            X_pca = pca.fit_transform(X)
+
+            plt.figure(figsize=(6, 5))
+            # sns.scatterplot(data=feature_df, x=feature_df.iloc[:, 2], y=feature_df.iloc[:, 3], alpha=0.2, c='gray', s=2, linewidth=0)
+            sns.scatterplot(x=X_pca[:, 0], y=X_pca[:, 1], alpha=0.3, c='gray', s=10, linewidth=0)
+            # for medoid in cluster.medoids:
+            #     medoid_name = list(paths.keys())[medoid]
+            #     distance_df_medoid = distance_df[distance_df["trajname"] == medoid_name]
+            #     sns.scatterplot(data=distance_df_medoid, x=distance_df_medoid.iloc[:, 2], y=distance_df_medoid.iloc[:, 3], 
+            #                     label=medoid_name, alpha=1, s=25, linewidth=0#, edgecolor='black', st
+            #                                                                     )
+            # plt.title(f"Medoids in PCA space for {K} paths")
+            plt.xlabel("PC1");  plt.ylabel("PC2")
+            plt.tight_layout()
+            plt.savefig(f"{outdir}/clustering_PCA.png")
+            # plt.show()
+            plt.close()
+            
+        return data
+   
     def make_unbinding_paths_pml(self, 
         paths: Dict[str, List[Tuple[str, str]]],
         outdir: str = "unbinding_paths_vis",
