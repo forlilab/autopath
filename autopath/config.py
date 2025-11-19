@@ -16,7 +16,7 @@ class Config(object):
         VS_mode: bool = False,
         pdb_path: str = None,
         do_fix_pdb: bool = True,
-        pocket_selection: str = "same residue as protein and (around 4 resname UNK) and (not name H*)",
+        pocket_selection: str = "same residue as protein and (around 4 resname UNK) and name CA",
         use_murcko_scaffold: bool = True,
         temperature: float = 300,
         random_state: int = 42,
@@ -26,10 +26,10 @@ class Config(object):
             "amber14/tip3pfb.xml",
             "amber/tip3p_HFE_multivalent.xml",
         ],
-        hydrogenMass: float = 3.0,  # amu
+        hydrogenMass: float = 1.5,  # amu
         lig_ff: str = "espaloma",
         boxShape: str = "dodecahedron",
-        padding: float = 1.0,
+        padding: float = 1.2,
         ionicStrength: float = 0.15,
         is_membrane: bool = False,
         lipid_type: str = None,
@@ -43,12 +43,12 @@ class Config(object):
         sMD_dx_per_move: float = 0.001,  # nm
         sMD_spring_cte: float = 50,  # KJ/mol/nm2/atom
         sMD_replicas: int = 5,
-        sMD_autostop: bool = False,
+        sMD_autostop: bool = 10,
         extract_milestones: bool = True,
         n_milestones: int = 5,
         run_metadynamics: bool = True,
-        mMD_time: int = 2,  # ns
-        mMD_bias_factor: int = 15,
+        mMD_time: int = 5,  # ns
+        mMD_bias_factor: int = 12,
         mMD_bias_frequency: int = 2,  # ps
         mMD_hill_height: float = 1.2,  # KJ/mol
         mMD_hill_width: float = 0.05,
