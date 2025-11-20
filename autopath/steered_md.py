@@ -344,13 +344,18 @@ class SteeredMD:
         simulation.context.setTime(0)  # reset simulation time
         simulation.context.setStepCount(0)  # reset step count
         
+        weighByMass = True
+        if len(self.groupA_atoms) == 1 or len(self.groupB_atoms) == 1:
+            weighByMass = False  # avoid problems with single DUM massless atom
+        print(f"weighByMass for CV: {weighByMass}")
+        
         # Add COM force to the ligand and pocket groups with a harmonic potential shape
         groups = [self.groupA_atoms] + [self.groupB_atoms]
         self.com_force = cvpack.CentroidFunction(
             "0.5 * fc_pull * (distance(g1,g2)-r0_smd)^2",
             openmmunit.kilojoules_per_mole,  # energy not force
             groups,
-            weighByMass=True if len(self.groupB_atoms) > 1 else False, # avoid problems with single DUM massless atoms
+            weighByMass=weighByMass,
             pbc=True,
         )
         
@@ -364,7 +369,7 @@ class SteeredMD:
             "distance(g1,g2)",
             openmmunit.nanometers,  # distance not energy
             groups,
-            weighByMass=True if len(self.groupB_atoms) > 2 else False, # avoid problems with single DUM massless atoms
+            weighByMass=weighByMass,
             pbc=True,
         )
         
