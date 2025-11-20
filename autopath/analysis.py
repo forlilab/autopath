@@ -52,7 +52,7 @@ def plot_atomic_rmsf(u, lig_resname:str='UNK', outname:str='rmsf.png', log_rmsf:
     fig = SimilarityMaps.GetSimilarityMapFromWeights(mol=probe_mol, 
                                                      weights=r.rmsf.tolist(), 
                                                      draw2d=drawer,
-                                                     scale=1.0,
+                                                     scale=2.0,
                                                      step=0.1,
                                                      alpha=0.5, 
                                                      contourLines=5

@@ -198,7 +198,7 @@ class AutoPath:
                                 topology=topology,
                                 system=system,
                                 out_dir=f"{sys_name}/equilibration",
-                                restrained_minimization=True,
+                                restrained_minimization=False,
                                 is_membrane=self.is_membrane,
                                 protocol_fname=self.protocol_fname,
                                 # platform='fastest'
@@ -306,8 +306,10 @@ class AutoPath:
                 autostop_freq=self.sMD_autostop_freq,
                 timestep=self.timestep,
                 temperature=self.temperature,
-                # save_freq=2500,  # every 10 ps if timestep=0.004 ps
+                save_freq=1250,  # every 5 ps if timestep=0.004 ps
                 out_dir=sMD_outdir,
+                # platform="OpenCL",
+
             )
 
             for speed, reps in self.sMD_pulling_speeds.items():
@@ -355,8 +357,8 @@ class AutoPath:
         smd = SteeredMDAnalysis(logs, 
                                 sys_name, 
                                 # dist_minmax=(0.0, 1.4), #nm                        
-                                cluster_paths=True,
-                                cluster_range=(0.0, 1.1),
+                                # cluster_paths='full',
+                                # cluster_range=(0.0, 1.1),
                                 trajectories=sMD_trajs,
                                 reference_pdb=equilibrated_pdb,
                                 pocket_select='protein and (around 6.0 resname UNK) and name CA',
@@ -367,9 +369,7 @@ class AutoPath:
         
         results, gmm_results = smd.run_analysis(use_target_grid=True,
                                                 # speeds=[0.001, 0.005],
-                                                fit_GMM=False)
-        smd.processed_data.to_csv(f"{sMD_outdir}/sMD_data_processed.csv")
-        smd.raw_data.to_csv(f"{sMD_outdir}/sMD_data_raw.csv")
+                                                fit_GMM=True)
         results.to_csv(f"{sMD_outdir}/sMD_analysis_results.csv")
 
         ##############################################################################################
