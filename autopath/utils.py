@@ -351,40 +351,45 @@ def add_variants(modeller: Modeller, variants_dict: dict = None) -> Modeller:
 
     return modeller 
 
-def get_pocket_atoms(u:mda.Universe, 
-                     pocket_selection:str, 
-                     ligand_selection:str,
+def get_pocket_atoms(u:mda.Universe = None,
+                     pocket_selection:str = None,
+                     ligand_selection:str = None,
                      cutoff: float = 6.0
                      ) -> mda.AtomGroup:
     """Get the pocket atoms based on a user provided selection 
     or the ligand residue name and some default heuristics."""
 
+    if u is None:
+        logging.error("No MDAnalysis Universe provided.")
+        exit(1)
+        
     u.trajectory[-1]  # set pointer to last frame if its a trajectory
 
     if pocket_selection is None and ligand_selection is None:
         logging.error("No pocket selection or ligand residue name provided.")
-        return []
-
+        exit(1)
     # If a custom pocket selection is provided, use it directly
-    if pocket_selection is not None:
-        # pocket_atoms = u.select_atoms(pocket_selection)
-        pocket_atoms_indices = [atom.index for atom in pocket_selection]
+    elif pocket_selection is not None and ligand_selection is None:
+        pocket_atoms = u.select_atoms(pocket_selection)
+        pocket_atoms_indices = [atom.index for atom in pocket_atoms]
     # If no custom selection, use the ligand residue name to define the pocket
-    elif ligand_selection is not None:
+    elif ligand_selection is not None and pocket_selection is None:
         # backbone_names = ["N", "CA", "C", "O"]
         ligand = u.select_atoms(ligand_selection)
         protein_residues = u.select_atoms(f"protein and around {cutoff} group ligand", ligand=ligand).residues
-        pocket_atoms_indices = [atom.index for res in protein_residues 
-                                for atom in res.atoms
-                                if atom.name in ['CA']]
+        pocket_atoms_indices = [atom.index for res in protein_residues for atom in res.atoms if atom.name in ['CA']]
+    else:
+        logging.error("Please provide either a pocket selection or a ligand residue name, not both.")
+        exit(1)
         
     if len(pocket_atoms_indices) == 0:
         logging.error(f"No atoms found for the provided pocket selection")
-        return []
+        exit(1)
     else:
         # convert to MDAnalysis AtomGroup
         pocket_atoms = u.select_atoms(f"index {' '.join(map(str, pocket_atoms_indices))}")
-        return pocket_atoms
+        
+    return pocket_atoms
 
 def reduce_to_murcko_scaffold(u, lig_resname: str, img_name: str = None):
     """
