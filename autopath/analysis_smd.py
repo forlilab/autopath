@@ -1578,3 +1578,127 @@ class SteeredMDAnalysis:
         plt.show()
         plt.close()
         return
+    def add_acf_column(self,
+                    df: pd.DataFrame,
+                    param: str = 'lag',
+                    x_col: str = 'time',
+                    max_lag: int | None = None,
+                    plot: bool = True) -> pd.DataFrame:
+        """
+        Compute the autocorrelation function (ACF) of `param` along `x_col`,
+        treating each (speed, path) group separately. Adds 'acf_<param>' and
+        plots one figure with subplots per speed, colored by path.
+        """
+        columns_needed = [param, x_col, 'speed', 'path']
+        for col in columns_needed:
+            if col not in df.columns:
+                raise ValueError(f"DataFrame is missing required column '{col}'")
+
+        df = df.copy()
+        # ensure global ordering is consistent
+        df = df.sort_values(['speed', 'path', x_col])
+
+        acf_colname = f'acf_{param}'
+        df[acf_colname] = np.nan
+
+        group_iter = df.groupby(['speed', 'path'])
+
+        # compute ACF per group
+        for key, df_g in group_iter:
+            df_g = df_g.sort_values(x_col)
+
+            y = df_g[param].to_numpy(dtype=float)
+            n = len(y)
+            if n < 2:
+                continue
+
+            y_centered = y - y.mean()
+            var = np.dot(y_centered, y_centered)
+            if var == 0.0:
+                acf_vals = np.zeros(n)
+                acf_vals[0] = 1.0
+            else:
+                this_max_lag = max_lag
+                if this_max_lag is None or this_max_lag >= n:
+                    this_max_lag = n - 1
+
+                acf_short = np.empty(this_max_lag + 1, dtype=float)
+                for lag in range(this_max_lag + 1):
+                    if lag == 0:
+                        acf_short[lag] = 1.0
+                    else:
+                        acf_short[lag] = np.dot(y_centered[:-lag], y_centered[lag:]) / var
+
+                if this_max_lag + 1 < n:
+                    acf_vals = np.concatenate(
+                        [acf_short, np.full(n - (this_max_lag + 1), np.nan)]
+                    )
+                else:
+                    acf_vals = acf_short
+
+            df.loc[df_g.index, acf_colname] = acf_vals
+
+        if plot:
+            speeds = sorted(df['speed'].dropna().unique())
+            n_speeds = len(speeds)
+            fig, axes = plt.subplots(1, n_speeds,
+                                    figsize=(6 * n_speeds, 4.5),
+                                    sharex=False)
+            if n_speeds == 1:
+                axes = [axes]
+
+            for ax, spd in zip(axes, speeds):
+                df_s = df[df['speed'] == spd]
+                if df_s.empty:
+                    ax.set_visible(False)
+                    continue
+
+                paths = sorted(df_s['path'].dropna().unique())
+
+                for p in paths:
+                    # sort by x_col so ACF sequence matches lag order
+                    df_p = df_s[df_s['path'] == p].sort_values(x_col)
+                    if df_p.empty:
+                        continue
+
+                    acf_vals = df_p[acf_colname].to_numpy()
+                    valid = ~np.isnan(acf_vals)
+                    if not np.any(valid):
+                        continue
+                    acf_vals = acf_vals[valid]
+
+                    lags = np.arange(len(acf_vals), dtype=float)
+
+                    x_vals = df_p[x_col].to_numpy()
+                    if len(x_vals) > 1:
+                        dx = np.median(np.diff(x_vals))
+                        if np.isfinite(dx) and dx > 0:
+                            lags = lags * dx
+                            x_label = f'Lag in {x_col} units'
+                        else:
+                            x_label = 'Lag (frames)'
+                    else:
+                        x_label = 'Lag (frames)'
+
+                    label = f'path {p}'
+                    ax.plot(lags, acf_vals, lw=2, label=label)
+
+                ax.axhline(0.0, color='k', lw=1)
+                title = f'ACF of {param} (speed = {spd})'
+                ax.set_title(title)
+                ax.set_xlabel(x_label)
+                ax.set_ylabel(f'ACF({param})')
+                ax.grid(True)
+                if len(paths) > 1:
+                    ax.legend(frameon=False)
+
+            plt.tight_layout()
+            outname = os.path.join(
+                self.outdir,
+                f'{self.sysname}_acf_{param}_vs_{x_col}_by_speed_path.png'
+            )
+            plt.savefig(outname, dpi=300)
+            plt.show()
+            plt.close()
+
+        return df
