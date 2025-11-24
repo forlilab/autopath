@@ -8,7 +8,7 @@ import pandas as pd
 
 from scipy.signal import savgol_filter
 from scipy.interpolate import UnivariateSpline
-from scipy.ndimage import gaussian_filter1d
+from scipy.ndimage import gaussian_filter1d, gaussian_filter
 from scipy.stats import linregress
 from scipy.integrate import cumulative_trapezoid
 from scipy import special
@@ -1278,9 +1278,9 @@ class SteeredMDAnalysis:
             feature_df = self.get_trace_features(data,
                                                 x_col='r_target',
                                                 rescale_by_speed=True,
-                                                zscore_by_speed=False,
+                                                zscore_by_speed=True,
                                                 )
-            feature_cols = ['r_before', 'work','lag']  # or ['work','lag']
+            feature_cols = ['r_before', 'force','lag']  # or ['work','lag']
         else:  # 'full'
             geom_feat = self.get_geom_features(recompute=recompute_geom, outdir=outdir)
             traces_feat = self.get_trace_features(data,
@@ -1291,7 +1291,7 @@ class SteeredMDAnalysis:
             traces_feat['lag'] = traces_feat['r_target'] - traces_feat['r_after']
             feature_df = self.build_merged_features(traces_feat, geom_feat)
             geom_cols = [c for c in feature_df.columns if c.startswith('dist_')]
-            trace_cols = ['work','lag']
+            trace_cols = ['work', 'lag', 'r_after']
             feature_cols = geom_cols + trace_cols
             
         feature_df, labels_dict, trajname_map, medoid_names, vectors_stacked_scaled = self.cluster_time_series(
@@ -1316,13 +1316,10 @@ class SteeredMDAnalysis:
             # Get the minimum number of frames across all trajectories
             min_len = min(arr.shape[0] for arr in vectors_stacked_scaled)
 
-            # Trim all arrays to this length
+            # Trim all arrays to this length, required for PCA
             vectors_trimmed = [arr[:min_len, :] for arr in vectors_stacked_scaled]
-
-            # Stack for PCA
             X = np.vstack(vectors_trimmed)   # shape (N_traj * min_len, d)
 
-            from sklearn.decomposition import PCA
             pca = PCA(n_components=2)
             X_pca = pca.fit_transform(X)
 
@@ -1336,7 +1333,7 @@ class SteeredMDAnalysis:
             # base scatter: all points in light gray
             plt.figure(figsize=(6, 5))
             sns.scatterplot(x=X_pca[:, 0], y=X_pca[:, 1],
-                            alpha=0.5, color='lightgray', s=10, linewidth=0)
+                            alpha=0.75, color='lightgray', s=50, linewidth=0)
 
             # color palette by path label
             n_paths = len(set(labels_dict.values()))
@@ -1353,7 +1350,7 @@ class SteeredMDAnalysis:
                 path_label = labels_dict[trajname]
                 color = palette[path_label]
 
-                label = f'path {path_label} medoid'
+                label = f'path-{path_label}_{trajname}'
                 # avoid duplicate legend entries
                 if path_label in used_labels:
                     label = None
@@ -1362,16 +1359,14 @@ class SteeredMDAnalysis:
 
                 plt.scatter(X_pca[start:end, 0],
                             X_pca[start:end, 1],
-                            s=18, alpha=0.9,
-                            color=color,
+                            s=20, alpha=0.9,
                             label=label)
 
             if used_labels:
                 plt.legend(frameon=False)
 
-            plt.xlabel("PC1")
-            plt.ylabel("PC2")
-            plt.title(f"Medoids in PCA space for {len(set(labels_dict.values()))} paths")
+            plt.xlabel("PC1");             plt.ylabel("PC2")
+            plt.title(f"Medoids in PCA space")
             plt.tight_layout()
             plt.savefig(f"{outdir}/clustering_PCA.png")
             plt.close()
@@ -1412,13 +1407,13 @@ class SteeredMDAnalysis:
         paths: Dict[str, List[Tuple[str, str]]],
         outdir: str = "unbinding_paths_vis",
         align_sel: str = "protein and backbone",
-        grid_spacing: float = 1.0,
+        grid_spacing: float = 0.5,
         cartoon_color: str = "palecyan",
         sample_stride: int = 1,
     ) -> str:
         """Generate ligand-path density maps and a PyMOL .pml that uses only relative paths."""
                 
-        level = 0.000003
+        level = 0.000002
         surface_transparency = 0.35
         cartoon_transparency = 0.25
         
@@ -1433,7 +1428,7 @@ class SteeredMDAnalysis:
         protein_abs = str(prot_copy.resolve())
         u_ref = mda.Universe(protein_abs)
 
-        default_palette = ["deepsalmon", "marine", "forest", "violetpurple", "gold", "tv_red", "tv_blue"]
+        default_palette = ["violetpurple", "marine", "forest", "deepsalmon", "gold", "tv_red", "tv_blue"]
         path_colors = {name: default_palette[i % len(default_palette)] for i, name in enumerate(paths)}
 
         dx_files_rel = {}
@@ -1450,10 +1445,10 @@ class SteeredMDAnalysis:
                 if lig.n_atoms == 0:
                     raise ValueError(f"No atoms found for '{ligand_sel}' in {traj}.")
 
-                da = density.DensityAnalysis(lig, delta=grid_spacing,padding=30.0)
+                da = density.DensityAnalysis(lig, delta=grid_spacing,padding=50.0)
                 da.run(step=sample_stride)
                 rho = da.results.density
-
+                
                 dens_sum = rho if dens_sum is None else dens_sum._replace(grid=dens_sum.grid + rho.grid) or dens_sum
                 total_frames += len(u.trajectory[::sample_stride])
 
@@ -1461,7 +1456,10 @@ class SteeredMDAnalysis:
             if total_frames > 0:
                 dens_sum.grid /= float(total_frames)
 
-            dx_path = str((outdir / f"{path_name}_ligand_density.dx").resolve())
+              #smooth the density a bit
+            dens_sum.grid = gaussian_filter(dens_sum.grid, sigma=1.0)
+                
+            dx_path = str((outdir / f"{path_name}_density.dx").resolve())
             dens_sum.export(dx_path)
             dx_files_rel[path_name] = dx_path
 
@@ -1498,12 +1496,13 @@ class SteeredMDAnalysis:
             pml.write(f"select lig_ref, ({ligand_sel}) and prot\n")
             pml.write("if sele count lig_ref > 0:\n")
             pml.write("    create lig, lig_ref\n")
-            pml.write("    show spheres, lig\n")
-            pml.write("    color lightpink, lig\n")
-            pml.write("    set sphere_transparency, 0.35, lig\n")
+            # pml.write("    show stick, lig\n")
+            pml.write("    show sphere, lig\n")
+            pml.write("    color yellow, lig\n")
+            pml.write("    set sphere_transparency, 0.9, lig\n")
             pml.write("orient lig\n")
             pml.write("zoom prot, 10.0\n")
-            # pml.write("png preview.png, ray=1, dpi=300\n")
+            pml.write("png preview.png, ray=1, dpi=300\n")
 
         return str(pml_path)
     
