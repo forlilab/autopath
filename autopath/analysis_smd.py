@@ -250,7 +250,7 @@ class SteeredMDAnalysis:
 
                 gmm_dict = self.fit_gmm_to_work_values(raw_W,
                                                         max_K=3,
-                                                        covariance_type='full',
+                                                        covariance_type='spherical',
                                                         random_state=self.seed)
 
                 #These have shape (K,) for K components
@@ -878,7 +878,7 @@ class SteeredMDAnalysis:
         """
         outfname = os.path.join(self.outdir, f'{self.sysname}_{param}_extrapolated.png')
         color_col = 'R2'  # Column for color mapping
-        se_col = f'se_{param}'
+        se_col = f'{param}_se'
 
         if df is None or df.empty:
             return
@@ -934,12 +934,15 @@ class SteeredMDAnalysis:
                 r2_val = df_p[color_col].iloc[i]
 
                 color = cmap(norm(r2_val))
-                ax.plot(xi, yi, color=color, lw=3)
+                ax.plot(xi, yi, color=color, lw=4)
 
                 if yerri is not None:
-                    ax.fill_between(xi, yi - yerri, yi + yerri, color=color, alpha=0.4)
+                    ax.fill_between(xi, yi - yerri, yi + yerri, color=color, alpha=0.3)
 
             # Ax labels/titles per subplot
+            if param == 'dG_v0_intercept':
+                ax.axhline(27, color='k', lw=2, ls='--')
+
             ax.set_xlabel(x_col)
             ax.set_ylabel(param)
             if path_val is not None:
@@ -983,8 +986,8 @@ class SteeredMDAnalysis:
         df = processed_data.copy()
             
         # sort so each trajectory is an ordered trace in r-space
-        # sort_cols = ['trajname', 'speed', x_col]
-        # df = df.sort_values(sort_cols).reset_index(drop=True)
+        sort_cols = ['speed', 'trajname', x_col]
+        df = df.sort_values(sort_cols).reset_index(drop=True)
 
         # rescale trace features by speed
         skip_normalization = ['speed', 'trajname', x_col, 
@@ -1280,7 +1283,7 @@ class SteeredMDAnalysis:
                                                 rescale_by_speed=True,
                                                 zscore_by_speed=True,
                                                 )
-            feature_cols = ['r_before', 'force','lag']  # or ['work','lag']
+            feature_cols = ['lag', 'force', 'r_before']# or ['work','lag']
         else:  # 'full'
             geom_feat = self.get_geom_features(recompute=recompute_geom, outdir=outdir)
             traces_feat = self.get_trace_features(data,
@@ -1291,7 +1294,7 @@ class SteeredMDAnalysis:
             traces_feat['lag'] = traces_feat['r_target'] - traces_feat['r_after']
             feature_df = self.build_merged_features(traces_feat, geom_feat)
             geom_cols = [c for c in feature_df.columns if c.startswith('dist_')]
-            trace_cols = ['work', 'lag', 'r_after']
+            trace_cols = ['force', 'lag']
             feature_cols = geom_cols + trace_cols
             
         feature_df, labels_dict, trajname_map, medoid_names, vectors_stacked_scaled = self.cluster_time_series(
@@ -1549,8 +1552,11 @@ class SteeredMDAnalysis:
                 estimator=None, errorbar=None,  # don't aggregate across paths
                 ax=axes[i]
             )
-
-            axes[i].set_title(f'Speed: {speed} nm/ps', fontsize=12)
+            axes[i].grid(True)
+            # just reference for trypsin
+            axes[i].axhline(27, color='k', lw=1, ls='--')
+            
+            axes[i].set_title(f'Speed: {speed} nm/ps', fontsize=10)
             axes[i].set_xlabel(f'{r_coord} (nm)')
             if i == 0:
                 axes[i].set_ylabel('dG (kJ/mol)')

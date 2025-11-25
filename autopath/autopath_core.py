@@ -361,8 +361,9 @@ class AutoPath:
         
         smd = SteeredMDAnalysis(logs, 
                                 sys_name, 
+                                outdir=f'{sMD_outdir}_analysis',
                                 # dist_minmax=(0.0, 1.4), #nm                        
-                                cluster_paths='full',
+                                # cluster_paths='full',
                                 # cluster_range=(0.0, 1.1),
                                 trajectories=sMD_trajs,
                                 reference_pdb=equilibrated_pdb,
@@ -404,7 +405,7 @@ class AutoPath:
                 exit(1)
         
             # calculate some features for clustering
-            coms = calculate_com_distance(u_sMD, ligand_atoms_full, pocket_atoms, wrap=False)
+            coms = calculate_com_distance(u_sMD, ligand_atoms_full, pocket_atoms, wrap=True)
             rmsd = compute_rmsd(u_sMD, u_sMD, 
                                 alig_select=f"resname {lig_resname} and not name H*",
                                 groupselections={'ligand': f"resname {lig_resname} and not name H*"},
@@ -448,7 +449,7 @@ class AutoPath:
 
         if self.run_metadynamics:
             try:
-                smd_raw = pd.read_csv(f"{sMD_outdir}/sMD_data_raw.csv")
+                smd_raw = pd.read_csv(f'{sMD_outdir}_analysis/sMD_data_raw.csv')
                 min_com = smd_raw['r_before'].min() * 0.75  # nm
                 max_com = smd_raw['r_before'].max() * 1.1 # nm
             except Exception as e:
