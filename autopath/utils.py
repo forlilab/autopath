@@ -660,6 +660,7 @@ def compute_rmsd(u,
                 groupselections:dict={}, 
                 aligned_fname:str=None,
                 plots_outdir:str=None,
+                suffix:str=None
                 ) -> pd.DataFrame:
     r = RMSD(u, 
              u_ref,
@@ -684,7 +685,10 @@ def compute_rmsd(u,
             plt.xlabel('Frame');            plt.ylabel(f'RMSD (A)')
             plt.title(f'{col} RMSD')
             plt.tight_layout()
-            plt.savefig(f'{plots_outdir}/rmsd_{col}.png')
+            if suffix is not None:
+                plt.savefig(f'{plots_outdir}/rmsd_{suffix}_{col}.png')
+            else:
+                plt.savefig(f'{plots_outdir}/rmsd_{col}.png')
             plt.close()
 
     return rmsd_df
