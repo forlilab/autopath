@@ -669,7 +669,7 @@ def compute_rmsd(u,
              ref_frame=0).run()
 
     rmsd_results = r.results.rmsd  # Do not skip any columns
-    columns = ['frame','time (ps)', f'RMSD_selected_alignment'] + [f'RMSD_{group}' for group in groupselections.keys()]
+    columns = ['frame','time (ps)', f'RMSD_selected_alignment'] + [f'RMSD_{group}' for group in groupselections.keys() if group is not None]
     rmsd_df = pd.DataFrame(rmsd_results, columns=columns)
 
     if aligned_fname is not None:

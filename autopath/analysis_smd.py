@@ -813,6 +813,7 @@ class SteeredMDAnalysis:
 
         # Filter out speeds if provided. You could only want to fit specific (low) speeds
         if speeds is not None:
+            speeds = [float(s) for s in speeds]
             df = df[df['speed'].isin(speeds)]
 
         if df['speed'].nunique() < 2:
