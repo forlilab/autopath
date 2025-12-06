@@ -165,6 +165,7 @@ class Equilibration:
         system: str = None,
         out_dir: str = "equilibration",
         restrained_minimization: bool = True,
+        restrained_minimization_only: bool = False,
         protocol_fname: str = "autopath/data/equilibration.json",
         save_freq: int = 6250, # 12500 is 0.05ns at 4fs timestep
         is_membrane: bool = False,
@@ -185,6 +186,7 @@ class Equilibration:
         self.save_freq = save_freq
 
         self.restrained_minimization = restrained_minimization
+        self.restrained_minimization_only = restrained_minimization_only
 
         self.platform = select_platform(platform)
         self.verbose = verbose
@@ -277,9 +279,12 @@ class Equilibration:
        # Add the required forces to the system
         for num, (name, selection) in enumerate(self.components_lookup.items()):
             restrain_idxs = u.select_atoms(selection).indices
-            restrain_names = [u.atoms[idx].name for idx in restrain_idxs]
-            logging.info(f"Adding {len(restrain_idxs)} harmonic restraints to {name}..")
-            logging.debug(f"The following {name} atoms will be restrained: {', '.join(restrain_names)}")
+            if len(restrain_idxs) > 0:
+                restrain_names = [u.atoms[idx].name for idx in restrain_idxs]
+                logging.info(f"Adding {len(restrain_idxs)} harmonic restraints to {name}..")
+                logging.debug(f"The following {name} atoms will be restrained: {', '.join(restrain_names)}")
+            else:
+                logging.info(f"Skipping harmonic restraints for {name}: No atoms found for selection '{selection}'")
 
             add_harmonic_restraints(
                 self.system,
@@ -313,6 +318,9 @@ class Equilibration:
 
         # remove existing restraint forces
         self.system = remove_openmm_force(self.system, "k_")
+
+        if self.restrained_minimization_only:
+            return self.system 
 
         # Re-add the restraints with updated positions.
         # Because the forces exist this will update them, there's no need to remove them first (I think).

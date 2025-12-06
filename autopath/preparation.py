@@ -109,11 +109,18 @@ class SystemPreparation:
     def _ligand_to_mol(self, lig_fname: str = None, lig_smiles: str = None):
         """Load ligand SDF/PDB and transform to OpenMM molecule"""
 
+        if lig_smiles is not None:
+            sanitize_mol_upon_reading = False
+            removeHs_upon_reading = True
+        else:
+            sanitize_mol_upon_reading = True 
+            removeHs_upon_reading = False 
+
         try:
             if lig_fname.endswith(".pdb"):
-                rdkit_mol = Chem.MolFromPDBFile(lig_fname, removeHs=False)
+                rdkit_mol = Chem.MolFromPDBFile(lig_fname, sanitize=sanitize_mol_upon_reading, removeHs=removeHs_upon_reading)
             elif lig_fname.endswith(".sdf") or lig_fname.endswith(".mol2"): # SDMolSupplier also works for mol2 files
-                rdkit_mol = Chem.SDMolSupplier(lig_fname, removeHs=False)[0]
+                rdkit_mol = Chem.SDMolSupplier(lig_fname, sanitize=sanitize_mol_upon_reading, removeHs=removeHs_upon_reading)[0]
             else:
                 logging.error(f"Ligand file format not recognized. Please provide a .sdf or .pdb file.")
                 exit(1)
@@ -124,8 +131,11 @@ class SystemPreparation:
         # assign bond orders from SMILES if provided
         if lig_smiles is not None:
             rdkit_mol = assign_bondOrders(rdkit_mol, lig_smiles)
+            Chem.SanitizeMol(rdkit_mol)
             # save the fixed ligand
-            fixed_ligfname = os.path.join(self.out_dir, os.path.basename(lig_fname), "_fixed.sdf")
+            basename = os.path.basename(lig_fname)
+            lig_fname = os.path.splitext(basename)[0]
+            fixed_ligfname = os.path.join(self.out_dir, f"{lig_fname}_fixed.sdf")
             writer = Chem.SDWriter(fixed_ligfname)
             for cid in range(rdkit_mol.GetNumConformers()):
                 writer.write(rdkit_mol, confId=-1)
@@ -226,6 +236,7 @@ class SystemPreparation:
                         while chr(chain_id) in used_chains:
                             chain_id += 1
                         logging.info(f"Parametrizing ligand {lig_name}..")
+                        print(f"Parametrizing ligand {lig_name}..")
                         lig = self._ligand_to_mol(lig_path, lig_smiles)
                         ligand_topology, ligand_positions = self._parametrize_ligand(lig)
                         for chain in ligand_topology.chains():

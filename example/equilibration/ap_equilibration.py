@@ -36,8 +36,8 @@ def cmd_lineparser():
         "-l",
         "--lig",
         dest="lig",
-        required=True,
-        action="store",
+        required=False,
+        default=None,
         help="path to the ligand SDF/PDB file",
     )
     
@@ -76,7 +76,10 @@ def main():
     lig_path = args.lig 
     lig_resname = args.resname
     lig_smiles = args.smiles
-    ligands = [(lig_resname,lig_path,lig_smiles)]
+    if lig_path is not None:
+        ligands = [(lig_resname,lig_path,lig_smiles)]
+    else:
+        ligands = None
     equilibration_scheme = args.protocol # Make sure to customize the equilibration scheme as needed
     
     sys_name = os.path.splitext(os.path.basename(receptor))[0]
@@ -98,13 +101,14 @@ def main():
 
     # Prepare the system
     prepare_system = SystemPreparation(
-            out_dir=sys_name,
             boxShape="dodecahedron",
             padding=1.2,
+            hydrogenMass=1.5,
             lig_ff="espaloma",
             ionicStrength=0.15,
             is_membrane=False,
             lipid_type="POPC",
+            out_dir=sys_name,
             forcefield = [
             'amber14-all.xml',
             "amber14/tip3pfb.xml",
@@ -114,28 +118,28 @@ def main():
 
     # Variants is a dictionary which specifies the chain:resid for the variant e.g. {"A:123": "CYX"}
     # If you re-run the script and the system is already prepared comment the following line
-    system, topo = prepare_system.run(protein=prot_path, variants=None, ligands=ligands)
+    system, topology = prepare_system.run(protein=prot_path, variants=None, ligands=ligands)
 
     ########################################################################################
     ###################################### Equilibration ###################################
     ########################################################################################
 
     system_pdb_file = f"{sys_name}/system.pdb"
-    topo = PDBFile(system_pdb_file).topology
+    topology = PDBFile(system_pdb_file).topology
     system = load_system(f"{sys_name}/system.xml")
 
     # Run restrained equilibration
     equilibration = Equilibration(
         system=system,
-        topology=topo,
+        topology=topology,
         protocol_fname=equilibration_scheme,
         is_membrane=False,
-        restrained_minimization=True,
+        restrained_minimization=False,
         out_dir=f"{sys_name}/equilibration",
         )
     
     # If you re-run the script and the system is equilibrated prepared comment the following line
-    system_eq = equilibration.run(pdb_file=system_pdb_file, run_id=sys_name)
+    system = equilibration.run(pdb_file=system_pdb_file, run_id=sys_name)
         
     ########################################################################################
     ###################################### Post-processing #################################
@@ -159,14 +163,17 @@ def main():
 
     # Calculate RMSD and RMSF of the ligand
     u_eq = mda.Universe(system_pdb_file, equilibrated_traj.replace(".dcd", "_aligned.xtc"), in_memory=True)
-    lig_rmsd_equilibration = compute_rmsd(u_eq, u_eq,
+    rmsd_equilibration = compute_rmsd(u_eq, u_eq,
                                           alig_select="backbone", 
-                                          groupselections={"ligand":f"resname {lig_resname} and not name H*", 
-                                                           "protein":'protein and not name H*'},
+                                          groupselections={
+                                                           "ligand":f"resname {lig_resname} and not name H*" if ligands is not None else None, 
+                                                           "protein":'protein and not name H*'
+                                                           },
                                           plots_outdir=f"{sys_name}/equilibration"
                                           )
-    lig_rmsd_equilibration.to_csv(f"{sys_name}/equilibration/{sys_name}_ligand_rmsd.csv", index=False)
-    plot_atomic_rmsf(u_eq, outname=f"{sys_name}/equilibration/{sys_name}_RMSF.png", log_rmsf=True)
+    rmsd_equilibration.to_csv(f"{sys_name}/equilibration/{sys_name}_ligand_rmsd.csv", index=False)
+    if ligands is not None:
+        plot_atomic_rmsf(u_eq, outname=f"{sys_name}/equilibration/{sys_name}_RMSF.png", log_rmsf=True)
 
     return
 
