@@ -247,20 +247,25 @@ class AutoPath:
         #         logging.warning(f"Simulation for ligand {sys_name} terminated because ligand RMSD={final_rmsd:.2f} > {self.eq_checkpoint_cutoff}")
         #         exit(1)
 
-        pocket_atoms = get_pocket_atoms(u_eq, None, f"resname {lig_resname}")
+        pocket_atoms = get_pocket_atoms(u_eq, self.pocket_selection)
         pocket_atom_indices = [atom.index for atom in pocket_atoms]
         pocket_residues = [f"{atom.resname}_{atom.resid}" for atom in pocket_atoms]
         # logging.info(f"Pocket residues are: {', '.join(set(pocket_residues))}")
         print(f"Pocket residues are: {', '.join(set(pocket_residues))}")
 
-        # # write out the pocket atoms to a pdb
-        # with mda.Writer(f"{sys_name}/pocket_definition.pdb", u_eq.atoms.n_atoms) as W:
-        #     W.write(pocket_atoms)
-        # with mda.Writer(f"{sys_name}/pocket_prote.pdb", u_eq.atoms.n_atoms) as W:
-        #     W.write(u_eq.select_atoms(f'protein'))
-        # with mda.Writer(f"{sys_name}/pocket_lig.pdb", u_eq.atoms.n_atoms) as W:
-        #     W.write(u_eq.select_atoms(f'resname {lig_resname}'))
-    
+        # write out the pocket atoms to a pdb
+        #FIXME this should be a function that writes a pymol sesh
+        try:
+            with mda.Writer(f"{sys_name}/pocket_definition.pdb", u_eq.atoms.n_atoms) as W:
+                W.write(pocket_atoms)
+            with mda.Writer(f"{sys_name}/pocket_prote.pdb", u_eq.atoms.n_atoms) as W:
+                W.write(u_eq.select_atoms(f'protein'))
+            with mda.Writer(f"{sys_name}/pocket_lig.pdb", u_eq.atoms.n_atoms) as W:
+                W.write(u_eq.select_atoms(f'resname {lig_resname}'))
+        except Exception as e:
+            logging.error(f"Error writing pocket/ligand/protein pdbs: {e}")
+            pass
+        
         ligand_atoms_indices = get_ligand_anchor_atoms(u_eq, lig_resname, 
                                                        mode=lig_anchor_mode, 
                                                        n_atoms=lig_anchor_mode_atoms,
@@ -356,15 +361,17 @@ class AutoPath:
         
         smd = SteeredMDAnalysis(logs, 
                                 sys_name, 
+                                outdir=f'{sMD_outdir}_analysis',
                                 # dist_minmax=(0.0, 1.4), #nm                        
                                 # cluster_paths='full',
                                 # cluster_range=(0.0, 1.1),
                                 trajectories=sMD_trajs,
                                 reference_pdb=equilibrated_pdb,
-                                pocket_select='protein and (around 6.0 resname UNK) and name CA',
+                                pocket_select=f'protein and around 6.0 resname {lig_resname} and name CA',
                                 ligand_select=f'resname {lig_resname} and not name H*',
                                 timestep=self.timestep,
                                 temperature=self.temperature,
+                                pulling_direction=self.sMD_pulling_dir
                                 )
         
         results, gmm_results = smd.run_analysis(use_target_grid=True,
@@ -398,7 +405,7 @@ class AutoPath:
                 exit(1)
         
             # calculate some features for clustering
-            coms = calculate_com_distance(u_sMD, ligand_atoms_full, pocket_atoms, wrap=False)
+            coms = calculate_com_distance(u_sMD, ligand_atoms_full, pocket_atoms, wrap=True)
             rmsd = compute_rmsd(u_sMD, u_sMD, 
                                 alig_select=f"resname {lig_resname} and not name H*",
                                 groupselections={'ligand': f"resname {lig_resname} and not name H*"},
@@ -442,7 +449,7 @@ class AutoPath:
 
         if self.run_metadynamics:
             try:
-                smd_raw = pd.read_csv(f"{sMD_outdir}/sMD_data_raw.csv")
+                smd_raw = pd.read_csv(f'{sMD_outdir}_analysis/sMD_data_raw.csv')
                 min_com = smd_raw['r_before'].min() * 0.75  # nm
                 max_com = smd_raw['r_before'].max() * 1.1 # nm
             except Exception as e:

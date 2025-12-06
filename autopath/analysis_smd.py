@@ -8,7 +8,7 @@ import pandas as pd
 
 from scipy.signal import savgol_filter
 from scipy.interpolate import UnivariateSpline
-from scipy.ndimage import gaussian_filter1d
+from scipy.ndimage import gaussian_filter1d, gaussian_filter
 from scipy.stats import linregress
 from scipy.integrate import cumulative_trapezoid
 from scipy import special
@@ -99,8 +99,9 @@ class SteeredMDAnalysis:
         self.cluster_paths = cluster_paths
         self.cluster_range = cluster_range
         self.trajectories = trajectories
-        if cluster_paths and (trajectories is None or len(trajectories) == 0):
-            raise ValueError("Clustering paths is enabled, but no trajectories provided.")
+        if cluster_paths in ['geometric', 'full']:
+            if (trajectories is None or len(trajectories) == 0):
+                raise ValueError(f"{cluster_paths} clustering of paths is enabled, but no trajectories provided.")
         
         # this will be used for topology and pocket selection, so should be pdb before pulling
         self.reference_pdb = reference_pdb
@@ -208,10 +209,6 @@ class SteeredMDAnalysis:
         # decorrelate work values using statistical inefficiency g or by replica averaging
         # If we dont decorrelate, we should use the per-replica aggregated work. i.e. each replica contributes one work value per bin ENSEMBLE AVERAGE OVER REPLICAS
         if use_target_grid:
-            # # ensure 'step' exists (per-trajectory running index)
-            # if "step" not in processed_data.columns:
-            #     processed_data = (processed_data.sort_values(["trajname"])
-            #                     .assign(step=lambda d: d.groupby("trajname").cumcount()))
             processed_data = self.build_common_target_grid(processed_data)
             group_keys = ["step", "speed", "path"]  # integer key avoids fragmentation
         else:
@@ -253,7 +250,7 @@ class SteeredMDAnalysis:
 
                 gmm_dict = self.fit_gmm_to_work_values(raw_W,
                                                         max_K=3,
-                                                        covariance_type='diag',
+                                                        covariance_type='spherical',
                                                         random_state=self.seed)
 
                 #These have shape (K,) for K components
@@ -816,6 +813,7 @@ class SteeredMDAnalysis:
 
         # Filter out speeds if provided. You could only want to fit specific (low) speeds
         if speeds is not None:
+            speeds = [float(s) for s in speeds]
             df = df[df['speed'].isin(speeds)]
 
         if df['speed'].nunique() < 2:
@@ -881,7 +879,7 @@ class SteeredMDAnalysis:
         """
         outfname = os.path.join(self.outdir, f'{self.sysname}_{param}_extrapolated.png')
         color_col = 'R2'  # Column for color mapping
-        se_col = f'se_{param}'
+        se_col = f'{param}_se'
 
         if df is None or df.empty:
             return
@@ -937,18 +935,21 @@ class SteeredMDAnalysis:
                 r2_val = df_p[color_col].iloc[i]
 
                 color = cmap(norm(r2_val))
-                ax.plot(xi, yi, color=color, lw=3)
+                ax.plot(xi, yi, color=color, lw=4)
 
                 if yerri is not None:
-                    ax.fill_between(xi, yi - yerri, yi + yerri, color=color, alpha=0.4)
+                    ax.fill_between(xi, yi - yerri, yi + yerri, color=color, alpha=0.3)
 
             # Ax labels/titles per subplot
+            if param == 'dG_v0_intercept':
+                ax.axhline(27, color='k', lw=2, ls='--')
+
             ax.set_xlabel(x_col)
             ax.set_ylabel(param)
             if path_val is not None:
-                ax.set_title(f'{self.sysname} - {param} vs. {x_col} (path {path_val})')
+                ax.set_title(f'{self.sysname} - path {path_val}')
             else:
-                ax.set_title(f'{self.sysname} - {param} vs. {x_col}')
+                ax.set_title(f'{self.sysname} - path 1')
             ax.grid(True)
 
         # Add a single colorbar for the whole figure
@@ -960,11 +961,62 @@ class SteeredMDAnalysis:
         cbar.set_label('$R^2$ of extrapolation')
 
         plt.tight_layout()
-        plt.savefig(outfname, dpi=300)
+        plt.savefig(outfname, dpi=300, bbox_inches='tight')
         plt.show()
         plt.close()
 
         return
+        
+    def get_trace_features(self,
+                        processed_data: pd.DataFrame,
+                        x_col: str = 'r_coord',   # or 'r_coord'
+                        outdir: str | None = None,
+                        rescale_by_speed: bool = False,
+                        zscore_by_speed: bool = False) -> pd.DataFrame:
+        """
+        Build a feature table from trace-like quantities (force, lag, work, ...),
+        organized in r-space (x_col) for each trajectory.
+        """
+        
+        if outdir is None:
+            outdir = os.path.join(self.outdir, 'path_clustering')
+        os.makedirs(outdir, exist_ok=True)
+
+        outfname = os.path.join(outdir, f'{self.sysname}_trace_features_{x_col}.csv')
+
+        df = processed_data.copy()
+            
+        # sort so each trajectory is an ordered trace in r-space
+        sort_cols = ['speed', 'trajname', x_col]
+        df = df.sort_values(sort_cols).reset_index(drop=True)
+
+        # rescale trace features by speed
+        skip_normalization = ['speed', 'trajname', x_col, 
+                              'path', 'replica', 'step', 'replica', 'm_eff',
+                              'time', 'r_before', 'r_after', 'NC', 'r_target']
+        if rescale_by_speed:
+            for col in df.columns:
+                if col not in skip_normalization:
+                    df[col] = df[col] / df['speed']
+
+        # z-score features within each speed 
+        if zscore_by_speed:
+            def _zscore_speed(group):
+                for col in df.columns:
+                    if col not in skip_normalization:
+                        mean = group[col].mean()
+                        std = group[col].std(ddof=0)
+                        if std == 0 or np.isnan(std):
+                            group[col] = 0.0
+                        else:
+                            group[col] = (group[col] - mean) / std
+                return group
+
+            df = df.groupby('speed', group_keys=False).apply(_zscore_speed)
+
+        df.to_csv(outfname, index=False)
+
+        return df
 
     def get_geom_features(self, 
                           recompute: bool = False,
@@ -1118,12 +1170,12 @@ class SteeredMDAnalysis:
         For more information on DTW see: https://doi.org/10.1073/pnas.231354212
                                          https://dtaidistance.readthedocs.io/en/latest/index.html
         """
-        print(feature_df.columns)
         df = feature_df.copy()
 
         # r-range filtering
         if r_range is not None:
             low, high = map(float, r_range)
+            print(f'WARNING: Filtering trajectories to r_target in [{low}, {high}] for clustering.')
             df = df[(df[r_coord] >= low) & (df[r_coord] <= high)]
 
         # Build per-trajectory arrays
@@ -1217,19 +1269,33 @@ class SteeredMDAnalysis:
             raise ValueError("cluster_paths must be one of: False, 'geometric', 'traces', 'full'")
         
         if self.cluster_paths == 'geometric':
-            feature_df = self.get_geom_features(recompute=recompute_geom, outdir=outdir)
+            geom_feat = self.get_geom_features(recompute=recompute_geom, outdir=outdir)
+            # I do this to have r_target in feature_df for r_range filtering
+            feature_df = self.build_merged_features(
+            raw_data=self.raw_data[['trajname','time','r_target']],
+            geom_df=geom_feat,
+            tolerance_ps=None
+        )
             feature_cols = [c for c in feature_df.columns if c.startswith('dist_')]
         elif self.cluster_paths == 'traces':
-            feature_df = data.copy()
-            feature_df['lag'] = feature_df['r_target'] - feature_df['r_after']
-            feature_cols = ['r_before','work','lag']  # or ['work','lag']
+            data['lag'] = data['r_target'] - data['r_after']
+            feature_df = self.get_trace_features(data,
+                                                x_col='r_target',
+                                                rescale_by_speed=True,
+                                                zscore_by_speed=True,
+                                                )
+            feature_cols = ['lag', 'force', 'r_before']# or ['work','lag']
         else:  # 'full'
             geom_feat = self.get_geom_features(recompute=recompute_geom, outdir=outdir)
-            traces_feat = data.copy()
+            traces_feat = self.get_trace_features(data,
+                                                x_col='r_target',
+                                                rescale_by_speed=True,
+                                                zscore_by_speed=True,
+                                                )
             traces_feat['lag'] = traces_feat['r_target'] - traces_feat['r_after']
             feature_df = self.build_merged_features(traces_feat, geom_feat)
             geom_cols = [c for c in feature_df.columns if c.startswith('dist_')]
-            trace_cols = ['force','lag']
+            trace_cols = ['force', 'lag']
             feature_cols = geom_cols + trace_cols
             
         feature_df, labels_dict, trajname_map, medoid_names, vectors_stacked_scaled = self.cluster_time_series(
@@ -1250,36 +1316,94 @@ class SteeredMDAnalysis:
                         paths[f'path_{labels_dict[trajname]}_{trajcode}'] = [(self.reference_pdb, traj)]
 
             self.make_unbinding_paths_pml(paths, outdir=outdir)
-            # generate PCA plot of the clustered paths
-            
+             # generate PCA plot of the clustered paths
             # Get the minimum number of frames across all trajectories
             min_len = min(arr.shape[0] for arr in vectors_stacked_scaled)
 
-            # Trim all arrays to this length
+            # Trim all arrays to this length, required for PCA
             vectors_trimmed = [arr[:min_len, :] for arr in vectors_stacked_scaled]
-
-            # Stack for PCA
             X = np.vstack(vectors_trimmed)   # shape (N_traj * min_len, d)
 
-            from sklearn.decomposition import PCA
             pca = PCA(n_components=2)
             X_pca = pca.fit_transform(X)
 
+            # --- figure out trajectory order matching vectors_stacked_scaled ---
+            # groupby preserves the order of appearance of trajname in feature_df,
+            # which is what cluster_time_series used when building vectors_stacked_scaled
+            traj_order = [name for name, _ in feature_df.groupby('trajname')]
+            n_traj = len(traj_order)
+            assert n_traj == len(vectors_trimmed), "traj_order and vectors_stacked_scaled misaligned"
+
+            # base scatter: all points in light gray
             plt.figure(figsize=(6, 5))
-            # sns.scatterplot(data=feature_df, x=feature_df.iloc[:, 2], y=feature_df.iloc[:, 3], alpha=0.2, c='gray', s=2, linewidth=0)
-            sns.scatterplot(x=X_pca[:, 0], y=X_pca[:, 1], alpha=0.3, c='gray', s=10, linewidth=0)
-            # for medoid in cluster.medoids:
-            #     medoid_name = list(paths.keys())[medoid]
-            #     distance_df_medoid = distance_df[distance_df["trajname"] == medoid_name]
-            #     sns.scatterplot(data=distance_df_medoid, x=distance_df_medoid.iloc[:, 2], y=distance_df_medoid.iloc[:, 3], 
-            #                     label=medoid_name, alpha=1, s=25, linewidth=0#, edgecolor='black', st
-            #                                                                     )
-            # plt.title(f"Medoids in PCA space for {K} paths")
-            plt.xlabel("PC1");  plt.ylabel("PC2")
+            sns.scatterplot(x=X_pca[:, 0], y=X_pca[:, 1],
+                            alpha=0.75, color='lightgray', s=50, linewidth=0)
+
+            # color palette by path label
+            n_paths = len(set(labels_dict.values()))
+            palette = sns.color_palette("tab10", n_colors=n_paths)
+
+            # overlay medoid trajectories, colored by path
+            used_labels = set()
+            for i, trajname in enumerate(traj_order):
+                if trajname not in medoid_names:
+                    continue
+
+                start = i * min_len
+                end = start + min_len
+                path_label = labels_dict[trajname]
+                color = palette[path_label]
+
+                label = f'path-{path_label}_{trajname}'
+                # avoid duplicate legend entries
+                if path_label in used_labels:
+                    label = None
+                else:
+                    used_labels.add(path_label)
+
+                plt.scatter(X_pca[start:end, 0],
+                            X_pca[start:end, 1],
+                            s=20, alpha=0.9,
+                            label=label)
+
+            if used_labels:
+                plt.legend(frameon=False)
+
+            plt.xlabel("PC1");             plt.ylabel("PC2")
+            plt.title(f"Medoids in PCA space")
             plt.tight_layout()
             plt.savefig(f"{outdir}/clustering_PCA.png")
-            # plt.show()
             plt.close()
+           
+            # # generate PCA plot of the clustered paths
+            # # Get the minimum number of frames across all trajectories
+            # min_len = min(arr.shape[0] for arr in vectors_stacked_scaled)
+
+            # # Trim all arrays to this length
+            # vectors_trimmed = [arr[:min_len, :] for arr in vectors_stacked_scaled]
+
+            # # Stack for PCA
+            # X = np.vstack(vectors_trimmed)   # shape (N_traj * min_len, d)
+
+            # from sklearn.decomposition import PCA
+            # pca = PCA(n_components=2)
+            # X_pca = pca.fit_transform(X)
+
+            # plt.figure(figsize=(6, 5))
+            # # sns.scatterplot(data=feature_df, x=feature_df.iloc[:, 2], y=feature_df.iloc[:, 3], alpha=0.2, c='gray', s=2, linewidth=0)
+            # sns.scatterplot(x=X_pca[:, 0], y=X_pca[:, 1], alpha=0.3, c='gray', s=10, linewidth=0)
+            # # for medoid in cluster.medoids:
+            # #     medoid_name = list(paths.keys())[medoid]
+            # #     distance_df_medoid = distance_df[distance_df["trajname"] == medoid_name]
+            # #     sns.scatterplot(data=distance_df_medoid, x=distance_df_medoid.iloc[:, 2], y=distance_df_medoid.iloc[:, 3], 
+            # #                     label=medoid_name, alpha=1, s=25, linewidth=0#, edgecolor='black', st
+            # #                                                                     )
+            # # plt.title(f"Medoids in PCA space for {K} paths")
+            # plt.xlabel("PC1");  plt.ylabel("PC2")
+            # plt.tight_layout()
+            # plt.savefig(f"{outdir}/clustering_PCA.png")
+            # # plt.show()
+            # plt.close()
             
         return data
    
@@ -1287,13 +1411,13 @@ class SteeredMDAnalysis:
         paths: Dict[str, List[Tuple[str, str]]],
         outdir: str = "unbinding_paths_vis",
         align_sel: str = "protein and backbone",
-        grid_spacing: float = 1.0,
+        grid_spacing: float = 0.5,
         cartoon_color: str = "palecyan",
         sample_stride: int = 1,
     ) -> str:
         """Generate ligand-path density maps and a PyMOL .pml that uses only relative paths."""
                 
-        level = 0.000003
+        level = 0.000002
         surface_transparency = 0.35
         cartoon_transparency = 0.25
         
@@ -1308,7 +1432,7 @@ class SteeredMDAnalysis:
         protein_abs = str(prot_copy.resolve())
         u_ref = mda.Universe(protein_abs)
 
-        default_palette = ["deepsalmon", "marine", "forest", "violetpurple", "gold", "tv_red", "tv_blue"]
+        default_palette = ["violetpurple", "marine", "forest", "deepsalmon", "gold", "tv_red", "tv_blue"]
         path_colors = {name: default_palette[i % len(default_palette)] for i, name in enumerate(paths)}
 
         dx_files_rel = {}
@@ -1325,10 +1449,10 @@ class SteeredMDAnalysis:
                 if lig.n_atoms == 0:
                     raise ValueError(f"No atoms found for '{ligand_sel}' in {traj}.")
 
-                da = density.DensityAnalysis(lig, delta=grid_spacing,padding=20.0)
+                da = density.DensityAnalysis(lig, delta=grid_spacing,padding=50.0)
                 da.run(step=sample_stride)
                 rho = da.results.density
-
+                
                 dens_sum = rho if dens_sum is None else dens_sum._replace(grid=dens_sum.grid + rho.grid) or dens_sum
                 total_frames += len(u.trajectory[::sample_stride])
 
@@ -1336,7 +1460,10 @@ class SteeredMDAnalysis:
             if total_frames > 0:
                 dens_sum.grid /= float(total_frames)
 
-            dx_path = str((outdir / f"{path_name}_ligand_density.dx").resolve())
+              #smooth the density a bit
+            dens_sum.grid = gaussian_filter(dens_sum.grid, sigma=1.0)
+                
+            dx_path = str((outdir / f"{path_name}_density.dx").resolve())
             dens_sum.export(dx_path)
             dx_files_rel[path_name] = dx_path
 
@@ -1373,12 +1500,13 @@ class SteeredMDAnalysis:
             pml.write(f"select lig_ref, ({ligand_sel}) and prot\n")
             pml.write("if sele count lig_ref > 0:\n")
             pml.write("    create lig, lig_ref\n")
-            pml.write("    show spheres, lig\n")
-            pml.write("    color lightpink, lig\n")
-            pml.write("    set sphere_transparency, 0.35, lig\n")
+            # pml.write("    show stick, lig\n")
+            pml.write("    show sphere, lig\n")
+            pml.write("    color yellow, lig\n")
+            pml.write("    set sphere_transparency, 0.9, lig\n")
             pml.write("orient lig\n")
             pml.write("zoom prot, 10.0\n")
-            # pml.write("png preview.png, ray=1, dpi=300\n")
+            pml.write("png preview.png, ray=1, dpi=300\n")
 
         return str(pml_path)
     
@@ -1390,6 +1518,11 @@ class SteeredMDAnalysis:
         title_suffix: str = 'dcTMD',
         outdir: str = 'work_profiles'
     ):
+        if outdir is None:
+            outdir = self.outdir
+        os.makedirs(outdir, exist_ok=True)
+        outfile = os.path.join(outdir, f"work_profiles_{title_suffix}.png")
+        
         speeds = sorted(results['speed'].unique())
         fig, ax = plt.subplots(
             figsize=(12, 4),
@@ -1420,8 +1553,11 @@ class SteeredMDAnalysis:
                 estimator=None, errorbar=None,  # don't aggregate across paths
                 ax=axes[i]
             )
-
-            axes[i].set_title(f'Speed: {speed} nm/ps', fontsize=12)
+            axes[i].grid(True)
+            # just reference for trypsin
+            axes[i].axhline(27, color='k', lw=1, ls='--')
+            
+            axes[i].set_title(f'Speed: {speed} nm/ps', fontsize=10)
             axes[i].set_xlabel(f'{r_coord} (nm)')
             if i == 0:
                 axes[i].set_ylabel('dG (kJ/mol)')
@@ -1444,9 +1580,131 @@ class SteeredMDAnalysis:
 
         # plt.title(f'Work Profiles {title_suffix}', fontsize=16)
         plt.tight_layout()
-        os.makedirs(outdir, exist_ok=True)
-        outfile = os.path.join(outdir, f"work_profiles_{title_suffix}.png")
         plt.savefig(outfile, bbox_inches='tight', dpi=300)
         plt.show()
         plt.close()
         return
+    def add_acf_column(self,
+                    df: pd.DataFrame,
+                    param: str = 'lag',
+                    x_col: str = 'time',
+                    max_lag: int | None = None,
+                    plot: bool = True) -> pd.DataFrame:
+        """
+        Compute the autocorrelation function (ACF) of `param` along `x_col`,
+        treating each (speed, path) group separately. Adds 'acf_<param>' and
+        plots one figure with subplots per speed, colored by path.
+        """
+        columns_needed = [param, x_col, 'speed', 'path']
+        for col in columns_needed:
+            if col not in df.columns:
+                raise ValueError(f"DataFrame is missing required column '{col}'")
+
+        df = df.copy()
+        # ensure global ordering is consistent
+        df = df.sort_values(['speed', 'path', x_col])
+
+        acf_colname = f'acf_{param}'
+        df[acf_colname] = np.nan
+
+        group_iter = df.groupby(['speed', 'path'])
+
+        # compute ACF per group
+        for key, df_g in group_iter:
+            df_g = df_g.sort_values(x_col)
+
+            y = df_g[param].to_numpy(dtype=float)
+            n = len(y)
+            if n < 2:
+                continue
+
+            y_centered = y - y.mean()
+            var = np.dot(y_centered, y_centered)
+            if var == 0.0:
+                acf_vals = np.zeros(n)
+                acf_vals[0] = 1.0
+            else:
+                this_max_lag = max_lag
+                if this_max_lag is None or this_max_lag >= n:
+                    this_max_lag = n - 1
+
+                acf_short = np.empty(this_max_lag + 1, dtype=float)
+                for lag in range(this_max_lag + 1):
+                    if lag == 0:
+                        acf_short[lag] = 1.0
+                    else:
+                        acf_short[lag] = np.dot(y_centered[:-lag], y_centered[lag:]) / var
+
+                if this_max_lag + 1 < n:
+                    acf_vals = np.concatenate(
+                        [acf_short, np.full(n - (this_max_lag + 1), np.nan)]
+                    )
+                else:
+                    acf_vals = acf_short
+
+            df.loc[df_g.index, acf_colname] = acf_vals
+
+        if plot:
+            speeds = sorted(df['speed'].dropna().unique())
+            n_speeds = len(speeds)
+            fig, axes = plt.subplots(1, n_speeds,
+                                    figsize=(6 * n_speeds, 4.5),
+                                    sharex=False)
+            if n_speeds == 1:
+                axes = [axes]
+
+            for ax, spd in zip(axes, speeds):
+                df_s = df[df['speed'] == spd]
+                if df_s.empty:
+                    ax.set_visible(False)
+                    continue
+
+                paths = sorted(df_s['path'].dropna().unique())
+
+                for p in paths:
+                    # sort by x_col so ACF sequence matches lag order
+                    df_p = df_s[df_s['path'] == p].sort_values(x_col)
+                    if df_p.empty:
+                        continue
+
+                    acf_vals = df_p[acf_colname].to_numpy()
+                    valid = ~np.isnan(acf_vals)
+                    if not np.any(valid):
+                        continue
+                    acf_vals = acf_vals[valid]
+
+                    lags = np.arange(len(acf_vals), dtype=float)
+
+                    x_vals = df_p[x_col].to_numpy()
+                    if len(x_vals) > 1:
+                        dx = np.median(np.diff(x_vals))
+                        if np.isfinite(dx) and dx > 0:
+                            lags = lags * dx
+                            x_label = f'Lag in {x_col} units'
+                        else:
+                            x_label = 'Lag (frames)'
+                    else:
+                        x_label = 'Lag (frames)'
+
+                    label = f'path {p}'
+                    ax.plot(lags, acf_vals, lw=2, label=label)
+
+                ax.axhline(0.0, color='k', lw=1)
+                title = f'ACF of {param} (speed = {spd})'
+                ax.set_title(title)
+                ax.set_xlabel(x_label)
+                ax.set_ylabel(f'ACF({param})')
+                ax.grid(True)
+                if len(paths) > 1:
+                    ax.legend(frameon=False)
+
+            plt.tight_layout()
+            outname = os.path.join(
+                self.outdir,
+                f'{self.sysname}_acf_{param}_vs_{x_col}_by_speed_path.png'
+            )
+            plt.savefig(outname, dpi=300)
+            plt.show()
+            plt.close()
+
+        return df
