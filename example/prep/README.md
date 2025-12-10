@@ -1,4 +1,4 @@
-#Overview
+# Overview
 
 `ap_prep.py` can assist in preparing structures for docking tasks. Conceptually, `ap_prep.py` is very similar to `ap_equilibration.py`, except it is more general purpose as it allows one to automatically fetch their receptor of interest from the PDB with the relevant chemical context (i.e. ligand, cofactors, waters, etc.). In addition, it will save the relevant files to conduct a docking and corresponding analyses (i.e. receptor, ligand). 
 
