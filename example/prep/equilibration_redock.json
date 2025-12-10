@@ -1,15 +1,14 @@
 {
   "components_lookup": {
-    "protein_heavy": "not resname HOH and not name H*",
-    "ligand": "resname UNK and name H*",
-    "organic_coligand": "resname OCL and name H*"
+    "all_heavy": "not resname HOH and not name H*",
+    "inorg_cofactors": "resname ZN MG CA MN FE"
   },
   
   "minimization": [
-    { "name": "Stage 1", "forces": [100.00, 100.00, 100.00] },
-    { "name": "Stage 2", "forces": [100.00, 100.00, 100.00] },
-    { "name": "Stage 3", "forces": [100.00, 100.00, 100.00] },
-    { "name": "Stage 4", "forces": [100.00, 100.00, 100.00] }
+    { "name": "Stage 1", "forces": [10.00, 100.00] },
+    { "name": "Stage 2", "forces": [10.00, 100.00] },
+    { "name": "Stage 3", "forces": [10.00, 100.00] },
+    { "name": "Stage 4", "forces": [10.00, 100.00] }
   ],
 
   "warmup": {

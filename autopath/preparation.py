@@ -106,7 +106,7 @@ class SystemPreparation:
         self.nb_cutoff = 1.0 * openmmunit.nanometers
         self.switchDistance = 0.9 * openmmunit.nanometers
 
-    def _ligand_to_mol(self, lig_fname: str = None, lig_smiles: str = None):
+    def _ligand_to_mol(self, lig_fname: str = None, lig_smiles: str = None, lig_from_xray: bool = False):
         """Load ligand SDF/PDB and transform to OpenMM molecule"""
 
         if lig_smiles is not None:
@@ -130,6 +130,11 @@ class SystemPreparation:
             
         # assign bond orders from SMILES if provided
         if lig_smiles is not None:
+            if lig_from_xray:
+                #kekulization errors often arise when reading ligand from xray structure, so we delete bond info prior to assigning bond orders  
+                for bond in rdkit_mol.GetBonds():
+                    bond.SetBondType(Chem.BondType.SINGLE)
+                    bond.SetIsAromatic(False)
             rdkit_mol = assign_bondOrders(rdkit_mol, lig_smiles)
             Chem.SanitizeMol(rdkit_mol)
             # save the fixed ligand
@@ -232,12 +237,12 @@ class SystemPreparation:
                 elif isinstance(ligands, list):
                     used_chains = set(c.id for c in modeller.topology.chains()) if modeller else set()
                     chain_id = ord('A')
-                    for lig_name, lig_path, lig_smiles in ligands:
+                    for lig_name, lig_path, lig_smiles, lig_from_xray in ligands:
                         while chr(chain_id) in used_chains:
                             chain_id += 1
                         logging.info(f"Parametrizing ligand {lig_name}..")
                         print(f"Parametrizing ligand {lig_name}..")
-                        lig = self._ligand_to_mol(lig_path, lig_smiles)
+                        lig = self._ligand_to_mol(lig_path, lig_smiles, lig_from_xray)
                         ligand_topology, ligand_positions = self._parametrize_ligand(lig)
                         for chain in ligand_topology.chains():
                             chain.id = chr(chain_id)

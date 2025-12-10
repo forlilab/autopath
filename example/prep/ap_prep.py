@@ -5,9 +5,9 @@ import argparse
 import MDAnalysis as mda
 import mdtraj as md
 
-from autopath import SystemPreparation, Equilibration, SteeredMD
+from autopath import SystemPreparation, Equilibration
 from autopath.analysis import plot_atomic_rmsf
-from autopath.utils import fix_pdb, fetch_pdb, save_receptor_and_ligand_from_pdb, save_receptor_and_ligand_from_openmm, save_pdb, load_system, setup_logging, compute_rmsd
+from autopath.utils import fix_pdb, fetch_pdb, save_receptor_and_ligand_from_pdb, save_receptor_and_ligand_from_openmm, save_pdb, save_receptor_w_colig, load_system, setup_logging, compute_rmsd
 from openmm.app import PDBFile
 
 def cmd_lineparser():
@@ -24,29 +24,35 @@ def cmd_lineparser():
     )
 
     parser.add_argument(
-        "-r",
         "--rec",
-        dest="rec",
-        action="store",
         default=None,
         help="path to the receptor PDB file",
     )
 
     parser.add_argument(
-        "-l",
         "--lig",
-        dest="lig",
-        action="store",
         default=None,
         help="path to the ligand SDF/PDB file",
     )
     
     parser.add_argument(
-        "-s",
-        "--smiles",
-        dest="smiles",
+        "--lig_smiles",
         default=None,
+        type=str,
         help="Smiles of the ligand",
+    )
+
+    parser.add_argument(
+        "--org_colig",
+        default=None,
+        help="path to the organic co-ligand SDF/PDB file",
+    )
+
+    parser.add_argument(
+        "--org_colig_smiles",
+        default=None,
+        type=str,
+        help="Smiles of the organic co-ligand",
     )
     
     parser.add_argument(
@@ -67,7 +73,7 @@ def cmd_lineparser():
     parser.add_argument(
         "--equil_rec_only", 
         action='store_true',
-        help='equilibrate the receptor without any ligands or org cofactors',
+        help='equilibrate the receptor without any ligands or cofactors',
         default=False
     )
 
@@ -88,7 +94,7 @@ def cmd_lineparser():
         "--pdb_chain_ids", 
         type=str, 
         default=None, 
-        help='chain ids to fetch. assumes chain ids are passed as A-B-C (i.e. dash separated)'
+        help='chain ids to fetch. if multiple, assumes chain ids are passed as A-B-C (i.e. dash separated)'
     )
 
     parser.add_argument(
@@ -101,7 +107,7 @@ def cmd_lineparser():
     parser.add_argument(
         "--use_ccd_smiles_for_lig", 
         action='store_true',
-        help='uses ccd smiles to create rdkit mol. otherwise will default to using molscrub', 
+        help='use ccd smiles to create rdkit mol. otherwise will default to using molscrub', 
         default=False
     )
 
@@ -116,21 +122,21 @@ def cmd_lineparser():
         "--pdb_inorg_cofactor_name", 
         type=str, 
         default=None, 
-        help='if provided, will extract receptor with all inorganic cofactors corresponding this name (e.g. Mg, Zn, etc.)'
+        help='if provided, will extract receptor with all inorganic cofactors corresponding this name (e.g. MG, ZN, etc.)'
     )
 
     parser.add_argument(
         "--pdb_inorg_cofactor_resid", 
         type=str, 
         default=None, 
-        help='if provided alongisde pdb_inorg_cofactor_name, will extract receptor with inorganic cofactor corresponding to this residue id and name <pdb_inorg_cofactor_name> from the pdb. if needing to pass in chan id as well, can specify as <resid>_<chainid>' 
+        help='if provided alongside pdb_inorg_cofactor_name, will extract receptor with inorganic cofactor corresponding to this residue id and name <pdb_inorg_cofactor_name> from the pdb. if needing to pass in chan id as well, can specify as <resid>_<chainid>' 
     )
 
     parser.add_argument(
         "--pdb_org_colig_name", 
         type=str, 
         default=None, 
-        help='if provided, will extract all organic co-ligands corresponding to this name (e.g. Hem, NAD+, etc.)'
+        help='if provided, will extract all organic co-ligands corresponding to this name (e.g. HEM, NAD, etc.)'
     )
 
     parser.add_argument(
@@ -143,14 +149,14 @@ def cmd_lineparser():
     parser.add_argument(
         "--use_ccd_smiles_for_colig", 
         action='store_true',
-        help='uses ccd smiles to create rdkit mol. otherwise will default to using molscrub', 
+        help='use ccd smiles to create rdkit mol. otherwise will default to using molscrub', 
         default=False
     )
 
     parser.add_argument(
-        "--treat_org_colig_as_rec", 
+        "--ignore_colig_simulation", 
         action='store_true',
-        help='treat organic co-ligand as part of receptor as opposed to a separate ligand to be parameterized by espaloma/smirnoff/gaff',
+        help='dont include coligand in simulation. relevant if forcefield has issue parameterizing molecule (e.g. heme)',
         default=False
     )
 
@@ -165,7 +171,7 @@ def cmd_lineparser():
         "--water_resids",
         type=str,
         nargs='+',
-        help='when saving receptor, restricts waters included to those whose residue id is contained in water_resids', 
+        help='saves waters with receptor whose residue id is contained in this list. (example: 25 29 32)', 
         default=None 
     )
 
@@ -173,7 +179,7 @@ def cmd_lineparser():
         "--water_chainids",
         type=str,
         nargs='+',
-        help='when saving receptor, restricts waters included to those within these chains', 
+        help='restricts waters to be saved with receptor to those whose chain id is contained in this list. must specify if water_resids is included to prevent inclusion of waters added upon solvation by OpenMM. (example: A B)', 
         default=None 
     )
 
@@ -181,16 +187,8 @@ def cmd_lineparser():
         "--lig_resname",
         dest="lig_resname",
         required=False,
-        default="UNK",
+        default="UNK",  
         help="residue name to assign ligand during system prep",
-    )
-
-    parser.add_argument(
-        "--org_colig_resname",
-        dest="org_colig_resname",
-        required=False,
-        default="OCL",
-        help="residue name to assign organic co-ligand during system prep",
     )
 
     parser.add_argument(
@@ -211,7 +209,11 @@ def main():
     if args.ignore_crystallographic_waters:
         include_waters = False
     else:
-        include_waters = True 
+        include_waters = True
+
+    if args.water_resids and args.water_chainids is None:
+        msg = "must specify water_chainids if including water_resids to prevent inclusion of waters added upon solvation by OpenMM"
+        raise ValueError(msg) 
 
     if args.fetch_pdb and args.rec is None:
         sys_name = args.pdb_id 
@@ -225,27 +227,36 @@ def main():
                                                                                                              args.pdb_inorg_cofactor_resid,
                                                                                                              args.pdb_org_colig_name, 
                                                                                                              args.pdb_org_colig_resid,
-                                                                                                             args.treat_org_colig_as_rec,
+                                                                                                             args.ignore_colig_simulation,
                                                                                                              args.pdb_lig_name,                                                                                                                                                                     args.pdb_lig_resid,
                                                                                                              args.use_ccd_smiles_for_lig,
                                                                                                              args.use_ccd_smiles_for_colig,
                                                                                                              include_waters,
                                                                                                              args.water_resids,
-                                                                                                             args.water_chainids) 
+                                                                                                             args.water_chainids)
+        if args.lig_smiles:
+            lig_smiles = args.lig_smiles 
+        ligs_from_xray = True 
     elif args.rec is not None:
         sys_name = os.path.splitext(os.path.basename(args.rec))[0]
         rec_path = args.rec
         lig_path = args.lig 
-        lig_smiles = args.smiles
+        lig_smiles = args.lig_smiles
+        org_colig_path = args.org_colig
+        org_colig_smiles = args.org_colig_smiles       
+        ligs_from_xray = False 
 
     lig_resname = args.lig_resname
-    org_colig_resname = args.org_colig_resname
+    if args.pdb_org_colig_name is not None:
+        org_colig_resname = args.pdb_org_colig_name
+    else:   
+        org_colig_resname = None
 
     ligands = []
     if lig_path is not None and not args.equil_rec_only:
-        ligands.append((lig_resname,lig_path,lig_smiles))
-    if org_colig_path is not None and not args.treat_org_colig_as_rec and not args.equil_rec_only:
-        ligands.append((org_colig_resname,org_colig_path,org_colig_smiles))
+        ligands.append((lig_resname,lig_path,lig_smiles,ligs_from_xray))
+    if org_colig_path is not None and not args.ignore_colig_simulation and not args.equil_rec_only:
+        ligands.append((org_colig_resname,org_colig_path,org_colig_smiles,ligs_from_xray))
     if len(ligands) == 0:
         ligands = None
 
@@ -264,27 +275,37 @@ def main():
     # Fix/prepare the receptor
     protein_pdb = fix_pdb(pdbfile=rec_path, keep_heterogens=True, pH=7.4)
     pdb_name = os.path.splitext(os.path.basename(rec_path))[0]
-    prot_path=f"{save_dir}/{pdb_name}_fixed.pdb"
-    #save full receptor
+    #save full receptor 
+    prot_path = f"{save_dir}/{pdb_name}_fixed.pdb"
     save_pdb(protein_pdb.topology, protein_pdb.positions, prot_path)
-    #save receptor wo/solvent
-    save_receptor_and_ligand_from_openmm(pdb_path=prot_path, 
+    #add co-ligand to fixed receptor if applicable 
+    if org_colig_path is not None:
+        prot_path_w_colig=f"{save_dir}/{pdb_name}_fixed_w_colig.pdb"
+        save_receptor_w_colig(prot_path, org_colig_path, org_colig_smiles, prot_path_w_colig, args.pdb_org_colig_name)
+        fixed_path = prot_path_w_colig
+        base_fname = f"{pdb_name}_fixed_w_colig"
+    else:
+        fixed_path = prot_path
+        base_fname = f"{pdb_name}_fixed"
+    
+    #save fixed receptor wo/solvent
+    save_receptor_and_ligand_from_openmm(pdb_path=fixed_path, 
                                          save_dir=save_dir, 
                                          inorg_cofactor_name=args.pdb_inorg_cofactor_name, 
                                          org_colig_name=args.pdb_org_colig_name, 
                                          ligand_name=None, 
-                                         include_waters=False,
                                          water_resids=None,
-                                         output_fname_rec=f"{pdb_name}_fixed_wo_solvent.pdb")
-    #save receptor w/solvent 
-    save_receptor_and_ligand_from_openmm(pdb_path=prot_path, 
-                                         save_dir=save_dir, 
-                                         inorg_cofactor_name=args.pdb_inorg_cofactor_name, 
-                                         org_colig_name=args.pdb_org_colig_name, 
-                                         ligand_name=None, 
-                                         include_waters=True,
-                                         water_resids=args.water_resids,
-                                         output_fname_rec=f"{pdb_name}_fixed_w_solvent.pdb")
+                                         output_fname_rec=f"{base_fname}_wo_solvent.pdb")
+    #save fixed receptor w/solvent with solvent if water_resids are specified  
+    if args.water_resids is not None:
+        save_receptor_and_ligand_from_openmm(pdb_path=fixed_path, 
+                                             save_dir=save_dir, 
+                                             inorg_cofactor_name=args.pdb_inorg_cofactor_name, 
+                                             org_colig_name=args.pdb_org_colig_name, 
+                                             ligand_name=None, 
+                                             water_resids=args.water_resids,
+                                             water_chainids=args.water_chainids,
+                                             output_fname_rec=f"{base_fname}_w_struct_waters.pdb")
 
 
     ########################################################################################
@@ -339,27 +360,32 @@ def main():
     ########################################################################################
 
     restrained_min_struct = f"{save_dir}/equilibration/{sys_name}_minim.pdb"
+    if org_colig_path is not None and args.ignore_colig_simulation:
+        #need to add co-ligand back to minimized structure since was not included in simulation  
+        save_receptor_w_colig(restrained_min_struct, org_colig_path, org_colig_smiles, restrained_min_struct, org_colig_resname)
+ 
     #save minimized structure without solvent
     save_receptor_and_ligand_from_openmm(pdb_path=restrained_min_struct, 
                                          save_dir=f"{save_dir}/equilibration",
                                          inorg_cofactor_name=args.pdb_inorg_cofactor_name, 
                                          org_colig_name=org_colig_resname,
+                                         remove_H_colig=True,
                                          ligand_name=lig_resname,
-                                         include_waters=False,
                                          water_resids=None,
                                          water_chainids=None,
                                          output_fname_rec=f"{sys_name}_minim_receptor_wo_solvent.pdb",
                                          output_fname_lig=f"{sys_name}_minim_ligand.pdb")
-    #save minimized structure with solvent
-    save_receptor_and_ligand_from_openmm(pdb_path=restrained_min_struct, 
-                                         save_dir=f"{save_dir}/equilibration",
-                                         inorg_cofactor_name=args.pdb_inorg_cofactor_name, 
-                                         org_colig_name=org_colig_resname,
-                                         ligand_name=None,
-                                         include_waters=True,
-                                         water_resids=args.water_resids,
-                                         water_chainids=args.water_chainids,
-                                         output_fname_rec=f"{sys_name}_minim_receptor_w_solvent.pdb")
+    #save minimized structure with solvent if water_resids are specified 
+    if args.water_resids is not None:
+        save_receptor_and_ligand_from_openmm(pdb_path=restrained_min_struct, 
+                                             save_dir=f"{save_dir}/equilibration",
+                                             inorg_cofactor_name=args.pdb_inorg_cofactor_name, 
+                                             org_colig_name=org_colig_resname,
+                                             remove_H_colig=True,
+                                             ligand_name=None,
+                                             water_resids=args.water_resids,
+                                             water_chainids=args.water_chainids,
+                                             output_fname_rec=f"{sys_name}_minim_receptor_w_struct_waters.pdb")
 
 
     if args.restrained_minimization_only:

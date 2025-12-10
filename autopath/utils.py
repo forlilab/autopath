@@ -209,9 +209,9 @@ def save_receptor_and_ligand_from_pdb(
     inorg_cofactor_resid: str = None,
     org_colig_name: str = None, 
     org_colig_resid: str = None,
-    treat_org_colig_as_rec: bool = False, 
+    ignore_colig_simulation: bool = False, 
     ligand_name: str = None, 
-    ligand_resid: int = None,
+    ligand_resid: str = None,
     use_ccd_smiles_for_lig: bool = False,
     use_ccd_smiles_for_colig: bool = False, 
     include_waters: bool = True,
@@ -228,9 +228,9 @@ def save_receptor_and_ligand_from_pdb(
         inorg_cofactor_resid (str): residue number of inorg cofactor - relevant if there are multiple copies
         org_colig_name (str): name of org co-ligand
         org_colig_resid (str): residue number of org co-ligand - relevant if there are multiple copies
-        treat_org_colig_as_rec (bool): treat organic co-ligand as part of receptor as opposed to a separate ligand 
+        ignore_colig_simulation (bool): treat organic co-ligand as part of receptor as opposed to a separate ligand 
         ligand_name (str): name of ligand to extract
-        ligand_resid (int): residue number of ligand to extract - relevant if there are multiple copies 
+        ligand_resid (str): residue number of ligand to extract - relevant if there are multiple copies 
         include_waters (bool): retain crystallographic waters in receptor 
         water_resids (list): retain crystallographic waters corresponding to these residue ids in receptor 
     """
@@ -254,8 +254,8 @@ def save_receptor_and_ligand_from_pdb(
         sel = f"resn {inorg_cofactor_name}"
         if inorg_cofactor_resid:
             if len(inorg_cofactor_resid.split('_')) == 2:
-                inorg_cofactor_resid, inorg_cofactor_chain_id = inorg_cofactor_resid.split('_')
-                sel += f" and resid {inorg_cofactor_resid} and chain {inorg_cofactor_resid}"
+                iocl_resid, iocl_chainid = inorg_cofactor_resid.split('_')
+                sel += f" and resid {iocl_resid} and chain {iocl_chainid}"
             else:
                 sel += f" and resid {inorg_cofactor_resid}"
         keep_criteria.append(sel)
@@ -264,12 +264,10 @@ def save_receptor_and_ligand_from_pdb(
         sel = f"resn {org_colig_name}"
         if org_colig_resid:
             if len(org_colig_resid.split('_')) == 2:
-                org_colig_resid, org_colig_chain_id = org_colig_resid.split('_')
-                sel += f" and resid {org_colig_resid} and chain {org_colig_resid}"
+                ocl_resid, ocl_chainid = org_colig_resid.split('_')
+                sel += f" and resid {ocl_resid} and chain {ocl_chainid}"
             else:
                 sel += f" and resid {org_colig_resid}"
-        if treat_org_colig_as_rec:
-            keep_criteria.append(sel)
         cmd.create("org_colig_obj", sel) 
         org_colig_path = f"{save_dir}/{pdb_id}_org_colig.sdf"
         cmd.save(org_colig_path, "org_colig_obj")
@@ -300,8 +298,8 @@ def save_receptor_and_ligand_from_pdb(
         cmd.select("ligand", f"resn {ligand_name} and alt A") 
     else:
         if len(ligand_resid.split('_')) == 2:
-            ligand_resid, ligand_chain_id = ligand_resid.split('_')
-            cmd.select("ligand", f"resn {ligand_name} and resid {ligand_resid} and chain {ligand_chain_id} and alt A") 
+            l_resid, l_chainid = ligand_resid.split('_')
+            cmd.select("ligand", f"resn {ligand_name} and resid {l_resid} and chain {l_chainid} and alt A") 
         else:
             cmd.select("ligand", f"resn {ligand_name} and resid {ligand_resid} and alt A") 
     objects = cmd.get_object_list("ligand")
@@ -316,9 +314,11 @@ def save_receptor_and_ligand_from_pdb(
         if ligand_resid is None:
             cmd.select("ligand", f"resn {ligand_name}") 
         else:
+            print(ligand_resid)
             if len(ligand_resid.split('_')) == 2:
-                ligand_resid, ligand_chain_id = ligand_resid.split('_')
-                cmd.select("ligand", f"resn {ligand_name} and resid {ligand_resid} and chain {ligand_chain_id}") 
+                l_resid, l_chainid = ligand_resid.split('_')
+                print('here')
+                cmd.select("ligand", f"resn {ligand_name} and resid {l_resid} and chain {l_chainid}") 
             else:
                 cmd.select("ligand", f"resn {ligand_name} and resid {ligand_resid}") 
         objects = cmd.get_object_list("ligand")
@@ -344,9 +344,9 @@ def save_receptor_and_ligand_from_openmm(
     pdb_path: str, 
     save_dir: str, 
     inorg_cofactor_name: str = None,
-    org_colig_name: str = None, 
+    org_colig_name: str = None,
+    remove_H_colig: bool = True, 
     ligand_name: str = None,
-    include_waters: bool = True,
     water_resids: List[str] = None,
     water_chainids: List[str] = None,
     output_fname_rec: str = None,
@@ -357,10 +357,10 @@ def save_receptor_and_ligand_from_openmm(
     Args:
         pdb_path (str): path to pdb file 
         save_dir (str): directory to save files
-        inorg_cofactor_name (str): name of inorg cofactor
-        org_colig_name (str): name of org co-ligand
+        inorg_cofactor_name (str): name of inorganic cofactor
+        org_colig_name (str): name of organic co-ligand
+        remove_H_colig (bool): remove hydrogens from co-ligand. set to True by default to facilitate Meeko's automated parameterization of unknown residues. 
         ligand_name (str): name of ligand to extract
-        include_waters (bool): retain waters in receptor 
         water_resids (list): retain waters corresponding to these residue ids in receptor 
         output_fname_rec (str): output filename for receptor (assumes extension is present)
         output_fname_lig (str): output filename for ligand (assumes extension is present)
@@ -380,23 +380,23 @@ def save_receptor_and_ligand_from_openmm(
 
     keep_criteria = ["polymer"]
 
-    if include_waters:
-        if water_resids is None: 
-            keep_criteria.append("resn HOH")
-        elif water_resids is not None and water_chainids is not None:
-            water_resids = "+".join(water_resids)
-            water_chainids = "+".join(water_chainids)
-            keep_criteria.append(f"resn HOH and resid {water_resids} and chain {water_chainids}")
-        elif water_resids is not None:
-            water_resids = "+".join(water_resids)
-            keep_criteria.append(f"resn HOH and resid {water_resids}")
+    if water_resids is not None and water_chainids is not None:
+        water_resids = "+".join(water_resids)
+        water_chainids = "+".join(water_chainids)
+        keep_criteria.append(f"resn HOH and resid {water_resids} and chain {water_chainids}")
+    elif water_resids is not None:
+        water_resids = "+".join(water_resids)
+        keep_criteria.append(f"resn HOH and resid {water_resids}")
      
     if inorg_cofactor_name:
         sel = f"resn {inorg_cofactor_name}"
         keep_criteria.append(sel)
 
     if org_colig_name:
-        sel = f"resn {org_colig_name}"
+        if remove_H_colig:
+            sel = f"resn {org_colig_name} and not elem H"
+        else:
+            sel = f"resn {org_colig_name}"
         keep_criteria.append(sel)
 
     selection_string = " or ".join(keep_criteria)
@@ -415,6 +415,7 @@ def save_receptor_and_ligand_from_openmm(
 
 def fix_pdb(
     pdbfile: str,
+    replace_nonstandard_residues: bool = True,
     keep_heterogens: bool = False,
     ignore_terminal_missing_residues: bool = True,
     pH: float = 7.4,
@@ -445,6 +446,10 @@ def fix_pdb(
             if key[1] == 0 or key[1] == len(list(chain.residues())):
                 del fixer.missingResidues[key]
 
+    if replace_nonstandard_residues:
+        fixer.findNonstandardResidues()
+        fixer.replaceNonstandardResidues()
+
     if not keep_heterogens:
         fixer.removeHeterogens(keepWater=True)
 
@@ -455,7 +460,7 @@ def fix_pdb(
     return fixer
 
 
-def save_pdb(topology: app.Topology, positions: list, file_path: str) -> None:
+def save_pdb(topology: app.Topology, positions: list, out_path: str) -> None:
     """Saves the specified topology and position to the out_path file.
 
     Args:
@@ -463,12 +468,61 @@ def save_pdb(topology: app.Topology, positions: list, file_path: str) -> None:
         positions (list): list of 3D coords
         out_path (str): path to where to save the file
     """
-    app.PDBFile.writeFile(topology, positions, file_path, keepIds=True)
+    app.PDBFile.writeFile(topology, positions, out_path, keepIds=True)
 
     return
 
+def save_receptor_w_colig(receptor_path: str, colig_path: str, colig_smiles: str, out_path: str, colig_name: str = None) -> None:
+    """Saves the receptor and co-ligand to the out_path file.
 
-def save_system(system: System, out_file: str) -> None:
+    Args:
+        receptor_path (str): path to receptor (pdb)
+        colig_path (str): path to co-ligand (sdf)
+        colig_smiles (str): smiles of co-ligand
+        out_path (str): path to where to save the file
+        colig_name (str): new name to assign co-ligand
+    """
+    protein = PDBFile(receptor_path)
+    mol = Chem.SDMolSupplier(colig_path, sanitize=False, removeHs=True)[0]
+    mol = assign_bondOrders(mol, colig_smiles)
+    save_dir = os.path.dirname(out_path) 
+    Chem.MolToPDBFile(mol, f"{save_dir}/temp_colig.pdb")
+    colig_pdb = PDBFile(f"{save_dir}/temp_colig.pdb")
+
+    amino_acids = ['ALA', 'ARG', 'ASN', 'ASP', 'CYS', 'GLN', 'GLU', 'GLY', 'HIS', 'ILE', 
+                   'LEU', 'LYS', 'MET', 'PHE', 'PRO', 'SER', 'THR', 'TRP', 'TYR', 'VAL',
+                   'HID', 'HIE', 'HIP', 'CYX', 'ASH', 'GLH', 'LYN', 'HSD', 'HSE', 'HSP', 'UNK']
+
+    #get residue and chain id of ligand based on last amino acid info 
+    max_chain_id = 'A' 
+    for res in protein.topology.residues():
+        if res.name in amino_acids:
+            try:
+                curr_chain_id = res.chain.id
+                if ord(curr_chain_id) > ord(max_chain_id):
+                    max_chain_id = curr_chain_id
+            except ValueError:
+                pass
+    colig_chain_id = chr(ord(max_chain_id) + 1)
+    colig_res_id = 0
+
+    for res in colig_pdb.topology.residues():
+        if colig_name is not None:
+            res.name = colig_name 
+        res.id = str(colig_res_id)
+    for chain in colig_pdb.topology.chains():
+        chain.id = colig_chain_id
+
+    modeller = Modeller(protein.topology, protein.positions)
+    modeller.add(colig_pdb.topology, colig_pdb.positions)
+    app.PDBFile.writeFile(modeller.topology, modeller.positions, out_path, keepIds=True)
+    os.remove(f"{save_dir}/temp_colig.pdb")
+
+    return 
+
+
+
+def save_system(system: System, out_path: str) -> None:
     """Saves the openmm system to the desired out path.
 
     Args:
@@ -476,15 +530,15 @@ def save_system(system: System, out_file: str) -> None:
         system (System): system to be saved
     """
 
-    with open(out_file, "w") as fo:
+    with open(out_path, "w") as fo:
         fo.write(XmlSerializer.serialize(system))
     return
 
 
-def save_simulation(simulation, out_file: str) -> None:
+def save_simulation(simulation, out_path: str) -> None:
 
-    simulation.saveCheckpoint(f"{out_file}.chk")
-    simulation.saveState(f"{out_file}.xml")
+    simulation.saveCheckpoint(f"{out_path}.chk")
+    simulation.saveState(f"{out_path}.xml")
 
     return
 
