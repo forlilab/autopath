@@ -36,12 +36,13 @@ class MetadynamicsMD:
         ligand_atoms: list[int] = None,
         pocket_atoms: list[int] = None,
         restrained_atoms: list[int] = None,
-        out_dir: str = "metadynamics",
         is_membrane: bool = False,
-        timestep: float = 0.004, #  # 4 fs timestep
+        timestep: float = 0.004, #  4 fs timestep
         temp: float = 300,
         use_GReweighting: bool = False,
+        ligand_resname: str = "UNK",
         platform: str = "fastest",
+        out_dir: str = "metadynamics",
         verbose: bool = True,
     ) -> None:
         
@@ -57,6 +58,7 @@ class MetadynamicsMD:
 
         self.ligand_atoms = ligand_atoms
         self.pocket_atoms = pocket_atoms
+        self.ligand_resname = ligand_resname
         
         self.restrained_atoms = restrained_atoms
 
@@ -108,6 +110,7 @@ class MetadynamicsMD:
         checkpoint_file: str = None,
         run_id: str = None,
         mMD_CV: str = "com",
+        milestones: list[str] = None,
         mMD_time: int = 10,
         bias_factor: float = 10,
         hill_height: float = 1.2, #  # 1.2 kJ/mol approx 0.5 KbT
@@ -253,8 +256,7 @@ class MetadynamicsMD:
             ligand_atoms_to_match = [a.index for a in ligand_residue[0].atoms() if not a.name.startswith("H")]
             ligand_names_to_match = [a.name for a in ligand_residue[0].atoms() if not a.name.startswith("H")]
             logging.info(f"Matched {len(ligand_atoms_to_match)} heavy atoms from the ligand")
-            sys_name =self.out_dir.split('/')[0] 
-            milestones = glob(f'{sys_name}/milestones/pdbs/milestone_*.pdb')
+
             milestones.sort(key=lambda x: int(os.path.basename(x).split('_')[1]))
        
             milestones_dicts = [self._get_reference_dict(pdb, ligand_names_to_match, ligand_atoms_to_match) for pdb in milestones]
@@ -264,21 +266,20 @@ class MetadynamicsMD:
                 sigma=0.001 * openmmunit.nanometers,
                 numAtoms=self.n_atoms,
             )
+
         elif mMD_CV == "path_cv":
 
             from copy import deepcopy
 
-            ligand_residue = [r for r in self.topology.residues() if r.name == "UNK"]
+            ligand_residue = [r for r in self.topology.residues() if r.name == self.ligand_resname]
             ligand_atoms_to_match = [a.index for a in ligand_residue[0].atoms() if not a.name.startswith("H")]
             ligand_names_to_match = [a.name for a in ligand_residue[0].atoms() if not a.name.startswith("H")]
             logging.info(f"Matched {len(ligand_atoms_to_match)} heavy atoms from the ligand")
             print(ligand_atoms_to_match)
-            
-            sys_name = '6dy7_A'
-            milestones = glob(f'{sys_name}/milestones/pdbs/milestone_*.pdb')           
-
-            print(f"Found {len(milestones)} milestones")
-            
+                        
+            # TODO all of this should be done outside of the run function
+            milestones.sort(key=lambda x: int(os.path.basename(x).split('_')[1]))
+            print(milestones)
             milestones_array = np.zeros((len(milestones), 2))
             for i, milestone in enumerate(milestones):
                 milestone_name = os.path.basename(milestone)
@@ -289,11 +290,11 @@ class MetadynamicsMD:
                 logging.info(f"Calculating CVs for {milestone_name}..")
                 cv1 = cvpack.RMSD(milestone_positions, self.ligand_atoms, self.n_atoms)
                 cv2 = cvpack.CentroidFunction(
-                                                f"sqrt(distance(g1,g2)^2)",
-                                                openmmunit.nanometers,
-                                                groups=[self.pocket_atoms] + [self.ligand_atoms],
-                                                weighByMass=True,
-                                                pbc=False,
+                                            f"sqrt(distance(g1,g2)^2)",
+                                            openmmunit.nanometers,
+                                            groups=[self.pocket_atoms] + [self.ligand_atoms],
+                                            weighByMass=True,
+                                            pbc=False,
                                             )
                 cv1.addToSystem(_system)
                 cv2.addToSystem(_system)
@@ -304,7 +305,9 @@ class MetadynamicsMD:
                 milestones_array[i, 1] = round(cv2.getValue(_context).value_in_unit(openmmunit.nanometers),2)    
             
             print(milestones_array)
-
+            # slice to one cv
+            milestones_array = milestones_array[:, 1].reshape(-1, 1)
+            
             cv1 = cvpack.RMSD(input_positions, self.ligand_atoms, self.n_atoms)
             cv2 = cvpack.CentroidFunction(
                                         f"sqrt(distance(g1,g2)^2)",
@@ -316,9 +319,10 @@ class MetadynamicsMD:
  
             cv = cvpack.PathInCVSpace(
                 metric=cvpack.path.progress,
-                variables=[cv1, cv2],
+                # variables=[cv1, cv2],
+                variables=[cv2],  # slicing to one cv
                 milestones=milestones_array,
-                sigma=0.001 * openmmunit.nanometers,
+                sigma=0.0001 #* openmmunit.nanometers,
             )
 
         elif mMD_CV == "nc":
