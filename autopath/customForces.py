@@ -1,13 +1,15 @@
-import logging
 from typing import Union, Tuple, Optional, List
 from openmm import *
 from openmm.app import *
 import openmm.app as app
 import openmm.unit as openmmunit
 
+import logging
+logger = logging.getLogger("autopath")
+
 def print_current_forces(system: System = None) -> None:
     for index, fc in enumerate(system.getForces()):
-        logging.info(f"Force Index:{index} | Name: {fc.getName()} | Group: {fc.getForceGroup()}")
+        logger.info(f"Force Index:{index} | Name: {fc.getName()} | Group: {fc.getForceGroup()}")
         print(f"Force Index:{index} | Name: {fc.getName()} | Group: {fc.getForceGroup()}")
     return
 
@@ -18,7 +20,7 @@ def remove_openmm_force(system: System = None, fname: str = None) -> System:
     for f_idx in range(system.getNumForces()):
         force = system.getForce(f_idx)
         if force.getName().startswith(fname):
-            # logging.warning(f"Removing force {force.getName()} at index {f_idx}.")
+            # logger.warning(f"Removing force {force.getName()} at index {f_idx}.")
             forces_to_remove.append(f_idx)
 
     for f_idx in sorted(forces_to_remove, reverse=True):
@@ -79,7 +81,7 @@ def add_harmonic_restraints(
         if atom.index in atom_idx_list:
             force.addParticle(i, atom_crd.value_in_unit(openmmunit.nanometers))
             counter += 1
-    # logging.info(f"{counter} atoms will be restrained")
+    # logger.info(f"{counter} atoms will be restrained")
 
     force.setName(force_name)
     force.setForceGroup(force_group)

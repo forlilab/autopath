@@ -14,6 +14,8 @@ from rdkit.Chem.Draw import rdMolDraw2D, SimilarityMaps
 import MDAnalysis as mda
 from MDAnalysis.analysis.rms import RMSF
 
+import logging
+logger = logging.getLogger("autopath")
 
 def plot_atomic_rmsf(u, lig_resname:str='UNK', outname:str='rmsf.png', log_rmsf:bool=False):
     """
