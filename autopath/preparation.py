@@ -44,7 +44,7 @@ class SystemPreparation:
         num_solvent: int = None,
         ionicStrength: float = 0.15,
         is_membrane: bool = False,
-        lipid_type: str = None,
+        lipid_type: str = 'POPC',
         out_dir: str = "system",
     ) -> None:
 
