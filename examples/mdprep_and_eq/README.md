@@ -11,7 +11,7 @@
 
 # Workflow Summary
 
-Below is a high level description of the whole pipeline. By default Autopath will generate a log file at `{sys_name}/autopath.log` that captures key output information about what's happening and, hopefully, can help you troubleshoot potential problems. Also, its a record of what you did, in case you come back later of forgot eveything.
+Below is a high-level description of the whole pipeline. By default Autopath will generate a log file at `{sys_name}/autopath.log` that captures key output information about what's happening and, hopefully, can help you troubleshoot potential problems. Also, its a record of what you did, in case you come back later of forgot eveything.
 
 ## PDB fixing
 This step is optional and may include:
@@ -27,31 +27,31 @@ Note: Heterogens, such as waters, ligands or cofactors, can be removed or retain
 ## System assembly
 
 Depending on the user input, the script can assemble
-Protein+Ligand | Protein | Ligand
+Protein+Ligand | Protein | Ligand systems.
 
 * Solvation (default: dodecahedral box). Other options available.
 
 * Ions added to target ionic strength (default: 0.15 M) Set to None to just neutralize charges.
 
-* If your target is embedded in a membrane, set is_membrane=True and lipid_type to the desired lipid. Only pure bilayers are supported (OpenMM). For complex lipid mixtures, you can pass the path to a custom membrane patch PDB.
+* If your target is embedded in a membrane, set `is_membrane=True` and `lipid_type` to the desired lipid. Only pure bilayers are supported (OpenMM). For complex lipid mixtures, you can pass the path to a custom membrane patch PDB.
 
-* Force-field assignment (default: AMBER14SB + TIP3P-FB + Espaloma). All options availabl in OpenMM are supported. For small molecules, Espaloma, OpenFF, and GAFF are supported.
+* Force-field assignment (default: AMBER14SB + TIP3P-FB + Espaloma). All options available in OpenMM are supported. For small molecules, Espaloma, OpenFF, and GAFF are supported.
 
 ## Equilibration
-The overall equilibration protocol is controled by a JSON config file, which enables a detailed control over the equilbration process. The JSON file has the following subsections:
+The overall equilibration protocol is orchestrated by a JSON config file, which enables a detailed control over the process. The JSON file has the following subsections:
 
 #### components_lookup
 The components_lookup section allows you to specify different components of the systems that will be trated separately during the equilibration: For example: protein_sidechains, protein_backbone, ligand, membrane, etc. This uses MDAnalysis selection syntax, so its very flexible.
 
 #### minimization
-This section controls how the components will be selectively minimized using harmonic restrainst. The list of forces should match the list of components previously defined. Forces are in Kcal/mol/A2. This section is only used when the Equilibration.py class is instantiated with the flag restrained_minimization=True. Otherwise, standard minimization if performed with restraints in all components especified before.
+This section controls how the components will be selectively minimized using harmonic restrainst. The list of forces should match the list of components previously defined. Forces are in kcal/mol/A<sup>2</sup>. This section is only used when the Equilibration.py class is instantiated with the flag `restrained_minimization=True`. Otherwise, standard minimization if performed with restraints on all components especified before.
 
 #### warmup
 This section controls the thermalization or warming up phase. By default, the system is gradually heated to the target temperature in the NVT ensemble using a small timestep. 
 
 #### equilibration
-Once we have reached the target temperature, we want to run MD steps while gradually removing the restraints imposed on the system. Each stage in this section allows the user to specify the restraint forces (list lenght should match components_lookup), the ensemble (NVP/NPT), the number of steps, and the timestep.
-If npt_flag=True, a MonteCarloBarostat will be added to the system. Remember to set is_membrane=True if you have a membrane so the correct barostat is added to the system.
+Once we have reached the target temperature, we want to run MD steps while gradually removing the restraints imposed on the system. Each stage in this section allows the user to specify the restraint forces (the list lenght should match components_lookup), the ensemble (NVP/NPT), the number of steps, and the timestep.
+If `npt_flag=True`, a MonteCarloBarostat will be added to the system. Remember to set `is_membrane=True` if you have a membrane so a membrane barostat is used instead.
 
 NOTE: you can find some protocol examples in the `autopath/data/` folder. Equilibration lengths are intentionally conservative. If your system is far from equilibrium, you may want to increase the number of steps in some stages and/or reduce timestep. In the equilibration folder, a `equilibration_protocol.json` file is created with the protocol used during the run, in case you need to reproduce it later or just forgot what you did.
 
