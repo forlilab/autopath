@@ -64,23 +64,30 @@ class ProteinLigandAnalyzer:
     #   INTERNAL HELPERS
     # -----------------------------------------------------------
 
-    def _load_trajectories(self,
-                           traj_start: Optional[int] = None,
-                           traj_end: Optional[int] = None,
-                           traj_step: Optional[int] = None
-                           ):
+    def _load_trajectories(self):
         """Load each replica separately using MDAnalysis."""
         #FIXME the slicing is nto working as intended
         self.replicas = {}
         for t in self.traj_paths:
             try:
                 u = mda.Universe(self.top, t)
-                # u.trajectory = u.trajectory[traj_start:traj_end:traj_step]
                 repname = os.path.basename(t).split('.')[0]
                 self.replicas[repname] = u
             except Exception as e:
                 logger.warning(f"Failed to load trajectory {t} with topology {self.top}: {e}")
                 pass
+            
+    def concat_trajectories(self):
+        """Concatenate all replicas into a single MDAnalysis Universe."""
+        all_trajs = []
+        for rep in self.replicas.values():
+            all_trajs.append(rep.trajectory)
+        
+        # Create a new Universe with concatenated trajectories
+        concat_u = mda.Universe(self.top)
+        concat_u.load_new(np.concatenate([t.timeseries() for t in all_trajs], axis=0))
+        
+        return concat_u
             
     # -----------------------------------------------------------
     #   PROLIF STUFF

@@ -17,7 +17,7 @@ from MDAnalysis.analysis.rms import RMSF
 import logging
 logger = logging.getLogger("autopath")
 
-def plot_atomic_rmsf(u, lig_resname:str='UNK', outname:str='rmsf.png', log_rmsf:bool=False):
+def plot_atomic_rmsf(u, lig_resname:str='UNK', outname:str='rmsf.png', log_rmsf:bool=True) -> None:
     """
     Draws a RMSF (Root Mean Square Fluctuation) plot for a specified ligand and saves it as an image file.
     Parameters:

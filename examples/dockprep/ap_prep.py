@@ -269,8 +269,8 @@ def main():
     equilibration_scheme = args.protocol # Make sure to customize the equilibration scheme as needed
     
     # Setup logging
-    setup_logging(logfile=f"{save_dir}/{sys_name}.log", log_level="INFO")
-    logging.info("Starting equilibration process")
+    logger = setup_logging(f"{sys_name}/autopath.log", log_level="INFO")
+    logger.info("Starting equilibration process")
 
     # Fix/prepare the receptor
     protein_pdb = fix_pdb(pdbfile=rec_path, keep_heterogens=True, pH=7.4)
@@ -352,7 +352,7 @@ def main():
         )
     
     # If you re-run the script and the system is equilibrated prepared comment the following line
-    print("running equilibration...")
+    logger.info("Running equilibration...")
     system_eq = equilibration.run(pdb_file=system_pdb_file, run_id=sys_name)
         
     ########################################################################################
@@ -402,10 +402,10 @@ def main():
         backbone = traj.topology.select("backbone")
         traj = traj.superpose(traj[0], atom_indices=backbone)
     except Exception as e:
-        logging.warning(f"Superposition failed: {e}. Proceeding without superposition.")
+        logger.warning(f"Superposition failed: {e}. Proceeding without superposition.")
     traj.save(equilibrated_traj.replace(".dcd", "_aligned.xtc"))
     os.remove(equilibrated_traj)
-    logging.info(f"Aligned trajectory saved to {equilibrated_traj.replace('.dcd', '_aligned.xtc')}")
+    logger.info(f"Aligned trajectory saved to {equilibrated_traj.replace('.dcd', '_aligned.xtc')}")
 
     if ligands is not None:
         # Calculate RMSD and RMSF of the ligand
