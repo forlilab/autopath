@@ -4,6 +4,7 @@ import pandas as pd
 import MDAnalysis as mda
 import pytraj as pt
 from prolif import Fingerprint
+
 from typing import List, Optional
 import logging
 import matplotlib.pyplot as plt
@@ -129,7 +130,9 @@ class ProteinLigandAnalyzer:
             
             # convert to DataFrame
             df = fp.to_dataframe()
-            
+            fp.plot_barcode()
+            plt.savefig(os.path.join(self.outdir, f"prolif_barcode_{rep_name}.png"))
+            plt.close()
             # percentage of the trajectory where each interaction is present
             persistence_byRes_byType = (df.mean().sort_values(ascending=False).to_frame(name="%").T * 1).T
 
@@ -231,8 +234,9 @@ class ProteinLigandAnalyzer:
 
         df_all = pd.concat(all_reps, ignore_index=True)
         
-        #plot LIE components
+        # plot LIE components
         self.plot_lie_components(df_all)
+        df_all.to_csv(os.path.join(self.outdir, "LIE_results.csv"), index=False)
         
         return df_all
 
