@@ -55,14 +55,23 @@ def cmd_lineparser():
         dest="smiles",
         required=False,
         default=None,
-        help="Smiles of the ligand",
+        help="Smiles of the ligand. Will be used to assign bond orders if provided",
     )
 
     parser.add_argument(
         "--lig_from_xray",
         action='store_true',
-        help="include flag if ligand is directly extracted from crystal structure without any processing"
+        help="include flag if ligand is directly extracted from crystal structure without any processing",
         default=False
+    )
+    
+    parser.add_argument(
+        "-f",
+        "--fixpdb",
+        dest="fixpdb",
+        required=False,
+        default=True,
+        help="whether to fix the input PDB file (default: True)",
     )
     
     parser.add_argument(
@@ -82,9 +91,8 @@ def main():
     receptor = args.rec
     lig_path = args.lig 
     lig_resname = args.resname
-    lig_smiles = args.smiles
     if lig_path is not None:
-        ligands = [(lig_resname,lig_path,lig_smiles,args.lig_from_xray)]
+        ligands = [(lig_resname,lig_path,args.smiles,args.lig_from_xray)]
     else:
         ligands = None
     equilibration_scheme = args.protocol # Make sure to customize the equilibration scheme as needed
@@ -93,20 +101,26 @@ def main():
     os.makedirs(sys_name, exist_ok=True)
 
     # Setup logging
-    setup_logging(logfile=f"{sys_name}/{sys_name}.log", log_level="INFO")
-    logging.info("Starting equilibration process")
-
-    # Fix/prepare the receptor
-    protein_pdb = fix_pdb(pdbfile=receptor, keep_heterogens=True, pH=7.4)
-    pdb_name = os.path.splitext(os.path.basename(receptor))[0]
-    prot_path=f"{sys_name}/{pdb_name}_fixed.pdb"
-    save_pdb(protein_pdb.topology, protein_pdb.positions, prot_path)
+    logger = setup_logging(f"{sys_name}/autopath.log", log_level="INFO")
+    logger.info("Starting equilibration process")
 
     ########################################################################################
     #################################### System preparation ################################
     ########################################################################################
 
-    # Prepare the system
+    # Fix/prepare the receptor
+    if not args.fixpdb:
+        fixed_receptor = receptor
+    else:
+        fixed_receptor = fix_pdb(pdbfile=receptor, 
+                            replace_nonstandard_residues=True,
+                            keep_heterogens=True, 
+                            pH=7.4
+                            )
+        pdb_name = os.path.splitext(os.path.basename(receptor))[0]
+        save_pdb(fixed_receptor.topology, fixed_receptor.positions, f"{sys_name}/{pdb_name}_fixed.pdb")
+
+    # Assemble and parameterize the system
     prepare_system = SystemPreparation(
             boxShape="dodecahedron",
             padding=1.2,
@@ -125,7 +139,7 @@ def main():
 
     # Variants is a dictionary which specifies the chain:resid for the variant e.g. {"A:123": "CYX"}
     # If you re-run the script and the system is already prepared comment the following line
-    system, topology = prepare_system.run(protein=prot_path, variants=None, ligands=ligands)
+    system, topology = prepare_system.run(protein=fixed_receptor, variants=None, ligands=ligands)
 
     ########################################################################################
     ###################################### Equilibration ###################################
@@ -166,9 +180,10 @@ def main():
         logging.warning(f"Superposition failed: {e}. Proceeding without superposition.")
     traj.save(equilibrated_traj.replace(".dcd", "_aligned.xtc"))
     os.remove(equilibrated_traj)
-    logging.info(f"Aligned trajectory saved to {equilibrated_traj.replace('.dcd', '_aligned.xtc')}")
+    logger.info(f"Aligned trajectory saved to {equilibrated_traj.replace('.dcd', '_aligned.xtc')}")
 
     # Calculate RMSD and RMSF of the ligand
+    # Make sure to customize/add the selections as needed
     u_eq = mda.Universe(system_pdb_file, equilibrated_traj.replace(".dcd", "_aligned.xtc"), in_memory=True)
     rmsd_equilibration = compute_rmsd(u_eq, u_eq,
                                           alig_select="backbone", 
@@ -180,8 +195,9 @@ def main():
                                           )
     rmsd_equilibration.to_csv(f"{sys_name}/equilibration/{sys_name}_ligand_rmsd.csv", index=False)
     if ligands is not None:
-        plot_atomic_rmsf(u_eq, outname=f"{sys_name}/equilibration/{sys_name}_RMSF.png", log_rmsf=True)
-
+        plot_atomic_rmsf(u_eq, lig_resname = lig_resname,
+                         outname=f"{sys_name}/equilibration/{sys_name}_RMSF.png",
+                        )
     return
 
 if __name__ == "__main__":
