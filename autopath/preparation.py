@@ -48,11 +48,11 @@ class SystemPreparation:
         out_dir: str = "system",
     ) -> None:
 
-        if lig_ff.upper() in ["ESPALOMA", "SMIRNOFF", "GAFF"]:
+        if lig_ff.upper() in ["ESPALOMA", "OPENFF", "GAFF"]:
             self.lig_ff = lig_ff.upper()
         else:
             logger.error(
-                f"Ligand forcefield must be one of Espaloma, SMIRNOFF or GAFF"
+                f"Ligand forcefield must be one of Espaloma, OPENFF or GAFF"
             )
             exit(1)
 
@@ -159,7 +159,7 @@ class SystemPreparation:
                 # template_generator_kwargs = {"reference_forcefield": "openff_unconstrained-2.2.1"}
                 # forcefield="espaloma-0.3.2"
             )
-        elif self.lig_ff == "SMIRNOFF":
+        elif self.lig_ff == "OPENFF":
             template_generator = SMIRNOFFTemplateGenerator(
                 molecules=ligand, 
                 # forcefield="openff-1.2.0"
