@@ -5,7 +5,7 @@ import argparse
 import MDAnalysis as mda
 import mdtraj as md
 
-from autopath import SystemPreparation, Equilibration, SteeredMD
+from autopath import SystemPreparation, Equilibration
 from autopath.analysis import plot_atomic_rmsf
 from autopath.utils import fix_pdb, save_pdb, load_system, setup_logging, compute_rmsd
 from openmm.app import PDBFile
@@ -57,6 +57,13 @@ def cmd_lineparser():
         default=None,
         help="Smiles of the ligand",
     )
+
+    parser.add_argument(
+        "--lig_from_xray",
+        action='store_true',
+        help="include flag if ligand is directly extracted from crystal structure without any processing"
+        default=False
+    )
     
     parser.add_argument(
         "-p",
@@ -77,7 +84,7 @@ def main():
     lig_resname = args.resname
     lig_smiles = args.smiles
     if lig_path is not None:
-        ligands = [(lig_resname,lig_path,lig_smiles)]
+        ligands = [(lig_resname,lig_path,lig_smiles,args.lig_from_xray)]
     else:
         ligands = None
     equilibration_scheme = args.protocol # Make sure to customize the equilibration scheme as needed
