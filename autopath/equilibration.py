@@ -1,7 +1,6 @@
+import os
 import time
 import json
-import logging
-import os
 from dataclasses import dataclass
 from typing import List, Dict, Any
 
@@ -12,6 +11,9 @@ import openmm.unit as openmmunit
 from autopath.utils import *
 from autopath.customForces import *
 import datetime
+
+import logging
+logger = logging.getLogger("autopath")
 
 @dataclass
 class EquilibrationStep:
@@ -61,7 +63,7 @@ def warm_up_system(
     """
 
     integrator.setStepSize(timestep)
-    logging.debug(f"Stepsize set to {integrator.getStepSize()}")
+    logger.debug(f"Stepsize set to {integrator.getStepSize()}")
     simulation.context.reinitialize(preserveState=True)
 
     # Calculate the number of temperature steps
@@ -74,7 +76,7 @@ def warm_up_system(
     for i in range(nT + 1):
         temperature = Tstart + i * Tstep
         integrator.setTemperature(temperature)
-        logging.debug(f"Temperature set to {temperature} K.")
+        logger.debug(f"Temperature set to {temperature} K.")
         simulation.step(int(warming_steps / nT))
 
     return None
@@ -96,7 +98,7 @@ def update_force_constants(
                 ),
             )
         except Exception as e:
-            logging.error(f"Error updating force constant for {component}.\n{e}")
+            logger.error(f"Error updating force constant for {component}.\n{e}")
             pass
 
     return None
@@ -109,12 +111,12 @@ def run_restrained_minimization(
     """Perform restrained minimization, progressively releasing constraints."""
     
     for stage in minim_scheme:
-        logging.info(f"Minimization stage {stage['name']}")
+        logger.info(f"Minimization stage {stage['name']}")
         force_constants = stage['forces']
         force_constants_dict = {k: v for k, v in zip(components, force_constants)}
         update_force_constants(simulation, force_constants_dict)
         simulation.minimizeEnergy(maxIterations=0) # default is 0 meaning until convergence
-        logging.info(f"Current system's energy: {simulation.context.getState(getEnergy=True).getPotentialEnergy()}")
+        logger.info(f"Current system's energy: {simulation.context.getState(getEnergy=True).getPotentialEnergy()}")
     return None
 
 def run_restrained_md(
@@ -133,7 +135,7 @@ def run_restrained_md(
     prev_constants = {component: None for component in components}
     npt_prev, stepsize_prev = None, None
     for step in steps:
-        logging.info(
+        logger.info(
             f"Equilibration {step.name}: force_constants={step.forces} | NPT={step.npt_flag} | n_steps={step.nsteps} | stepsize={step.stepsize} | components={components}"
         )
 
@@ -148,7 +150,7 @@ def run_restrained_md(
         if stepsize_prev is None or step.stepsize != stepsize_prev:
             integrator.setStepSize(step.stepsize)
             simulation.context.reinitialize(preserveState=True)
-            logging.debug(f"Stepsize set to {integrator.getStepSize()}")
+            logger.debug(f"Stepsize set to {integrator.getStepSize()}")
 
         simulation.step(step.nsteps)
 
@@ -198,14 +200,14 @@ class Equilibration:
 
     def from_json(self, fname: str = None) -> dict:
         try:
-            logging.info(f"Loading equilibration protocol from {fname}.")
+            logger.info(f"Loading equilibration protocol from {fname}.")
             with open(fname) as f:
                 protocol = json.load(f)
         except FileNotFoundError:
-            logging.error(f"{fname} not found.")
+            logger.error(f"{fname} not found.")
             raise
         except json.JSONDecodeError:
-            logging.error(f"{fname} is not valid JSON.")
+            logger.error(f"{fname} is not valid JSON.")
             raise
 
         # Initialize the variables
@@ -228,7 +230,7 @@ class Equilibration:
             stage_time = int(stage['nsteps']) * stage['stepsize']
             self.simulation_time += stage_time
 
-        logging.info(f"Total equilibration time: {self.simulation_time:.2f} ps")
+        logger.info(f"Total equilibration time: {self.simulation_time:.2f} ps")
         print(f"Total equilibration time: {self.simulation_time:.2f} ps")
 
         return protocol
@@ -238,11 +240,11 @@ class Equilibration:
         self.protocol['time_elapsed'] = f"{self.simulation_time:.2f} min"
 
         try:
-            logging.info("Saving equilibration protocol to JSON file.")
+            logger.info("Saving equilibration protocol to JSON file.")
             with open(fname, "w") as f:
                 json.dump(self.protocol, f, indent=4)
         except FileNotFoundError:
-            logging.error(f"Could not save to {fname}.")
+            logger.error(f"Could not save to {fname}.")
             raise
 
         return
@@ -251,7 +253,7 @@ class Equilibration:
 
         start_time = time.monotonic()
 
-        logging.debug("Setting up the integrator..")
+        logger.debug("Setting up the integrator..")
         # The native OpenMM integrator is faster bu cannot change splitting. 
         # By default it is "V V R O R". If using this, remember to change the 
         # splitting of any openmmtools integrator downstream.
@@ -281,10 +283,10 @@ class Equilibration:
             restrain_idxs = u.select_atoms(selection).indices
             if len(restrain_idxs) > 0:
                 restrain_names = [u.atoms[idx].name for idx in restrain_idxs]
-                logging.info(f"Adding {len(restrain_idxs)} harmonic restraints to {name}..")
-                logging.debug(f"The following {name} atoms will be restrained: {', '.join(restrain_names)}")
+                logger.info(f"Adding {len(restrain_idxs)} harmonic restraints to {name}..")
+                logger.debug(f"The following {name} atoms will be restrained: {', '.join(restrain_names)}")
             else:
-                logging.info(f"Skipping harmonic restraints for {name}: No atoms found for selection '{selection}'")
+                logger.warning(f"Skipping harmonic restraints for {name}: No atoms found for selection '{selection}'")
 
             add_harmonic_restraints(
                 self.system,
@@ -298,13 +300,13 @@ class Equilibration:
         
         simulation.context.reinitialize(preserveState=True)
         
-        logging.info(f"Current system's energy: {simulation.context.getState(getEnergy=True).getPotentialEnergy()}")
+        logger.info(f"Current system's energy: {simulation.context.getState(getEnergy=True).getPotentialEnergy()}")
         if not self.restrained_minimization:
-            logging.info("Running standard minimization..")
+            logger.info("Running standard minimization..")
             simulation.minimizeEnergy()
-            logging.info(f"Current system's energy: {simulation.context.getState(getEnergy=True).getPotentialEnergy()}")
+            logger.info(f"Current system's energy: {simulation.context.getState(getEnergy=True).getPotentialEnergy()}")
         else:
-            logging.info("Running enhanced minimization..")
+            logger.info("Running enhanced minimization..")
             run_restrained_minimization(simulation, list(self.components_lookup.keys()), self.minimization_scheme)
         
         minimized_positions = simulation.context.getState(getPositions=True).getPositions()
@@ -314,7 +316,7 @@ class Equilibration:
             save_pdb(self.topology, minimized_positions, f"{self.out_dir}/{run_id}_minim.pdb")
 
         # After restrained minimization remove and re-add restraints with updated reference positions
-        logging.debug("Resetting harmonic restraints after minimization to update reference positions.")
+        logger.debug("Resetting harmonic restraints after minimization to update reference positions.")
 
         # remove existing restraint forces
         self.system = remove_openmm_force(self.system, "k_")
@@ -326,7 +328,7 @@ class Equilibration:
         # Because the forces exist this will update them, there's no need to remove them first (I think).
         for num, (name, selection) in enumerate(self.components_lookup.items()):
             restrain_idxs = u.select_atoms(selection).indices
-            logging.info(f"Re-adding {len(restrain_idxs)} harmonic restraints to {name} after minimization.")
+            logger.info(f"Re-adding {len(restrain_idxs)} harmonic restraints to {name} after minimization.")
 
             add_harmonic_restraints(
                 self.system,
@@ -341,7 +343,7 @@ class Equilibration:
         simulation.context.reinitialize(preserveState=True)
         # print_current_forces(self.system)
 
-        logging.info("Warming up the system..")
+        logger.info("Warming up the system..")
         warm_up_system(simulation, integrator, 
                        Tstart=self.temp_init, 
                        Tend=self.temperature, 
@@ -349,7 +351,7 @@ class Equilibration:
                        warming_steps=self.warm_up_steps
                        )
         
-        logging.info("Running restrained equilibration protocol..")
+        logger.info("Running restrained equilibration protocol..")
         run_restrained_md(
             simulation,
             self.system,
@@ -371,7 +373,7 @@ class Equilibration:
         save_pdb(self.topology, final_positions, f"{self.out_dir}/{run_id}_equilibrated.pdb")
 
         self.simulation_time = (time.monotonic() - start_time) / 60 
-        logging.info(f"Autopath equilibration completed in {self.simulation_time:.2f} min.")
+        logger.info(f"Autopath equilibration completed in {self.simulation_time:.2f} min.")
         self.to_json(f"{self.out_dir}/equilibration_protocol.json")
 
         return self.system

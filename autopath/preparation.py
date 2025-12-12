@@ -1,7 +1,6 @@
 # general imports
 import os
 import time
-import logging
 import numpy as np
 from sys import exit
 from typing import Union, List
@@ -27,6 +26,8 @@ from rdkit import Chem
 # AutoPath imports
 from autopath.utils import assign_bondOrders, add_variants, save_pdb, save_system, save_amber_files
 
+import logging
+logger = logging.getLogger("autopath")
 
 class SystemPreparation:
     def __init__(
@@ -50,7 +51,7 @@ class SystemPreparation:
         if lig_ff.upper() in ["ESPALOMA", "SMIRNOFF", "GAFF"]:
             self.lig_ff = lig_ff.upper()
         else:
-            logging.error(
+            logger.error(
                 f"Ligand forcefield must be one of Espaloma, SMIRNOFF or GAFF"
             )
             exit(1)
@@ -68,14 +69,14 @@ class SystemPreparation:
         if self.padding is not None:
             self.padding = self.padding * openmmunit.nanometers
             if num_solvent is not None:
-                logging.warning("Both 'num_solvent' and 'padding' were specified. 'padding' will be ignored.")
+                logger.warning("Both 'num_solvent' and 'padding' were specified. 'padding' will be ignored.")
                 self.num_solvent = num_solvent
                 self.padding = None
         elif self.num_solvent is not None:
             self.num_solvent = num_solvent
             self.padding = None
         else:
-            logging.error("Either 'num_solvent' or 'padding' must be specified.")
+            logger.error("Either 'num_solvent' or 'padding' must be specified.")
             exit(1)
             
         self.ionicStrength = ionicStrength * openmmunit.molar
@@ -93,11 +94,11 @@ class SystemPreparation:
         ]
 
         if is_membrane and self.lipid_type is not None:
-            assert self.lipid_type in self._available_lipids, logging.error(
+            assert self.lipid_type in self._available_lipids, logger.error(
                 f"{self.lipid_type} lipid is not supported. Available lipids are:\n\t{self._available_lipids}"
             )
         elif is_membrane and self.lipid_type is None:
-            logging.error(
+            logger.error(
                 f"For building a membrane system a lipid type must be specified"
             )
             exit(1)
@@ -122,10 +123,10 @@ class SystemPreparation:
             elif lig_fname.endswith(".sdf") or lig_fname.endswith(".mol2"): # SDMolSupplier also works for mol2 files
                 rdkit_mol = Chem.SDMolSupplier(lig_fname, sanitize=sanitize_mol_upon_reading, removeHs=removeHs_upon_reading)[0]
             else:
-                logging.error(f"Ligand file format not recognized. Please provide a .sdf or .pdb file.")
+                logger.error(f"Ligand file format not recognized. Please provide a .sdf or .pdb file.")
                 exit(1)
         except Exception as e:
-            logging.error(f"Something went wrong loading {lig_fname}..\n{e}")
+            logger.error(f"Something went wrong loading {lig_fname}..\n{e}")
             exit(1)
             
         # assign bond orders from SMILES if provided
@@ -192,7 +193,7 @@ class SystemPreparation:
 
         # if ligands is not None and protein is None:
         #     if isinstance(ligands, str):
-        #         logging.info(f"Parametrizing ligand {os.path.basename(ligands)}..")
+        #         logger.info(f"Parametrizing ligand {os.path.basename(ligands)}..")
         #         lig = self._ligand_to_mol(ligands)
         #         ligand_topology, ligand_positions = self._parametrize_ligand(lig)
         #         for res in ligand_topology.residues():
@@ -201,7 +202,7 @@ class SystemPreparation:
 
         #     elif isinstance(ligands, dict):
         #         for lig_name, lig_path in ligands.items():
-        #             logging.info(f"Parametrizing ligand {lig_name}..")
+        #             logger.info(f"Parametrizing ligand {lig_name}..")
         #             lig = self._ligand_to_mol(lig_path)
         #             ligand_topology, ligand_positions = self._parametrize_ligand(lig)
         #             for res in ligand_topology.residues():
@@ -212,9 +213,9 @@ class SystemPreparation:
             rec_name = os.path.splitext(os.path.basename(protein))[0]
             try:
                 protein_pdb = PDBFile(protein)
-                logging.info(f"Loaded {rec_name} PDB..")
+                logger.info(f"Loaded {rec_name} PDB..")
             except Exception as e:
-                logging.error(f"Something went wrong loading {rec_name} PDB..\n{e}")
+                logger.error(f"Something went wrong loading {rec_name} PDB..\n{e}")
                 raise
 
             # make an OpenMM Modeller object with the protein
@@ -227,7 +228,7 @@ class SystemPreparation:
             # Add the ligand to the Modeller built from the protein structure
             if ligands is not None:
                 if isinstance(ligands, str):
-                    logging.info(f"Parametrizing ligand {os.path.basename(ligands)}..")
+                    logger.info(f"Parametrizing ligand {os.path.basename(ligands)}..")
                     lig = self._ligand_to_mol(ligands)
                     ligand_topology, ligand_positions = self._parametrize_ligand(lig)
                     for res in ligand_topology.residues():
@@ -279,7 +280,7 @@ class SystemPreparation:
 
         if self.is_membrane:
 
-            logging.info(f"Adding a {self.lipid_type} membrane to the system..")
+            logger.info(f"Adding a {self.lipid_type} membrane to the system..")
             try:
                 modeller.addMembrane(
                     forcefield=self.forcefield,
@@ -290,11 +291,11 @@ class SystemPreparation:
                 )
 
             except OpenMMException as e:
-                logging.error(f"Something went wrong while building the membrane.\n{e}")
+                logger.error(f"Something went wrong while building the membrane.\n{e}")
                 exit(1)
 
         else:
-            logging.info(f"Solvating the system..")
+            logger.info(f"Solvating the system..")
             modeller.addSolvent(
                 self.forcefield,
                 neutralize=True,
@@ -304,7 +305,7 @@ class SystemPreparation:
                 padding=self.padding,
             )
 
-        logging.info(f"Creating the an OpenMM system..")
+        logger.info(f"Creating the an OpenMM system..")
         system = self.forcefield.createSystem(
             modeller.topology,
             nonbondedMethod=PME,
@@ -333,6 +334,6 @@ class SystemPreparation:
         save_amber_files(modeller.topology, modeller.positions, openmm_system, self.out_dir)
 
         simulation_time = time.monotonic() - start_time
-        logging.info(f"Finished system preparation in {simulation_time:.2f} seconds.")
+        logger.info(f"Finished system preparation in {simulation_time:.2f} seconds.")
 
         return system, modeller.topology

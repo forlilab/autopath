@@ -1,6 +1,5 @@
 import time
 import math
-import logging
 
 from openmm import *
 from openmm.app import *
@@ -9,6 +8,8 @@ import openmm.unit as openmmunit
 from autopath.utils import *
 from autopath.customForces import add_harmonic_restraints
 
+import logging
+logger = logging.getLogger("autopath")
 
 class VanillaMD:
     def __init__(
@@ -55,7 +56,7 @@ class VanillaMD:
         # Calculate the number of steps required
         MD_steps = math.ceil(MD_time / self.timestep.value_in_unit(openmmunit.picoseconds) * 1000.0)  # 250.000 1ns at 4fs
 
-        logging.debug("Setting up the integrator..")
+        logger.debug("Setting up the integrator..")
         integrator = LangevinMiddleIntegrator(
             self.temperature, 1 / openmmunit.picoseconds, self.timestep
         )
@@ -65,26 +66,26 @@ class VanillaMD:
 
         # If a checkpoint is provided, it will assume it comes from an equilibration simulation, so it will just continue
         if checkpoint_file is None and pdb_file is None:
-            logging.error("Either pdb_file or checkpoint_file must be provided to set initial positions.")
+            logger.error("Either pdb_file or checkpoint_file must be provided to set initial positions.")
             exit(1)
         elif checkpoint_file is None and pdb_file is not None:
-            logging.info(f"Setting positions and box vectors from PDB file {pdb_file}")
+            logger.info(f"Setting positions and box vectors from PDB file {pdb_file}")
             pdb = PDBFile(pdb_file)
             simulation.context.setPositions(pdb.getPositions())
             simulation.context.setPeriodicBoxVectors(*pdb.topology.getPeriodicBoxVectors())
             simulation.context.setVelocitiesToTemperature(self.temperature)
 
         elif checkpoint_file is not None and pdb_file is None:
-            logging.info(f"Loading checkpoint from {checkpoint_file}")
+            logger.info(f"Loading checkpoint from {checkpoint_file}")
             simulation.loadCheckpoint(checkpoint_file)
         else:
             # if both are provided, use the checkpoint file but warn the user
-            logging.warning("Both checkpoint_file and pdb_file were provided. Using checkpoint_file.")
+            logger.warning("Both checkpoint_file and pdb_file were provided. Using checkpoint_file.")
             simulation.loadCheckpoint(checkpoint_file)
 
         # Reset velocities to temperature
         if restart_velocities:
-            logging.info(f"Resetting velocities to temperature {self.temperature}..")
+            logger.info(f"Resetting velocities to temperature {self.temperature}..")
             simulation.context.setVelocitiesToTemperature(self.temperature)
 
         # Add harmonic positional restraints to protein CA
@@ -117,6 +118,6 @@ class VanillaMD:
         save_pdb(self.topology, final_positions, f"{self.out_dir}/MD_{run_id}.pdb")
 
         simulation_time = time.monotonic() - start_time
-        logging.info(f"Finished MD {run_id} in {simulation_time/60:.2f} min.")
+        logger.info(f"Finished MD {run_id} in {simulation_time/60:.2f} min.")
 
         return

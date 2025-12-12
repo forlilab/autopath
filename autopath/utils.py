@@ -45,6 +45,7 @@ from molscrub import Scrub
 from deeptime.clustering import RegularSpace
 
 def setup_logging(logfile: str = 'autopath.log',
+                  logname: str = "autopath",
                   log_level: str = "INFO", 
                   ) -> logging.Logger:
     """Set up logging for the application at the entry point, i.e. cli scripts."""
@@ -55,7 +56,7 @@ def setup_logging(logfile: str = 'autopath.log',
     
     os.makedirs(os.path.dirname(logfile), exist_ok=True)
 
-    logger = logging.getLogger("autopath")
+    logger = logging.getLogger(logname)
     logger.setLevel(log_level.upper())
 
     # Prevent duplicate handlers if setup_logging is called multiple times

@@ -33,7 +33,6 @@ from scipy.stats import norm
 import math
 
 import seaborn as sns
-
 import matplotlib.pyplot as plt
 import matplotlib.style as style
 import matplotlib.cm as cm
@@ -48,6 +47,9 @@ from collections import defaultdict
 
 import warnings
 warnings.filterwarnings("ignore", category=RuntimeWarning)
+
+import logging
+logger = logging.getLogger("autopath")
 
 class SteeredMDAnalysis:
     """Class to analyze Steered Molecular Dynamics (sMD) data, mostly within the dcTMD framework.

@@ -14,13 +14,15 @@ from openmm.app import *
 import openmm.unit as openmmunit
 
 import cvpack
+import logging
+logger = logging.getLogger("autopath")
 
 try:
     from openmmtools.integrators import LangevinSplittingGirsanov
     from reweightingreporter import ReweightingReporter
 except ImportError:
     girsanov = False
-    logging.warning("Please install openmmtools to use Girsanov reweighting.")
+    logger.warning("Please install openmmtools to use Girsanov reweighting.")
     
 class SteeredMD:
     """
@@ -45,6 +47,7 @@ class SteeredMD:
         save_freq: int = None,
         verbose: int = 0,
     ):
+        
         self.system = system
         self.topology = topology
         self.out_dir = out_dir
@@ -66,10 +69,10 @@ class SteeredMD:
         self.use_GReweighting = use_GReweighting
         if self.use_GReweighting:
             if not girsanov:
-                logging.error("Disabled Girsanov reweighting because openmmtools is not installed.")
+                logger.error("Disabled Girsanov reweighting because openmmtools is not installed.")
                 self.use_GReweighting = False
             else:
-                logging.info("Using Girsanov reweighting for steered MD.")
+                logger.info("Using Girsanov reweighting for steered MD.")
 
         self.platform = select_platform(platform)
 
@@ -101,7 +104,7 @@ class SteeredMD:
 
         # Set the initial r0 parameter
         initial_r0 = self.com_dist.getValue(simulation.context, allowReinitialization=False)
-        logging.info(f"Initial COM distance: {initial_r0}")
+        logger.info(f"Initial COM distance: {initial_r0}")
         simulation.context.setParameter("r0_smd", initial_r0)
 
         with open(f"{self.out_dir}/sMD_{run_id}.dat","w") as f:
@@ -170,15 +173,15 @@ class SteeredMD:
                         print(f"Step {i+1}/{self.sMD_moves}: r_target={r_target_nm:.2f} nm, r_before={r_before_nm:.2f} nm, r_after={r_after_nm:.2f} nm, nc={nc_now}")
                         if nc_now < 1:
                             f.write(f"{i},{time_now},{r_target_nm},{r_before_nm},{r_after_nm},{nc_now},{force_kjmnm},{U_cvpack_kjm},{m_eff_dalton}\n")
-                            logging.warning(f"Stopping pulling at step {i} because n_contacts={nc_now}.")
+                            logger.warning(f"Stopping pulling at step {i} because n_contacts={nc_now}.")
                             break
                     else:
                         print(f"Step {i+1}/{self.sMD_moves}: r_target={r_target_nm:.2f} nm, r_before={r_before_nm:.2f} nm, r_after={r_after_nm:.2f} nm")
                         # if (r_target_nm - r_before_nm) > 0.1:
                         if r_before_nm < 0.05:
                             f.write(f"{i},{time_now},{r_target_nm},{r_before_nm},{r_after_nm},{nc_now},{force_kjmnm},{U_cvpack_kjm},{m_eff_dalton}\n")
-                            logging.warning(f"Stopping backward pulling at step {i} with r_target={r_target_nm:.2f} nm and r_before={r_before_nm:.2f} nm.")
-                            # logging.warning(f"Stopping backward pulling at step {i} because r_after={r_after_nm:.2f} nm.")
+                            logger.warning(f"Stopping backward pulling at step {i} with r_target={r_target_nm:.2f} nm and r_before={r_before_nm:.2f} nm.")
+                            # logger.warning(f"Stopping backward pulling at step {i} because r_after={r_after_nm:.2f} nm.")
                             break
                 f.write(f"{i},{time_now},{r_target_nm},{r_before_nm},{r_after_nm},{nc_now},{force_kjmnm},{U_cvpack_kjm},{m_eff_dalton}\n")
                 
@@ -243,12 +246,12 @@ class SteeredMD:
         print(f"  steps_per_move: {self.steps_per_move} steps")
         print(f"  Total sMD moves: {self.sMD_moves}")
         
-        # logging.info(f"Steered MD parameters for {run_id}:")
-        # logging.info(f"  Pulling direction: {pulling_direction}")
-        # logging.info(f"  Pulling speed: {pulling_speed} nm/ps")
-        # logging.info(f"  dx_per_move: {self.dx_per_move.value_in_unit(openmmunit.nanometers):.4f} nm")
-        # logging.info(f"  steps_per_move: {self.steps_per_move} steps")
-        # logging.info(f"  Total sMD moves: {self.sMD_moves}")
+        # logger.info(f"Steered MD parameters for {run_id}:")
+        # logger.info(f"  Pulling direction: {pulling_direction}")
+        # logger.info(f"  Pulling speed: {pulling_speed} nm/ps")
+        # logger.info(f"  dx_per_move: {self.dx_per_move.value_in_unit(openmmunit.nanometers):.4f} nm")
+        # logger.info(f"  steps_per_move: {self.steps_per_move} steps")
+        # logger.info(f"  Total sMD moves: {self.sMD_moves}")
         ########################################################################################
         
         if self.use_GReweighting:
@@ -275,22 +278,22 @@ class SteeredMD:
         #If the systems was equilibrated with a different integrator I get NaNs (even with same splitting)
         # so Im using the PDB instead of the checkpoint file
         if checkpoint_file is None and pdb_file is None:
-            logging.error("Either pdb_file or checkpoint_file must be provided to set initial positions.")
+            logger.error("Either pdb_file or checkpoint_file must be provided to set initial positions.")
             exit(1)
         elif checkpoint_file is None and pdb_file is not None:
-            logging.info(f"Setting positions from PDB file {pdb_file}")
+            logger.info(f"Setting positions from PDB file {pdb_file}")
             pdb = PDBFile(pdb_file)
             simulation.context.setPositions(pdb.getPositions())
             simulation.context.setPeriodicBoxVectors(*pdb.topology.getPeriodicBoxVectors())
             simulation.context.setVelocitiesToTemperature(self.temperature)
 
         elif checkpoint_file is not None and pdb_file is None:
-            logging.info(f"Setting positions from checkpoint {checkpoint_file}")
+            logger.info(f"Setting positions from checkpoint {checkpoint_file}")
             simulation.loadCheckpoint(checkpoint_file)
             simulation.integrator = integrator  # Replace the integrator with the new one
         else:
             # if both are provided, use the checkpoint file but warn the user
-            logging.warning("Both checkpoint_file and pdb_file are provided. Using checkpoint_file.")
+            logger.warning("Both checkpoint_file and pdb_file are provided. Using checkpoint_file.")
             simulation.loadCheckpoint(checkpoint_file)
             simulation.integrator = integrator
 
@@ -339,7 +342,7 @@ class SteeredMD:
         # try:
         #     simulation.integrator.reset()  # Reset the integrator. Only openmmtools integrators have this method    
         # except AttributeError:
-        #     logging.warning("Integrator does not have reset method. This is expected for standard OpenMM integrators.")
+        #     logger.warning("Integrator does not have reset method. This is expected for standard OpenMM integrators.")
 
         simulation.context.setTime(0)  # reset simulation time
         simulation.context.setStepCount(0)  # reset step count
@@ -383,7 +386,7 @@ class SteeredMD:
 
         # Logging the total time for all replicas
         simulation_time = time.monotonic() - simulation_start_time
-        logging.info(f"Finished {pulling_direction} sMD simulation in {simulation_time/60:.2f} min.")
+        logger.info(f"Finished {pulling_direction} sMD simulation in {simulation_time/60:.2f} min.")
 
         return run_id
 
@@ -469,12 +472,12 @@ class SteeredMD:
     #     sMD_steps = sMD_moves * steps_per_move
     #     sMD_time = sMD_steps * timestep_ps      # ps
 
-    #     logging.info(f"Max displacement: {max_displacement} nm")
-    #     logging.info(f"Pulling speed: {pulling_speed:.4f} nm/ps")
-    #     logging.info(f"Steps per move: {steps_per_move} steps")
-    #     logging.info(f"Time per move: {steps_per_move * timestep_ps:.3f} ps")
-    #     logging.info(f"Displacement per move: {dx_per_move} nm")
-    #     logging.info(f"Total sMD time: {sMD_time:.2f} ps, Moves: {sMD_moves}, Total steps: {sMD_steps}")
+    #     logger.info(f"Max displacement: {max_displacement} nm")
+    #     logger.info(f"Pulling speed: {pulling_speed:.4f} nm/ps")
+    #     logger.info(f"Steps per move: {steps_per_move} steps")
+    #     logger.info(f"Time per move: {steps_per_move * timestep_ps:.3f} ps")
+    #     logger.info(f"Displacement per move: {dx_per_move} nm")
+    #     logger.info(f"Total sMD time: {sMD_time:.2f} ps, Moves: {sMD_moves}, Total steps: {sMD_steps}")
 
     #     print(f"Steered MD parameters: sMD_time={sMD_time:.2f} ps, sMD_steps_per_move={steps_per_move}, sMD_steps={sMD_steps}, dx_per_move={dx_per_move:.4f} nm, pulling_speed={pulling_speed:.4f} nm/ps, max_displacement={max_displacement:.2f} nm")
 
