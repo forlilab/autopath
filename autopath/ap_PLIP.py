@@ -11,6 +11,9 @@ from matplotlib import style
 import seaborn as sns
 style.use("fivethirtyeight")
 
+import logging
+logger = logging.getLogger("autopath")
+
 class ProteinLigandAnalyzer:
     """
     Simple analysis class for protein-ligand or protein-protein MD simulations.
@@ -71,11 +74,11 @@ class ProteinLigandAnalyzer:
         for t in self.traj_paths:
             try:
                 u = mda.Universe(self.top, t)
-                u.trajectory = u.trajectory[traj_start:traj_end:traj_step]
+                # u.trajectory = u.trajectory[traj_start:traj_end:traj_step]
                 repname = os.path.basename(t).split('.')[0]
                 self.replicas[repname] = u
             except Exception as e:
-                logging.warning(f"Failed to load trajectory {t} with topology {self.top}: {e}")
+                logger.warning(f"Failed to load trajectory {t} with topology {self.top}: {e}")
                 pass
             
     # -----------------------------------------------------------
@@ -110,14 +113,14 @@ class ProteinLigandAnalyzer:
             fp_fname = os.path.join(self.outdir, f"FP_{rep_name}.pkl")
             if os.path.exists(fp_fname):
                 fp = Fingerprint.from_pickle(fp_fname)
-                logging.info(f"Loaded cached ProLif fingerprint for replica {rep_name}")
+                logger.info(f"Loaded cached ProLif fingerprint for replica {rep_name}")
             else:
-                logging.info(f"Computing ProLif fingerprint for replica {rep_name}")
+                logger.info(f"Computing ProLif fingerprint for replica {rep_name}")
                 protein_sel = rep.select_atoms(self.protein_mda_selection) if self.protein_mda_selection else rep.select_atoms("protein")
                 ligand_sel = rep.select_atoms(self.ligand_mda_selection)
 
                 # Compute interaction fingerprint over trajectory, optionally strided
-                fp = fp.run(rep.trajectory[::stride],
+                fp = fp.run(rep.trajectory, #FIXME stride does not work here
                                 protein_sel, 
                                 ligand_sel
                                 )
@@ -168,7 +171,8 @@ class ProteinLigandAnalyzer:
         some literature:
         https://ambermd.org/tutorials/advanced/tutorial24/liew.php
         https://pubs.acs.org/doi/10.1021/acs.jcim.9b00609
-
+        https://pmc.ncbi.nlm.nih.gov/articles/PMC7311763/
+        
         Parameters
         ----------
         prmtop : str
