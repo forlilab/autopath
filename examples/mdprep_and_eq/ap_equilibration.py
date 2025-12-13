@@ -110,7 +110,7 @@ def main():
 
     # Fix/prepare the receptor
     if not args.fixpdb:
-        fixed_receptor = receptor
+        pdb_fname = receptor
     else:
         fixed_receptor = fix_pdb(pdbfile=receptor, 
                             replace_nonstandard_residues=True,
@@ -118,7 +118,8 @@ def main():
                             pH=7.4
                             )
         pdb_name = os.path.splitext(os.path.basename(receptor))[0]
-        save_pdb(fixed_receptor.topology, fixed_receptor.positions, f"{sys_name}/{pdb_name}_fixed.pdb")
+        pdb_fname = f"{sys_name}/{pdb_name}_fixed.pdb"
+        save_pdb(fixed_receptor.topology, fixed_receptor.positions, pdb_fname)
 
     # Assemble and parameterize the system
     prepare_system = SystemPreparation(
@@ -139,7 +140,7 @@ def main():
 
     # Variants is a dictionary which specifies the chain:resid for the variant e.g. {"A:123": "CYX"}
     # If you re-run the script and the system is already prepared comment the following line
-    system, topology = prepare_system.run(protein=fixed_receptor, variants=None, ligands=ligands)
+    system, topology = prepare_system.run(protein=pdb_fname, variants=None, ligands=ligands)
 
     ########################################################################################
     ###################################### Equilibration ###################################
