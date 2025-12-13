@@ -799,8 +799,10 @@ class SteeredMDAnalysis:
                                     "Gamma": Gamma,
                                     "speed": speed, 
                                     "path": path}))
-        return pd.concat(rows, ignore_index=True)   
-
+        gamma_df = pd.concat(rows, ignore_index=True)
+        # merge back to original df
+        df = df.merge(gamma_df, on=[x_col, 'speed', 'path'], how='left')
+        return df
     def extrapolate_to_v0(self,
                         df: pd.DataFrame = None,
                         x_col:str='r_coord',
