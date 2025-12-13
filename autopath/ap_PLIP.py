@@ -1,12 +1,13 @@
 import os
+import re
 import numpy as np
 import pandas as pd
+from typing import List, Optional
+
 import MDAnalysis as mda
 import pytraj as pt
 from prolif import Fingerprint
 
-from typing import List, Optional
-import logging
 import matplotlib.pyplot as plt
 from matplotlib import style
 import seaborn as sns
@@ -263,3 +264,116 @@ class ProteinLigandAnalyzer:
         plt.close()
         
         return
+    
+    # -----------------------------------------------------------
+    #   MMPB(GB)SA analysis 
+    # -----------------------------------------------------------
+    
+    @staticmethod
+    def parse_mmpbsa_deltas_all_components(filepath:str=None) -> pd.DataFrame:
+        """
+        Parse the DELTAS section of an AMBER MMPBSA per-residue decomposition file
+        with all energy components (PB/GB).
+        """
+
+        with open(filepath) as f:
+            lines = f.readlines()
+
+        start = None
+        for i, line in enumerate(lines):
+            if line.strip().startswith("DELTAS:"):
+                start = i
+                break
+        if start is None:
+            raise ValueError("No DELTAS section found in file")
+
+        # Line layout around DELTAS:
+        # start       : "DELTAS:"
+        # start + 1   : "Total Energy Decomposition:"
+        # start + 2   : "Residue,Location,Internal,,,van der Waals,,,Electrostatic,..."
+        # start + 3   : ",,Avg.,Std. Dev.,Std. Err. of Mean,Avg.,Std. Dev.,..."
+        header_line = lines[start + 2].strip()
+        header_parts = [h.strip() for h in header_line.split(",")]
+
+        # Should be "Residue,Location,..."
+        if not header_parts[0].startswith("Residue"):
+            raise ValueError(f"Unexpected header format: {header_line}")
+
+        has_location = (len(header_parts) > 1 and header_parts[1] == "Location")
+        offset = 2 if has_location else 1  # number of leading non-numeric columns
+
+        #figure out group names (Internal, van der Waals, etc.)
+        group_names = []
+        for idx, token in enumerate(header_parts[offset:]):
+            token = token.strip()
+            # every 3rd token is a group name (name, '', '')
+            if token and idx % 3 == 0:
+                group_names.append(token)
+
+        # build column names: Group_Avg, Group_StdDev, Group_StdErr
+        suffixes = ("Avg", "StdDev", "StdErr")
+        group_cols = []
+        for g in group_names:
+            g_slug = re.sub(r"\s+", "_", g)
+            g_slug = g_slug.replace(".", "").replace("-", "_")
+            for s in suffixes:
+                group_cols.append(f"{g_slug}_{s}")
+
+        # data start: skip DELTAS, "Total Energy Decomposition:", group header, subheader
+        data_start = start + 4
+
+        records = []
+        for line in lines[data_start:]:
+            stripped = line.strip()
+            if not stripped:
+                break
+            if stripped.startswith(("Run on", "Complex:", "Receptor:", "Ligand:")):
+                break
+
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < offset + len(group_cols):
+                # likely end of table or malformed line
+                continue
+
+            if has_location:
+                res_field, loc_field = parts[0], parts[1]
+            else:
+                res_field, loc_field = parts[0], ""
+
+            # Parse residue name and ID, e.g. "ARG   1"
+            m = re.match(r"^([A-Z0-9]{3})\s+(-?\d+)$", res_field)
+            if not m:
+                continue
+            resname, resid = m.groups()
+            resid = int(resid)
+
+            record = {
+                "resname": resname,
+                "resid": resid,
+            }
+
+            if has_location:
+                # "R ARG   1" - "R"
+                record["location"] = loc_field.split()[0] if loc_field else ""
+
+            # numeric values: 6 groups x 3 fields = 18 numbers (for PB/GB)
+            numeric_raw = parts[offset:]
+            # drop empty trailing commas
+            numeric_raw = [x for x in numeric_raw if x != ""]
+            nums = []
+            for x in numeric_raw:
+                try:
+                    nums.append(float(x))
+                except ValueError:
+                    # if anything weird appears, put NaN
+                    nums.append(float("nan"))
+
+            for col, val in zip(group_cols, nums[:len(group_cols)]):
+                record[col] = val
+
+            records.append(record)
+
+        df = pd.DataFrame.from_records(records)
+        df['label'] = df['resname'] + df['resid'].astype(str)
+        return df
+        
