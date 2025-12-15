@@ -333,26 +333,22 @@ class SteeredMDAnalysis:
         raw_data = []
         for fn in self.log_files:
             try:
-                base = os.path.basename(fn)[:-4]  # remove .dat extension
-                speed = float(base.split('_')[-2].strip('v'))
-                replica_str = base.split('_')[-3]
-                replica_idx = int(replica_str.split('-')[1])
                 df = pd.read_csv(fn, comment='#')
-                df['trajname'] = base
-                df['speed'] = speed
-                df['replica'] = replica_idx
+                df['trajname'] = os.path.basename(fn)[:-4]  # remove .dat extension
+                df['speed'] = self.speed_from_log(fn)
+                df['replica'] = self.replica_idx_from_log(fn)
                 raw_data.append(df)
                 count += 1
             except Exception as e:
                 print(f"Error loading {fn}: {e}")
                 continue
         if count == 0:
-            print("No valid log files found.")
+            logger.warning("No valid log files found.")
             return None
-        print(f"Loaded {count} log files for system '{self.sysname}'.")
+        logger.debug(f"Loaded {count} log files for system '{self.sysname}'.")
 
         if not raw_data:
-            print("No data loaded from log files.")
+            logger.warning("No data loaded from log files.")
             return None
         return pd.concat(list(raw_data))
     
@@ -383,7 +379,15 @@ class SteeredMDAnalysis:
             gg = gg.merge(grid, on="step", suffixes=("", "_mean"))
             gg["r_coord"] = gg["r_target_mean"].values
             new.append(gg.drop(columns=["r_target_mean"]))
-        return pd.concat(new, ignore_index=True)
+            
+            new_df = pd.concat(new, ignore_index=True)
+            
+            # do this to avoid missmatch of float r_coord values due to numerical precision
+            new_df["r_coord"] = (new_df
+                                .groupby(["speed"])["r_coord"]
+                                .transform(lambda x: np.round(x, 3))
+                                )
+        return new_df
 
     def bin_data(self,
                 raw_data: pd.DataFrame,
@@ -1715,3 +1719,105 @@ class SteeredMDAnalysis:
             plt.close()
 
         return df
+
+    def assess_sequential_replica_convergence(
+        self,
+        speed: float,
+        quantity: str = 'Wdiss',  # or 'dG', 'dG_gmm'
+        min_replicas: int = 4,
+        tol_rmsd: float = 2.0,     # kJ/mol
+        tol_barrier: float = 2.0,  # kJ/mol
+    ):
+        """
+        Sequential convergence check for a single pulling speed.
+        Compares PMF(N) vs PMF(N-1). For now this will ignore paths entirely.
+        """
+
+        fit_GMM = False
+        if 'gmm' in quantity:
+            fit_GMM = True
+
+        # filter logs by speed
+        all_logs = self.log_files.copy()
+        speed_logs = [fn for fn in all_logs if self.speed_from_log(fn) == speed]
+
+        if len(speed_logs) < min_replicas:
+            raise ValueError(
+                f"Not enough replicas for speed={speed}: {len(speed_logs)}"
+            )
+
+        # sort replicas by timestamp
+        speed_logs = sorted(speed_logs, key=self.replica_idx_from_log)
+
+        rows = []
+        prev_results = None
+
+        for k in range(min_replicas, len(speed_logs) + 1):
+
+            self.log_files = speed_logs[:k]
+            results_k, _ = self.run_analysis(fit_GMM=fit_GMM)
+
+            if results_k.empty:
+                continue
+
+            # aggregate PMFs over replicas
+            pmf_k = (
+                results_k
+                .groupby("r_coord")[quantity]
+                .mean()
+                .sort_index()
+            )
+
+            if prev_results is None:
+                prev_results = pmf_k
+                continue
+
+            pmf_km1 = prev_results
+
+            # trim to common r_coord. We have to do this for rmsd calculation.
+            # maybe TimeWarp algo that we used in clustering would be better?
+            r_min = max(pmf_k.index.min(), pmf_km1.index.min())
+            r_max = min(pmf_k.index.max(), pmf_km1.index.max())
+
+            pmf_k = pmf_k[(pmf_k.index >= r_min) & (pmf_k.index <= r_max)]
+            pmf_km1 = pmf_km1[(pmf_km1.index >= r_min) & (pmf_km1.index <= r_max)]
+
+            common_r = pmf_k.index.intersection(pmf_km1.index)
+
+            if len(common_r) < 5:
+                continue
+
+            yN = pmf_k.loc[common_r].values
+            yNm1 = pmf_km1.loc[common_r].values
+
+            pmf_rmsd = np.sqrt(np.mean((yN - yNm1) ** 2))
+            delta_barrier = abs(yN.max() - yNm1.max())
+
+            rows.append({
+                "speed": speed,
+                "n_replicas": k,
+                "pmf_rmsd": pmf_rmsd,
+                "delta_barrier": delta_barrier,
+                "converged": (
+                    pmf_rmsd < tol_rmsd and
+                    delta_barrier < tol_barrier
+                ),
+            })
+
+            prev_results = pmf_k
+
+        return pd.DataFrame(rows)
+    
+    @staticmethod
+    def speed_from_log(fn):
+        base = os.path.basename(fn)
+        for token in base.split("_"):
+            if token.startswith("v"):
+                return float(token[1:])
+        return None
+    
+    @staticmethod
+    def replica_idx_from_log(fn):
+        base = os.path.basename(fn)[:-4]
+        rep = base.split("_")[-3]          # replica-182710
+        return int(rep.split("-")[1])
