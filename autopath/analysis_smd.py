@@ -345,7 +345,7 @@ class SteeredMDAnalysis:
         if count == 0:
             logger.warning("No valid log files found.")
             return None
-        logger.debug(f"Loaded {count} log files for system '{self.sysname}'.")
+        logger.info(f"Loaded {count} log files for system '{self.sysname}'.")
 
         if not raw_data:
             logger.warning("No data loaded from log files.")
@@ -951,8 +951,8 @@ class SteeredMDAnalysis:
                     ax.fill_between(xi, yi - yerri, yi + yerri, color=color, alpha=0.3)
 
             # Ax labels/titles per subplot
-            if param == 'dG_v0_intercept':
-                ax.axhline(27, color='k', lw=2, ls='--')
+            # if param == 'dG_v0_intercept':
+            #     ax.axhline(27, color='k', lw=2, ls='--')
 
             ax.set_xlabel(x_col)
             ax.set_ylabel(param)
@@ -1564,8 +1564,9 @@ class SteeredMDAnalysis:
                 ax=axes[i]
             )
             axes[i].grid(True)
-            # just reference for trypsin
-            axes[i].axhline(27, color='k', lw=1, ls='--')
+            
+            # # just reference for trypsin
+            # axes[i].axhline(27, color='k', lw=1, ls='--')
             
             axes[i].set_title(f'Speed: {speed} nm/ps', fontsize=10)
             axes[i].set_xlabel(f'{r_coord} (nm)')
