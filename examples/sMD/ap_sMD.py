@@ -6,8 +6,9 @@ import MDAnalysis as mda
 import mdtraj as md
 
 from autopath import SteeredMD
-from autopath.utils import load_system
+from autopath.utils import load_system, setup_logging
 from openmm.app import PDBFile, AmberPrmtopFile
+
 
 def cmd_lineparser():
     parser = argparse.ArgumentParser(
@@ -38,21 +39,25 @@ def main():
     args = cmd_lineparser()
     sys_name = args.sysname
     
+    # Setup logging
+    logger = setup_logging(f"{sys_name}/autopath.log", log_level="INFO")
+    logger.info("Starting equilibration process")
+    
     N_REPS = 50 # how many pulling replicates to run
     DIRECTION = 'forward' # 'forward' or 'backward'
-    SPEED = 0.0005 #nm/ps
+    SPEED = 0.005 #nm/ps
     sMD_spring_cte_per_atom = 50 * 4.184  # KJ/mol/nm2, converted from kcal. This affects thermal fluctuations
 
     ligand_resname = "UNK"  # Change this to your ligand residue name
     # pocket_residues = [218, 219, 262, 263, 305, 306, 49, 50, 91, 92, 133, 134, 175, 176]  # Change this to your pocket residue IDs
     pocket_residues = [134, 135, 136, 137, 138, 139, 140, 157, 158, 159, 160, 161, 162, 180,
                        181, 182, 183, 211, 212, 213, 214, 215, 226, 227, 228, 229]
-    checkpoint = f'../equilibration/{sys_name}/equilibration/checkpoint_equil_{sys_name}.chk'
-    system_fname = f'../equilibration/{sys_name}/equilibration/system_equil_{sys_name}.xml'
+    checkpoint = f'../mdprep_and_eq/{sys_name}/equilibration/checkpoint_equil_{sys_name}.chk'
+    system_fname = f'../mdprep_and_eq/{sys_name}/equilibration/system_equil_{sys_name}.xml'
     system = load_system(system_fname)
-    prmtop_fname = f'../equilibration/{sys_name}/system.prmtop'
+    prmtop_fname = f'../mdprep_and_eq/{sys_name}/system.prmtop'
     # topology = AmberPrmtopFile(prmtop_fname).topology
-    pdb_fname = f'../equilibration/{sys_name}/equilibration/{sys_name}_equilibrated.pdb'
+    pdb_fname = f'../mdprep_and_eq/{sys_name}/equilibration/{sys_name}_equilibrated.pdb'
     topology = PDBFile(pdb_fname).topology
     
     u = mda.Universe(pdb_fname)
@@ -62,22 +67,14 @@ def main():
     ligand_atoms_idx = [a.index for a in ligand_atoms]
     
     os.makedirs(sys_name, exist_ok=True)
-
-    logging.basicConfig(
-    level="INFO",
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(f"{sys_name}/{sys_name}.log", mode="a"),
-        logging.StreamHandler(),
-    ],
-    )
     
     ########################################################################################
     ###################################### Steered MD ######################################
     ########################################################################################
 
     sMD_spring_cte = sMD_spring_cte_per_atom * len(ligand_atoms_idx)  # Normalize by ligand size
-
+    logger.info(f"sMD spring constant set to {sMD_spring_cte} KJ/mol/nm2 for ligand of {len(ligand_atoms_idx)} atoms.")
+    
     # Run steered MD
     sMD = SteeredMD(
         system=system,
