@@ -1,5 +1,7 @@
 scratch/*
 examples/*
+*.dcd
+*.xtc
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
