@@ -89,6 +89,43 @@ class ProteinLigandAnalyzer:
         concat_u.load_new(np.concatenate([t.timeseries() for t in all_trajs], axis=0))
         
         return concat_u
+
+    def write_combined_trajectory(
+            topology: str,
+            trajectories: List[str],
+            output_traj: str,
+            start: Optional[int] = None,
+            stop: Optional[int] = None,
+            step: Optional[int] = None,
+        ) -> str:
+        """
+        Combine multiple trajectories into a single trajectory file,
+        applying start/stop/step independently to each input trajectory.
+
+        Parameters
+        ----------
+        topology : str
+            Topology file (PRMTOP, PSF, PDB, etc.)
+        trajectories : list of str
+            Input trajectory files (DCD, XTC, etc.)
+        output_traj : str
+            Output trajectory filename.
+        start, stop, step : int or None
+            Slicing applied independently to each trajectory.
+        """
+
+        # Load first trajectory to initialize writer
+        u0 = mda.Universe(topology, trajectories[0])
+
+        with mda.Writer(output_traj, n_atoms=u0.atoms.n_atoms) as W:
+
+            for traj in trajectories:
+                u = mda.Universe(topology, traj)
+
+                for ts in u.trajectory[start:stop:step]:
+                    W.write(u.atoms)
+
+        return output_traj
             
     # -----------------------------------------------------------
     #   PROLIF STUFF
