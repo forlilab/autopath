@@ -63,7 +63,7 @@ def warm_up_system(
     """
 
     integrator.setStepSize(timestep)
-    logger.debug(f"Stepsize set to {integrator.getStepSize()}")
+    logger.debug(f"Timestep set to {integrator.getStepSize()}")
     simulation.context.reinitialize(preserveState=True)
 
     # Calculate the number of temperature steps
@@ -135,8 +135,9 @@ def run_restrained_md(
     prev_constants = {component: None for component in components}
     npt_prev, stepsize_prev = None, None
     for step in steps:
+        force_comp_dict = {k: v for k, v in zip(components, step.forces)}
         logger.info(
-            f"Equilibration {step.name}: force_constants={step.forces} | NPT={step.npt_flag} | n_steps={step.nsteps} | stepsize={step.stepsize} | components={components}"
+            f"Equilibration {step.name}: force_constants={force_comp_dict} | NPT={step.npt_flag} | n_steps={step.nsteps} | timestep={step.stepsize}"
         )
 
         set_force_constants(
@@ -231,7 +232,6 @@ class Equilibration:
             self.simulation_time += stage_time
 
         logger.info(f"Total equilibration time: {self.simulation_time:.2f} ps")
-        print(f"Total equilibration time: {self.simulation_time:.2f} ps")
 
         return protocol
 
@@ -343,7 +343,7 @@ class Equilibration:
         simulation.context.reinitialize(preserveState=True)
         # print_current_forces(self.system)
 
-        logger.info("Warming up the system..")
+        logger.info(f"Warming up the system from {self.temp_init} K to {self.temperature} K..")
         warm_up_system(simulation, integrator, 
                        Tstart=self.temp_init, 
                        Tend=self.temperature, 
