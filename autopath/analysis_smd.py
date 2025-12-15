@@ -334,12 +334,13 @@ class SteeredMDAnalysis:
         for fn in self.log_files:
             try:
                 base = os.path.basename(fn)[:-4]  # remove .dat extension
-                # print(f"Loading {base}...")
                 speed = float(base.split('_')[-2].strip('v'))
+                replica_str = base.split('_')[-3]
+                replica_idx = int(replica_str.split('-')[1])
                 df = pd.read_csv(fn, comment='#')
                 df['trajname'] = base
-                df['speed'] = speed  # add speed column
-                df['replica'] = base.split('_')[-3]  # extract replica number from filename
+                df['speed'] = speed
+                df['replica'] = replica_idx
                 raw_data.append(df)
                 count += 1
             except Exception as e:
@@ -803,6 +804,7 @@ class SteeredMDAnalysis:
         # merge back to original df
         df = df.merge(gamma_df, on=[x_col, 'speed', 'path'], how='left')
         return df
+    
     def extrapolate_to_v0(self,
                         df: pd.DataFrame = None,
                         x_col:str='r_coord',
@@ -1588,6 +1590,7 @@ class SteeredMDAnalysis:
         plt.show()
         plt.close()
         return
+    
     def add_acf_column(self,
                     df: pd.DataFrame,
                     param: str = 'lag',
