@@ -1723,19 +1723,35 @@ class SteeredMDAnalysis:
     def assess_sequential_replica_convergence(
         self,
         speed: float,
-        quantity: str = 'Wdiss',  # or 'dG', 'dG_gmm'
+        quantities: list[str] | str = "Wdiss",
         min_replicas: int = 4,
         tol_rmsd: float = 2.0,     # kJ/mol
         tol_barrier: float = 2.0,  # kJ/mol
-    ):
+        save_pmfs: bool = True,
+        ):
         """
         Sequential convergence check for a single pulling speed.
-        Compares PMF(N) vs PMF(N-1). For now this will ignore paths entirely.
+
+        Compares PMF(N) vs PMF(N-1). Paths are ignored.
+        Multiple quantities can be monitored; the first one
+        is used to decide convergence.
+
+        Parameters
+        ----------
+        quantities : list[str] or str
+            Quantities to monitor (e.g. ['Wdiss', 'dG', 'dG_gmm']).
+            The first entry is used for convergence criteria.
+        save_pmfs : bool
+            If True, save PMFs to CSV for later plotting.
         """
 
-        fit_GMM = False
-        if 'gmm' in quantity:
-            fit_GMM = True
+        if isinstance(quantities, str):
+            quantities = [quantities]
+
+        main_quantity = quantities[0]
+
+        #determine whether GMM is needed. This saves time
+        fit_GMM = any("gmm" in q for q in quantities)
 
         # filter logs by speed
         all_logs = self.log_files.copy()
@@ -1746,11 +1762,12 @@ class SteeredMDAnalysis:
                 f"Not enough replicas for speed={speed}: {len(speed_logs)}"
             )
 
-        # sort replicas by timestamp
+        # sort replicas by timestamp, so its sequential
         speed_logs = sorted(speed_logs, key=self.replica_idx_from_log)
 
         rows = []
-        prev_results = None
+        pmf_records = []  # for optional CSV output
+        prev_pmfs = None
 
         for k in range(min_replicas, len(speed_logs) + 1):
 
@@ -1760,22 +1777,24 @@ class SteeredMDAnalysis:
             if results_k.empty:
                 continue
 
-            # aggregate PMFs over replicas
-            pmf_k = (
-                results_k
-                .groupby("r_coord")[quantity]
-                .mean()
-                .sort_index()
-            )
+            # build PMFs for all quantities
+            pmfs_k = {}
+            for q in quantities:
+                pmfs_k[q] = (
+                    results_k
+                    .groupby("r_coord")[q]
+                    .mean()
+                    .sort_index()
+                )
 
-            if prev_results is None:
-                prev_results = pmf_k
+            if prev_pmfs is None:
+                prev_pmfs = pmfs_k
                 continue
 
-            pmf_km1 = prev_results
+            # trim + align using the main quantity. Only compare common r-coords in rmsd
+            pmf_k = pmfs_k[main_quantity]
+            pmf_km1 = prev_pmfs[main_quantity]
 
-            # trim to common r_coord. We have to do this for rmsd calculation.
-            # maybe TimeWarp algo that we used in clustering would be better?
             r_min = max(pmf_k.index.min(), pmf_km1.index.min())
             r_max = min(pmf_k.index.max(), pmf_km1.index.max())
 
@@ -1785,6 +1804,7 @@ class SteeredMDAnalysis:
             common_r = pmf_k.index.intersection(pmf_km1.index)
 
             if len(common_r) < 5:
+                prev_pmfs = pmfs_k
                 continue
 
             yN = pmf_k.loc[common_r].values
@@ -1793,23 +1813,70 @@ class SteeredMDAnalysis:
             pmf_rmsd = np.sqrt(np.mean((yN - yNm1) ** 2))
             delta_barrier = abs(yN.max() - yNm1.max())
 
-            rows.append({
+            converged = (
+                pmf_rmsd < tol_rmsd and
+                delta_barrier < tol_barrier
+            )
+
+            row = {
                 "speed": speed,
                 "n_replicas": k,
-                "pmf_rmsd": pmf_rmsd,
-                "delta_barrier": delta_barrier,
-                "converged": (
-                    pmf_rmsd < tol_rmsd and
-                    delta_barrier < tol_barrier
-                ),
-            })
+                f"{main_quantity}-rmsd": pmf_rmsd,
+                f"{main_quantity}-deltaMax": delta_barrier,
+                "converged": converged,
+                "decision_quantity": main_quantity,
+            }
 
-            prev_results = pmf_k
+            # compute auxiliary metrics for other quantities
+            for q in quantities:
+                if q == main_quantity:
+                    continue
 
-        return pd.DataFrame(rows)
+                pmf_q = pmfs_k[q]
+                pmf_qm1 = prev_pmfs[q]
+
+                pmf_q = pmf_q.loc[common_r]
+                pmf_qm1 = pmf_qm1.loc[common_r]
+
+                row[f"{q}-rmsd"] = np.sqrt(
+                    np.mean((pmf_q.values - pmf_qm1.values) ** 2)
+                )
+                row[f"{q}-deltaMax"] = abs(
+                    pmf_q.values.max() - pmf_qm1.values.max()
+                )
+
+            rows.append(row)
+
+            #store PMFs for optional CSV output
+            if save_pmfs:
+                for q in quantities:
+                    for r, val in pmfs_k[q].items():
+                        pmf_records.append({
+                            "speed": speed,
+                            "n_replicas": k,
+                            "quantity": q,
+                            "r_coord": r,
+                            "value": val,
+                        })
+
+            prev_pmfs = pmfs_k
+
+        #restore full log list
+        self.log_files = all_logs
+
+        conv_df = pd.DataFrame(rows)
+
+        # write PMF CSV
+        if save_pmfs:
+            pmf_df = pd.DataFrame(pmf_records)
+            pmf_df.to_csv(f"{self.outdir}/pmfs_speed_{speed}.csv", index=False)
+
+        return conv_df
+
     
     @staticmethod
     def speed_from_log(fn):
+        # Example log name: sMD_replica-182557_v0.005_forward.dat
         base = os.path.basename(fn)
         for token in base.split("_"):
             if token.startswith("v"):
@@ -1819,5 +1886,5 @@ class SteeredMDAnalysis:
     @staticmethod
     def replica_idx_from_log(fn):
         base = os.path.basename(fn)[:-4]
-        rep = base.split("_")[-3]          # replica-182710
+        rep = base.split("_")[-3]
         return int(rep.split("-")[1])
