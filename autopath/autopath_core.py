@@ -21,6 +21,7 @@ from autopath import (
     SystemPreparation,
     Equilibration,
     SteeredMD,
+    SteeredMDAnalysis,
     RelaxMD,
     MetadynamicsMD,
 )
@@ -241,8 +242,7 @@ class AutoPath:
         pocket_atoms = get_pocket_atoms(u_eq, self.pocket_selection)
         pocket_atom_indices = [atom.index for atom in pocket_atoms]
         pocket_residues = [f"{atom.resname}_{atom.resid}" for atom in pocket_atoms]
-        # logger.info(f"Pocket residues are: {', '.join(set(pocket_residues))}")
-        print(f"Pocket residues are: {', '.join(set(pocket_residues))}")
+        logger.info(f"Pocket residues are: {', '.join(set(pocket_residues))}")
 
         # write out the pocket atoms to a pdb
         #FIXME this should be a function that writes a pymol sesh
@@ -288,7 +288,6 @@ class AutoPath:
             if self.sMD_spring_cte is None:
                 sMD_spring_cte = sMD_spring_cte_per_atom * len(ligand_atoms_indices)  # Normalize by ligand size
                 logger.info(f"Spring constant set to {sMD_spring_cte} KJ/mol/nm2 for {len(ligand_atoms_indices)} atoms.")
-                print(f"Spring constant set to {sMD_spring_cte} KJ/mol/nm2 for {len(ligand_atoms_indices)} atoms.")
             else:
                 sMD_spring_cte = self.sMD_spring_cte
 
@@ -309,25 +308,64 @@ class AutoPath:
             )
 
             for speed, reps in self.sMD_pulling_speeds.items():
-                for i in range(reps):
-                    try:
-                        sMD.run(
-                            checkpoint_file=equilibrated_chk,
-                            # pdb_file=equilibrated_pdb,
-                            pulling_speed=speed,  # nm/ps
-                            dx_per_move=self.sMD_dx_per_move,  # nm, this is the displacement per move
-                            sMD_spring_cte=sMD_spring_cte,
-                            pulling_direction=self.sMD_pulling_dir,
-                        )
-                    except Exception as e:  
-                        logger.error(f"Error during sMD pulling for speed {speed} nm/ps, replica {i+1}: {e}")
-                        continue
-                    
-        # Load and align the sMD trajectories
+                if reps is not None:
+                    logger.info(f"Running sMD for speed {speed} nm/ps with {reps} replicas.")
+                    for i in range(reps):
+                        try:
+                            sMD.run(
+                                checkpoint_file=equilibrated_chk,
+                                # pdb_file=equilibrated_pdb,
+                                pulling_speed=speed,  # nm/ps
+                                dx_per_move=self.sMD_dx_per_move,  # nm, this is the displacement per move
+                                sMD_spring_cte=sMD_spring_cte,
+                                pulling_direction=self.sMD_pulling_dir,
+                            )
+                        except Exception as e:  
+                            logger.error(f"Error during sMD pulling for speed {speed} nm/ps, replica {i+1}: {e}")
+                            continue
+                else:
+                    logger.info(f"Running sMD for speed {speed} nm/ps until convergence.")
+                    CONVERGED = False
+                    replica = 1
+                    while not CONVERGED:
+                        try:
+                            sMD.run(
+                                checkpoint_file=equilibrated_chk,
+                                # pdb_file=equilibrated_pdb,
+                                pulling_speed=speed,  # nm/ps
+                                dx_per_move=self.sMD_dx_per_move,  # nm, this is the displacement per move
+                                sMD_spring_cte=sMD_spring_cte,
+                                pulling_direction=self.sMD_pulling_dir,
+                            )
+                            if replica > 4:
+                                # After run, check convergence from log files
+                                log_files = glob(f"{sMD_outdir}/sMD_*_v{speed}_{self.sMD_pulling_dir}.dat")
+                                sMD_trajs = glob(f"{sMD_outdir}/sMD_*_v{speed}_{self.sMD_pulling_dir}.dcd")
+                                smd = SteeredMDAnalysis(log_files, sys_name, 
+                                    outdir=f'{sMD_outdir}/analysis',
+                                    trajectories=sMD_trajs,
+                                    reference_pdb=equilibrated_pdb,
+                                    pocket_select=f'protein and around 6.0 resname {ligand_resname} and name CA',
+                                    ligand_select=f'resname {ligand_resname} and not name H*',
+                                    timestep=self.timestep,
+                                    temperature=self.temperature,
+                                    pulling_direction=self.sMD_pulling_dir
+                                    )
+                                df_convergence = smd.assess_sequential_replica_convergence(speed=speed)
+                                df_convergence.to_csv(f"{sMD_outdir}/analysis/sMD_conv_v{speed}_metrics.csv", index=False)
+                                CONVERGED = df_convergence['converged'].iloc[-1]
+                            if CONVERGED:
+                                logger.warning(f"sMD pulling for speed {speed} nm/ps CONVERGED after {replica} replicas.")
+                            else:
+                                replica += 1
+                        except Exception as e:
+                            logger.error(f"Error during sMD pulling for speed {speed} nm/ps, replica {replica}: {e}")
+                            continue
+        ##############################################################################################
+        ############################### Load and align sMD trajectories ##############################
+        ##############################################################################################
         sMD_trajs = glob(f"{sMD_outdir}/sMD_replica-*_*_*.dcd")
-        logger.info(f"Found {len(sMD_trajs)} sMD trajectories to align.")
-        print(f"Found {len(sMD_trajs)} sMD trajectories to align.")
-        
+        logger.info(f"Found {len(sMD_trajs)} sMD trajectories to align.")        
         for traj_file in sMD_trajs:
             traj = md.load(traj_file, top=solvated_system_pdb)
             traj = traj.center_coordinates()
@@ -341,16 +379,13 @@ class AutoPath:
             os.remove(traj_file) # remove the dcds
 
         ##############################################################################################
-        ###################################### sMD Analysis #######################################
+        ######################################### sMD Analysis #######################################
         ##############################################################################################
-        from autopath.analysis_smd import SteeredMDAnalysis
         
-        logs = glob(f"{sMD_outdir}/sMD_*_*_forward.dat")
-        # sMD_trajs = glob(f"{sMD_outdir}/sMD_*_*_forward.xtc")
-        sMD_trajs = glob(f"{sMD_outdir}/sMD_*_*_forward_aligned.dcd")
-
+        # load all the aligned xtc trajectories
+        logs = glob(f"{sMD_outdir}/sMD_*_*_{self.sMD_pulling_dir}.dat")
+        sMD_trajs = glob(f"{sMD_outdir}/sMD_*_*_{self.sMD_pulling_dir}.xtc")
         logger.info(f"Found {len(sMD_trajs)} sMD trajectories for analysis.")
-        print(f"Found {len(sMD_trajs)} sMD trajectories for analysis.")
         
         smd = SteeredMDAnalysis(logs, 
                                 sys_name, 
@@ -367,10 +402,10 @@ class AutoPath:
                                 pulling_direction=self.sMD_pulling_dir
                                 )
         
-        # results, gmm_results = smd.run_analysis(use_target_grid=True,
-        #                                         # speeds=[0.001, 0.005],
-        #                                         fit_GMM=True)
-        # results.to_csv(f"{sMD_outdir}/sMD_analysis_results.csv")
+        results, gmm_results = smd.run_analysis(use_target_grid=True,
+                                                # speeds=[0.001, 0.005],
+                                                fit_GMM=True)
+        results.to_csv(f"{sMD_outdir}/analysis/sMD_analysis_results.csv")
 
         ##############################################################################################
         ###################################### Extract Milestones ####################################
@@ -390,7 +425,7 @@ class AutoPath:
             os.makedirs(milestones_outdir, exist_ok=True)
 
             # sMD_trajs = glob(f"{sMD_outdir}/sMD_replica-*_*_*.xtc")
-            print(f"Found {len(sMD_trajs)} sMD trajectories for milestone extraction.")
+            logger.info(f"Found {len(sMD_trajs)} sMD trajectories for milestone extraction.")
             # sMD_trajs = [t for t in sMD_trajs if not t.endswith("_aligned.dcd")]
 
             if len(sMD_trajs) == 0:
