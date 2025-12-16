@@ -177,8 +177,8 @@ class ProteinLigandAnalyzer:
             # convert to DataFrame
             df = fp.to_dataframe()
             fp.plot_barcode()
-            plt.show()
             plt.savefig(os.path.join(self.outdir, f"prolif_barcode_{rep_name}.png"))
+            # plt.show()
             plt.close()
             # percentage of the trajectory where each interaction is present
             persistence_byRes_byType = (df.mean().sort_values(ascending=False).to_frame(name="%").T * 100).T
@@ -299,8 +299,8 @@ class ProteinLigandAnalyzer:
             ax.set_xlabel("Frame") ;    ax.set_ylabel("LIE Energy (kJ/mol)")
             
         plt.tight_layout()
-        plt.show()
         plt.savefig(os.path.join(self.outdir, "LIE_components.png"))
+        # plt.show()
         plt.close()
         
         return
