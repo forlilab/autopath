@@ -1870,10 +1870,69 @@ class SteeredMDAnalysis:
         # write PMF CSV
         if save_pmfs:
             pmf_df = pd.DataFrame(pmf_records)
-            pmf_df.to_csv(f"{self.outdir}/pmfs_speed_{speed}.csv", index=False)
+            pmf_df.to_csv(f"{self.outdir}/sMD_conv_v{speed}_traces.csv", index=False)
 
         return conv_df
 
+    @staticmethod
+    def plot_convergence_traces(smd_conv_traces, outdir):
+        
+        """ Plot convergence traces from sMD convergence analysis.
+        Parameters
+        ----------
+        smd_conv_traces : list of str
+            List of file paths to sMD convergence trace CSV files.
+        """
+        all_data = []
+        for f in smd_conv_traces:
+            speed = f.split('_')[-2]
+            df_conver = pd.read_csv(f)
+            all_data.append(df_conver)
+        df_all = pd.concat(all_data)
+        df_all.reset_index(drop=True, inplace=True)
+
+        for quantity, group in df_all.groupby('quantity'):
+
+            speeds = sorted(group['speed'].unique())
+            fig, axes = plt.subplots(
+                1, len(speeds),
+                figsize=(5 * len(speeds), 4),
+                sharey=True
+            )
+
+            if len(speeds) == 1:
+                axes = [axes]
+
+            for ax, speed in zip(axes, speeds):
+
+                g = group[group['speed'] == speed]
+
+                # normalize color scale PER SPEED
+                norm = mcolors.Normalize(
+                    vmin=g['n_replicas'].min(),
+                    vmax=g['n_replicas'].max()
+                )
+                cmap = cm.get_cmap('coolwarm_r')
+
+                for n_rep, gg in g.groupby('n_replicas'):
+                    color = cmap(norm(n_rep))
+                    ax.plot(
+                        gg['r_coord'],
+                        gg['value'],
+                        color=color,
+                        linewidth=2.0,
+                        alpha=0.9
+                    )
+
+                ax.set_title(f"speed = {speed} nm/ps")
+                ax.set_xlabel("r_coord (nm)")
+                ax.grid(True)
+
+            axes[0].set_ylabel(f"{quantity} KJ/mol")
+            plt.tight_layout()
+            plt.savefig(f"{outdir}/sMD_convergence_{quantity}.png", dpi=300)
+            plt.close()
+        return
     
     @staticmethod
     def speed_from_log(fn):
