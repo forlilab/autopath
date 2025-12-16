@@ -114,6 +114,7 @@ def main():
     else:
         fixed_receptor = fix_pdb(pdbfile=receptor, 
                             replace_nonstandard_residues=True,
+                            ignore_terminal_missing_residues=True,
                             keep_heterogens=True, 
                             pH=7.4
                             )
