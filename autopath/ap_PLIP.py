@@ -55,12 +55,13 @@ class ProteinLigandAnalyzer:
         self.ligand_mda_selection = ligand_mda_selection
         self.protein_mda_selection = protein_mda_selection # used for LIE if provided
 
-        self._load_trajectories(traj_start, traj_end, traj_step)
+        self._load_trajectories()
         
         os.makedirs(outdir, exist_ok=True)
         self.outdir = outdir
         
         return
+    
     # -----------------------------------------------------------
     #   INTERNAL HELPERS
     # -----------------------------------------------------------
@@ -176,10 +177,11 @@ class ProteinLigandAnalyzer:
             # convert to DataFrame
             df = fp.to_dataframe()
             fp.plot_barcode()
+            plt.show()
             plt.savefig(os.path.join(self.outdir, f"prolif_barcode_{rep_name}.png"))
             plt.close()
             # percentage of the trajectory where each interaction is present
-            persistence_byRes_byType = (df.mean().sort_values(ascending=False).to_frame(name="%").T * 1).T
+            persistence_byRes_byType = (df.mean().sort_values(ascending=False).to_frame(name="%").T * 100).T
 
             # same but we regroup all interaction types
             persistence_byRes = (
@@ -190,16 +192,16 @@ class ProteinLigandAnalyzer:
                 .sort_values(ascending=False)
                 .to_frame(name="%")
                 .T
-                * 1
+                * 100
             ).T
             
             # Filter residues by frequency
-            selected_residues = persistence_byRes[persistence_byRes["%"] >= frequency_cutoff].index.tolist()
+            selected_residues = persistence_byRes[persistence_byRes["%"] >= frequency_cutoff/100].index.tolist()
             selected_resnames = [res[1] for res in selected_residues]
             selected_resids = [int(res[3:]) for res in selected_resnames]
             important_resids.update(selected_resids)
 
-        return sorted(list(important_resids))
+        return sorted(list(important_resids)), persistence_byRes, persistence_byRes_byType
 
     # -----------------------------------------------------------
     #   LIE CALCULATION VIA PYTRAJ
@@ -297,6 +299,7 @@ class ProteinLigandAnalyzer:
             ax.set_xlabel("Frame") ;    ax.set_ylabel("LIE Energy (kJ/mol)")
             
         plt.tight_layout()
+        plt.show()
         plt.savefig(os.path.join(self.outdir, "LIE_components.png"))
         plt.close()
         
