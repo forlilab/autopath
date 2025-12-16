@@ -246,8 +246,12 @@ def main():
         org_colig_smiles = args.org_colig_smiles       
         ligs_from_xray = False 
 
-    lig_resname = args.lig_resname
-    if args.pdb_org_colig_name is not None:
+    if lig_path is not None:
+        lig_resname = args.lig_resname
+    else:
+        lig_resname = None
+
+    if org_colig_path is not None:
         org_colig_resname = args.pdb_org_colig_name
     else:   
         org_colig_resname = None
@@ -269,7 +273,7 @@ def main():
     equilibration_scheme = args.protocol # Make sure to customize the equilibration scheme as needed
     
     # Setup logging
-    logger = setup_logging(f"{sys_name}/autopath.log", log_level="INFO")
+    logger = setup_logging(f"{save_dir}/autopath.log", log_level="INFO")
     logger.info("Starting equilibration process")
 
     # Fix/prepare the receptor
@@ -382,7 +386,7 @@ def main():
                                              inorg_cofactor_name=args.pdb_inorg_cofactor_name, 
                                              org_colig_name=org_colig_resname,
                                              remove_H_colig=True,
-                                             ligand_name=None,
+                                             ligand_name=None, 
                                              water_resids=args.water_resids,
                                              water_chainids=args.water_chainids,
                                              output_fname_rec=f"{sys_name}_minim_receptor_w_struct_waters.pdb")
