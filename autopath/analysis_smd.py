@@ -1724,11 +1724,10 @@ class SteeredMDAnalysis:
     def assess_sequential_replica_convergence(
         self,
         speed: float,
-        quantities: list[str] | str = "Wdiss",
+        quantities: list[str] | str = ["dG"],
         min_replicas: int = 4,
         tol_rmsd: float = 2.0,     # kJ/mol
         tol_barrier: float = 2.0,  # kJ/mol
-        save_pmfs: bool = True,
         ):
         """
         Sequential convergence check for a single pulling speed.
@@ -1742,8 +1741,6 @@ class SteeredMDAnalysis:
         quantities : list[str] or str
             Quantities to monitor (e.g. ['Wdiss', 'dG', 'dG_gmm']).
             The first entry is used for convergence criteria.
-        save_pmfs : bool
-            If True, save PMFs to CSV for later plotting.
         """
 
         if isinstance(quantities, str):
@@ -1815,8 +1812,8 @@ class SteeredMDAnalysis:
             delta_barrier = abs(yN.max() - yNm1.max())
 
             converged = (
-                pmf_rmsd < tol_rmsd and
-                delta_barrier < tol_barrier
+                (pmf_rmsd < tol_rmsd)
+                and (delta_barrier < tol_barrier)
             )
 
             row = {
@@ -1848,31 +1845,28 @@ class SteeredMDAnalysis:
 
             rows.append(row)
 
-            #store PMFs for optional CSV output
-            if save_pmfs:
-                for q in quantities:
-                    for r, val in pmfs_k[q].items():
-                        pmf_records.append({
-                            "speed": speed,
-                            "n_replicas": k,
-                            "quantity": q,
-                            "r_coord": r,
-                            "value": val,
-                        })
+            #store PMFs/traces for CSV output
+            for q in quantities:
+                for r, val in pmfs_k[q].items():
+                    pmf_records.append({
+                        "speed": speed,
+                        "n_replicas": k,
+                        "quantity": q,
+                        "r_coord": r,
+                        "value": val,
+                    })
 
             prev_pmfs = pmfs_k
 
         #restore full log list
         self.log_files = all_logs
 
+        # this df has convergence metrics
         conv_df = pd.DataFrame(rows)
+        # this df has traces per replica count
+        traces_df = pd.DataFrame(pmf_records)
 
-        # write PMF CSV
-        if save_pmfs:
-            pmf_df = pd.DataFrame(pmf_records)
-            pmf_df.to_csv(f"{self.outdir}/sMD_conv_v{speed}_traces.csv", index=False)
-
-        return conv_df
+        return conv_df, traces_df
 
     @staticmethod
     def plot_convergence_traces(smd_conv_traces, outdir):
@@ -1932,6 +1926,45 @@ class SteeredMDAnalysis:
             plt.tight_layout()
             plt.savefig(f"{outdir}/sMD_convergence_{quantity}.png", dpi=300)
             plt.close()
+        return
+    
+    @staticmethod
+    def plot_convergence_metrics(smd_conv_metrics:List[str], outdir:str):
+        """plot_convergence_metrics plots convergence metrics from sMD convergence analysis.
+
+        Args:
+            smd_conv_metrics (List[str]): List of file paths to sMD convergence metrics CSV files.
+            outdir (str): Output directory to save the plots.
+        """
+        all_data = []
+        for f in smd_conv_metrics:
+            speed = f.split('_')[-2]
+            df_conver = pd.read_csv(f)
+            all_data.append(df_conver)
+        df_all = pd.concat(all_data)
+        df_all.reset_index(drop=True, inplace=True)
+
+        metrics = [c for c in df_all.columns if c not in ['speed', 'n_replicas', 'converged', 'decision_quantity']]
+        speeds = sorted(df_all['speed'].unique())
+        
+        fig, axes = plt.subplots(len(metrics), 1, figsize=(8, 4 * len(metrics)), sharex=True)
+
+        if len(metrics) == 1:
+            axes = [axes]
+
+        for ax, metric in zip(axes, metrics):
+            for speed in speeds:
+                subset = df_all[df_all['speed'] == speed]
+                ax.plot(subset['n_replicas'], subset[metric], label=f"Speed {speed}")
+            ax.set_title(metric)
+            ax.set_ylabel(metric)
+            ax.legend()
+            ax.grid(True)
+
+        axes[-1].set_xlabel("Number of replicas")
+        plt.tight_layout()
+        plt.savefig(f"{outdir}/sMD_convergence_metrics.png", dpi=300)
+        plt.close()
         return
     
     @staticmethod
