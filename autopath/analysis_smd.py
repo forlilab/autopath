@@ -37,6 +37,8 @@ import matplotlib.pyplot as plt
 import matplotlib.style as style
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
+from matplotlib.lines import Line2D
+
 # style.use("fivethirtyeight")
 
 from pymbar import timeseries
@@ -66,6 +68,7 @@ class SteeredMDAnalysis:
                  dist_minmax: tuple = None, #nm
                  cluster_paths: bool = False,
                  cluster_range: tuple = None, #nm
+                 drop_low_count_paths: int = 0,
                  trajectories: list[str] = None,
                  reference_pdb: str = None,
                  pocket_select: str = 'protein and (around 6.0 resname UNK) and name CA',
@@ -104,6 +107,7 @@ class SteeredMDAnalysis:
         if cluster_paths in ['geometric', 'full']:
             if (trajectories is None or len(trajectories) == 0):
                 raise ValueError(f"{cluster_paths} clustering of paths is enabled, but no trajectories provided.")
+        self.drop_low_count_paths = drop_low_count_paths
         
         # this will be used for topology and pocket selection, so should be pdb before pulling
         self.reference_pdb = reference_pdb
@@ -202,10 +206,11 @@ class SteeredMDAnalysis:
         
         # filter out paths with too few trajectories
         to_drop = []
-        for path in processed_data.groupby(['path'])[['trajname']].nunique().iterrows():
-            if path[1]['trajname'] <= 3:
-                to_drop.append(path[0])
-                print(f"WARNING: Dropping path: {path[0]} due to insufficient number of trajectories ({path[1].trajname}).")        
+        if self.drop_low_count_paths > 0:
+            for path in processed_data.groupby(['path'])[['trajname']].nunique().iterrows():
+                if path[1]['trajname'] <= self.drop_low_count_paths:
+                    to_drop.append(path[0])
+                    print(f"WARNING: Dropping path: {path[0]} due to insufficient number of trajectories ({path[1].trajname}).")        
         processed_data = processed_data[~processed_data['path'].isin(to_drop)]
 
         # decorrelate work values using statistical inefficiency g or by replica averaging
@@ -335,8 +340,8 @@ class SteeredMDAnalysis:
             try:
                 df = pd.read_csv(fn, comment='#')
                 df['trajname'] = os.path.basename(fn)[:-4]  # remove .dat extension
-                df['speed'] = self.speed_from_log(fn)
-                df['replica'] = self.replica_idx_from_log(fn)
+                df['speed'] = self._speed_from_log(fn)
+                df['replica'] = self._replica_idx_from_log(fn)
                 raw_data.append(df)
                 count += 1
             except Exception as e:
@@ -1024,6 +1029,15 @@ class SteeredMDAnalysis:
 
             df = df.groupby('speed', group_keys=False).apply(_zscore_speed)
 
+        # apply a stride to the data to reduce size
+        stride = 1
+        df = df.groupby(['speed', 'trajname']).apply(lambda g: g.iloc[::stride]).reset_index(drop=True)
+        
+        # round up values to reduce file size
+        for col in df.columns:
+            if col not in skip_normalization:
+                df[col] = df[col].round(2)
+        
         df.to_csv(outfname, index=False)
 
         return df
@@ -1211,21 +1225,22 @@ class SteeredMDAnalysis:
         # DTW distance matrix
         distmatrix = dtw_ndim.distance_matrix_fast(s=vectors_stacked_scaled)
 
-        plt.figure(figsize=(6, 5))
-        sns.heatmap(distmatrix, cmap="viridis")
-        plt.xlabel("Trajectory index"); plt.ylabel("Trajectory index")
-        plt.title(f"DTW Distance Matrix ({method})")
-        plt.tight_layout()
-        plt.savefig(os.path.join(outdir, f"distmatrix_{method}.png"))
-        plt.close()
+        if self.cluster_paths != 'traces':
+            plt.figure(figsize=(6, 5))
+            sns.heatmap(distmatrix, cmap="viridis")
+            plt.xlabel("Trajectory index"); plt.ylabel("Trajectory index")
+            plt.title(f"DTW Distance Matrix ({method})")
+            plt.tight_layout()
+            plt.savefig(os.path.join(outdir, f"distmatrix_{method}.png"))
+            plt.close()
 
         # Choose K
         K_MAX = min(max_k, len(names))
         if K_MAX < 2:
             raise RuntimeError("Not enough trajectories to form at least 2 clusters.")
-
+        # print(f'Finding optimal number of paths up to K={K_MAX}...')
         scores = {}
-        for k in range(2, K_MAX + 1):
+        for k in range(2, K_MAX):
             c = kmedoids.fasterpam(distmatrix, k, random_state=seed)
             if use_silhouette:
                 scores[k] = silhouette_score(distmatrix, c.labels, metric="precomputed")
@@ -1235,16 +1250,17 @@ class SteeredMDAnalysis:
         K = max(scores, key=scores.get)
         print(f"Found {K} paths with score {scores[K]:.2f}")
 
-        # elbow plot, comment out if not do_plots
-        plt.figure(figsize=(6, 5))
-        sns.lineplot(x=list(scores.keys()), y=list(scores.values()))
-        plt.title(f"Optimal number of paths: {K}")
-        plt.axvline(x=K, color='red', linestyle='--', label=f'Optimal K={K}')
-        plt.xlabel("Number of clusters")
-        plt.ylabel("Silhouette score" if use_silhouette else "Score")
-        plt.tight_layout()
-        plt.savefig(os.path.join(outdir, f"elbowplot_{method}.png"))
-        plt.close()
+        if self.cluster_paths != 'traces':
+            # elbow plot, comment out if not do_plots
+            plt.figure(figsize=(6, 5))
+            sns.lineplot(x=list(scores.keys()), y=list(scores.values()))
+            plt.title(f"Optimal number of paths: {K}")
+            plt.axvline(x=K, color='red', linestyle='--', label=f'Optimal K={K}')
+            plt.xlabel("Number of clusters")
+            plt.ylabel("Silhouette score" if use_silhouette else "Score")
+            plt.tight_layout()
+            plt.savefig(os.path.join(outdir, f"elbowplot_{method}.png"))
+            plt.close()
 
         # Final clustering
         cluster = kmedoids.fasterpam(distmatrix, K, random_state=seed)
@@ -1254,10 +1270,9 @@ class SteeredMDAnalysis:
         medoid_names = [names[idx] for idx in medoid_indices]
 
         print("Medoid trajectories:", medoid_names)
-        print("cluster counts:")
         unique, counts = np.unique(cluster.labels, return_counts=True)
         for u, c in zip(unique, counts):
-            print(f" Cluster {u}: {c} trajectories")
+            print(f"Cluster {u} has {c} trajectories")
 
         # Map cluster labels back to full df (including any rows filtered out earlier)
         trajname_map = pd.DataFrame(
@@ -1291,11 +1306,12 @@ class SteeredMDAnalysis:
             data['lag'] = data['r_target'] - data['r_after']
             feature_df = self.get_trace_features(data,
                                                 x_col='r_target',
-                                                rescale_by_speed=True,
-                                                zscore_by_speed=True,
+                                                rescale_by_speed=False,
+                                                zscore_by_speed=False,
                                                 )
-            feature_cols = ['lag', 'force', 'r_before']# or ['work','lag']
+            feature_cols = ['lag', 'work', 'r_before']# or ['work','lag']
         else:  # 'full'
+            # FIXME: Test if this is worth it
             geom_feat = self.get_geom_features(recompute=recompute_geom, outdir=outdir)
             traces_feat = self.get_trace_features(data,
                                                 x_col='r_target',
@@ -1310,23 +1326,26 @@ class SteeredMDAnalysis:
             
         feature_df, labels_dict, trajname_map, medoid_names, vectors_stacked_scaled = self.cluster_time_series(
                     feature_df, feature_cols, r_range=self.cluster_range, outdir=outdir, method=self.cluster_paths, seed=self.seed)
+        
         # finally map back to raw_data
         feature_df['path'] = feature_df['trajname'].map(trajname_map)
         data['path'] = data['trajname'].map(trajname_map)
         
         print(data.groupby(['path', 'speed'])[['trajname']].nunique())
         if do_plots: 
-            # generate pymol sesh for the paths
-            paths = {}
-            for trajname in medoid_names:
-                for traj in self.trajectories:
-                    if trajname == os.path.basename(traj)[:-4]:
-                        #{'path_0': [(protein_pdb, traj1), (protein_pdb, traj2)], ...}
-                        trajcode = trajname.split('_')[1]
-                        paths[f'path_{labels_dict[trajname]}_{trajcode}'] = [(self.reference_pdb, traj)]
+            if self.trajectories is not None:
+                # generate pymol sesh for the paths
+                paths = {}
+                for trajname in medoid_names:
+                    for traj in self.trajectories:
+                        if trajname == os.path.basename(traj)[:-4]:
+                            #{'path_0': [(protein_pdb, traj1), (protein_pdb, traj2)], ...}
+                            trajcode = trajname.split('_')[1]
+                            paths[f'path_{labels_dict[trajname]}_{trajcode}'] = [(self.reference_pdb, traj)]
 
-            self.make_unbinding_paths_pml(paths, outdir=outdir)
-             # generate PCA plot of the clustered paths
+                self.make_unbinding_paths_pml(paths, outdir=outdir)
+            
+            # generate PCA plot of the clustered paths
             # Get the minimum number of frames across all trajectories
             min_len = min(arr.shape[0] for arr in vectors_stacked_scaled)
 
@@ -1337,7 +1356,7 @@ class SteeredMDAnalysis:
             pca = PCA(n_components=2)
             X_pca = pca.fit_transform(X)
 
-            # --- figure out trajectory order matching vectors_stacked_scaled ---
+            # figure out trajectory order matching vectors_stacked_scaled
             # groupby preserves the order of appearance of trajname in feature_df,
             # which is what cluster_time_series used when building vectors_stacked_scaled
             traj_order = [name for name, _ in feature_df.groupby('trajname')]
@@ -1720,27 +1739,32 @@ class SteeredMDAnalysis:
             plt.close()
 
         return df
-
-    def assess_sequential_replica_convergence(
+    
+    def check_seq_rep_conv(
         self,
         speed: float,
         quantities: list[str] | str = ["dG"],
-        min_replicas: int = 4,
+        min_replicas: int = 5,
         tol_rmsd: float = 2.0,     # kJ/mol
         tol_barrier: float = 2.0,  # kJ/mol
-        ):
+        min_coverage_frac: float | None = None,
+    ):
         """
         Sequential convergence check for a single pulling speed.
 
-        Compares PMF(N) vs PMF(N-1). Paths are ignored.
-        Multiple quantities can be monitored; the first one
-        is used to decide convergence.
+        # FIXME:
+        Compares PMF(N) vs PMF(N-1).
+        Paths are treated separately, this is a problem becuase paths appear/dissapear
+        as we add more pullings. For now I'll keep it. Maybe for restrospective analysis 
+        we can cluster once at the end and use the membership as a lookup table.
+        Multiple quantities can be monitored; the first one is used to decide convergence.
+        Coverage is also not working until I carry forwarsd trajnames info.
 
         Parameters
         ----------
-        quantities : list[str] or str
-            Quantities to monitor (e.g. ['Wdiss', 'dG', 'dG_gmm']).
-            The first entry is used for convergence criteria.
+        min_coverage_frac : float or None
+            If not None, only r_coord points with coverage >=
+            min_coverage_frac * n_replicas are used in metrics.
         """
 
         if isinstance(quantities, str):
@@ -1748,146 +1772,186 @@ class SteeredMDAnalysis:
 
         main_quantity = quantities[0]
 
-        #determine whether GMM is needed. This saves time
+        # determine whether GMM is needed
         fit_GMM = any("gmm" in q for q in quantities)
 
         # filter logs by speed
         all_logs = self.log_files.copy()
-        speed_logs = [fn for fn in all_logs if self.speed_from_log(fn) == speed]
+        speed_logs = [fn for fn in all_logs if self._speed_from_log(fn) == speed]
 
         if len(speed_logs) < min_replicas:
             raise ValueError(
                 f"Not enough replicas for speed={speed}: {len(speed_logs)}"
             )
 
-        # sort replicas by timestamp, so its sequential
-        speed_logs = sorted(speed_logs, key=self.replica_idx_from_log)
+        # sort replicas sequentially
+        speed_logs = sorted(speed_logs, key=self._replica_idx_from_log)
 
         rows = []
-        pmf_records = []  # for optional CSV output
-        prev_pmfs = None
+        pmf_records = []
+        prev_pmfs = {}  # per path
 
         for k in range(min_replicas, len(speed_logs) + 1):
 
             self.log_files = speed_logs[:k]
             results_k, _ = self.run_analysis(fit_GMM=fit_GMM)
 
-            if results_k.empty:
-                continue
+            # ensure dont deal with paths at all, see fixme above
+            results_k['path'] = 1
+            
+            # operate per path
+            for path, dfp in results_k.groupby("path"):
 
-            # build PMFs for all quantities
-            pmfs_k = {}
-            for q in quantities:
-                pmfs_k[q] = (
-                    results_k
-                    .groupby("r_coord")[q]
-                    .mean()
-                    .sort_index()
-                )
+                # # coverage per r_coord
+                # coverage = (
+                #     dfp.groupby("r_coord")["trajname"]
+                #     .nunique()
+                #     .sort_index()
+                # )
 
-            if prev_pmfs is None:
-                prev_pmfs = pmfs_k
-                continue
+                # build PMFs for all quantities
+                pmfs_k = {}
+                for q in quantities:
+                    pmfs_k[q] = (
+                        dfp.groupby("r_coord")[q]
+                        .mean()
+                        .sort_index()
+                    )
 
-            # trim + align using the main quantity. Only compare common r-coords in rmsd
-            pmf_k = pmfs_k[main_quantity]
-            pmf_km1 = prev_pmfs[main_quantity]
+                # store traces + coverage
+                for q in quantities:
+                    for r in pmfs_k[q].index:
+                        pmf_records.append({
+                            "speed": speed,
+                            "path": path,
+                            "n_replicas": k,
+                            "quantity": q,
+                            "r_coord": r,
+                            "value": pmfs_k[q].loc[r],
+                            # "coverage": coverage.loc[r],
+                        })
 
-            r_min = max(pmf_k.index.min(), pmf_km1.index.min())
-            r_max = min(pmf_k.index.max(), pmf_km1.index.max())
-
-            pmf_k = pmf_k[(pmf_k.index >= r_min) & (pmf_k.index <= r_max)]
-            pmf_km1 = pmf_km1[(pmf_km1.index >= r_min) & (pmf_km1.index <= r_max)]
-
-            common_r = pmf_k.index.intersection(pmf_km1.index)
-
-            if len(common_r) < 5:
-                prev_pmfs = pmfs_k
-                continue
-
-            yN = pmf_k.loc[common_r].values
-            yNm1 = pmf_km1.loc[common_r].values
-
-            pmf_rmsd = np.sqrt(np.mean((yN - yNm1) ** 2))
-            delta_barrier = abs(yN.max() - yNm1.max())
-
-            converged = (
-                (pmf_rmsd < tol_rmsd)
-                and (delta_barrier < tol_barrier)
-            )
-
-            row = {
-                "speed": speed,
-                "n_replicas": k,
-                f"{main_quantity}-rmsd": pmf_rmsd,
-                f"{main_quantity}-deltaMax": delta_barrier,
-                "converged": converged,
-                "decision_quantity": main_quantity,
-            }
-
-            # compute auxiliary metrics for other quantities
-            for q in quantities:
-                if q == main_quantity:
+                # no comparison yet for this path
+                if path not in prev_pmfs:
+                    prev_pmfs[path] = pmfs_k
                     continue
 
-                pmf_q = pmfs_k[q]
-                pmf_qm1 = prev_pmfs[q]
+                pmf_k = pmfs_k[main_quantity]
+                pmf_km1 = prev_pmfs[path][main_quantity]
 
-                pmf_q = pmf_q.loc[common_r]
-                pmf_qm1 = pmf_qm1.loc[common_r]
+                # align r_coord
+                common_r = pmf_k.index.intersection(pmf_km1.index)
 
-                row[f"{q}-rmsd"] = np.sqrt(
-                    np.mean((pmf_q.values - pmf_qm1.values) ** 2)
+                if min_coverage_frac is not None:
+                    min_cov = int(np.ceil(min_coverage_frac * k))
+                    common_r = [
+                        r for r in common_r
+                        # if coverage.loc[r] >= min_cov
+                    ]
+
+                if len(common_r) < 5:
+                    prev_pmfs[path] = pmfs_k
+                    continue
+
+                yN = pmf_k.loc[common_r].values
+                yNm1 = pmf_km1.loc[common_r].values
+
+                pmf_rmsd = np.sqrt(np.mean((yN - yNm1) ** 2))
+                
+                delta_barrier = abs(yN.max() - yNm1.max())
+
+                converged = (
+                    (pmf_rmsd < tol_rmsd)
+                    and (delta_barrier < tol_barrier)
                 )
-                row[f"{q}-deltaMax"] = abs(
-                    pmf_q.values.max() - pmf_qm1.values.max()
-                )
 
-            rows.append(row)
+                row = {
+                    "speed": speed,
+                    "path": path,
+                    "n_replicas": k,
+                    f"{main_quantity}-rmsd": pmf_rmsd,
+                    f"{main_quantity}-deltaMax": delta_barrier,
+                    "converged": converged,
+                    "decision_quantity": main_quantity,
+                    # "n_points_used": len(common_r),
+                }
 
-            #store PMFs/traces for CSV output
-            for q in quantities:
-                for r, val in pmfs_k[q].items():
-                    pmf_records.append({
-                        "speed": speed,
-                        "n_replicas": k,
-                        "quantity": q,
-                        "r_coord": r,
-                        "value": val,
-                    })
+                # auxiliary quantities
+                for q in quantities:
+                    if q == main_quantity:
+                        continue
 
-            prev_pmfs = pmfs_k
+                    pmf_q = pmfs_k[q].loc[common_r]
+                    pmf_qm1 = prev_pmfs[path][q].loc[common_r]
 
-        #restore full log list
+                    row[f"{q}-rmsd"] = np.sqrt(
+                        np.mean((pmf_q.values - pmf_qm1.values) ** 2)
+                    )
+                    row[f"{q}-deltaMax"] = abs(
+                        pmf_q.values.max() - pmf_qm1.values.max()
+                    )
+
+                rows.append(row)
+
+                prev_pmfs[path] = pmfs_k
+
+        # restore full log list
         self.log_files = all_logs
 
-        # this df has convergence metrics
         conv_df = pd.DataFrame(rows)
-        # this df has traces per replica count
         traces_df = pd.DataFrame(pmf_records)
 
         return conv_df, traces_df
 
+    from scipy.signal import savgol_filter
+    def find_convex_maxima(x, y, smooth=True, window=100, poly=2):
+        """
+        Identify convex local maxima in a 1D curve.
+        Returns indices of convex maxima.
+        The smoothing is to reduce noise in the derivatives.
+        """
+
+        if smooth and len(y) >= window:
+            y = savgol_filter(y, window, poly)
+
+        # first and second derivatives (finite differences)
+        dy = np.gradient(y, x)
+        d2y = np.gradient(dy, x)
+
+        # local maxima when derivative changes sign
+        maxima = np.where((dy[:-1] > 0) & (dy[1:] < 0))[0] + 1
+
+        # convexity condition when second derivative is negative
+        convex_maxima = [i for i in maxima if d2y[i] < 0]
+
+        return convex_maxima
+        
     @staticmethod
     def plot_convergence_traces(smd_conv_traces, outdir):
-        
-        """ Plot convergence traces from sMD convergence analysis.
-        Parameters
-        ----------
-        smd_conv_traces : list of str
-            List of file paths to sMD convergence trace CSV files.
         """
+        Plot convergence traces from sMD convergence analysis.
+        Each cluster/path is shown with a different line style,
+        while color encodes the number of replicas (per speed).
+        """
+
+        # load all data
         all_data = []
         for f in smd_conv_traces:
-            speed = f.split('_')[-2]
-            df_conver = pd.read_csv(f)
-            all_data.append(df_conver)
-        df_all = pd.concat(all_data)
-        df_all.reset_index(drop=True, inplace=True)
+            df = pd.read_csv(f)
+            all_data.append(df)
 
-        for quantity, group in df_all.groupby('quantity'):
+        df_all = pd.concat(all_data, ignore_index=True)
+        # ignore paths for now, same as above
+        df_all['path'] = 1
 
-            speeds = sorted(group['speed'].unique())
+        # define line styles for clusters
+        LINESTYLES = [
+            "-", "--", "-.", ":", (0, (3, 1, 1, 1)), (0, (5, 1))
+        ]
+
+        for quantity, group in df_all.groupby("quantity"):
+
+            speeds = sorted(group["speed"].unique())
             fig, axes = plt.subplots(
                 1, len(speeds),
                 figsize=(5 * len(speeds), 4),
@@ -1899,76 +1963,144 @@ class SteeredMDAnalysis:
 
             for ax, speed in zip(axes, speeds):
 
-                g = group[group['speed'] == speed]
+                g_speed = group[group["speed"] == speed]
 
-                # normalize color scale PER SPEED
+                # per-speed color normalization
                 norm = mcolors.Normalize(
-                    vmin=g['n_replicas'].min(),
-                    vmax=g['n_replicas'].max()
+                    vmin=g_speed["n_replicas"].min(),
+                    vmax=g_speed["n_replicas"].max()
                 )
-                cmap = cm.get_cmap('coolwarm_r')
+                cmap = cm.get_cmap("coolwarm_r")
 
-                for n_rep, gg in g.groupby('n_replicas'):
-                    color = cmap(norm(n_rep))
-                    ax.plot(
-                        gg['r_coord'],
-                        gg['value'],
-                        color=color,
-                        linewidth=2.0,
-                        alpha=0.9
-                    )
+                # iterate over clusters / paths
+                paths = sorted(g_speed["path"].unique())
+
+                for i, path in enumerate(paths):
+
+                    g_path = g_speed[g_speed["path"] == path]
+                    linestyle = LINESTYLES[i % len(LINESTYLES)]
+
+                    for n_rep, gg in g_path.groupby("n_replicas"):
+                        color = cmap(norm(n_rep))
+
+                        ax.plot(
+                            gg["r_coord"],
+                            gg["value"],
+                            color=color,
+                            linestyle=linestyle,
+                            linewidth=2.0,
+                            alpha=0.9,
+                        )
 
                 ax.set_title(f"speed = {speed} nm/ps")
                 ax.set_xlabel("r_coord (nm)")
                 ax.grid(True)
 
-            axes[0].set_ylabel(f"{quantity} KJ/mol")
+            axes[0].set_ylabel(f"{quantity} (kJ/mol)")
             plt.tight_layout()
             plt.savefig(f"{outdir}/sMD_convergence_{quantity}.png", dpi=300)
             plt.close()
+
         return
     
     @staticmethod
-    def plot_convergence_metrics(smd_conv_metrics:List[str], outdir:str):
-        """plot_convergence_metrics plots convergence metrics from sMD convergence analysis.
-
-        Args:
-            smd_conv_metrics (List[str]): List of file paths to sMD convergence metrics CSV files.
-            outdir (str): Output directory to save the plots.
+    def plot_convergence_metrics(smd_conv_metrics: List[str], outdir: str):
         """
+        Plot convergence metrics from sMD convergence analysis.
+        Each path/cluster is shown with a different line style,
+        while color encodes pulling speed.
+        """
+
         all_data = []
         for f in smd_conv_metrics:
-            speed = f.split('_')[-2]
-            df_conver = pd.read_csv(f)
-            all_data.append(df_conver)
-        df_all = pd.concat(all_data)
-        df_all.reset_index(drop=True, inplace=True)
+            df = pd.read_csv(f)
+            all_data.append(df)
 
-        metrics = [c for c in df_all.columns if c not in ['speed', 'n_replicas', 'converged', 'decision_quantity']]
+        df_all = pd.concat(all_data, ignore_index=True)
+
+        # metrics to plot
+        metrics = [
+            c for c in df_all.columns
+            if c not in ['speed', 'path', 'n_replicas', 'converged', 'decision_quantity']
+        ]
+
         speeds = sorted(df_all['speed'].unique())
-        
-        fig, axes = plt.subplots(len(metrics), 1, figsize=(8, 4 * len(metrics)), sharex=True)
+        paths = sorted(df_all['path'].unique())
+
+        # color map for speeds
+        cmap = cm.get_cmap("tab10")
+        speed_colors = {s: cmap(i % cmap.N) for i, s in enumerate(speeds)}
+
+        # line styles for paths
+        LINESTYLES = [
+            "-", "--", "-.", ":", (0, (3, 1, 1, 1)), (0, (5, 1))
+        ]
+
+        fig, axes = plt.subplots(
+            len(metrics), 1,
+            figsize=(8, 4 * len(metrics)),
+            sharex=True
+        )
 
         if len(metrics) == 1:
             axes = [axes]
 
         for ax, metric in zip(axes, metrics):
-            for speed in speeds:
-                subset = df_all[df_all['speed'] == speed]
-                ax.plot(subset['n_replicas'], subset[metric], label=f"Speed {speed}")
+
+            for i, path in enumerate(paths):
+                linestyle = LINESTYLES[i % len(LINESTYLES)]
+
+                for speed in speeds:
+                    subset = df_all[
+                        (df_all['speed'] == speed) &
+                        (df_all['path'] == path)
+                    ]
+
+                    if subset.empty:
+                        continue
+
+                    ax.plot(
+                        subset['n_replicas'],
+                        subset[metric],
+                        color=speed_colors[speed],
+                        linestyle=linestyle,
+                        linewidth=2.0,
+                        alpha=0.9,
+                    )
+
             ax.set_title(metric)
             ax.set_ylabel(metric)
-            ax.legend()
             ax.grid(True)
 
         axes[-1].set_xlabel("Number of replicas")
+
+        # build legend (speed colors + path styles)
+        speed_handles = [
+            Line2D([0], [0], color=speed_colors[s], lw=2, label=f"speed {s}")
+            for s in speeds
+        ]
+
+        path_handles = [
+            Line2D([0], [0], color="black",
+                linestyle=LINESTYLES[i % len(LINESTYLES)],
+                lw=2, label=f"path {p}")
+            for i, p in enumerate(paths)
+        ]
+
+        axes[0].legend(
+            handles=speed_handles + path_handles,
+            loc="best",
+            frameon=False,
+            ncol=2,
+        )
+
         plt.tight_layout()
         plt.savefig(f"{outdir}/sMD_convergence_metrics.png", dpi=300)
         plt.close()
         return
     
     @staticmethod
-    def speed_from_log(fn):
+    def _speed_from_log(fn):
         # Example log name: sMD_replica-182557_v0.005_forward.dat
         base = os.path.basename(fn)
         for token in base.split("_"):
@@ -1977,7 +2109,7 @@ class SteeredMDAnalysis:
         return None
     
     @staticmethod
-    def replica_idx_from_log(fn):
+    def _replica_idx_from_log(fn):
         base = os.path.basename(fn)[:-4]
         rep = base.split("_")[-3]
         return int(rep.split("-")[1])
