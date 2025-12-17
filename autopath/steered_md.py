@@ -238,20 +238,15 @@ class SteeredMD:
 
         self.sMD_moves = int(math.ceil(self.max_displacement / dx_per_move))
         
-        #print summary of the pulling parameters
-        print(f"Steered MD parameters for {run_id}:")
-        print(f"  Pulling direction: {pulling_direction}")
-        print(f"  Pulling speed: {pulling_speed} nm/ps")
-        print(f"  dx_per_move: {self.dx_per_move.value_in_unit(openmmunit.nanometers):.4f} nm")
-        print(f"  steps_per_move: {self.steps_per_move} steps")
-        print(f"  Total sMD moves: {self.sMD_moves}")
-        
-        # logger.info(f"Steered MD parameters for {run_id}:")
-        # logger.info(f"  Pulling direction: {pulling_direction}")
-        # logger.info(f"  Pulling speed: {pulling_speed} nm/ps")
-        # logger.info(f"  dx_per_move: {self.dx_per_move.value_in_unit(openmmunit.nanometers):.4f} nm")
-        # logger.info(f"  steps_per_move: {self.steps_per_move} steps")
-        # logger.info(f"  Total sMD moves: {self.sMD_moves}")
+        ########################################################################################        
+        logger.info("#"*80)
+        logger.info(f"Steered MD parameters for {run_id}:")
+        logger.info(f"Pulling direction: {pulling_direction}")
+        logger.info(f"Pulling speed: {pulling_speed} nm/ps")
+        logger.info(f"dx_per_move: {self.dx_per_move.value_in_unit(openmmunit.nanometers):.4f} nm")
+        logger.info(f"steps_per_move: {self.steps_per_move} steps")
+        logger.info(f"Total sMD moves: {self.sMD_moves}")
+        logger.info("#"*80)
         ########################################################################################
         
         if self.use_GReweighting:
@@ -350,7 +345,6 @@ class SteeredMD:
         weighByMass = True
         if len(self.groupA_atoms) == 1 or len(self.groupB_atoms) == 1:
             weighByMass = False  # avoid problems with single DUM massless atom
-        print(f"weighByMass for CV: {weighByMass}")
         
         # Add COM force to the ligand and pocket groups with a harmonic potential shape
         groups = [self.groupA_atoms] + [self.groupB_atoms]
