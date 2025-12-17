@@ -314,7 +314,6 @@ class AutoPath:
                         try:
                             sMD.run(
                                 checkpoint_file=equilibrated_chk,
-                                # pdb_file=equilibrated_pdb,
                                 pulling_speed=speed,  # nm/ps
                                 dx_per_move=self.sMD_dx_per_move,  # nm, this is the displacement per move
                                 sMD_spring_cte=sMD_spring_cte,
@@ -326,41 +325,56 @@ class AutoPath:
                 else:
                     logger.info(f"Running sMD for speed {speed} nm/ps until convergence.")
                     CONVERGED = False
-                    replica = 1
                     while not CONVERGED:
+                        log_files = glob(f"{sMD_outdir}/sMD_*_v{speed}_{self.sMD_pulling_dir}.dat")
+                        current_replica = len(log_files) + 1
+                        logger.info(f"Starting replica {current_replica} for speed {speed} nm/ps.")
+
+                        if len(log_files) >= 5:  # need at least 5 replicas to assess convergence
+                            smd = SteeredMDAnalysis(
+                                log_files, 
+                                sys_name, 
+                                outdir=f'{sMD_outdir}/analysis',
+                                reference_pdb=equilibrated_pdb,
+                                ligand_select=f'resname {ligand_resname} and not name H*',
+                                timestep=self.timestep,
+                                temperature=self.temperature,
+                                pulling_direction=self.sMD_pulling_dir
+                            )
+                            metrics_df, traces_df = smd.check_seq_rep_conv(
+                                speed=speed, 
+                                min_replicas=5,
+                                quantities=['dG', 'Wdiss', 'dG_Jarzynski'],
+                            )
+
+                            metrics_df.to_csv(f"{sMD_outdir}/analysis/sMD_conv_v{speed}_metrics.csv", index=False)
+                            traces_df.to_csv(f"{sMD_outdir}/analysis/sMD_conv_v{speed}_traces.csv", index=False)
+
+                            # Plot convergence results
+                            smd_conv_traces = glob(f"{sMD_outdir}/analysis/sMD_conv_*_traces.csv")
+                            smd.plot_convergence_traces(smd_conv_traces, f"{sMD_outdir}/analysis")
+                            smd_conv_metrics = glob(f"{sMD_outdir}/analysis/sMD_conv_*_metrics.csv")
+                            smd.plot_convergence_metrics(smd_conv_metrics, f"{sMD_outdir}/analysis")
+
+                            # Check convergence. Two last replicas must be converged
+                            CONVERGED = metrics_df['converged'].iloc[-2] and metrics_df['converged'].iloc[-1]
+                            if CONVERGED:
+                                logger.warning(f"sMD pulling for speed {speed} nm/ps CONVERGED after {current_replica} replicas.")
+                                break
+
+                        # Run the next replica if not converged
                         try:
                             sMD.run(
                                 checkpoint_file=equilibrated_chk,
-                                # pdb_file=equilibrated_pdb,
                                 pulling_speed=speed,  # nm/ps
                                 dx_per_move=self.sMD_dx_per_move,  # nm, this is the displacement per move
                                 sMD_spring_cte=sMD_spring_cte,
                                 pulling_direction=self.sMD_pulling_dir,
                             )
-                            if replica > 4:
-                                # After run, check convergence from log files
-                                log_files = glob(f"{sMD_outdir}/sMD_*_v{speed}_{self.sMD_pulling_dir}.dat")
-                                sMD_trajs = glob(f"{sMD_outdir}/sMD_*_v{speed}_{self.sMD_pulling_dir}.dcd")
-                                smd = SteeredMDAnalysis(log_files, sys_name, 
-                                    outdir=f'{sMD_outdir}/analysis',
-                                    trajectories=sMD_trajs,
-                                    reference_pdb=equilibrated_pdb,
-                                    pocket_select=f'protein and around 6.0 resname {ligand_resname} and name CA',
-                                    ligand_select=f'resname {ligand_resname} and not name H*',
-                                    timestep=self.timestep,
-                                    temperature=self.temperature,
-                                    pulling_direction=self.sMD_pulling_dir
-                                    )
-                                df_convergence = smd.assess_sequential_replica_convergence(speed=speed)
-                                df_convergence.to_csv(f"{sMD_outdir}/analysis/sMD_conv_v{speed}_metrics.csv", index=False)
-                                CONVERGED = df_convergence['converged'].iloc[-1]
-                            if CONVERGED:
-                                logger.warning(f"sMD pulling for speed {speed} nm/ps CONVERGED after {replica} replicas.")
-                            else:
-                                replica += 1
                         except Exception as e:
-                            logger.error(f"Error during sMD pulling for speed {speed} nm/ps, replica {replica}: {e}")
+                            logger.error(f"Error during sMD pulling for speed {speed} nm/ps, replica {current_replica}: {e}")
                             continue
+                            
         ##############################################################################################
         ############################### Load and align sMD trajectories ##############################
         ##############################################################################################
@@ -572,3 +586,9 @@ class AutoPath:
         logger.info(f"Finished AutoPath simulation in {simulation_time/60:.2f} min.")
 
         return
+    
+    @staticmethod
+    def _replica_idx_from_log(fn):
+        base = os.path.basename(fn)[:-4]
+        rep = base.split("_")[-3]
+        return int(rep.split("-")[1])
