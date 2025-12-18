@@ -119,8 +119,9 @@ def main():
                             pH=7.4
                             )
         pdb_name = os.path.splitext(os.path.basename(receptor))[0]
-        save_pdb(fixed_receptor.topology, fixed_receptor.positions, f"{sys_name}/{pdb_name}_fixed.pdb")
-
+        fixed_receptor_path=f"{sys_name}/{pdb_name}_fixed.pdb"
+        save_pdb(fixed_receptor.topology, fixed_receptor.positions, fixed_receptor_path)
+        
     # Assemble and parameterize the system
     prepare_system = SystemPreparation(
             boxShape="dodecahedron",
@@ -140,7 +141,7 @@ def main():
 
     # Variants is a dictionary which specifies the chain:resid for the variant e.g. {"A:123": "CYX"}
     # If you re-run the script and the system is already prepared comment the following line
-    system, topology = prepare_system.run(protein=fixed_receptor, variants=None, ligands=ligands)
+    system, topology = prepare_system.run(protein=fixed_receptor_path, variants=None, ligands=ligands)
 
     ########################################################################################
     ###################################### Equilibration ###################################
