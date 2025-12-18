@@ -203,6 +203,8 @@ class ProteinLigandAnalyzer:
 
         return sorted(list(important_resids)), persistence_byRes, persistence_byRes_byType
 
+
+
     # -----------------------------------------------------------
     #   LIE CALCULATION VIA PYTRAJ
     # -----------------------------------------------------------
@@ -294,7 +296,9 @@ class ProteinLigandAnalyzer:
             sharex=True, sharey=False)
 
         for component, ax in zip(["Total", "EELEC", "VDW"], axes.flatten()):
-            sns.lineplot(data=lie_df, x=lie_df.index, y=component, ax=ax, label=component)
+            mean_ = lie_df[component].mean()
+            std_ = lie_df[component].std()
+            sns.lineplot(data=lie_df, x=lie_df.index, y=component, ax=ax, label=f"Mean: {mean_:.2f} kJ/mol\nStd: {std_:.2f} kJ/mol")
             ax.set_title(f"{component.upper()}")
             ax.set_xlabel("Frame") ;    ax.set_ylabel("LIE Energy (kJ/mol)")
             
