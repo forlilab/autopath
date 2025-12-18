@@ -794,7 +794,7 @@ class SteeredMDAnalysis:
     def friction_from_wdiss(df: pd.DataFrame, 
                             w_col:str='Wdiss', # could use smoothed column here
                             x_col:str='r_coord',
-                            use_spline:bool=True) -> pd.DataFrame:
+                            use_spline:bool=False) -> pd.DataFrame:
         rows = []
         for (speed, path), g in df.groupby(["speed","path"]):
             g = g.sort_values(x_col, ascending=True)
@@ -812,6 +812,7 @@ class SteeredMDAnalysis:
         gamma_df = pd.concat(rows, ignore_index=True)
         # merge back to original df
         df = df.merge(gamma_df, on=[x_col, 'speed', 'path'], how='left')
+
         return df
     
     def extrapolate_to_v0(self,
@@ -824,7 +825,7 @@ class SteeredMDAnalysis:
 
         """Extrapolate a given parameter to zero speed using linear regression. 
         This method groups the data by speed and fits a linear regression to the
-        param vs speed for each bin."""
+        param vs speed for each reaction coordinate point."""
 
         # Filter out speeds if provided. You could only want to fit specific (low) speeds
         if speeds is not None:
@@ -855,7 +856,6 @@ class SteeredMDAnalysis:
                 })
                     
             else:
-                results = []
                 for param_col in param_cols:
                     _df = []
                     for (r_bin, path), group in df.groupby([x_col,'path']):
@@ -866,10 +866,10 @@ class SteeredMDAnalysis:
                         _df.append({
                             x_col: r_bin,
                             'path': path,
-                            f"{param_col}_v0_intercept": lr_results.intercept,
-                            f"{param_col}_v0_slope": lr_results.slope,
-                            f"{param_col}_v0_intercept_se": lr_results.intercept_stderr,
-                            f"{param_col}_v0_slope_se": lr_results.stderr,
+                            f"{param_col}_intercept": lr_results.intercept,
+                            f"{param_col}_slope": lr_results.slope,
+                            f"{param_col}_intercept_se": lr_results.intercept_stderr,
+                            f"{param_col}_slope_se": lr_results.stderr,
                             'R2': lr_results.rvalue**2,
                             'n_speeds': len(speeds)
                         })
@@ -879,14 +879,20 @@ class SteeredMDAnalysis:
 
                     results.append(pd.DataFrame(_df))
 
-                results = pd.concat(results, axis=1)
-
+                v0_results = pd.concat(results, axis=1)
+                
+        # drop duplicated columns if any
+        v0_results = v0_results.loc[:,~v0_results.columns.duplicated()]
+        
+        # merge back to original df
+        results = df.merge(v0_results, on=[x_col, 'path'], how='left')
+        
         return results
         
     def plot_extrapolated_param(self, 
                                 df: pd.DataFrame = None, 
-                                param: str = 'Wdiss',
-                                x_col: str = 'step',
+                                param: str = 'Wdiss_slope',
+                                x_col: str = 'r_coord',
                                 ):
         """Plot the extrapolated parameter vs x_col with R2 color mapping and error bands.
         
@@ -906,7 +912,9 @@ class SteeredMDAnalysis:
             x_global = df.index
 
         # Normalize R2 for colormap across all paths
-        norm = mcolors.Normalize(vmin=df[color_col].min(), vmax=df[color_col].max())
+
+        vmin, vmax = df[color_col].min(), df[color_col].max()
+        norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
         cmap = cm.get_cmap('coolwarm')
 
         # Determine paths
@@ -1744,7 +1752,7 @@ class SteeredMDAnalysis:
         self,
         speed: float,
         quantities: list[str] | str = ["dG"],
-        min_replicas: int = 5,
+        min_replicas: int = 3,
         tol_rmsd: float = 2.0,     # kJ/mol
         tol_barrier: float = 2.0,  # kJ/mol
         min_coverage_frac: float | None = None,
@@ -1786,7 +1794,7 @@ class SteeredMDAnalysis:
 
         # sort replicas sequentially
         speed_logs = sorted(speed_logs, key=self._replica_idx_from_log)
-
+        print(f"Checking convergence for speed={speed} with {len(speed_logs)} replicas")
         rows = []
         pmf_records = []
         prev_pmfs = {}  # per path
@@ -1795,20 +1803,13 @@ class SteeredMDAnalysis:
 
             self.log_files = speed_logs[:k]
             results_k, _ = self.run_analysis(fit_GMM=fit_GMM)
-
             # ensure dont deal with paths at all, see fixme above
-            results_k['path'] = 1
-            
+            # results_k = results_k.copy()
+            # results_k["path"] = 1        
+                
             # operate per path
             for path, dfp in results_k.groupby("path"):
-
-                # # coverage per r_coord
-                # coverage = (
-                #     dfp.groupby("r_coord")["trajname"]
-                #     .nunique()
-                #     .sort_index()
-                # )
-
+                
                 # build PMFs for all quantities
                 pmfs_k = {}
                 for q in quantities:
@@ -1849,7 +1850,25 @@ class SteeredMDAnalysis:
                         # if coverage.loc[r] >= min_cov
                     ]
 
+                print(
+                    f"k={k}, path={path}, "
+                    f"len(pmf_k)={len(pmf_k)}, "
+                    f"len(pmf_km1)={len(pmf_km1)}, "
+                    f"len(common_r)={len(common_r)}"
+                )
+
                 if len(common_r) < 5:
+                    rows.append({
+                        "speed": speed,
+                        "path": path,
+                        "n_replicas": k,
+                        f"{main_quantity}-rmsd": np.nan,
+                        f"{main_quantity}-deltaMax": np.nan,
+                        "converged": False,
+                        "decision_quantity": main_quantity,
+                        "reason": "insufficient_overlap",
+                        "n_common_points": len(common_r),
+                    })
                     prev_pmfs[path] = pmfs_k
                     continue
 
