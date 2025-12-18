@@ -7,6 +7,7 @@ from typing import List, Optional
 import MDAnalysis as mda
 import pytraj as pt
 from prolif import Fingerprint
+from rdkit import DataStructs
 
 import matplotlib.pyplot as plt
 from matplotlib import style
@@ -203,8 +204,50 @@ class ProteinLigandAnalyzer:
 
         return sorted(list(important_resids)), persistence_byRes, persistence_byRes_byType
 
+    @staticmethod
+    def plot_tanimoto_similarity(query_fp, reference_fp, use_frame:int=None, outdir:str=None):
+        
+        if outdir is None:
+            outdir = "."
+            
+        if reference_fp is None:
+            reference_fp = query_fp
+            
+        query_bit = query_fp.to_bitvectors()
+        query_df = query_fp.to_dataframe()
+        reference_bit = reference_fp.to_bitvectors()
 
-
+        if use_frame is not None:
+            refe_bit = reference_bit[use_frame]
+            tanimoto_sims = DataStructs.BulkTanimotoSimilarity(refe_bit, query_bit)
+            plt.figure(figsize=(6,4))
+            sns.lineplot(x=range(len(tanimoto_sims)), y=tanimoto_sims)
+            plt.xlabel("Frame index"); plt.ylabel("Tanimoto similarity")
+            plt.title(f"Tanimoto similarity to frame {use_frame}")
+            plt.savefig(f"{outdir}/tanimoto_to_frame_{use_frame}.png", dpi=300)
+            plt.show()
+            plt.close()
+            return tanimoto_sims
+        else:
+            # Tanimoto similarity matrix
+            similarity_matrix = []
+            for bv in query_bit:
+                similarity_matrix.append(DataStructs.BulkTanimotoSimilarity(bv, query_bit))
+            similarity_matrix = pd.DataFrame(similarity_matrix, index=query_df.index, columns=query_df.index)
+            fig, ax = plt.subplots(figsize=(3, 3), dpi=200)
+            colormap = sns.color_palette('viridis', as_cmap=True)
+            sns.heatmap(similarity_matrix, ax=ax,
+            square=True, cmap=colormap, vmin=0, vmax=1,
+            center=0.5, xticklabels=5,  yticklabels=5, )
+            ax.invert_yaxis()
+            plt.yticks(rotation="horizontal", fontsize=5); plt.xticks(fontsize=5)
+            plt.ylabel("Frame", fontsize=7); plt.xlabel("Frame", fontsize=7)
+            fig.patch.set_facecolor("white")
+            plt.title("Tanimoto similarity matrix", fontsize=8)
+            plt.savefig(f"{outdir}/tanimoto_similarity_matrix.png", dpi=300, bbox_inches='tight')
+            plt.show()
+            plt.close()
+            return similarity_matrix
     # -----------------------------------------------------------
     #   LIE CALCULATION VIA PYTRAJ
     # -----------------------------------------------------------
