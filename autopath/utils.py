@@ -188,7 +188,8 @@ def get_ligand_name(pdb_path: str) -> str | None:
     """
     cmd.reinitialize()
     cmd.load(pdb_path, "receptor_w_ligand")
-    cmd.select("org", "(not (polymer or solvent))")
+    # cmd.select("org", "(not (polymer or solvent))")
+    cmd.select("org", "organic")
     model = cmd.get_model("org")
     ligand_names = list(set(atom.resn for atom in model.atom))
     print(f"the following ligands are present in {pdb_path}:")
@@ -794,22 +795,25 @@ def get_ligand_anchor_atoms(
     frames: int = 100,
     n_atoms: int = 5,
     reduce_before: bool = False,
-    expand_rings: bool = False,
+    expand_rings: bool = True,
     out_dir: str = None,
     verbose: bool = True,
 ):
     """
     Select anchor atoms in the ligand for pulling and optionally visualize them.
-
+    if reduce_before is True, the ligand is first reduced to its Murcko scaffold before
     If mode="murcko", returns Murcko scaffold atoms.
-
+    If expand_rings is True, expands selection to include entire rings containing anchor atoms.
+    Only top n_atoms are selected based on the chosen mode.
     Parameters
     ----------
-    reduce_before : bool
-        If True, reduce ligand to Murcko scaffold before anchor selection.
+
     """
-    # FIXME this is buggy
     
+    if out_dir is None:
+        out_dir = "."
+    os.makedirs(out_dir, exist_ok=True)
+
     img_name = f"{out_dir}/pulling_{lig_resname}_{mode}.png"
 
     ligand_full = u.select_atoms(f"resname {lig_resname}")
@@ -818,28 +822,41 @@ def get_ligand_anchor_atoms(
     if ligand_full.n_atoms == 0:
         raise ValueError(f"No atoms found for ligand {lig_resname}.")
 
-    # Reduce first if requested
-    if reduce_before:
-        ligand, highlight_rdk_indices, mol = reduce_to_murcko_scaffold(u, lig_resname, img_name)
-    else:
-        ligand = ligand_full
-        mol = ligand_full.convert_to("RDKIT")
-        mol = Chem.RemoveAllHs(mol)
-        highlight_rdk_indices = []
+    # RDKit mol from full ligand (keep Hs so indexing matches MDAnalysis)
+    mol = ligand_full.convert_to("RDKIT")
 
-    u.trajectory[-1]  # Ensure we are at the last frame
+    # make sure we are at the last frame
+    u.trajectory[-1]
     pocket = u.select_atoms(pocket_sel)
     anchor = []
 
-    if mode == 'lig_ha':
-        ligand_ha = u.select_atoms(f"resname {lig_resname} and not name H*")
-        anchor =[ligand_ha.atoms[i].index for i in range(len(ligand_ha))]
-        # mol = ligand_full.convert_to("RDKIT")
-        # sel_atoms = mol.GetAtoms()
+    # optional Murcko reduction before anchor selection
+    if reduce_before:
+        ligand, highlight_rdk_indices, mol = reduce_to_murcko_scaffold(
+            u, lig_resname, img_name
+        )
+        # filter out H for pulling
+        ligand = ligand.select_atoms("not name H*")
+    else:
+        # use heavy atoms for anchor selection
+        ligand = ligand_ha
+        highlight_rdk_indices = []
 
-    if mode == "murcko":
-        ligand, anchor_indices, mol = reduce_to_murcko_scaffold(u, lig_resname, img_name)
-        anchor = [ligand.atoms[i].index for i in range(len(ligand))]
+    # This are the difrent modes implemented.
+    # TODO implement MMGBSA by residue decomposition 
+    # and select top n_atoms from the ligand interacting residues.
+
+    if mode == "lig_ha":
+        # all heavy atoms of the ligand
+        anchor = [a.index for a in ligand_ha.atoms]
+
+    elif mode == "murcko":
+        ligand, anchor_indices, mol = reduce_to_murcko_scaffold(
+            u, lig_resname, img_name
+        )
+        # only heavy atoms for anchors
+        ligand = ligand.select_atoms("not name H*")
+        anchor = [a.index for a in ligand.atoms]
 
     elif mode == "lig_com":
         com = ligand.center_of_mass()
@@ -867,7 +884,6 @@ def get_ligand_anchor_atoms(
         principal_axis = eigvecs[:, np.argmin(eigvals)]
         projections = np.dot(coords, principal_axis)
         anchor = ligand.atoms[np.argsort(projections)[:n_atoms]].indices
-        # anchor = ligand.atoms[np.argsort(projections)[-n_atoms:]].indices
 
     elif mode == "weighted_com":
         contact_counts = np.zeros(len(ligand))
@@ -881,39 +897,61 @@ def get_ligand_anchor_atoms(
         dists = np.linalg.norm(ligand.positions - anchor_com, axis=1)
         anchor = ligand.atoms[np.argsort(dists)[:n_atoms]].indices
 
-    # else:
-    #     raise ValueError(f"Unknown mode '{mode}'")
+    else:
+        raise ValueError(f"Unknown mode '{mode}'")
 
+    # expand rings in RDKit space if requested
     if expand_rings:
-        rdk_anchor_indices = []
+        # map MDAnalysis atom index -> RDKit index
         idx_map = {a.index: i for i, a in enumerate(ligand_full.atoms)}
-        for idx in anchor:
-            if idx in idx_map:
-                rdk_anchor_indices.append(idx_map[idx])
+        rdk_anchor_indices = [idx_map[i] for i in anchor if i in idx_map]
+
         ring_info = mol.GetRingInfo()
-        anchor_rings = [set(ring) for ring in ring_info.AtomRings() if any(i in ring for i in rdk_anchor_indices)]
+        anchor_rings = [
+            set(ring) for ring in ring_info.AtomRings()
+            if any(i in ring for i in rdk_anchor_indices)
+        ]
+
         expanded_rdk_indices = set()
         for ring in anchor_rings:
             expanded_rdk_indices.update(ring)
-        expanded_mda_indices = [ligand_full.atoms[i].index for i in expanded_rdk_indices]
-        anchor = list(set(anchor).union(expanded_mda_indices))
-        print(f"[get_ligand_anchor_atoms] Expanded to include rings: {expanded_mda_indices}")
 
+        # convert back to MDAnalysis indices, skip hydrogens
+        expanded_mda_indices = []
+        for ridx in expanded_rdk_indices:
+            atom = ligand_full.atoms[ridx]
+            if not atom.name.startswith("H"):
+                expanded_mda_indices.append(atom.index)
 
-    # Draw 2D image with highlights
+        anchor = sorted(set(anchor).union(expanded_mda_indices))
+
+        if verbose:
+            print(f"[get_ligand_anchor_atoms] Expanded to include rings (heavy only): {expanded_mda_indices}")
+
+    # Draw 2D image
     try:
+        # map MDA indices (all) to RDKit indices
         idx_map = {a.index: i for i, a in enumerate(ligand_full.atoms)}
+        # skip hydrogens in highlight
+        # idx_map = {k: v for k, v in idx_map.items() if not ligand_full.atoms[k].name.startswith("H")}
         highlight_rdk_indices = [idx_map[i] for i in anchor if i in idx_map]
+
+        # sanity check
+        # natoms = mol.GetNumAtoms()
+        # highlight_rdk_indices = [i for i in highlight_rdk_indices if i < natoms]
+
         Chem.rdDepictor.Compute2DCoords(mol)
-        mol = Chem.RemoveHs(mol)
-        img = Chem.Draw.MolToImage(mol, size=(300, 300), highlightAtoms=highlight_rdk_indices)
+        img = Chem.Draw.MolToImage(
+            mol,
+            size=(300, 300),
+            highlightAtoms=highlight_rdk_indices,
+        )
         img.save(img_name)
     except Exception as e:
         logging.warning(f"Could not generate 2D image with highlights: {e}")
-
-    if verbose:
-        print(f"[get_ligand_anchor_atoms] Anchor atoms selected ({mode}): {anchor}")
-
+        
+    #ligand_ag = u.atoms[anchor]
+    
     return anchor
 
 
