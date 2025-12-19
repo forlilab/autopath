@@ -1753,9 +1753,8 @@ class SteeredMDAnalysis:
         speed: float,
         quantities: list[str] | str = ["dG"],
         min_replicas: int = 3,
-        tol_rmsd: float = 2.0,     # kJ/mol
+        tol_rmsd: float = 3.0,     # kJ/mol
         tol_barrier: float = 2.0,  # kJ/mol
-        min_coverage_frac: float | None = None,
     ):
         """
         Sequential convergence check for a single pulling speed.
@@ -1842,14 +1841,7 @@ class SteeredMDAnalysis:
 
                 # align r_coord
                 common_r = pmf_k.index.intersection(pmf_km1.index)
-
-                if min_coverage_frac is not None:
-                    min_cov = int(np.ceil(min_coverage_frac * k))
-                    common_r = [
-                        r for r in common_r
-                        # if coverage.loc[r] >= min_cov
-                    ]
-
+                
                 print(
                     f"k={k}, path={path}, "
                     f"len(pmf_k)={len(pmf_k)}, "

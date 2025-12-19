@@ -135,11 +135,13 @@ class ProteinLigandAnalyzer:
 
     def get_persistent_interactions(self,
                                    fp_interactions: Optional[List[str]] = None,
+                                   frequency_cutoff: float = 0.5,
                                    stride: int = 1,
-                                   frequency_cutoff: float = 0.5
+                                   n_jobs: int = 1
                                    ):
         """
         Identify most persistent interactions across replicas using ProLif.
+        Prolif gives me problems with parallel processing, so n_jobs=1 by default.
 
         Parameters
         ----------
@@ -173,7 +175,7 @@ class ProteinLigandAnalyzer:
                 fp = fp.run(u.trajectory, #FIXME stride does not work here
                             protein_sel, 
                             ligand_sel,
-                            n_jobs=1
+                            n_jobs=n_jobs
                             )
                 # TODO: another function should read and analyze these pickles
                 fp.to_pickle(fp_fname)

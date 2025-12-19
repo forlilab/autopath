@@ -12,7 +12,7 @@ nvidia-smi
 
 source ~/.bashrc
 micromamba activate autopath3
-python ap_equilibration.py --rec ../data/3ptb.pdb --lig ../data/3ptb.sdf --protocol equilibration_lig_prot_memb_4ps.json\
+python ap_equilibration.py --rec ../data/3ptb.pdb --lig ../data/3ptb.sdf --protocol eq_lig-prot_5ns_4fs.json\
 # resname and smiles are optional
 #  --resname UNK\
 #  --smiles 'CCC(CC)O[C@@H]1C=C(C[C@@H]([C@H]1NC(=O)C)N)C(=O)[O-]'\

@@ -217,7 +217,7 @@ class AutoPath:
         lig_anchor_mode = 'lig_ha'
         lig_anchor_mode_atoms = 5
 
-        equilibrated_traj = equilibrated_traj.replace(".dcd", "_aligned.dcd")
+        equilibrated_traj = equilibrated_traj.replace(".dcd", "_aligned.xtc")
         u_eq = mda.Universe(equilibrated_pdb, equilibrated_traj, in_memory=True)
         try:
             rmsd = compute_rmsd(u_eq, u_eq,
@@ -319,7 +319,12 @@ class AutoPath:
                         log_files = glob(f"{sMD_outdir}/sMD_*_v{speed}_{self.sMD_pulling_dir}.dat")
                         current_replica = len(log_files) + 1
                         logger.info(f"Starting replica {current_replica} for speed {speed} nm/ps.")
-
+                        
+                        # cap the number of replicas to avoid infinite loops
+                        if current_replica > 50:
+                            logger.warning(f"Reached maximum number of replicas (50) for speed {speed} nm/ps without convergence. Stopping.")
+                            break
+                        
                         if len(log_files) >= 5:  # need at least 5 replicas to assess convergence
                             smd = SteeredMDAnalysis(
                                 log_files, sys_name, 
