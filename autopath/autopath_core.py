@@ -238,12 +238,20 @@ class AutoPath:
         #     if final_rmsd > self.eq_checkpoint_cutoff * 10:  # to Angs
         #         logger.warning(f"Simulation for ligand {sys_name} terminated because ligand RMSD={final_rmsd:.2f} > {self.eq_checkpoint_cutoff}")
         #         exit(1)
-
-        pocket_atoms = get_pocket_atoms(u_eq, self.pocket_selection)
-        pocket_atom_indices = [atom.index for atom in pocket_atoms]
+        # ligand_atoms = u_eq.select_atoms(f'index {" ".join(map(str, ligand_atoms_indices))}')
+        # final_com = calculate_com_distance(u_eq, ligand_atoms, pocket_atoms, wrap=False)[-1] /10 # convert to nm
+        # logger.info(f"COM distance after equilibration is: {final_com:.2f} nm")
+        
+        pocket_atom_indices = get_pocket_atoms_idxs(u_eq, self.pocket_selection)
+        pocket_atoms = u_eq.select_atoms(f'index {" ".join(map(str, pocket_atom_indices))}')
         pocket_residues = [f"{atom.resname}_{atom.resid}" for atom in pocket_atoms]
         logger.info(f"Pocket residues are: {', '.join(set(pocket_residues))}")
-
+        
+        ligand_atoms_indices = get_ligand_anchor_atoms(u_eq, ligand_resname, 
+                                                       mode=lig_anchor_mode, 
+                                                       n_atoms=lig_anchor_mode_atoms,
+                                                       out_dir=sys_name)
+        logger.info(f"Ligand anchor atom indices are: {', '.join(map(str, ligand_atoms_indices))}")
         # write out the pocket atoms to a pdb
         #FIXME this should be a function that writes a pymol sesh
         try:
@@ -256,21 +264,6 @@ class AutoPath:
         except Exception as e:
             logger.error(f"Error writing pocket/ligand/protein pdbs: {e}")
             pass
-        
-        ligand_atoms_indices = get_ligand_anchor_atoms(u_eq, ligand_resname, 
-                                                       mode=lig_anchor_mode, 
-                                                       n_atoms=lig_anchor_mode_atoms,
-                                                       out_dir=sys_name)
-        
-        # ligand_atoms = u_eq.select_atoms(f'index {" ".join(map(str, ligand_atoms_indices))}')
-        # final_com = calculate_com_distance(u_eq, ligand_atoms, pocket_atoms, wrap=False)[-1] /10 # convert to nm
-        # logger.info(f"COM distance after equilibration is: {final_com:.2f} nm")
-
-        # u_eq.trajectory[-1]  # set pointer to last frame
-        # restrained_atoms = u_eq.select_atoms("group pocket_atoms and name CA", pocket_atoms=pocket_atoms)
-        # restrained_atoms_indices = [atom.index for atom in restrained_atoms]
-        # restrained_atoms_full_names = [f"{atom.resname}_{atom.resid}_{atom.index}" for atom in restrained_atoms]
-        # logger.info(f"Restrained atoms are: {', '.join(set(restrained_atoms_full_names))}")
 
         ##############################################################################################
         ##################################### Steered MD simulations #################################
@@ -296,15 +289,12 @@ class AutoPath:
                 topology=topology,
                 groupA_atoms=ligand_atoms_indices,
                 groupB_atoms=pocket_atom_indices,
-                # restrained_atoms=restrained_atoms_indices, #NO RESTRAINTS IN SMD
                 restart_velocities=True,
                 autostop_freq=self.sMD_autostop_freq,
                 timestep=self.timestep,
                 temperature=self.temperature,
                 save_freq=1250,  # every 5 ps if timestep=0.004 ps
                 out_dir=sMD_outdir,
-                # platform="OpenCL",
-
             )
 
             for speed, reps in self.sMD_pulling_speeds.items():
@@ -332,8 +322,7 @@ class AutoPath:
 
                         if len(log_files) >= 5:  # need at least 5 replicas to assess convergence
                             smd = SteeredMDAnalysis(
-                                log_files, 
-                                sys_name, 
+                                log_files, sys_name, 
                                 outdir=f'{sMD_outdir}/analysis',
                                 reference_pdb=equilibrated_pdb,
                                 ligand_select=f'resname {ligand_resname} and not name H*',
@@ -342,9 +331,7 @@ class AutoPath:
                                 pulling_direction=self.sMD_pulling_dir
                             )
                             metrics_df, traces_df = smd.check_seq_rep_conv(
-                                speed=speed, 
-                                min_replicas=5,
-                                quantities=['dG', 'Wdiss', 'dG_Jarzynski'],
+                                speed=speed, quantities=['dG', 'Wdiss', 'dG_Jarzynski'],
                             )
 
                             metrics_df.to_csv(f"{sMD_outdir}/analysis/sMD_conv_v{speed}_metrics.csv", index=False)
@@ -404,9 +391,6 @@ class AutoPath:
         smd = SteeredMDAnalysis(logs, 
                                 sys_name, 
                                 outdir=f'{sMD_outdir}/analysis',
-                                # dist_minmax=(0.0, 1.4), #nm                        
-                                # cluster_paths='full',
-                                # cluster_range=(0.0, 1.1),
                                 trajectories=sMD_trajs,
                                 reference_pdb=equilibrated_pdb,
                                 pocket_select=f'protein and around 6.0 resname {ligand_resname} and name CA',

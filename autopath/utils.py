@@ -718,22 +718,22 @@ def add_variants(modeller: Modeller, variants_dict: dict = None) -> Modeller:
 
     return modeller 
 
-def get_pocket_atoms(u:mda.Universe = None,
+def get_pocket_atoms_idxs(u:mda.Universe = None,
                      pocket_selection:str = None,
                      ligand_selection:str = None,
                      cutoff: float = 6.0
-                     ) -> mda.AtomGroup:
+                     ) -> List[int]:
     """Get the pocket atoms based on a user provided selection 
     or the ligand residue name and some default heuristics."""
 
     if u is None:
-        logging.error("No MDAnalysis Universe provided.")
+        print("No MDAnalysis Universe provided.")
         exit(1)
         
     u.trajectory[-1]  # set pointer to last frame if its a trajectory
 
     if pocket_selection is None and ligand_selection is None:
-        logging.error("No pocket selection or ligand residue name provided.")
+        print("No pocket selection or ligand residue name provided.")
         exit(1)
     # If a custom pocket selection is provided, use it directly
     elif pocket_selection is not None and ligand_selection is None:
@@ -746,17 +746,14 @@ def get_pocket_atoms(u:mda.Universe = None,
         protein_residues = u.select_atoms(f"protein and around {cutoff} group ligand", ligand=ligand).residues
         pocket_atoms_indices = [atom.index for res in protein_residues for atom in res.atoms if atom.name in ['CA']]
     else:
-        logging.error("Please provide either a pocket selection or a ligand residue name, not both.")
+        print("Please provide either a pocket selection or a ligand residue name, not both.")
         exit(1)
         
     if len(pocket_atoms_indices) == 0:
-        logging.error(f"No atoms found for the provided pocket selection")
+        print(f"No atoms found for the provided pocket selection")
         exit(1)
-    else:
-        # convert to MDAnalysis AtomGroup
-        pocket_atoms = u.select_atoms(f"index {' '.join(map(str, pocket_atoms_indices))}")
         
-    return pocket_atoms
+    return pocket_atoms_indices
 
 def reduce_to_murcko_scaffold(u, lig_resname: str, img_name: str = None):
     """

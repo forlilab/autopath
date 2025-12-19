@@ -241,8 +241,7 @@ class SystemPreparation:
                     for lig_name, lig_path, lig_smiles, lig_from_xray in ligands:
                         while chr(chain_id) in used_chains:
                             chain_id += 1
-                        logging.info(f"Parametrizing ligand {lig_name}..")
-                        print(f"Parametrizing ligand {lig_name}..")
+                        logger.info(f"Parametrizing ligand {lig_name}..")
                         lig = self._ligand_to_mol(lig_path, lig_smiles, lig_from_xray)
                         ligand_topology, ligand_positions = self._parametrize_ligand(lig)
                         for chain in ligand_topology.chains():

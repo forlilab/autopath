@@ -157,21 +157,24 @@ class ProteinLigandAnalyzer:
         else:
             fp = Fingerprint()  # default interaction set
 
-        for rep_name, rep in self.replicas.items():
+        for rep_name, u in self.replicas.items():
             fp_fname = os.path.join(self.outdir, f"FP_{rep_name}.pkl")
             if os.path.exists(fp_fname):
                 fp = Fingerprint.from_pickle(fp_fname)
                 logger.info(f"Loaded cached ProLif fingerprint for replica {rep_name}")
             else:
                 logger.info(f"Computing ProLif fingerprint for replica {rep_name}")
-                protein_sel = rep.select_atoms(self.protein_mda_selection) if self.protein_mda_selection else rep.select_atoms("protein")
-                ligand_sel = rep.select_atoms(self.ligand_mda_selection)
-
+                protein_sel = u.select_atoms(self.protein_mda_selection) if self.protein_mda_selection else u.select_atoms("protein")
+                logger.info(f"Protein selection has {protein_sel.n_atoms} atoms.")
+                ligand_sel = u.select_atoms(self.ligand_mda_selection)
+                logger.info(f"Ligand selection has {ligand_sel.n_atoms} atoms.")
+                
                 # Compute interaction fingerprint over trajectory, optionally strided
-                fp = fp.run(rep.trajectory, #FIXME stride does not work here
-                                protein_sel, 
-                                ligand_sel
-                                )
+                fp = fp.run(u.trajectory, #FIXME stride does not work here
+                            protein_sel, 
+                            ligand_sel,
+                            n_jobs=1
+                            )
                 # TODO: another function should read and analyze these pickles
                 fp.to_pickle(fp_fname)
             
