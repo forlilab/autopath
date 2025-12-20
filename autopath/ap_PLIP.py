@@ -613,4 +613,85 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
         plt.savefig(out_fname, dpi=300)
         # plt.show()
         plt.close()
-        return 
+        return
+    
+    @staticmethod
+    def paint_mmpbsa_byresidue(df_decomp,
+                            pdb_file: str=None,
+                            prmtop_file: str=None,
+                            mmpbsa_component: str='all',
+                            normalize: bool=False,
+                            outdir: str=None,
+                            ):
+        """paint_mmpbsa_byresidue This function colors a PDB structure 
+        based on per-residue MMGBSA decomposition values.
+
+        Args:
+            df_decomp (pd.DataFrame): DataFrame containing MMGBSA decomposition data.
+            pdb_file (str): Path to the PDB file.
+            prmtop_file (str): Path to the topology file.
+            mmpbsa_component (str): Component to use for coloring (e.g., 'TOTAL').
+        """
+        _components_list = ['TOTAL_Avg', 'Electrostatic_Avg', "van_der_Waals_Avg",
+                            'Internal_Avg', #this one is usually not very informative
+                            "Polar_Solvation_Avg", "Non_Polar_Solv_Avg"]
+        if outdir is None:
+            outdir = '.'
+        
+        os.makedirs(outdir, exist_ok=True)
+            
+        if mmpbsa_component.upper() == 'ALL':
+            components_list = _components_list
+        else:
+            if mmpbsa_component not in _components_list:
+                print(f"ERROR: mmpbsa_component must be one of {_components_list} or 'all'.")
+            else:
+                components_list = [mmpbsa_component]
+
+        if pdb_file is None or prmtop_file is None:
+            print("ERROR: Both pdb_file and prmtop_file must be provided.")
+            exit(1)
+        
+        u = mda.Universe(prmtop_file, pdb_file)
+        
+        # Initialize all B-factors to 0
+        u.add_TopologyAttr("tempfactors")
+
+        for component in components_list:
+            print(f"Painting component: {component}")
+            out_fname = f'{outdir}/mmpbsa_painted_{component}.pdb'
+            u.atoms.tempfactors = 0.0
+
+            # Process protein residues
+            for res in u.residues:
+                # Determine if the residue is in the receptor (R) or ligand (L)
+                location = "R" if res.resid in df_decomp[df_decomp["location"] == "R"]["resid"].values else "L"
+                
+                # Filter the decomposition data for the current residue
+                _df = df_decomp[(df_decomp["resid"] == res.resid) & (df_decomp["location"] == location)]
+                
+                if not _df.empty:
+                    residue = _df.iloc[0]
+                    # Check if residue names match
+                    if res.resname != residue['resname']:
+                        print(f'WARNING: Residue name mismatch for resid {res.resid}: '
+                            f'{res.resname} (PDB) vs {residue["resname"]} (decomp)')
+                        continue
+                    
+                    # Assign the MMGBSA component value to the B-factor
+                    res.atoms.tempfactors = residue[component]
+
+            if normalize:
+                # Normalize B-factors to 0-100 range for better visualization
+                b_factors = u.atoms.tempfactors
+                min_b = np.min(b_factors)
+                max_b = np.max(b_factors)
+                u.atoms.tempfactors = 100 * (b_factors - min_b) / (max_b - min_b)
+                out_fname = f'{outdir}/mmpbsa_painted_{component}_NORM.pdb'
+            # Write out the new PDB with B-factors set to the decomposition values
+            # Strip water, ions, and some lipids for clarity. this can be improved
+
+            u.select_atoms("not resname HOH and not resname NA and not resname CL and not resname POP"
+                        ).write(out_fname)
+            # print(f"Painted PDB saved to {out_fname}")
+        return
