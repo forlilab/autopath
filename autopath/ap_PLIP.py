@@ -92,6 +92,7 @@ class ProteinLigandAnalyzer:
         
         return concat_u
 
+    @staticmethod
     def write_combined_trajectory(
             topology: str,
             trajectories: List[str],
@@ -378,40 +379,39 @@ class ProteinLigandAnalyzer:
         """Function to write a SLURM qfile for MMPBSA calculations."""    
         
         template='''#!/bin/bash
-    #SBATCH -e ${out_dir}/${sysname}_mmpbsa.err
-    #SBATCH -o ${out_dir}/${sysname}_mmpbsa.out
-    ##SBATCH --gres=gpu#:${gpu_resource}:${gpu_num} # COMMENT OUT THE # IF YOU WANT TO USE A SPECIFIC GPU TYPE
-    #SBATCH --time=${time}
-    #SBATCH --partition=${partition}
-    #SBATCH --exclude=nodea0111,nodea0110 # EXCLUDE KNOWN PROBLEMATIC NODES
-    #SBATCH --ntasks=${omp_threads}  # Request 32 separate MPI processes/slots
-    #SBATCH --cpus-per-task=1 # Each process uses 1 CPU. for MPI runs
-    ## SBATCH --cpus-per-task=${omp_threads} # Each process uses multiple CPUs. for OpenMP runs
-    #SBATCH --job-name="mmpbsa_${sysname}"
+#SBATCH -e ${out_dir}/${sysname}_mmpbsa.err
+#SBATCH -o ${out_dir}/${sysname}_mmpbsa.out
+#SBATCH --time=${time}
+#SBATCH --partition=${partition}
+#SBATCH --exclude=nodea0111,nodea0110 # EXCLUDE KNOWN PROBLEMATIC NODES
+#SBATCH --ntasks=${omp_threads}  # Request 32 separate MPI processes/slots
+#SBATCH --cpus-per-task=1 # Each process uses 1 CPU. for MPI runs
+## SBATCH --cpus-per-task=${omp_threads} # Each process uses multiple CPUs. for OpenMP runs
+#SBATCH --job-name="mmpbsa_${sysname}"
 
-    # module purge
-    module load openmpi/3.1.6
-    # module load gcc
+# module purge
+module load openmpi/3.1.6
+# module load gcc
 
-    source ~/.bashrc
-    micromamba activate autopath3
+source ~/.bashrc
+micromamba activate autopath3
 
-    module load amber/24
-    #export OMP_NUM_THREADS=${omp_threads}
+module load amber/24
+#export OMP_NUM_THREADS=${omp_threads}
 
-    echo "Starting mmpbsa calculation for ${sysname} at $(date)"
-    echo "Running on $(hostname)"
-    echo "Entering output directory ${out_dir} ..."
-    cd ${out_dir}
+echo "Starting mmpbsa calculation for ${sysname} at $(date)"
+echo "Running on $(hostname)"
+echo "Entering output directory ${out_dir} ..."
+cd ${out_dir}
 
-    echo "Running ante-mmpbsa to generate prmtop files..."
-    ante-MMPBSA.py -p ${system_prmtop} -s ${strip_selection} -n ${lig_selection} --radii mbondi2 -c complex.prmtop -r receptor.prmtop -l ligand.prmtop
+echo "Running ante-mmpbsa to generate prmtop files..."
+ante-MMPBSA.py -p ${system_prmtop} -s ${strip_selection} -n ${lig_selection} --radii mbondi2 -c complex.prmtop -r receptor.prmtop -l ligand.prmtop
 
-    echo "Finished ante-mmpbsa at $(date)"
-    echo "Running mmpbsa.py for trajectory ${trajectory} ..."
+echo "Finished ante-mmpbsa at $(date)"
+echo "Running mmpbsa.py for trajectory ${trajectory} ..."
 
-    # MMPBSA.py -O -i ${mmpbsa_in} -o FINAL_RESULTS_mmpbsa.dat -do FINAL_DECOMP_mmpbsa.dat -sp ${system_prmtop} -y ${trajectory} -cp complex.prmtop -rp receptor.prmtop -lp ligand.prmtop
-    mpirun -np ${omp_threads} MMPBSA.py.MPI -O -i ${mmpbsa_in} -o FINAL_RESULTS_mmpbsa.dat -do FINAL_DECOMP_mmpbsa.dat -sp ${system_prmtop} -y ${trajectory} -cp complex.prmtop -rp receptor.prmtop -lp ligand.prmtop
+# MMPBSA.py -O -i ${mmpbsa_in} -o FINAL_RESULTS_mmpbsa.dat -do FINAL_DECOMP_mmpbsa.dat -sp ${system_prmtop} -y ${trajectory} -cp complex.prmtop -rp receptor.prmtop -lp ligand.prmtop
+mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} -o FINAL_RESULTS_mmpbsa.dat -do FINAL_DECOMP_mmpbsa.dat -sp ${system_prmtop} -y ${trajectory} -cp complex.prmtop -rp receptor.prmtop -lp ligand.prmtop
 
     '''
 
@@ -431,6 +431,45 @@ class ProteinLigandAnalyzer:
             f.write(template)
 
         return
+    
+    @staticmethod
+    def prepare_mmpbsa_batch(
+            sysname:str=None,
+            prmtop:str=None,
+            traj_fname:str=None,
+            ligand_amber_selection:str=":UNK",
+            strip_amber_selection:str=":POP:WAT:HOH,Na+:Cl-:Mg+:K+:NA:CL:K:MG",
+            mmpbsa_in:str="mmgbsa.in",
+            output_folder:str="mmpbsa_results",
+            bash_fname:str="run_mmpbsa_batch.sh",
+            mpi_threads:int=64,
+            ):
+        """Prepare MMPBSA batch script and qfiles."""
+        
+        os.makedirs('qfiles_mmpbsa', exist_ok=True)
+        os.makedirs(output_folder, exist_ok=True)
+
+        with open(bash_fname, "w") as f:
+            system_prmtop_abs = os.path.abspath(prmtop)
+            trajectory_abs = os.path.abspath(traj_fname)
+            mmpbsa_IN = os.path.abspath(mmpbsa_in)
+            logger.info(f"Writing MMPBSA qfile for system {sysname} ...")
+            ProteinLigandAnalyzer.write_qfile_mmpbsa(sysname=sysname,
+                                                    out_dir=output_folder,
+                                                    mmpbsa_in=mmpbsa_IN,
+                                                    system_prmtop=system_prmtop_abs,
+                                                    trajectory=trajectory_abs,
+                                                    lig_selection=ligand_amber_selection,
+                                                    strip_selection=strip_amber_selection,
+                                                    omp_threads=mpi_threads
+                                                    )
+            f.write("#!/bin/bash\n\n")
+            f.write(f"sbatch qfiles_mmpbsa/{sysname}_mmpbsa.q\n")
+
+        os.chmod(bash_fname, 0o755)
+        
+        return bash_fname
+        
     
     @staticmethod
     def parse_mmpbsa_deltas_all_components(filepath:str=None) -> pd.DataFrame:
