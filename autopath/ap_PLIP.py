@@ -579,3 +579,38 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
         df['label'] = df['resname'] + df['resid'].astype(str)
         return df
         
+    @staticmethod
+    def plot_mmpbsa_byresidue(df_decomp: pd.DataFrame,
+                            component: str='TOTAL',
+                            location: str='receptor',
+                            top_residues: int=10,
+                            out_fname: str=None
+                            ):
+        # Plot per-residue MMGBSA decomposition for top/bottom residues
+        if out_fname is None:
+            out_fname = f'mmpbsa_byres_{location}_{component}.png'
+        
+        #you may care about ligands if you are studying protein-protein interactions
+        if location == "receptor":
+            loc = "R"
+        else:
+            loc = "L"
+        
+        df_protein = df_decomp[df_decomp["location"] == loc].copy()
+        
+        top = df_protein.sort_values(f"{component}_Avg").head(top_residues)
+        bottom = df_protein.sort_values(f"{component}_Avg").tail(top_residues)
+        
+        plt.figure(figsize=(int(1*top_residues), int(top_residues/2)))
+        plt.bar(top["label"], top[f"{component}_Avg"], color="skyblue", yerr=top[f"{component}_StdErr"], capsize=4)
+        plt.bar(bottom["label"], bottom[f"{component}_Avg"], color="salmon", yerr=bottom[f"{component}_StdErr"], capsize=4)
+        # plt.axhline(0, linestyle="--")
+        plt.xticks(rotation=45)
+        plt.ylabel("ΔG_res (kcal/mol)")
+        # plt.title(f"Per-residue MMGBSA decomposition ({component}, {location})")
+        plt.title(f"{component} energy, {location}")
+        plt.tight_layout()
+        plt.savefig(out_fname, dpi=300)
+        # plt.show()
+        plt.close()
+        return 
