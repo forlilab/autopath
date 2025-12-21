@@ -217,7 +217,7 @@ class AutoPath:
         lig_anchor_mode = 'lig_ha'
         lig_anchor_mode_atoms = 5
 
-        equilibrated_traj = equilibrated_traj.replace(".dcd", "_aligned.xtc")
+        equilibrated_traj = equilibrated_traj.replace(".dcd", "_aligned.dcd")
         u_eq = mda.Universe(equilibrated_pdb, equilibrated_traj, in_memory=True)
         try:
             rmsd = compute_rmsd(u_eq, u_eq,
