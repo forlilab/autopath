@@ -226,7 +226,7 @@ class AutoPath:
                                                 "protein":'protein and not name H*'},
                                 plots_outdir=f"{sys_name}/equilibration"
                                 )
-            rmsd.to_csv(f"{sys_name}/equilibration/{sys_name}_ligand_rmsd.csv", index=False)
+            rmsd.to_csv(f"{sys_name}/equilibration/{sys_name}_rmsd.csv", index=False)
             plot_atomic_rmsf(u_eq, outname=f"{sys_name}/equilibration/{sys_name}_RMSF.png", log_rmsf=True)
         except Exception as e:
             logger.error(f"Error computing RMSD/RMSF: {e}")
