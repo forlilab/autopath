@@ -94,13 +94,14 @@ class SystemPreparation:
         ]
 
         if is_membrane and self.lipid_type is not None:
-            assert self.lipid_type in self._available_lipids, logger.error(
-                f"{self.lipid_type} lipid is not supported. Available lipids are:\n\t{self._available_lipids}"
-            )
+            if os.path.exists(self.lipid_type):
+                logger.info(f"Using custom lipid patch from {self.lipid_type}")
+            else:
+                assert self.lipid_type in self._available_lipids, logger.error(
+                    f"{self.lipid_type} lipid is not supported. Available lipids are:\n\t{self._available_lipids}"
+                )
         elif is_membrane and self.lipid_type is None:
-            logger.error(
-                f"For building a membrane system a lipid type must be specified"
-            )
+            logger.error(f"For building a membrane system a lipid type must be specified")
             exit(1)
 
         # you proabably dont want to change this
