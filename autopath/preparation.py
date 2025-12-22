@@ -279,12 +279,15 @@ class SystemPreparation:
             modeller = Modeller(ligand_topology, ligand_positions)
 
         if self.is_membrane:
-
-            logger.info(f"Adding a {self.lipid_type} membrane to the system..")
+            logger.info(f"Adding a {os.path.basename(self.lipid_type)} membrane to the system..")
+            if os.path.exists(self.lipid_type):
+                lipid_patch = PDBFile(self.lipid_type)
+            else:
+                lipid_patch = self.lipid_type
             try:
                 modeller.addMembrane(
                     forcefield=self.forcefield,
-                    lipidType=self.lipid_type,
+                    lipidType=lipid_patch,
                     neutralize=True,
                     ionicStrength=self.ionicStrength,
                     minimumPadding=self.padding + max_length,
