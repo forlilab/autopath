@@ -555,7 +555,73 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
         
         return bash_fname
         
-    
+    @staticmethod
+    def parse_mmpbsa_differences_table(path:str) -> pd.DataFrame:
+        """
+        Parse the 'Differences (Complex - Receptor - Ligand):' table from FINAL_RESULTS_mmpbsa.dat.
+
+        Returns DataFrame with:
+        Component, Average, Std_Dev, Std_Err_Mean
+        """
+        with open(path, "r") as f:
+            lines = f.readlines()
+
+        #Locate the start of the Differences section
+        start_idx = None
+        for i, line in enumerate(lines):
+            if line.strip().startswith("Differences (Complex - Receptor - Ligand):"):
+                start_idx = i
+                break
+        if start_idx is None:
+            raise ValueError("Could not find 'Differences (Complex - Receptor - Ligand):' section.")
+
+        # ve to first data line (after dashed separator)
+        i = start_idx + 1
+        while i < len(lines):
+            if re.match(r"^-{5,}\s*$", lines[i].strip()):  # line of dashes
+                i += 1
+                break
+            i += 1
+
+        #Parse rows: name (possibly with spaces) + 3 floats
+        float_row = re.compile(
+            r"^\s*(?P<name>.*?)\s+"
+            r"(?P<avg>-?\d+(?:\.\d+)?)\s+"
+            r"(?P<std>-?\d+(?:\.\d+)?)\s+"
+            r"(?P<sem>-?\d+(?:\.\d+)?)\s*$"
+        )
+
+        rows = []
+        while i < len(lines):
+            line = lines[i].rstrip("\n")
+            s = line.strip()
+
+            # Skip blank lines (DELTA rows often come after blanks)
+            if s == "":
+                i += 1
+                continue
+
+            # Stop when the next section begins (usually a header ending with :)
+            # e.g. "Energy Component ..." blocks elsewhere, or other section titles
+            if s.endswith(":") and not s.startswith("DELTA"):
+                break
+
+            m = float_row.match(line)
+            if m:
+                rows.append({
+                    "Component": m.group("name").strip(),
+                    "Average": float(m.group("avg")),
+                    "Std_Dev": float(m.group("std")),
+                    "Std_Err_Mean": float(m.group("sem")),
+                })
+
+            i += 1
+
+        if not rows:
+            raise ValueError("Found the Differences section, but parsed zero rows.")
+
+        return pd.DataFrame(rows)
+        
     @staticmethod
     def parse_mmpbsa_deltas_all_components(filepath:str=None) -> pd.DataFrame:
         """
@@ -663,73 +729,6 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
         df = pd.DataFrame.from_records(records)
         df['label'] = df['resname'] + df['resid'].astype(str)
         return df
-    
-    @staticmethod
-    def parse_mmpbsa_differences_table(path:str) -> pd.DataFrame:
-        """
-        Parse the 'Differences (Complex - Receptor - Ligand):' table from FINAL_RESULTS_mmpbsa.dat.
-
-        Returns DataFrame with:
-        Component, Average, Std_Dev, Std_Err_Mean
-        """
-        with open(path, "r") as f:
-            lines = f.readlines()
-
-        #Locate the start of the Differences section
-        start_idx = None
-        for i, line in enumerate(lines):
-            if line.strip().startswith("Differences (Complex - Receptor - Ligand):"):
-                start_idx = i
-                break
-        if start_idx is None:
-            raise ValueError("Could not find 'Differences (Complex - Receptor - Ligand):' section.")
-
-        # ve to first data line (after dashed separator)
-        i = start_idx + 1
-        while i < len(lines):
-            if re.match(r"^-{5,}\s*$", lines[i].strip()):  # line of dashes
-                i += 1
-                break
-            i += 1
-
-        #Parse rows: name (possibly with spaces) + 3 floats
-        float_row = re.compile(
-            r"^\s*(?P<name>.*?)\s+"
-            r"(?P<avg>-?\d+(?:\.\d+)?)\s+"
-            r"(?P<std>-?\d+(?:\.\d+)?)\s+"
-            r"(?P<sem>-?\d+(?:\.\d+)?)\s*$"
-        )
-
-        rows = []
-        while i < len(lines):
-            line = lines[i].rstrip("\n")
-            s = line.strip()
-
-            # Skip blank lines (DELTA rows often come after blanks)
-            if s == "":
-                i += 1
-                continue
-
-            # Stop when the next section begins (usually a header ending with :)
-            # e.g. "Energy Component ..." blocks elsewhere, or other section titles
-            if s.endswith(":") and not s.startswith("DELTA"):
-                break
-
-            m = float_row.match(line)
-            if m:
-                rows.append({
-                    "Component": m.group("name").strip(),
-                    "Average": float(m.group("avg")),
-                    "Std_Dev": float(m.group("std")),
-                    "Std_Err_Mean": float(m.group("sem")),
-                })
-
-            i += 1
-
-        if not rows:
-            raise ValueError("Found the Differences section, but parsed zero rows.")
-
-        return pd.DataFrame(rows)
         
     @staticmethod
     def plot_mmpbsa_byresidue(df_decomp: pd.DataFrame,
