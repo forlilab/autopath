@@ -3,6 +3,7 @@ import re
 import numpy as np
 import pandas as pd
 from typing import List, Optional
+from collections import Counter
 
 import MDAnalysis as mda
 import pytraj as pt
@@ -129,6 +130,68 @@ class ProteinLigandAnalyzer:
                     W.write(u.atoms)
 
         return output_traj
+
+    def find_interfacial_waters(
+            u: mda.Universe,
+            ligand_sel: str = "resname UNK",
+            protein_sel: str = "protein",
+            cutoff: float = 3.5,
+            fraction_persistence: float = 0.5,
+            pdb_fname: str = None,
+    ):
+        """
+        Identify persistent interfacial water molecules across a trajectory.
+
+        A water is interfacial in a frame if:
+            - any atom of that water is within `cutoff` Å of protein
+            - AND within `cutoff` Å of ligand
+        """
+
+        WATER_SEL= "resname HOH or resname WAT or resname SOL"
+
+        n_frames = len(u.trajectory)
+
+        counts = Counter()
+
+        for ts in u.trajectory:
+
+            # waters = u.select_atoms(WATER_SEL)
+
+            # Waters close to protein
+            near_protein = u.select_atoms(
+                f"({WATER_SEL}) and around {cutoff} ({protein_sel})"
+            )
+
+            # Waters close to ligand
+            near_ligand = u.select_atoms(
+                f"({WATER_SEL}) and around {cutoff} ({ligand_sel})"
+            )
+
+            # Residue-level intersection
+            interfacial_resids = np.intersect1d(
+                near_protein.resids,
+                near_ligand.resids
+            )
+
+            counts.update(interfacial_resids)
+        counts = {resid: c/n_frames for resid, c in counts.items()}
+        persistent = {resid: c for resid, c in counts.items() if c >= fraction_persistence}
+        # print(counts)
+        
+        if pdb_fname is not None:
+            keep_water_str = " ".join(str(r) for r in persistent.keys())
+            persistent_water_sel = f"({WATER_SEL}) and resid {keep_water_str}"
+
+            # Final cleaned selection
+            final_sel_str = f"({protein_sel}) or ({ligand_sel}) or ({persistent_water_sel})"
+
+            cleaned = u.select_atoms(final_sel_str)
+
+            # Write the final frame
+            u.trajectory[-1]
+            cleaned.write(pdb_fname)
+
+        return dict(sorted(persistent.items(), key=lambda item: item[1], reverse=True))
             
     # -----------------------------------------------------------
     #   PROLIF STUFF
@@ -254,6 +317,7 @@ class ProteinLigandAnalyzer:
             plt.show()
             plt.close()
             return similarity_matrix
+        
     # -----------------------------------------------------------
     #   LIE CALCULATION VIA PYTRAJ
     # -----------------------------------------------------------
@@ -362,7 +426,7 @@ class ProteinLigandAnalyzer:
     #   MMPB(GB)SA 
     # -----------------------------------------------------------
     @staticmethod
-    def write_qfile_mmpbsa(
+    def _write_qfile_mmpbsa(
                     sysname:str=None,
                     out_dir:str=None,
                     mmpbsa_in:str=None,
@@ -439,10 +503,11 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
             traj_fname:str=None,
             ligand_amber_selection:str=":UNK",
             strip_amber_selection:str=":POP:WAT:HOH,Na+:Cl-:Mg+:K+:NA:CL:K:MG",
+            persistent_waters_cutoff:float=None,
             mmpbsa_in:str="mmgbsa.in",
             output_folder:str="mmpbsa_results",
             bash_fname:str="run_mmpbsa_batch.sh",
-            mpi_threads:int=64,
+            mpi_threads:int=128,
             ):
         """Prepare MMPBSA batch script and qfiles."""
         
@@ -454,7 +519,27 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
             trajectory_abs = os.path.abspath(traj_fname)
             mmpbsa_IN = os.path.abspath(mmpbsa_in)
             logger.info(f"Writing MMPBSA qfile for system {sysname} ...")
-            ProteinLigandAnalyzer.write_qfile_mmpbsa(sysname=sysname,
+            if persistent_waters_cutoff is not None:
+                logger.info(f"Identifying persistent interfacial waters for system {sysname} ...")
+                u = mda.Universe(prmtop, traj_fname)
+                persistent_waters = ProteinLigandAnalyzer.find_interfacial_waters(
+                    u,
+                    ligand_sel=ligand_amber_selection.replace(":", "resname "),
+                    protein_sel="protein",
+                    cutoff=3.5,
+                    fraction_persistence=persistent_waters_cutoff,
+                    pdb_fname=os.path.join(output_folder, f"{sysname}_persistentWaters.pdb")
+                )
+                if persistent_waters:
+                    water_resids_str = ",".join(str(r) for r in persistent_waters.keys())
+                    logger.info(f"Found {len(persistent_waters)} persistent interfacial waters: {water_resids_str}")
+                    # exclude these waters from stripping
+                    strip_amber_selection = strip_amber_selection.strip(':WAT').strip(':HOH')
+                    strip_amber_selection += f":WAT,HOH@{water_resids_str}"
+                else:
+                    logger.info("No persistent interfacial waters found.")
+                    
+            ProteinLigandAnalyzer._write_qfile_mmpbsa(sysname=sysname,
                                                     out_dir=output_folder,
                                                     mmpbsa_in=mmpbsa_IN,
                                                     system_prmtop=system_prmtop_abs,
@@ -578,6 +663,73 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
         df = pd.DataFrame.from_records(records)
         df['label'] = df['resname'] + df['resid'].astype(str)
         return df
+    
+    @staticmethod
+    def parse_mmpbsa_differences_table(path:str) -> pd.DataFrame:
+        """
+        Parse the 'Differences (Complex - Receptor - Ligand):' table from FINAL_RESULTS_mmpbsa.dat.
+
+        Returns DataFrame with:
+        Component, Average, Std_Dev, Std_Err_Mean
+        """
+        with open(path, "r") as f:
+            lines = f.readlines()
+
+        #Locate the start of the Differences section
+        start_idx = None
+        for i, line in enumerate(lines):
+            if line.strip().startswith("Differences (Complex - Receptor - Ligand):"):
+                start_idx = i
+                break
+        if start_idx is None:
+            raise ValueError("Could not find 'Differences (Complex - Receptor - Ligand):' section.")
+
+        # ve to first data line (after dashed separator)
+        i = start_idx + 1
+        while i < len(lines):
+            if re.match(r"^-{5,}\s*$", lines[i].strip()):  # line of dashes
+                i += 1
+                break
+            i += 1
+
+        #Parse rows: name (possibly with spaces) + 3 floats
+        float_row = re.compile(
+            r"^\s*(?P<name>.*?)\s+"
+            r"(?P<avg>-?\d+(?:\.\d+)?)\s+"
+            r"(?P<std>-?\d+(?:\.\d+)?)\s+"
+            r"(?P<sem>-?\d+(?:\.\d+)?)\s*$"
+        )
+
+        rows = []
+        while i < len(lines):
+            line = lines[i].rstrip("\n")
+            s = line.strip()
+
+            # Skip blank lines (DELTA rows often come after blanks)
+            if s == "":
+                i += 1
+                continue
+
+            # Stop when the next section begins (usually a header ending with :)
+            # e.g. "Energy Component ..." blocks elsewhere, or other section titles
+            if s.endswith(":") and not s.startswith("DELTA"):
+                break
+
+            m = float_row.match(line)
+            if m:
+                rows.append({
+                    "Component": m.group("name").strip(),
+                    "Average": float(m.group("avg")),
+                    "Std_Dev": float(m.group("std")),
+                    "Std_Err_Mean": float(m.group("sem")),
+                })
+
+            i += 1
+
+        if not rows:
+            raise ValueError("Found the Differences section, but parsed zero rows.")
+
+        return pd.DataFrame(rows)
         
     @staticmethod
     def plot_mmpbsa_byresidue(df_decomp: pd.DataFrame,
