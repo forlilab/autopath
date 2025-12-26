@@ -732,38 +732,41 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
         
     @staticmethod
     def plot_mmpbsa_byresidue(df_decomp: pd.DataFrame,
-                            component: str='TOTAL',
-                            location: str='receptor',
                             top_residues: int=10,
-                            out_fname: str=None
+                            out_dir: str=None
                             ):
-        # Plot per-residue MMGBSA decomposition for top/bottom residues
-        if out_fname is None:
-            out_fname = f'mmpbsa_byres_{location}_{component}.png'
+        if out_dir is None:
+            out_dir = os.getcwd()
+        os.makedirs(out_dir, exist_ok=True)
+
+        mmpbsa_components_list = ['TOTAL_Avg', 'Electrostatic_Avg', "van_der_Waals_Avg",
+                    'Internal_Avg', #this one is usually not very informative
+                    "Polar_Solvation_Avg", "Non_Polar_Solv_Avg"]
         
         #you may care about ligands if you are studying protein-protein interactions
-        if location == "receptor":
-            loc = "R"
-        else:
-            loc = "L"
+        locations = {'R':'receptor', 'L':'ligand'}
+        for loc, location in locations.items():
+            df = df_decomp[df_decomp["location"] == loc].copy()
+            
+            for component in mmpbsa_components_list:
+                out_fname = os.path.join(out_dir, f'mmpbsa_byres_{location}_{component}.png')
+                
+                # Plot per-residue MMGBSA decomposition for top/bottom residues
+                top = df.sort_values(component).head(top_residues)
+                bottom = df.sort_values(component).tail(top_residues)
+                
+                plt.figure(figsize=(int(1*top_residues), int(top_residues/2)))
+                plt.bar(top["label"], top[component], color="skyblue", yerr=top[component.replace('Avg', 'StdErr')], capsize=4)
+                plt.bar(bottom["label"], bottom[component], color="salmon", yerr=bottom[component.replace('Avg', 'StdErr')], capsize=4)
+                # plt.axhline(0, linestyle="--")
+                plt.xticks(rotation=45)
+                plt.ylabel("ΔG_res (kcal/mol)")
+                plt.title(f"{component} energy, {location}")
+                plt.tight_layout()
+                plt.savefig(out_fname, dpi=300)
+                # plt.show()
+                plt.close()
         
-        df_protein = df_decomp[df_decomp["location"] == loc].copy()
-        
-        top = df_protein.sort_values(f"{component}_Avg").head(top_residues)
-        bottom = df_protein.sort_values(f"{component}_Avg").tail(top_residues)
-        
-        plt.figure(figsize=(int(1*top_residues), int(top_residues/2)))
-        plt.bar(top["label"], top[f"{component}_Avg"], color="skyblue", yerr=top[f"{component}_StdErr"], capsize=4)
-        plt.bar(bottom["label"], bottom[f"{component}_Avg"], color="salmon", yerr=bottom[f"{component}_StdErr"], capsize=4)
-        # plt.axhline(0, linestyle="--")
-        plt.xticks(rotation=45)
-        plt.ylabel("ΔG_res (kcal/mol)")
-        # plt.title(f"Per-residue MMGBSA decomposition ({component}, {location})")
-        plt.title(f"{component} energy, {location}")
-        plt.tight_layout()
-        plt.savefig(out_fname, dpi=300)
-        # plt.show()
-        plt.close()
         return
     
     @staticmethod
@@ -783,7 +786,7 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
             prmtop_file (str): Path to the topology file.
             mmpbsa_component (str): Component to use for coloring (e.g., 'TOTAL').
         """
-        _components_list = ['TOTAL_Avg', 'Electrostatic_Avg', "van_der_Waals_Avg",
+        mmpbsa_components_list = ['TOTAL_Avg', 'Electrostatic_Avg', "van_der_Waals_Avg",
                             'Internal_Avg', #this one is usually not very informative
                             "Polar_Solvation_Avg", "Non_Polar_Solv_Avg"]
         if outdir is None:
@@ -792,10 +795,10 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
         os.makedirs(outdir, exist_ok=True)
             
         if mmpbsa_component.upper() == 'ALL':
-            components_list = _components_list
+            components_list = mmpbsa_components_list
         else:
-            if mmpbsa_component not in _components_list:
-                print(f"ERROR: mmpbsa_component must be one of {_components_list} or 'all'.")
+            if mmpbsa_component not in mmpbsa_components_list:
+                print(f"ERROR: mmpbsa_component must be one of {mmpbsa_components_list} or 'all'.")
             else:
                 components_list = [mmpbsa_component]
 
