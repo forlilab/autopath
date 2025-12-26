@@ -535,7 +535,7 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
                     logger.info(f"Found {len(persistent_waters)} persistent interfacial waters: {water_resids_str}")
                     # exclude these waters from stripping
                     strip_amber_selection = strip_amber_selection.strip(':WAT').strip(':HOH')
-                    strip_amber_selection += f":WAT,HOH@{water_resids_str}"
+                    strip_amber_selection += f"!(:WAT,HOH@{water_resids_str})"
                 else:
                     logger.info("No persistent interfacial waters found.")
                     
