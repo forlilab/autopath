@@ -729,6 +729,73 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
         df = pd.DataFrame.from_records(records)
         df['label'] = df['resname'] + df['resid'].astype(str)
         return df
+    
+    @staticmethod
+    def parse_mmpbsa_differences_table(path):
+        """
+        Parse the 'Differences (Complex - Receptor - Ligand):' table from FINAL_RESULTS_mmpbsa.dat.
+
+        Returns DataFrame with:
+        Component, Average, Std_Dev, Std_Err_Mean
+        """
+        with open(path, "r") as f:
+            lines = f.readlines()
+
+        #Locate the start of the Differences section
+        start_idx = None
+        for i, line in enumerate(lines):
+            if line.strip().startswith("Differences (Complex - Receptor - Ligand):"):
+                start_idx = i
+                break
+        if start_idx is None:
+            raise ValueError("Could not find 'Differences (Complex - Receptor - Ligand):' section.")
+
+        # ve to first data line (after dashed separator)
+        i = start_idx + 1
+        while i < len(lines):
+            if re.match(r"^-{5,}\s*$", lines[i].strip()):  # line of dashes
+                i += 1
+                break
+            i += 1
+
+        #Parse rows: name (possibly with spaces) + 3 floats
+        float_row = re.compile(
+            r"^\s*(?P<name>.*?)\s+"
+            r"(?P<avg>-?\d+(?:\.\d+)?)\s+"
+            r"(?P<std>-?\d+(?:\.\d+)?)\s+"
+            r"(?P<sem>-?\d+(?:\.\d+)?)\s*$"
+        )
+
+        rows = []
+        while i < len(lines):
+            line = lines[i].rstrip("\n")
+            s = line.strip()
+
+            # Skip blank lines (DELTA rows often come after blanks)
+            if s == "":
+                i += 1
+                continue
+
+            # Stop when the next section begins (usually a header ending with :)
+            # e.g. "Energy Component ..." blocks elsewhere, or other section titles
+            if s.endswith(":") and not s.startswith("DELTA"):
+                break
+
+            m = float_row.match(line)
+            if m:
+                rows.append({
+                    "Component": m.group("name").strip(),
+                    "Average": float(m.group("avg")),
+                    "Std_Dev": float(m.group("std")),
+                    "Std_Err_Mean": float(m.group("sem")),
+                })
+
+            i += 1
+
+        if not rows:
+            raise ValueError("Found the Differences section, but parsed zero rows.")
+
+        return pd.DataFrame(rows)
         
     @staticmethod
     def plot_mmpbsa_byresidue(df_decomp: pd.DataFrame,
@@ -740,7 +807,7 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
         os.makedirs(out_dir, exist_ok=True)
 
         mmpbsa_components_list = ['TOTAL_Avg', 'Electrostatic_Avg', "van_der_Waals_Avg",
-                    'Internal_Avg', #this one is usually not very informative
+                    # 'Internal_Avg', #this one is usually not very informative
                     "Polar_Solvation_Avg", "Non_Polar_Solv_Avg"]
         
         #you may care about ligands if you are studying protein-protein interactions
@@ -757,8 +824,8 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
                 
                 plt.figure(figsize=(int(1*top_residues), int(top_residues/2)))
                 plt.bar(top["label"], top[component], color="skyblue", yerr=top[component.replace('Avg', 'StdErr')], capsize=4)
-                plt.bar(bottom["label"], bottom[component], color="salmon", yerr=bottom[component.replace('Avg', 'StdErr')], capsize=4)
-                # plt.axhline(0, linestyle="--")
+                if component != 'van_der_Waals_Avg':
+                    plt.bar(bottom["label"], bottom[component], color="salmon", yerr=bottom[component.replace('Avg', 'StdErr')], capsize=4)
                 plt.xticks(rotation=45)
                 plt.ylabel("ΔG_res (kcal/mol)")
                 plt.title(f"{component} energy, {location}")
@@ -787,7 +854,7 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
             mmpbsa_component (str): Component to use for coloring (e.g., 'TOTAL').
         """
         mmpbsa_components_list = ['TOTAL_Avg', 'Electrostatic_Avg', "van_der_Waals_Avg",
-                            'Internal_Avg', #this one is usually not very informative
+                            # 'Internal_Avg', #this one is usually not very informative
                             "Polar_Solvation_Avg", "Non_Polar_Solv_Avg"]
         if outdir is None:
             outdir = '.'
