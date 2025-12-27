@@ -502,7 +502,8 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
             prmtop:str=None,
             traj_fname:str=None,
             ligand_amber_selection:str=":UNK",
-            strip_amber_selection:str=":POP:WAT:HOH,Na+:Cl-:Mg+:K+:NA:CL:K:MG",
+            ligand_mda_selection:str="resname UNK",
+            strip_amber_selection:str=":POP:HOH:WAT:NA:CL:K:MG",
             persistent_waters_cutoff:float=None,
             mmpbsa_in:str="mmgbsa.in",
             output_folder:str="mmpbsa_results",
@@ -511,33 +512,39 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
             ):
         """Prepare MMPBSA batch script and qfiles."""
         
+        if sysname is None or prmtop is None or traj_fname is None:
+            raise ValueError("sysname, prmtop, and traj_fname must be provided.")
+        
         os.makedirs('qfiles_mmpbsa', exist_ok=True)
         os.makedirs(output_folder, exist_ok=True)
 
+        if ligand_mda_selection is None:
+            # brittle conversion from Amber to MDA selection
+            ligand_mda_selection = ligand_amber_selection.replace(":", "resname ")
+            
         with open(bash_fname, "w") as f:
             system_prmtop_abs = os.path.abspath(prmtop)
             trajectory_abs = os.path.abspath(traj_fname)
             mmpbsa_IN = os.path.abspath(mmpbsa_in)
-            logger.info(f"Writing MMPBSA qfile for system {sysname} ...")
+            u = mda.Universe(prmtop, traj_fname)
+            mpi_threads = min(mpi_threads, len(u.trajectory)) #avoid problems with too many threads
+            logger.info(f"Writing MMPBSA qfile for {sysname} with {len(u.trajectory)} frames and {mpi_threads} MPI threads.")
+            
             if persistent_waters_cutoff is not None:
-                logger.info(f"Identifying persistent interfacial waters for system {sysname} ...")
-                u = mda.Universe(prmtop, traj_fname)
-                persistent_waters = ProteinLigandAnalyzer.find_interfacial_waters(
-                    u,
-                    ligand_sel=ligand_amber_selection.replace(":", "resname "),
-                    protein_sel="protein",
-                    cutoff=3.5,
+                persistent_waters = ProteinLigandAnalyzer.find_interfacial_waters(u,
+                    ligand_sel=ligand_mda_selection, protein_sel="protein", cutoff=3.5,
                     fraction_persistence=persistent_waters_cutoff,
                     pdb_fname=os.path.join(output_folder, f"{sysname}_persistentWaters.pdb")
                 )
                 if persistent_waters:
-                    water_resids_str = ",".join(str(r) for r in persistent_waters.keys())
-                    logger.info(f"Found {len(persistent_waters)} persistent interfacial waters: {water_resids_str}")
                     # exclude these waters from stripping
-                    strip_amber_selection = strip_amber_selection.strip(':WAT').strip(':HOH')
-                    strip_amber_selection += f"!(:WAT,HOH@{water_resids_str})"
+                    water_resids_str = ",".join(str(r) for r in persistent_waters.keys())
+                    logger.info(f"Found {len(persistent_waters)} persistent interfacial waters: {water_resids_str} for {sysname}")
+                    dried_amber_selection = strip_amber_selection.strip(':WAT').strip(':HOH')
+                    strip_amber_selection = f'((:WAT,HOH)&!(:{water_resids_str}))|:{dried_amber_selection}'
+                    mmpbsa_IN = ProteinLigandAnalyzer._replace_strip_in_file(mmpbsa_IN, strip_amber_selection)
                 else:
-                    logger.info("No persistent interfacial waters found.")
+                    logger.info(f"No persistent interfacial waters found with the given cutoff {persistent_waters_cutoff}")
                     
             ProteinLigandAnalyzer._write_qfile_mmpbsa(sysname=sysname,
                                                     out_dir=output_folder,
@@ -554,6 +561,25 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
         os.chmod(bash_fname, 0o755)
         
         return bash_fname
+    
+    @staticmethod
+    def _replace_strip_in_file(file_path, new_selection):
+        """
+        Replace the strip_mask line in the mmpbsa input file.
+        """
+        with open(file_path, 'r') as file:
+            lines = file.readlines()
+
+        # Replace the specific line
+        for i, line in enumerate(lines):
+            if line.startswith("strip_mask"):
+                lines[i] = f'strip_mask = "{new_selection}"\n'
+                break
+
+        # Write the modified content back to the file
+        with open(file_path, 'w') as file:
+            file.writelines(lines)
+        return file_path
         
     @staticmethod
     def parse_mmpbsa_differences_table(path:str) -> pd.DataFrame:
