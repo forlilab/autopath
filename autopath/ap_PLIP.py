@@ -476,7 +476,7 @@ echo "Entering output directory ${out_dir} ..."
 cd ${out_dir}
 
 echo "Running ante-mmpbsa to generate prmtop files..."
-ante-MMPBSA.py -p ${system_prmtop} -s ${strip_selection} -n ${lig_selection} --radii mbondi2 -c complex.prmtop -r receptor.prmtop -l ligand.prmtop
+ante-MMPBSA.py -p ${system_prmtop} -s "${strip_selection}" -n ${lig_selection} --radii mbondi2 -c complex.prmtop -r receptor.prmtop -l ligand.prmtop
 
 echo "Finished ante-mmpbsa at $(date)"
 echo "Running mmpbsa.py for trajectory ${trajectory} ..."
@@ -571,7 +571,7 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
                 strip_amber_selection = f'((:WAT,HOH)&!(:{water_resids_str}))|{dried_amber_selection}'
                 mmpbsa_template = _replace_line(mmpbsa_template, 
                                         line_to_match='strip_mask', 
-                                        new_line=f'strip_mask = "{strip_amber_selection}",'
+                                        new_line=f'strip_mask= "{strip_amber_selection}",'
                                         )                    
             else:
                 logger.info(f"No persistent interfacial waters found with the given cutoff {persistent_waters_cutoff}")
