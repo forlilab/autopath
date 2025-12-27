@@ -529,7 +529,7 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
             mmpbsa_IN = os.path.abspath(mmpbsa_in)
             u = mda.Universe(prmtop, traj_fname)
             # slice trajectory if requested
-            start, end, step = None
+            start, end, step = (None, None, None)
             if traj_slice is not None:
                 start, end, step = traj_slice
                 u.trajectory[start:end:step]
