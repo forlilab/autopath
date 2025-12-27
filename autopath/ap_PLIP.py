@@ -135,6 +135,7 @@ class ProteinLigandAnalyzer:
             u: mda.Universe,
             ligand_sel: str = "resname UNK",
             protein_sel: str = "protein",
+            traj_slice: tuple = None,
             cutoff: float = 3.5,
             fraction_persistence: float = 0.5,
             pdb_fname: str = None,
@@ -148,12 +149,15 @@ class ProteinLigandAnalyzer:
         """
 
         WATER_SEL= "resname HOH or resname WAT or resname SOL"
-
-        n_frames = len(u.trajectory)
-
+        
+        start, end, step = None, None, None
+        if traj_slice is not None:
+            start, end, step = traj_slice
+        
         counts = Counter()
-
-        for ts in u.trajectory:
+        
+        n_frames = []
+        for ts in u.trajectory[start:end:step]:
 
             # waters = u.select_atoms(WATER_SEL)
 
@@ -174,6 +178,9 @@ class ProteinLigandAnalyzer:
             )
 
             counts.update(interfacial_resids)
+            n_frames.append(1)
+            
+        n_frames = sum(n_frames)
         counts = {resid: c/n_frames for resid, c in counts.items()}
         persistent = {resid: c for resid, c in counts.items() if c >= fraction_persistence}
         # print(counts)
@@ -522,62 +529,75 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
         if ligand_mda_selection is None:
             # brittle conversion from Amber to MDA selection
             ligand_mda_selection = ligand_amber_selection.replace(":", "resname ")
-            
-        with open(bash_fname, "w") as f:
-            system_prmtop_abs = os.path.abspath(prmtop)
-            trajectory_abs = os.path.abspath(traj_fname)
-            mmpbsa_IN = os.path.abspath(mmpbsa_in)
-            u = mda.Universe(prmtop, traj_fname)
-            # slice trajectory if requested
-            start, end, step = (None, None, None)
-            if traj_slice is not None:
-                start, end, step = traj_slice
-                u.trajectory[start:end:step]
-            mpi_threads = min(mpi_threads, len(u.trajectory)) #avoid problems with too many threads
-            logger.info(f"Writing MMPBSA qfile for {sysname} with {len(u.trajectory)} frames and {mpi_threads} MPI threads.")
-            
-            mmpbsa_IN = _replace_line_in_file(mmpbsa_IN,line_to_match='#startframe =', 
-                                                new_line=f'startframe = {start if start is not None else 0},'
-                                                )
-            mmpbsa_IN = _replace_line_in_file(mmpbsa_IN,line_to_match='#endframe =', 
-                                                new_line=f'endframe = {end if end is not None else len(u.trajectory)},'
-                                                )
-            mmpbsa_IN = _replace_line_in_file(mmpbsa_IN,line_to_match='#frame_step =',
-                                                new_line=f'frame_step = {step if step is not None else 1},'
-                                                )
-                    
-            if persistent_waters_cutoff is not None:
-                persistent_waters = ProteinLigandAnalyzer.find_interfacial_waters(u,
-                    ligand_sel=ligand_mda_selection, protein_sel="protein", cutoff=3.5,
-                    fraction_persistence=persistent_waters_cutoff,
-                    pdb_fname=os.path.join(output_folder, f"{sysname}_persistentWaters.pdb")
-                )
-                if persistent_waters:
-                    # exclude these waters from stripping
-                    water_resids_str = ",".join(str(r) for r in persistent_waters.keys())
-                    logger.info(f"Found {len(persistent_waters)} persistent interfacial waters: {water_resids_str} for {sysname}")
-                    dried_amber_selection = strip_amber_selection.strip(':WAT').strip(':HOH')
-                    strip_amber_selection = f'((:WAT,HOH)&!(:{water_resids_str}))|:{dried_amber_selection}'
-                    mmpbsa_IN = _replace_line_in_file(mmpbsa_IN, 
-                                                      line_to_match='strip_mask =', 
-                                                      new_line=f'strip_mask = "{strip_amber_selection}",'
-                                                      )
+        
+        with open(mmpbsa_in, 'r') as file:
+            mmpbsa_template = file.readlines()
 
-                    
-                else:
-                    logger.info(f"No persistent interfacial waters found with the given cutoff {persistent_waters_cutoff}")
-                    
-            ProteinLigandAnalyzer._write_qfile_mmpbsa(sysname=sysname,
-                                                    out_dir=output_folder,
-                                                    mmpbsa_in=mmpbsa_IN,
-                                                    system_prmtop=system_prmtop_abs,
-                                                    trajectory=trajectory_abs,
-                                                    lig_selection=ligand_amber_selection,
-                                                    strip_selection=strip_amber_selection,
-                                                    omp_threads=mpi_threads
-                                                    )
+        u = mda.Universe(prmtop, traj_fname, in_memory=True)
+        start, end, step = None, None, None
+        if traj_slice is not None:
+            start, end, step = traj_slice
+            n_frames = len(u.trajectory[start:end:step])
+
+        mpi_threads = min(mpi_threads, n_frames) #avoid problems with too many threads
+        logger.info(f"Writing MMPBSA qfile for {sysname} with {n_frames} frames and {mpi_threads} MPI threads.")
+
+        mmpbsa_template = _replace_line(mmpbsa_template,line_to_match='#startframe', 
+                                            new_line=f'startframe = {start if start is not None else 0},'
+                                            )
+        mmpbsa_template = _replace_line(mmpbsa_template,line_to_match='#endframe', 
+                                            new_line=f'endframe = {end if end is not None else len(u.trajectory)},'
+                                            )
+        mmpbsa_template = _replace_line(mmpbsa_template,line_to_match='#interval',
+                                            new_line=f'interval = {step if step is not None else 1},'
+                                            )
+        
+        system_prmtop_abs = os.path.abspath(prmtop)
+        trajectory_abs = os.path.abspath(traj_fname)
+        
+        # Identify persistent interfacial waters if requested                    
+        if persistent_waters_cutoff is not None:
+            persistent_waters = ProteinLigandAnalyzer.find_interfacial_waters(u,
+                ligand_sel=ligand_mda_selection, protein_sel="protein", cutoff=3.5,
+                fraction_persistence=persistent_waters_cutoff,
+                traj_slice=traj_slice,
+                pdb_fname=os.path.join(output_folder, f"{sysname}_persistentWaters.pdb")
+            )
+            if persistent_waters:
+                # exclude these waters from stripping
+                water_resids_str = ",".join(str(r) for r in persistent_waters.keys())
+                logger.info(f"Found {len(persistent_waters)} persistent interfacial waters: {water_resids_str} for {sysname}")
+                dried_amber_selection = strip_amber_selection.replace(':WAT', '').replace(':HOH', '')
+                strip_amber_selection = f'((:WAT,HOH)&!(:{water_resids_str}))|:{dried_amber_selection}'
+                mmpbsa_template = _replace_line(mmpbsa_template, 
+                                        line_to_match='strip_mask', 
+                                        new_line=f'strip_mask = "{strip_amber_selection}",'
+                                        )                    
+            else:
+                logger.info(f"No persistent interfacial waters found with the given cutoff {persistent_waters_cutoff}")
+            
+        # Write the modified content back to the file
+        mmpbsa_out = os.path.join(output_folder, f"mmpbsa_{sysname}_mmpbsa.in")
+        mmpbsa_out_abs = os.path.abspath(mmpbsa_out)
+        with open(mmpbsa_out_abs, 'w') as file:
+            file.writelines(mmpbsa_template)
+
+        ProteinLigandAnalyzer._write_qfile_mmpbsa(sysname=sysname,
+                                                out_dir=output_folder,
+                                                mmpbsa_in=mmpbsa_out_abs,
+                                                system_prmtop=system_prmtop_abs,
+                                                trajectory=trajectory_abs,
+                                                lig_selection=ligand_amber_selection,
+                                                strip_selection=strip_amber_selection,
+                                                omp_threads=mpi_threads
+                                                )
+        
+        # update batch bash script with all qfiles in folder
+        qfiles = [f for f in os.listdir('qfiles_mmpbsa') if f.endswith('_mmpbsa.q')]
+        with open(bash_fname, "w") as f:
             f.write("#!/bin/bash\n\n")
-            f.write(f"sbatch qfiles_mmpbsa/{sysname}_mmpbsa.q\n")
+            for qf in qfiles:
+                f.write(f"sbatch {os.path.abspath(os.path.join('qfiles_mmpbsa', qf))}\n")
 
         os.chmod(bash_fname, 0o755)
         
@@ -945,23 +965,17 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
             # print(f"Painted PDB saved to {out_fname}")
         return
     
-def _replace_line_in_file(file_path: str = None,
-                           line_to_match: str = None,
-                           new_line: str = None,
-                           ):
+def _replace_line(lines: list,
+                line_to_match: str = None,
+                new_line: str = None,
+                ):
     """
     Replace the strip_mask line in the mmpbsa input file.
     """
-    with open(file_path, 'r') as file:
-        lines = file.readlines()
 
     # Replace the specific line
     for i, line in enumerate(lines):
         if line.startswith(line_to_match):
             lines[i] = new_line + '\n'
             break
-
-    # Write the modified content back to the file
-    with open(file_path, 'w') as file:
-        file.writelines(lines)
-    return file_path
+    return lines
