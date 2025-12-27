@@ -94,13 +94,14 @@ class SystemPreparation:
         ]
 
         if is_membrane and self.lipid_type is not None:
-            assert self.lipid_type in self._available_lipids, logger.error(
-                f"{self.lipid_type} lipid is not supported. Available lipids are:\n\t{self._available_lipids}"
-            )
+            if os.path.exists(self.lipid_type):
+                logger.info(f"Using custom lipid patch from {self.lipid_type}")
+            else:
+                assert self.lipid_type in self._available_lipids, logger.error(
+                    f"{self.lipid_type} lipid is not supported. Available lipids are:\n\t{self._available_lipids}"
+                )
         elif is_membrane and self.lipid_type is None:
-            logger.error(
-                f"For building a membrane system a lipid type must be specified"
-            )
+            logger.error(f"For building a membrane system a lipid type must be specified")
             exit(1)
 
         # you proabably dont want to change this
@@ -241,8 +242,7 @@ class SystemPreparation:
                     for lig_name, lig_path, lig_smiles, lig_from_xray in ligands:
                         while chr(chain_id) in used_chains:
                             chain_id += 1
-                        logging.info(f"Parametrizing ligand {lig_name}..")
-                        print(f"Parametrizing ligand {lig_name}..")
+                        logger.info(f"Parametrizing ligand {lig_name}..")
                         lig = self._ligand_to_mol(lig_path, lig_smiles, lig_from_xray)
                         ligand_topology, ligand_positions = self._parametrize_ligand(lig)
                         for chain in ligand_topology.chains():
@@ -279,12 +279,15 @@ class SystemPreparation:
             modeller = Modeller(ligand_topology, ligand_positions)
 
         if self.is_membrane:
-
-            logger.info(f"Adding a {self.lipid_type} membrane to the system..")
+            logger.info(f"Adding a {os.path.basename(self.lipid_type)} membrane to the system..")
+            if os.path.exists(self.lipid_type):
+                lipid_patch = PDBFile(self.lipid_type)
+            else:
+                lipid_patch = self.lipid_type
             try:
                 modeller.addMembrane(
                     forcefield=self.forcefield,
-                    lipidType=self.lipid_type,
+                    lipidType=lipid_patch,
                     neutralize=True,
                     ionicStrength=self.ionicStrength,
                     minimumPadding=self.padding + max_length,

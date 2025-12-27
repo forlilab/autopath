@@ -3,10 +3,12 @@ import re
 import numpy as np
 import pandas as pd
 from typing import List, Optional
+from collections import Counter
 
 import MDAnalysis as mda
 import pytraj as pt
 from prolif import Fingerprint
+from rdkit import DataStructs
 
 import matplotlib.pyplot as plt
 from matplotlib import style
@@ -91,6 +93,7 @@ class ProteinLigandAnalyzer:
         
         return concat_u
 
+    @staticmethod
     def write_combined_trajectory(
             topology: str,
             trajectories: List[str],
@@ -127,6 +130,75 @@ class ProteinLigandAnalyzer:
                     W.write(u.atoms)
 
         return output_traj
+
+    def find_interfacial_waters(
+            u: mda.Universe,
+            ligand_sel: str = "resname UNK",
+            protein_sel: str = "protein",
+            traj_slice: tuple = None,
+            cutoff: float = 3.5,
+            fraction_persistence: float = 0.5,
+            pdb_fname: str = None,
+    ):
+        """
+        Identify persistent interfacial water molecules across a trajectory.
+
+        A water is interfacial in a frame if:
+            - any atom of that water is within `cutoff` Å of protein
+            - AND within `cutoff` Å of ligand
+        """
+
+        WATER_SEL= "resname HOH or resname WAT or resname SOL"
+        
+        start, end, step = None, None, None
+        if traj_slice is not None:
+            start, end, step = traj_slice
+        
+        counts = Counter()
+        
+        n_frames = []
+        for ts in u.trajectory[start:end:step]:
+
+            # waters = u.select_atoms(WATER_SEL)
+
+            # Waters close to protein
+            near_protein = u.select_atoms(
+                f"({WATER_SEL}) and around {cutoff} ({protein_sel})"
+            )
+
+            # Waters close to ligand
+            near_ligand = u.select_atoms(
+                f"({WATER_SEL}) and around {cutoff} ({ligand_sel})"
+            )
+
+            # Residue-level intersection
+            interfacial_resids = np.intersect1d(
+                near_protein.resids,
+                near_ligand.resids
+            )
+
+            counts.update(interfacial_resids)
+            n_frames.append(1)
+            
+        n_frames = sum(n_frames)
+        counts = {resid: c/n_frames for resid, c in counts.items()}
+        persistent = {resid: c for resid, c in counts.items() if c >= fraction_persistence}
+        # print(counts)
+        
+        if pdb_fname is not None:
+            keep_water_str = " ".join(str(r) for r in persistent.keys())
+            persistent_water_sel = f"({WATER_SEL}) and resid {keep_water_str}"
+
+            # Final cleaned selection
+            final_sel_str = f"({protein_sel}) or ({ligand_sel}) or ({persistent_water_sel})"
+
+            cleaned = u.select_atoms(final_sel_str)
+
+            # Write the final frame
+            u.trajectory[-1]
+            cleaned.write(pdb_fname)
+
+        return dict(sorted(persistent.items(), key=lambda item: item[1], reverse=True))
             
     # -----------------------------------------------------------
     #   PROLIF STUFF
@@ -134,11 +206,13 @@ class ProteinLigandAnalyzer:
 
     def get_persistent_interactions(self,
                                    fp_interactions: Optional[List[str]] = None,
+                                   frequency_cutoff: float = 0.5,
                                    stride: int = 1,
-                                   frequency_cutoff: float = 0.5
+                                   n_jobs: int = 1
                                    ):
         """
         Identify most persistent interactions across replicas using ProLif.
+        Prolif gives me problems with parallel processing, so n_jobs=1 by default.
 
         Parameters
         ----------
@@ -156,21 +230,24 @@ class ProteinLigandAnalyzer:
         else:
             fp = Fingerprint()  # default interaction set
 
-        for rep_name, rep in self.replicas.items():
+        for rep_name, u in self.replicas.items():
             fp_fname = os.path.join(self.outdir, f"FP_{rep_name}.pkl")
             if os.path.exists(fp_fname):
                 fp = Fingerprint.from_pickle(fp_fname)
                 logger.info(f"Loaded cached ProLif fingerprint for replica {rep_name}")
             else:
                 logger.info(f"Computing ProLif fingerprint for replica {rep_name}")
-                protein_sel = rep.select_atoms(self.protein_mda_selection) if self.protein_mda_selection else rep.select_atoms("protein")
-                ligand_sel = rep.select_atoms(self.ligand_mda_selection)
-
+                protein_sel = u.select_atoms(self.protein_mda_selection) if self.protein_mda_selection else u.select_atoms("protein")
+                logger.info(f"Protein selection has {protein_sel.n_atoms} atoms.")
+                ligand_sel = u.select_atoms(self.ligand_mda_selection)
+                logger.info(f"Ligand selection has {ligand_sel.n_atoms} atoms.")
+                
                 # Compute interaction fingerprint over trajectory, optionally strided
-                fp = fp.run(rep.trajectory, #FIXME stride does not work here
-                                protein_sel, 
-                                ligand_sel
-                                )
+                fp = fp.run(u.trajectory, #FIXME stride does not work here
+                            protein_sel, 
+                            ligand_sel,
+                            n_jobs=n_jobs
+                            )
                 # TODO: another function should read and analyze these pickles
                 fp.to_pickle(fp_fname)
             
@@ -203,6 +280,51 @@ class ProteinLigandAnalyzer:
 
         return sorted(list(important_resids)), persistence_byRes, persistence_byRes_byType
 
+    @staticmethod
+    def plot_tanimoto_similarity(query_fp, reference_fp, use_frame:int=None, outdir:str=None):
+        
+        if outdir is None:
+            outdir = "."
+            
+        if reference_fp is None:
+            reference_fp = query_fp
+            
+        query_bit = query_fp.to_bitvectors()
+        query_df = query_fp.to_dataframe()
+        reference_bit = reference_fp.to_bitvectors()
+
+        if use_frame is not None:
+            refe_bit = reference_bit[use_frame]
+            tanimoto_sims = DataStructs.BulkTanimotoSimilarity(refe_bit, query_bit)
+            plt.figure(figsize=(6,4))
+            sns.lineplot(x=range(len(tanimoto_sims)), y=tanimoto_sims)
+            plt.xlabel("Frame index"); plt.ylabel("Tanimoto similarity")
+            plt.title(f"Tanimoto similarity to frame {use_frame}")
+            plt.savefig(f"{outdir}/tanimoto_to_frame_{use_frame}.png", dpi=300)
+            plt.show()
+            plt.close()
+            return tanimoto_sims
+        else:
+            # Tanimoto similarity matrix
+            similarity_matrix = []
+            for bv in query_bit:
+                similarity_matrix.append(DataStructs.BulkTanimotoSimilarity(bv, query_bit))
+            similarity_matrix = pd.DataFrame(similarity_matrix, index=query_df.index, columns=query_df.index)
+            fig, ax = plt.subplots(figsize=(3, 3), dpi=200)
+            colormap = sns.color_palette('viridis', as_cmap=True)
+            sns.heatmap(similarity_matrix, ax=ax,
+            square=True, cmap=colormap, vmin=0, vmax=1,
+            center=0.5, xticklabels=5,  yticklabels=5, )
+            ax.invert_yaxis()
+            plt.yticks(rotation="horizontal", fontsize=5); plt.xticks(fontsize=5)
+            plt.ylabel("Frame", fontsize=7); plt.xlabel("Frame", fontsize=7)
+            fig.patch.set_facecolor("white")
+            plt.title("Tanimoto similarity matrix", fontsize=8)
+            plt.savefig(f"{outdir}/tanimoto_similarity_matrix.png", dpi=300, bbox_inches='tight')
+            plt.show()
+            plt.close()
+            return similarity_matrix
+        
     # -----------------------------------------------------------
     #   LIE CALCULATION VIA PYTRAJ
     # -----------------------------------------------------------
@@ -294,7 +416,9 @@ class ProteinLigandAnalyzer:
             sharex=True, sharey=False)
 
         for component, ax in zip(["Total", "EELEC", "VDW"], axes.flatten()):
-            sns.lineplot(data=lie_df, x=lie_df.index, y=component, ax=ax, label=component)
+            mean_ = lie_df[component].mean()
+            std_ = lie_df[component].std()
+            sns.lineplot(data=lie_df, x=lie_df.index, y=component, ax=ax, label=f"Mean: {mean_:.2f} kJ/mol\nStd: {std_:.2f} kJ/mol")
             ax.set_title(f"{component.upper()}")
             ax.set_xlabel("Frame") ;    ax.set_ylabel("LIE Energy (kJ/mol)")
             
@@ -309,7 +433,7 @@ class ProteinLigandAnalyzer:
     #   MMPB(GB)SA 
     # -----------------------------------------------------------
     @staticmethod
-    def write_qfile_mmpbsa(
+    def _write_qfile_mmpbsa(
                     sysname:str=None,
                     out_dir:str=None,
                     mmpbsa_in:str=None,
@@ -326,40 +450,39 @@ class ProteinLigandAnalyzer:
         """Function to write a SLURM qfile for MMPBSA calculations."""    
         
         template='''#!/bin/bash
-    #SBATCH -e ${out_dir}/${sysname}_mmpbsa.err
-    #SBATCH -o ${out_dir}/${sysname}_mmpbsa.out
-    ##SBATCH --gres=gpu#:${gpu_resource}:${gpu_num} # COMMENT OUT THE # IF YOU WANT TO USE A SPECIFIC GPU TYPE
-    #SBATCH --time=${time}
-    #SBATCH --partition=${partition}
-    #SBATCH --exclude=nodea0111,nodea0110 # EXCLUDE KNOWN PROBLEMATIC NODES
-    #SBATCH --ntasks=${omp_threads}  # Request 32 separate MPI processes/slots
-    #SBATCH --cpus-per-task=1 # Each process uses 1 CPU. for MPI runs
-    ## SBATCH --cpus-per-task=${omp_threads} # Each process uses multiple CPUs. for OpenMP runs
-    #SBATCH --job-name="mmpbsa_${sysname}"
+#SBATCH -e ${out_dir}/${sysname}_mmpbsa.err
+#SBATCH -o ${out_dir}/${sysname}_mmpbsa.out
+#SBATCH --time=${time}
+#SBATCH --partition=${partition}
+#SBATCH --exclude=nodea0111,nodea0110 # EXCLUDE KNOWN PROBLEMATIC NODES
+#SBATCH --ntasks=${omp_threads}  # Request 32 separate MPI processes/slots
+#SBATCH --cpus-per-task=1 # Each process uses 1 CPU. for MPI runs
+## SBATCH --cpus-per-task=${omp_threads} # Each process uses multiple CPUs. for OpenMP runs
+#SBATCH --job-name="mmpbsa_${sysname}"
 
-    # module purge
-    module load openmpi/3.1.6
-    # module load gcc
+# module purge
+module load openmpi/3.1.6
+# module load gcc
 
-    source ~/.bashrc
-    micromamba activate autopath3
+source ~/.bashrc
+micromamba activate autopath3
 
-    module load amber/24
-    #export OMP_NUM_THREADS=${omp_threads}
+module load amber/24
+#export OMP_NUM_THREADS=${omp_threads}
 
-    echo "Starting mmpbsa calculation for ${sysname} at $(date)"
-    echo "Running on $(hostname)"
-    echo "Entering output directory ${out_dir} ..."
-    cd ${out_dir}
+echo "Starting mmpbsa calculation for ${sysname} at $(date)"
+echo "Running on $(hostname)"
+echo "Entering output directory ${out_dir} ..."
+cd ${out_dir}
 
-    echo "Running ante-mmpbsa to generate prmtop files..."
-    ante-MMPBSA.py -p ${system_prmtop} -s ${strip_selection} -n ${lig_selection} --radii mbondi2 -c complex.prmtop -r receptor.prmtop -l ligand.prmtop
+echo "Running ante-mmpbsa to generate prmtop files..."
+ante-MMPBSA.py -p ${system_prmtop} -s "${strip_selection}" -n ${lig_selection} --radii mbondi2 -c complex.prmtop -r receptor.prmtop -l ligand.prmtop
 
-    echo "Finished ante-mmpbsa at $(date)"
-    echo "Running mmpbsa.py for trajectory ${trajectory} ..."
+echo "Finished ante-mmpbsa at $(date)"
+echo "Running mmpbsa.py for trajectory ${trajectory} ..."
 
-    # MMPBSA.py -O -i ${mmpbsa_in} -o FINAL_RESULTS_mmpbsa.dat -do FINAL_DECOMP_mmpbsa.dat -sp ${system_prmtop} -y ${trajectory} -cp complex.prmtop -rp receptor.prmtop -lp ligand.prmtop
-    mpirun -np ${omp_threads} MMPBSA.py.MPI -O -i ${mmpbsa_in} -o FINAL_RESULTS_mmpbsa.dat -do FINAL_DECOMP_mmpbsa.dat -sp ${system_prmtop} -y ${trajectory} -cp complex.prmtop -rp receptor.prmtop -lp ligand.prmtop
+# MMPBSA.py -O -i ${mmpbsa_in} -o FINAL_RESULTS_mmpbsa.dat -do FINAL_DECOMP_mmpbsa.dat -sp ${system_prmtop} -y ${trajectory} -cp complex.prmtop -rp receptor.prmtop -lp ligand.prmtop
+mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} -o FINAL_RESULTS_mmpbsa.dat -do FINAL_DECOMP_mmpbsa.dat -sp ${system_prmtop} -y ${trajectory} -cp complex.prmtop -rp receptor.prmtop -lp ligand.prmtop
 
     '''
 
@@ -380,6 +503,173 @@ class ProteinLigandAnalyzer:
 
         return
     
+    @staticmethod
+    def prepare_mmpbsa_batch(
+            sysname:str=None,
+            prmtop:str=None,
+            traj_fname:str=None,
+            ligand_amber_selection:str=":UNK",
+            ligand_mda_selection:str="resname UNK",
+            strip_amber_selection:str=":POP:HOH:WAT:NA:CL:K:MG",
+            traj_slice:tuple=None, #(start, end, step)
+            persistent_waters_cutoff:float=None,
+            mmpbsa_in:str="mmgbsa.in",
+            output_folder:str="mmpbsa_results",
+            bash_fname:str="run_mmpbsa_batch.sh",
+            mpi_threads:int=128,
+            ):
+        """Prepare MMPBSA batch script and qfiles."""
+        
+        if sysname is None or prmtop is None or traj_fname is None:
+            raise ValueError("sysname, prmtop, and traj_fname must be provided.")
+        
+        os.makedirs('qfiles_mmpbsa', exist_ok=True)
+        os.makedirs(output_folder, exist_ok=True)
+
+        if ligand_mda_selection is None:
+            # brittle conversion from Amber to MDA selection
+            ligand_mda_selection = ligand_amber_selection.replace(":", "resname ")
+        
+        with open(mmpbsa_in, 'r') as file:
+            mmpbsa_template = file.readlines()
+
+        u = mda.Universe(prmtop, traj_fname, in_memory=True)
+        start, end, step = None, None, None
+        if traj_slice is not None:
+            start, end, step = traj_slice
+            n_frames = len(u.trajectory[start:end:step])
+
+        mpi_threads = min(mpi_threads, n_frames) #avoid problems with too many threads
+        logger.info(f"Writing MMPBSA qfile for {sysname} with {n_frames} frames and {mpi_threads} MPI threads.")
+
+        mmpbsa_template = _replace_line(mmpbsa_template,line_to_match='#startframe', 
+                                            new_line=f'startframe = {start if start is not None else 0},'
+                                            )
+        mmpbsa_template = _replace_line(mmpbsa_template,line_to_match='#endframe', 
+                                            new_line=f'endframe = {end if end is not None else len(u.trajectory)},'
+                                            )
+        mmpbsa_template = _replace_line(mmpbsa_template,line_to_match='#interval',
+                                            new_line=f'interval = {step if step is not None else 1},'
+                                            )
+        
+        system_prmtop_abs = os.path.abspath(prmtop)
+        trajectory_abs = os.path.abspath(traj_fname)
+        
+        # Identify persistent interfacial waters if requested                    
+        if persistent_waters_cutoff is not None:
+            persistent_waters = ProteinLigandAnalyzer.find_interfacial_waters(u,
+                ligand_sel=ligand_mda_selection, protein_sel="protein", cutoff=3.5,
+                fraction_persistence=persistent_waters_cutoff,
+                traj_slice=traj_slice,
+                pdb_fname=os.path.join(output_folder, f"{sysname}_persistentWaters.pdb")
+            )
+            if persistent_waters:
+                # exclude these waters from stripping
+                water_resids_str = ",".join(str(r) for r in persistent_waters.keys())
+                logger.info(f"Found {len(persistent_waters)} persistent interfacial waters: {water_resids_str} for {sysname}")
+                dried_amber_selection = strip_amber_selection.replace(':WAT', '').replace(':HOH', '')
+                strip_amber_selection = f'((:WAT,HOH)&!(:{water_resids_str}))|{dried_amber_selection}'
+                mmpbsa_template = _replace_line(mmpbsa_template, 
+                                        line_to_match='strip_mask', 
+                                        new_line=f'strip_mask= "{strip_amber_selection}",'
+                                        )                    
+            else:
+                logger.info(f"No persistent interfacial waters found with the given cutoff {persistent_waters_cutoff}")
+            
+        # Write the modified content back to the file
+        mmpbsa_out = os.path.join(output_folder, f"mmpbsa_{sysname}_mmpbsa.in")
+        mmpbsa_out_abs = os.path.abspath(mmpbsa_out)
+        with open(mmpbsa_out_abs, 'w') as file:
+            file.writelines(mmpbsa_template)
+
+        ProteinLigandAnalyzer._write_qfile_mmpbsa(sysname=sysname,
+                                                out_dir=output_folder,
+                                                mmpbsa_in=mmpbsa_out_abs,
+                                                system_prmtop=system_prmtop_abs,
+                                                trajectory=trajectory_abs,
+                                                lig_selection=ligand_amber_selection,
+                                                strip_selection=strip_amber_selection,
+                                                omp_threads=mpi_threads
+                                                )
+        
+        # update batch bash script with all qfiles in folder
+        qfiles = [f for f in os.listdir('qfiles_mmpbsa') if f.endswith('_mmpbsa.q')]
+        with open(bash_fname, "w") as f:
+            f.write("#!/bin/bash\n\n")
+            for qf in qfiles:
+                f.write(f"sbatch {os.path.abspath(os.path.join('qfiles_mmpbsa', qf))}\n")
+
+        os.chmod(bash_fname, 0o755)
+        
+        return bash_fname
+        
+    @staticmethod
+    def parse_mmpbsa_differences_table(path:str) -> pd.DataFrame:
+        """
+        Parse the 'Differences (Complex - Receptor - Ligand):' table from FINAL_RESULTS_mmpbsa.dat.
+
+        Returns DataFrame with:
+        Component, Average, Std_Dev, Std_Err_Mean
+        """
+        with open(path, "r") as f:
+            lines = f.readlines()
+
+        #Locate the start of the Differences section
+        start_idx = None
+        for i, line in enumerate(lines):
+            if line.strip().startswith("Differences (Complex - Receptor - Ligand):"):
+                start_idx = i
+                break
+        if start_idx is None:
+            raise ValueError("Could not find 'Differences (Complex - Receptor - Ligand):' section.")
+
+        # ve to first data line (after dashed separator)
+        i = start_idx + 1
+        while i < len(lines):
+            if re.match(r"^-{5,}\s*$", lines[i].strip()):  # line of dashes
+                i += 1
+                break
+            i += 1
+
+        #Parse rows: name (possibly with spaces) + 3 floats
+        float_row = re.compile(
+            r"^\s*(?P<name>.*?)\s+"
+            r"(?P<avg>-?\d+(?:\.\d+)?)\s+"
+            r"(?P<std>-?\d+(?:\.\d+)?)\s+"
+            r"(?P<sem>-?\d+(?:\.\d+)?)\s*$"
+        )
+
+        rows = []
+        while i < len(lines):
+            line = lines[i].rstrip("\n")
+            s = line.strip()
+
+            # Skip blank lines (DELTA rows often come after blanks)
+            if s == "":
+                i += 1
+                continue
+
+            # Stop when the next section begins (usually a header ending with :)
+            # e.g. "Energy Component ..." blocks elsewhere, or other section titles
+            if s.endswith(":") and not s.startswith("DELTA"):
+                break
+
+            m = float_row.match(line)
+            if m:
+                rows.append({
+                    "Component": m.group("name").strip(),
+                    "Average": float(m.group("avg")),
+                    "Std_Dev": float(m.group("std")),
+                    "Std_Err_Mean": float(m.group("sem")),
+                })
+
+            i += 1
+
+        if not rows:
+            raise ValueError("Found the Differences section, but parsed zero rows.")
+
+        return pd.DataFrame(rows)
+        
     @staticmethod
     def parse_mmpbsa_deltas_all_components(filepath:str=None) -> pd.DataFrame:
         """
@@ -487,4 +777,205 @@ class ProteinLigandAnalyzer:
         df = pd.DataFrame.from_records(records)
         df['label'] = df['resname'] + df['resid'].astype(str)
         return df
+    
+    @staticmethod
+    def parse_mmpbsa_differences_table(path):
+        """
+        Parse the 'Differences (Complex - Receptor - Ligand):' table from FINAL_RESULTS_mmpbsa.dat.
+
+        Returns DataFrame with:
+        Component, Average, Std_Dev, Std_Err_Mean
+        """
+        with open(path, "r") as f:
+            lines = f.readlines()
+
+        #Locate the start of the Differences section
+        start_idx = None
+        for i, line in enumerate(lines):
+            if line.strip().startswith("Differences (Complex - Receptor - Ligand):"):
+                start_idx = i
+                break
+        if start_idx is None:
+            raise ValueError("Could not find 'Differences (Complex - Receptor - Ligand):' section.")
+
+        # ve to first data line (after dashed separator)
+        i = start_idx + 1
+        while i < len(lines):
+            if re.match(r"^-{5,}\s*$", lines[i].strip()):  # line of dashes
+                i += 1
+                break
+            i += 1
+
+        #Parse rows: name (possibly with spaces) + 3 floats
+        float_row = re.compile(
+            r"^\s*(?P<name>.*?)\s+"
+            r"(?P<avg>-?\d+(?:\.\d+)?)\s+"
+            r"(?P<std>-?\d+(?:\.\d+)?)\s+"
+            r"(?P<sem>-?\d+(?:\.\d+)?)\s*$"
+        )
+
+        rows = []
+        while i < len(lines):
+            line = lines[i].rstrip("\n")
+            s = line.strip()
+
+            # Skip blank lines (DELTA rows often come after blanks)
+            if s == "":
+                i += 1
+                continue
+
+            # Stop when the next section begins (usually a header ending with :)
+            # e.g. "Energy Component ..." blocks elsewhere, or other section titles
+            if s.endswith(":") and not s.startswith("DELTA"):
+                break
+
+            m = float_row.match(line)
+            if m:
+                rows.append({
+                    "Component": m.group("name").strip(),
+                    "Average": float(m.group("avg")),
+                    "Std_Dev": float(m.group("std")),
+                    "Std_Err_Mean": float(m.group("sem")),
+                })
+
+            i += 1
+
+        if not rows:
+            raise ValueError("Found the Differences section, but parsed zero rows.")
+
+        return pd.DataFrame(rows)
         
+    @staticmethod
+    def plot_mmpbsa_byresidue(df_decomp: pd.DataFrame,
+                            top_residues: int=10,
+                            out_dir: str=None
+                            ):
+        if out_dir is None:
+            out_dir = os.getcwd()
+        os.makedirs(out_dir, exist_ok=True)
+
+        mmpbsa_components_list = ['TOTAL_Avg', 'Electrostatic_Avg', "van_der_Waals_Avg",
+                    # 'Internal_Avg', #this one is usually not very informative
+                    "Polar_Solvation_Avg", "Non_Polar_Solv_Avg"]
+        
+        #you may care about ligands if you are studying protein-protein interactions
+        locations = {'R':'receptor', 'L':'ligand'}
+        for loc, location in locations.items():
+            df = df_decomp[df_decomp["location"] == loc].copy()
+            
+            for component in mmpbsa_components_list:
+                out_fname = os.path.join(out_dir, f'mmpbsa_byres_{location}_{component}.png')
+                
+                # Plot per-residue MMGBSA decomposition for top/bottom residues
+                top = df.sort_values(component).head(top_residues)
+                bottom = df.sort_values(component).tail(top_residues)
+                
+                plt.figure(figsize=(int(1*top_residues), int(top_residues/2)))
+                plt.bar(top["label"], top[component], color="skyblue", yerr=top[component.replace('Avg', 'StdErr')], capsize=4)
+                if component != 'van_der_Waals_Avg':
+                    plt.bar(bottom["label"], bottom[component], color="salmon", yerr=bottom[component.replace('Avg', 'StdErr')], capsize=4)
+                plt.xticks(rotation=45)
+                plt.ylabel("ΔG_res (kcal/mol)")
+                plt.title(f"{component} energy, {location}")
+                plt.tight_layout()
+                plt.savefig(out_fname, dpi=300)
+                # plt.show()
+                plt.close()
+        
+        return
+    
+    @staticmethod
+    def paint_mmpbsa_byresidue(df_decomp,
+                            pdb_file: str=None,
+                            prmtop_file: str=None,
+                            mmpbsa_component: str='all',
+                            normalize: bool=False,
+                            outdir: str=None,
+                            ):
+        """paint_mmpbsa_byresidue This function colors a PDB structure 
+        based on per-residue MMGBSA decomposition values.
+
+        Args:
+            df_decomp (pd.DataFrame): DataFrame containing MMGBSA decomposition data.
+            pdb_file (str): Path to the PDB file.
+            prmtop_file (str): Path to the topology file.
+            mmpbsa_component (str): Component to use for coloring (e.g., 'TOTAL').
+        """
+        mmpbsa_components_list = ['TOTAL_Avg', 'Electrostatic_Avg', "van_der_Waals_Avg",
+                            # 'Internal_Avg', #this one is usually not very informative
+                            "Polar_Solvation_Avg", "Non_Polar_Solv_Avg"]
+        if outdir is None:
+            outdir = '.'
+        
+        os.makedirs(outdir, exist_ok=True)
+            
+        if mmpbsa_component.upper() == 'ALL':
+            components_list = mmpbsa_components_list
+        else:
+            if mmpbsa_component not in mmpbsa_components_list:
+                print(f"ERROR: mmpbsa_component must be one of {mmpbsa_components_list} or 'all'.")
+            else:
+                components_list = [mmpbsa_component]
+
+        if pdb_file is None or prmtop_file is None:
+            print("ERROR: Both pdb_file and prmtop_file must be provided.")
+            exit(1)
+        
+        u = mda.Universe(prmtop_file, pdb_file)
+        
+        # Initialize all B-factors to 0
+        u.add_TopologyAttr("tempfactors")
+
+        for component in components_list:
+            print(f"Painting component: {component}")
+            out_fname = f'{outdir}/mmpbsa_painted_{component}.pdb'
+            u.atoms.tempfactors = 0.0
+
+            # Process protein residues
+            for res in u.residues:
+                # Determine if the residue is in the receptor (R) or ligand (L)
+                location = "R" if res.resid in df_decomp[df_decomp["location"] == "R"]["resid"].values else "L"
+                
+                # Filter the decomposition data for the current residue
+                _df = df_decomp[(df_decomp["resid"] == res.resid) & (df_decomp["location"] == location)]
+                
+                if not _df.empty:
+                    residue = _df.iloc[0]
+                    # Check if residue names match
+                    if res.resname != residue['resname']:
+                        print(f'WARNING: Residue name mismatch for resid {res.resid}: '
+                            f'{res.resname} (PDB) vs {residue["resname"]} (decomp)')
+                        continue
+                    
+                    # Assign the MMGBSA component value to the B-factor
+                    res.atoms.tempfactors = residue[component]
+
+            if normalize:
+                # Normalize B-factors to 0-100 range for better visualization
+                b_factors = u.atoms.tempfactors
+                min_b = np.min(b_factors)
+                max_b = np.max(b_factors)
+                u.atoms.tempfactors = 100 * (b_factors - min_b) / (max_b - min_b)
+                out_fname = f'{outdir}/mmpbsa_painted_{component}_NORM.pdb'
+            # Write out the new PDB with B-factors set to the decomposition values
+            # Strip water, ions, and some lipids for clarity. this can be improved
+
+            u.select_atoms("not resname HOH and not resname NA and not resname CL and not resname POP"
+                        ).write(out_fname)
+            # print(f"Painted PDB saved to {out_fname}")
+        return
+    
+def _replace_line(lines: list,
+                line_to_match: str = None,
+                new_line: str = None,
+                ):
+    """
+    Replace the strip_mask line in the mmpbsa input file.
+    """
+
+    # Replace the specific line
+    for i, line in enumerate(lines):
+        if line.startswith(line_to_match):
+            lines[i] = new_line + '\n'
+            break
+    return lines
