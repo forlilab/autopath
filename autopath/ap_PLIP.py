@@ -529,9 +529,10 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
             mmpbsa_IN = os.path.abspath(mmpbsa_in)
             u = mda.Universe(prmtop, traj_fname)
             # slice trajectory if requested
+            start, end, step = None
             if traj_slice is not None:
                 start, end, step = traj_slice
-                u.trajectory = u.trajectory[start:end:step]
+                u.trajectory[start:end:step]
             mpi_threads = min(mpi_threads, len(u.trajectory)) #avoid problems with too many threads
             logger.info(f"Writing MMPBSA qfile for {sysname} with {len(u.trajectory)} frames and {mpi_threads} MPI threads.")
             
