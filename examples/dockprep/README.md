@@ -43,7 +43,7 @@ If the user specified structural waters to be retained with the receptor, the fo
 * `ignore_colig_simulation` - boolean flag indicating to not include coligand in simulation. relevant if forcefield has issue parameterizing molecule (e.g. heme)
 * `ignore_crystallographic_waters` - boolean flag indicating to not use crystallographic waters when minimizing or equilibrating receptor
 * `water_resids` - saves waters with receptor whose residue id is contained in this list
-* `water_chainids` - restricts waters to be saved with receptor to those whose chain id is contained in this list. must specify if water_resids is included to prevent inclusion of waters added upon solvation by OpenMM
+* `water_chainids` - restricts waters to be saved with receptor to those whose chain id is contained in this list. must specify if water_resids is included to prevent inclusion of waters added upon solvation by OpenMM. can also include w/o water_resids to include all waters within a set of chains
 * `lig_resname` - residue name to assign ligand during system prep (default: "UNK")
 * `save_dir` - directory to save files. will resort to name of pdb file if not specified
 

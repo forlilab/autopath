@@ -234,6 +234,7 @@ def save_receptor_and_ligand_from_pdb(
         ligand_resid (str): residue number of ligand to extract - relevant if there are multiple copies 
         include_waters (bool): retain crystallographic waters in receptor 
         water_resids (list): retain crystallographic waters corresponding to these residue ids in receptor 
+        water_chainids (list): retain crystallographic waters corresponding to these chain ids in receptor 
     """
     cmd.reinitialize()
     cmd.load(pdb_path, "complex")
@@ -250,6 +251,9 @@ def save_receptor_and_ligand_from_pdb(
         elif water_resids is not None:
             water_resids = "+".join(water_resids)
             keep_criteria.append(f"resn HOH and resid {water_resids}")
+        elif water_chainids is not None:
+            water_chainids = "+".join(water_chainids)
+            keep_criteria.append(f"resn HOH and chain {water_chainids}")
         
     if inorg_cofactor_name:
         sel = f"resn {inorg_cofactor_name}"
@@ -363,6 +367,7 @@ def save_receptor_and_ligand_from_openmm(
         remove_H_colig (bool): remove hydrogens from co-ligand. set to True by default to facilitate Meeko's automated parameterization of unknown residues. 
         ligand_name (str): name of ligand to extract
         water_resids (list): retain waters corresponding to these residue ids in receptor 
+        water_chainids (list): retain crystallographic waters corresponding to these chain ids in receptor 
         output_fname_rec (str): output filename for receptor (assumes extension is present)
         output_fname_lig (str): output filename for ligand (assumes extension is present)
     """
@@ -388,7 +393,10 @@ def save_receptor_and_ligand_from_openmm(
     elif water_resids is not None:
         water_resids = "+".join(water_resids)
         keep_criteria.append(f"resn HOH and resid {water_resids}")
-     
+    elif water_chainids is not None:
+        water_chainids = "+".join(water_chainids)
+        keep_criteria.append(f"resn HOH and chain {water_chainids}")
+    
     if inorg_cofactor_name:
         sel = f"resn {inorg_cofactor_name}"
         keep_criteria.append(sel)

@@ -179,7 +179,7 @@ def cmd_lineparser():
         "--water_chainids",
         type=str,
         nargs='+',
-        help='restricts waters to be saved with receptor to those whose chain id is contained in this list. must specify if water_resids is included to prevent inclusion of waters added upon solvation by OpenMM. (example: A B)', 
+        help='restricts waters to be saved with receptor to those whose chain id is contained in this list. (example: A B). must specify if water_resids is included to prevent inclusion of waters added upon solvation by OpenMM. can also include w/o water_resids to include all waters within a set of chains', 
         default=None 
     )
 
@@ -301,7 +301,7 @@ def main():
                                          water_resids=None,
                                          output_fname_rec=f"{base_fname}_wo_solvent.pdb")
     #save fixed receptor w/solvent with solvent if water_resids are specified  
-    if args.water_resids is not None:
+    if args.water_resids is not None or args.water_chainids is not None:
         save_receptor_and_ligand_from_openmm(pdb_path=fixed_path, 
                                              save_dir=save_dir, 
                                              inorg_cofactor_name=args.pdb_inorg_cofactor_name, 
@@ -380,7 +380,7 @@ def main():
                                          output_fname_rec=f"{sys_name}_minim_receptor_wo_solvent.pdb",
                                          output_fname_lig=f"{sys_name}_minim_ligand.pdb")
     #save minimized structure with solvent if water_resids are specified 
-    if args.water_resids is not None:
+    if args.water_resids is not None or args.water_chainids is not None:
         save_receptor_and_ligand_from_openmm(pdb_path=restrained_min_struct, 
                                              save_dir=f"{save_dir}/equilibration",
                                              inorg_cofactor_name=args.pdb_inorg_cofactor_name, 
