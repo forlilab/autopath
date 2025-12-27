@@ -568,7 +568,7 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
                 water_resids_str = ",".join(str(r) for r in persistent_waters.keys())
                 logger.info(f"Found {len(persistent_waters)} persistent interfacial waters: {water_resids_str} for {sysname}")
                 dried_amber_selection = strip_amber_selection.replace(':WAT', '').replace(':HOH', '')
-                strip_amber_selection = f'((:WAT,HOH)&!(:{water_resids_str}))|:{dried_amber_selection}'
+                strip_amber_selection = f'((:WAT,HOH)&!(:{water_resids_str}))|{dried_amber_selection}'
                 mmpbsa_template = _replace_line(mmpbsa_template, 
                                         line_to_match='strip_mask', 
                                         new_line=f'strip_mask = "{strip_amber_selection}",'
