@@ -504,6 +504,7 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
             ligand_amber_selection:str=":UNK",
             ligand_mda_selection:str="resname UNK",
             strip_amber_selection:str=":POP:HOH:WAT:NA:CL:K:MG",
+            traj_slice:tuple=None, #(start, end, step)
             persistent_waters_cutoff:float=None,
             mmpbsa_in:str="mmgbsa.in",
             output_folder:str="mmpbsa_results",
@@ -527,9 +528,23 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
             trajectory_abs = os.path.abspath(traj_fname)
             mmpbsa_IN = os.path.abspath(mmpbsa_in)
             u = mda.Universe(prmtop, traj_fname)
+            # slice trajectory if requested
+            if traj_slice is not None:
+                start, end, step = traj_slice
+                u.trajectory = u.trajectory[start:end:step]
             mpi_threads = min(mpi_threads, len(u.trajectory)) #avoid problems with too many threads
             logger.info(f"Writing MMPBSA qfile for {sysname} with {len(u.trajectory)} frames and {mpi_threads} MPI threads.")
             
+            mmpbsa_IN = _replace_line_in_file(mmpbsa_IN,line_to_match='#startframe =', 
+                                                new_line=f'startframe = {start if start is not None else 0},'
+                                                )
+            mmpbsa_IN = _replace_line_in_file(mmpbsa_IN,line_to_match='#endframe =', 
+                                                new_line=f'endframe = {end if end is not None else len(u.trajectory)},'
+                                                )
+            mmpbsa_IN = _replace_line_in_file(mmpbsa_IN,line_to_match='#frame_step =',
+                                                new_line=f'frame_step = {step if step is not None else 1},'
+                                                )
+                    
             if persistent_waters_cutoff is not None:
                 persistent_waters = ProteinLigandAnalyzer.find_interfacial_waters(u,
                     ligand_sel=ligand_mda_selection, protein_sel="protein", cutoff=3.5,
@@ -542,7 +557,12 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
                     logger.info(f"Found {len(persistent_waters)} persistent interfacial waters: {water_resids_str} for {sysname}")
                     dried_amber_selection = strip_amber_selection.strip(':WAT').strip(':HOH')
                     strip_amber_selection = f'((:WAT,HOH)&!(:{water_resids_str}))|:{dried_amber_selection}'
-                    mmpbsa_IN = ProteinLigandAnalyzer._replace_strip_in_file(mmpbsa_IN, strip_amber_selection)
+                    mmpbsa_IN = _replace_line_in_file(mmpbsa_IN, 
+                                                      line_to_match='strip_mask =', 
+                                                      new_line=f'strip_mask = "{strip_amber_selection}",'
+                                                      )
+
+                    
                 else:
                     logger.info(f"No persistent interfacial waters found with the given cutoff {persistent_waters_cutoff}")
                     
@@ -561,25 +581,6 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
         os.chmod(bash_fname, 0o755)
         
         return bash_fname
-    
-    @staticmethod
-    def _replace_strip_in_file(file_path, new_selection):
-        """
-        Replace the strip_mask line in the mmpbsa input file.
-        """
-        with open(file_path, 'r') as file:
-            lines = file.readlines()
-
-        # Replace the specific line
-        for i, line in enumerate(lines):
-            if line.startswith("strip_mask"):
-                lines[i] = f'strip_mask = "{new_selection}"\n'
-                break
-
-        # Write the modified content back to the file
-        with open(file_path, 'w') as file:
-            file.writelines(lines)
-        return file_path
         
     @staticmethod
     def parse_mmpbsa_differences_table(path:str) -> pd.DataFrame:
@@ -942,3 +943,24 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
                         ).write(out_fname)
             # print(f"Painted PDB saved to {out_fname}")
         return
+    
+def _replace_line_in_file(file_path: str = None,
+                           line_to_match: str = None,
+                           new_line: str = None,
+                           ):
+    """
+    Replace the strip_mask line in the mmpbsa input file.
+    """
+    with open(file_path, 'r') as file:
+        lines = file.readlines()
+
+    # Replace the specific line
+    for i, line in enumerate(lines):
+        if line.startswith(line_to_match):
+            lines[i] = new_line + '\n'
+            break
+
+    # Write the modified content back to the file
+    with open(file_path, 'w') as file:
+        file.writelines(lines)
+    return file_path
