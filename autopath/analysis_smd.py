@@ -2128,3 +2128,35 @@ class SteeredMDAnalysis:
         p_neq_dic = df['p_neq'].to_dict()
         
         return p_neq_dic
+    
+    def get_p_eq(self, results) -> dict[str, float]:
+        """p_eq Equilibrium path probabilities from sMD analysis.
+        Returns a dictionary mapping path labels to p_eq values.
+        As described in https://doi.org/10.1063/5.0138761
+        If weights are too different means the CV is not good enough.
+        """
+        
+        p_neq_dic = self.get_p_neq()
+        
+        weights = {}
+        for path, g in results.groupby('path'):
+            dG = g['dG'].values
+            x = g['r_coord'].values
+            p_neq = p_neq_dic[path]
+            # numerically stable log-sum-exp-like handling
+            dG0 = np.nanmin(dG)
+            integrand = np.exp(-self.beta * (dG - dG0))
+            Zk = np.trapz(integrand, x) * np.exp(-self.beta * dG0)
+            weights[path] = (p_neq * Zk)
+            
+        # normalize
+        p_eq_dic = {k: v / sum(weights.values()) for k, v in weights.items()}
+
+        print("Non-equilibrium path weights:")
+        for k, v in p_neq_dic.items():
+            print(f"Path {k}: p_neq = {v:.4f}")
+        print("Equilibrium path weights:")
+        for k, v in p_eq_dic.items():
+            print(f"Path {k}: p_eq = {v:.4f}")
+
+        return p_eq_dic
