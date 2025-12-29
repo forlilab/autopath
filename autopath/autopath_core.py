@@ -381,7 +381,7 @@ class AutoPath:
                 traj = traj.superpose(traj[0], atom_indices=backbone)
             except Exception as e:
                 logger.warning(f"Superposition failed: {e}. Proceeding without superposition.")
-            traj.save(traj_file.replace(".dcd", ".xtc"))
+            traj.save(traj_file.replace(".dcd", ".dcd"))
             os.remove(traj_file) # remove the dcds
 
         ##############################################################################################
@@ -390,7 +390,7 @@ class AutoPath:
         
         # load all the aligned xtc trajectories
         logs = glob(f"{sMD_outdir}/sMD_*_*_{self.sMD_pulling_dir}.dat")
-        sMD_trajs = glob(f"{sMD_outdir}/sMD_*_*_{self.sMD_pulling_dir}.xtc")
+        sMD_trajs = glob(f"{sMD_outdir}/sMD_*_*_{self.sMD_pulling_dir}.dcd")
         logger.info(f"Found {len(sMD_trajs)} sMD trajectories for analysis.")
         
         smd = SteeredMDAnalysis(logs, 

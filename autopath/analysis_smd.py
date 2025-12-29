@@ -1753,7 +1753,7 @@ class SteeredMDAnalysis:
     def check_seq_rep_conv(
         self,
         speed: float,
-        quantities: list[str] | str = ["dG"],
+        quantities: list[str] = ["dG"],
         min_replicas: int = 3,
         tol_rmsd: float = 3.0,     # kJ/mol
         tol_barrier: float = 2.0,  # kJ/mol
@@ -2160,3 +2160,49 @@ class SteeredMDAnalysis:
             print(f"Path {k}: p_eq = {v:.4f}")
 
         return p_eq_dic
+    
+    def calculate_weighted_pmf(self, 
+                               results: pd.DataFrame,
+                               weight_col:str = 'dG',
+                               weight_type: str = 'p_eq') -> pd.DataFrame:
+        """Calculate weighted PMF across paths using either p_eq or p_neq weights.
+        
+        Parameters
+        ----------
+        results : pd.DataFrame
+            DataFrame with sMD analysis results including 'dG' and 'path' columns.
+        weight_type : str
+            Type of weights to use: 'p_eq' for equilibrium weights, 'p_neq' for non-equilibrium weights.
+        
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with weighted PMF values at each r_coord.
+        """
+        
+        if weight_type == 'p_eq':
+            weights = self.get_p_eq(results)
+        elif weight_type == 'p_neq':
+            weights = self.get_p_neq()
+        else:
+            raise ValueError("weight_type must be either 'p_eq' or 'p_neq'")
+        
+        r_coords = sorted(results['r_coord'].unique())
+        weighted_pmf = []
+
+        for r in r_coords:
+            dG_vals = []
+            w_vals = []
+            for path, g in results[results['r_coord'] == r].groupby('path'):
+                if path in weights:
+                    dG_vals.append(g[weight_col].values[0])
+                    w_vals.append(weights[path])
+            
+            if dG_vals:
+                # Weighted average of dG
+                dG_weighted = np.sum(np.array(dG_vals) * np.array(w_vals)) / np.sum(w_vals)
+                weighted_pmf.append({'r_coord': r, f'{weight_col}_weighted': dG_weighted})
+        
+        weighted_pmf_df = pd.DataFrame(weighted_pmf)
+        
+        return weighted_pmf_df
