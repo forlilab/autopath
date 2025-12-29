@@ -834,7 +834,7 @@ class SteeredMDAnalysis:
 
         if df['speed'].nunique() < 2:
             print("Not enough speeds for extrapolation.")
-            return pd.DataFrame()
+            return df
         
         results = []
         for param_col in param_cols:
@@ -871,7 +871,8 @@ class SteeredMDAnalysis:
                             f"{param_col}_intercept_se": lr_results.intercept_stderr,
                             f"{param_col}_slope_se": lr_results.stderr,
                             'R2': lr_results.rvalue**2,
-                            'n_speeds': len(speeds)
+                            'n_speeds': len(speeds),
+                            # 'speed': 0 # for compatibility
                         })
 
                     if len(_df) == 0:
@@ -883,6 +884,7 @@ class SteeredMDAnalysis:
                 
         # drop duplicated columns if any
         v0_results = v0_results.loc[:,~v0_results.columns.duplicated()]
+        v0_results['speed'] = 0.0  # add speed=0 for clarity
         
         # merge back to original df
         results = df.merge(v0_results, on=[x_col, 'path'], how='left')
@@ -1802,10 +1804,9 @@ class SteeredMDAnalysis:
 
             self.log_files = speed_logs[:k]
             results_k, _ = self.run_analysis(fit_GMM=fit_GMM)
-            # ensure dont deal with paths at all, see fixme above
-            # results_k = results_k.copy()
-            # results_k["path"] = 1        
-                
+            log_ids = [self._replica_idx_from_log(fn) for fn in self.log_files]
+            results_k['repids'] = log_ids
+            
             # operate per path
             for path, dfp in results_k.groupby("path"):
                 
@@ -1842,13 +1843,6 @@ class SteeredMDAnalysis:
                 # align r_coord
                 common_r = pmf_k.index.intersection(pmf_km1.index)
                 
-                print(
-                    f"k={k}, path={path}, "
-                    f"len(pmf_k)={len(pmf_k)}, "
-                    f"len(pmf_km1)={len(pmf_km1)}, "
-                    f"len(common_r)={len(common_r)}"
-                )
-
                 if len(common_r) < 5:
                     rows.append({
                         "speed": speed,
@@ -2124,3 +2118,13 @@ class SteeredMDAnalysis:
         base = os.path.basename(fn)[:-4]
         rep = base.split("_")[-3]
         return int(rep.split("-")[1])
+    
+    def get_p_neq(self) -> dict[str, float]:
+        """p_neq Non-equilibrium path probabilities from sMD analysis.
+        Returns a dictionary mapping path labels to p_neq values."""
+        
+        df = self.processed_data.groupby(['path'])[['trajname']].nunique()
+        df['p_neq'] = df['trajname'] / df['trajname'].sum()
+        p_neq_dic = df['p_neq'].to_dict()
+        
+        return p_neq_dic
