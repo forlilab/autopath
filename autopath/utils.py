@@ -429,6 +429,7 @@ def fix_pdb(
     keep_heterogens: bool = False,
     ignore_terminal_missing_residues: bool = True,
     pH: float = 7.4,
+    discard_input_hydrogens: bool = False,
 ) -> PDBFixer:
     """Fixes common problems in PDB such as:
             - missing atoms
@@ -442,9 +443,18 @@ def fix_pdb(
         keep_heterogens (bool): if False all the heterogen atoms but waters are deleted.
         ignore_terminal_missing_residues (bool): If missing residues at the beginning and the end of a chain should be ignored or built.
         pH (float):  pH value used to determine protonation state of residues
+        discard_input_hydrogens (bool): removes all hydrogens from input structure (then readd with PDBFixer)
     """
 
     fixer = PDBFixer(str(pdbfile))
+
+    if discard_input_hydrogens:
+        modeller = Modeller(fixer.topology, fixer.positions)
+        h_atoms = [a for a in modeller.topology.atoms() if a.element.symbol == 'H']
+        modeller.delete(h_atoms)
+        fixer.topology = modeller.topology
+        fixer.positions = modeller.positions
+
     fixer.findMissingResidues()
 
     if ignore_terminal_missing_residues:

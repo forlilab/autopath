@@ -184,6 +184,12 @@ def cmd_lineparser():
     )
 
     parser.add_argument(
+        "--discard_input_hydrogens",
+        action='store_true',
+        help="removes all hydrogens from input structure (then readd with PDBFixer)",
+    )
+
+    parser.add_argument(
         "--lig_resname",
         dest="lig_resname",
         required=False,
@@ -277,7 +283,7 @@ def main():
     logger.info("Starting equilibration process")
 
     # Fix/prepare the receptor
-    protein_pdb = fix_pdb(pdbfile=rec_path, keep_heterogens=True, pH=7.4)
+    protein_pdb = fix_pdb(pdbfile=rec_path, keep_heterogens=True, pH=7.4, discard_input_hydrogens=args.discard_input_hydrogens)
     pdb_name = os.path.splitext(os.path.basename(rec_path))[0]
     #save full receptor 
     prot_path = f"{save_dir}/{pdb_name}_fixed.pdb"
