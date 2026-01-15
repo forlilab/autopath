@@ -60,7 +60,7 @@ class AutoPath:
         protocol_fname: str = None,
         run_sMDpulling: bool = True,
         sMD_pulling_dir: str = "forward",  # "forward" or "backward"
-        sMD_pulling_speeds: dict = {0.001:2, 0.002:2, 0.003:2},  # nm/ps
+        sMD_pulling_speeds: dict = {0.001:None, 0.002:None, 0.003:None},  # nm/ps
         sMD_max_pulling_dist: float = 2.0,  # nm
         sMD_time: int = None,  # ns
         sMD_steps_per_move: int = None,
@@ -163,6 +163,7 @@ class AutoPath:
                 boxShape=self.boxShape,
                 padding=self.padding,
                 ionicStrength=self.ionicStrength,
+                ions=('Na+', 'Cl-'),
                 is_membrane=self.is_membrane,
                 lipid_type=self.lipid_type,
             )
@@ -219,53 +220,54 @@ class AutoPath:
         lig_anchor_mode = 'lig_ha'
         lig_anchor_mode_atoms = 5
 
-        equilibrated_traj = equilibrated_traj.replace(".dcd", "_aligned.xtc")
-        u_eq = mda.Universe(equilibrated_pdb, equilibrated_traj, in_memory=True)
-        try:
-            rmsd = compute_rmsd(u_eq, u_eq,
-                                alig_select="backbone", 
-                                groupselections={"ligand":f"resname {ligand_resname} and not name H*", 
-                                                "protein":'protein and not name H*'},
-                                plots_outdir=f"{sys_name}/equilibration"
-                                )
-            rmsd.to_csv(f"{sys_name}/equilibration/{sys_name}_rmsd.csv", index=False)
-            plot_atomic_rmsf(u_eq, outname=f"{sys_name}/equilibration/{sys_name}_RMSF.png", log_rmsf=True)
-        except Exception as e:
-            logger.error(f"Error computing RMSD/RMSF: {e}")
-            pass
-        
-        # Equilibration VS checkpoint
-        # if self.equilibration_checkpoint:
-        #     final_rmsd = lig_rmsd_equilibration[-1:].values
-        #     if final_rmsd > self.eq_checkpoint_cutoff * 10:  # to Angs
-        #         logger.warning(f"Simulation for ligand {sys_name} terminated because ligand RMSD={final_rmsd:.2f} > {self.eq_checkpoint_cutoff}")
-        #         exit(1)
-        # ligand_atoms = u_eq.select_atoms(f'index {" ".join(map(str, ligand_atoms_indices))}')
-        # final_com = calculate_com_distance(u_eq, ligand_atoms, pocket_atoms, wrap=False)[-1] /10 # convert to nm
-        # logger.info(f"COM distance after equilibration is: {final_com:.2f} nm")
-        
-        pocket_atom_indices = get_pocket_atoms_idxs(u_eq, self.pocket_selection)
-        pocket_atoms = u_eq.select_atoms(f'index {" ".join(map(str, pocket_atom_indices))}')
-        pocket_residues = [f"{atom.resname}_{atom.resid}" for atom in pocket_atoms]
-        logger.info(f"Pocket residues are: {', '.join(set(pocket_residues))}")
-        
-        ligand_atoms_indices = get_ligand_anchor_atoms(u_eq, ligand_resname, 
-                                                       mode=lig_anchor_mode, 
-                                                       n_atoms=lig_anchor_mode_atoms,
-                                                       out_dir=sys_name)
-        logger.info(f"Ligand anchor atom indices are: {', '.join(map(str, ligand_atoms_indices))}")
-        # write out the pocket atoms to a pdb
-        #FIXME this should be a function that writes a pymol sesh
-        try:
-            with mda.Writer(f"{sys_name}/pocket_definition.pdb", u_eq.atoms.n_atoms) as W:
-                W.write(pocket_atoms)
-            with mda.Writer(f"{sys_name}/pocket_prote.pdb", u_eq.atoms.n_atoms) as W:
-                W.write(u_eq.select_atoms(f'protein'))
-            with mda.Writer(f"{sys_name}/pocket_lig.pdb", u_eq.atoms.n_atoms) as W:
-                W.write(u_eq.select_atoms(f'resname {ligand_resname}'))
-        except Exception as e:
-            logger.error(f"Error writing pocket/ligand/protein pdbs: {e}")
-            pass
+        equilibrated_traj = equilibrated_traj.replace(".dcd", "_aligned.dcd")
+        if os.path.exists(equilibrated_traj):
+            u_eq = mda.Universe(equilibrated_pdb, equilibrated_traj, in_memory=True)
+            try:
+                rmsd = compute_rmsd(u_eq, u_eq,
+                                    alig_select="backbone", 
+                                    groupselections={"ligand":f"resname {ligand_resname} and not name H*", 
+                                                    "protein":'protein and not name H*'},
+                                    plots_outdir=f"{sys_name}/equilibration"
+                                    )
+                rmsd.to_csv(f"{sys_name}/equilibration/{sys_name}_rmsd.csv", index=False)
+                plot_atomic_rmsf(u_eq, outname=f"{sys_name}/equilibration/{sys_name}_RMSF.png", log_rmsf=True)
+            except Exception as e:
+                logger.error(f"Error computing RMSD/RMSF: {e}")
+                pass
+            
+            # Equilibration VS checkpoint
+            # if self.equilibration_checkpoint:
+            #     final_rmsd = lig_rmsd_equilibration[-1:].values
+            #     if final_rmsd > self.eq_checkpoint_cutoff * 10:  # to Angs
+            #         logger.warning(f"Simulation for ligand {sys_name} terminated because ligand RMSD={final_rmsd:.2f} > {self.eq_checkpoint_cutoff}")
+            #         exit(1)
+            # ligand_atoms = u_eq.select_atoms(f'index {" ".join(map(str, ligand_atoms_indices))}')
+            # final_com = calculate_com_distance(u_eq, ligand_atoms, pocket_atoms, wrap=False)[-1] /10 # convert to nm
+            # logger.info(f"COM distance after equilibration is: {final_com:.2f} nm")
+            
+            pocket_atom_indices = get_pocket_atoms_idxs(u_eq, self.pocket_selection)
+            pocket_atoms = u_eq.select_atoms(f'index {" ".join(map(str, pocket_atom_indices))}')
+            pocket_residues = [f"{atom.resname}_{atom.resid}" for atom in pocket_atoms]
+            logger.info(f"Pocket residues are: {', '.join(set(pocket_residues))}")
+            
+            ligand_atoms_indices = get_ligand_anchor_atoms(u_eq, ligand_resname, 
+                                                        mode=lig_anchor_mode, 
+                                                        n_atoms=lig_anchor_mode_atoms,
+                                                        out_dir=sys_name)
+            logger.info(f"Ligand anchor atom indices are: {', '.join(map(str, ligand_atoms_indices))}")
+            # write out the pocket atoms to a pdb
+            #FIXME this should be a function that writes a pymol sesh
+            try:
+                with mda.Writer(f"{sys_name}/pocket_definition.pdb", u_eq.atoms.n_atoms) as W:
+                    W.write(pocket_atoms)
+                with mda.Writer(f"{sys_name}/pocket_prote.pdb", u_eq.atoms.n_atoms) as W:
+                    W.write(u_eq.select_atoms(f'protein'))
+                with mda.Writer(f"{sys_name}/pocket_lig.pdb", u_eq.atoms.n_atoms) as W:
+                    W.write(u_eq.select_atoms(f'resname {ligand_resname}'))
+            except Exception as e:
+                logger.error(f"Error writing pocket/ligand/protein pdbs: {e}")
+                pass
 
         ##############################################################################################
         ##################################### Steered MD simulations #################################
