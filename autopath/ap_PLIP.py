@@ -441,6 +441,7 @@ class ProteinLigandAnalyzer:
                     trajectory:str=None,
                     lig_selection:str=None,
                     strip_selection:str=":POP:WAT:Na+:Cl-:Mg+:K+:HOH:NA:CL:K:MG",
+                    radii:str='mbondi2',
                     gpu_resource="rtxa6000", 
                     gpu_num=1, 
                     time="3-0",
@@ -476,7 +477,7 @@ echo "Entering output directory ${out_dir} ..."
 cd ${out_dir}
 
 echo "Running ante-mmpbsa to generate prmtop files..."
-ante-MMPBSA.py -p ${system_prmtop} -s "${strip_selection}" -n ${lig_selection} --radii mbondi2 -c complex.prmtop -r receptor.prmtop -l ligand.prmtop
+ante-MMPBSA.py -p ${system_prmtop} -s "${strip_selection}" -n ${lig_selection} --radii ${radii} -c complex.prmtop -r receptor.prmtop -l ligand.prmtop
 
 echo "Finished ante-mmpbsa at $(date)"
 echo "Running mmpbsa.py for trajectory ${trajectory} ..."
@@ -494,6 +495,7 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
             template = template.replace("${trajectory}", trajectory)
             template = template.replace("${lig_selection}", lig_selection)
             template = template.replace("${strip_selection}", strip_selection)
+            template = template.replace("${radii}", radii)
             template = template.replace("${gpu_resource}", gpu_resource)
             template = template.replace("${gpu_num}", str(gpu_num))
             template = template.replace("${time}", time)
@@ -514,6 +516,7 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
             traj_slice:tuple=None, #(start, end, step)
             persistent_waters_cutoff:float=None,
             mmpbsa_in:str="mmgbsa.in",
+            radii:str='mbondi2',
             output_folder:str="mmpbsa_results",
             bash_fname:str="run_mmpbsa_batch.sh",
             mpi_threads:int=128,
@@ -539,7 +542,9 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
         if traj_slice is not None:
             start, end, step = traj_slice
             n_frames = len(u.trajectory[start:end:step])
-
+        else:
+            n_frames = len(u.trajectory)
+            
         mpi_threads = min(mpi_threads, n_frames) #avoid problems with too many threads
         logger.info(f"Writing MMPBSA qfile for {sysname} with {n_frames} frames and {mpi_threads} MPI threads.")
 
@@ -590,6 +595,7 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
                                                 trajectory=trajectory_abs,
                                                 lig_selection=ligand_amber_selection,
                                                 strip_selection=strip_amber_selection,
+                                                radii=radii,
                                                 omp_threads=mpi_threads
                                                 )
         

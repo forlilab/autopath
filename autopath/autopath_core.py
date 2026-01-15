@@ -21,13 +21,15 @@ from autopath import (
     SystemPreparation,
     Equilibration,
     SteeredMD,
-    SteeredMDAnalysis,
     RelaxMD,
     MetadynamicsMD,
 )
+from autopath.sMDAnalysis import SMDData, SMDAnalysis
+from autopath.sMDAnalysis.PathModel import DTWPathModel
+from autopath.sMDAnalysis.Diagnostics import plot_convergence_traces, plot_convergence_metrics
 
 import logging
-logger = logging.getLogger('autopath')
+logger = logging.getLogger('autopath.core')
 
 class AutoPath:
     def __init__(
@@ -57,13 +59,15 @@ class AutoPath:
         run_equilibration: bool = True,
         protocol_fname: str = None,
         run_sMDpulling: bool = True,
+        sMD_outdir: str = "sMD",
         sMD_pulling_dir: str = "forward",  # "forward" or "backward"
-        sMD_pulling_speeds: dict = {0.001:2, 0.002:2, 0.003:2},  # nm/ps
+        sMD_pulling_speeds: dict = {0.001:None, 0.002:None, 0.003:None},  # nm/ps
         sMD_max_pulling_dist: float = 2.0,  # nm
         sMD_time: int = None,  # ns
         sMD_steps_per_move: int = None,
         sMD_dx_per_move: float = 0.001,  # nm, this is the displacement per move
         sMD_spring_cte: float = None,  # KJ/mol/nm2
+        sMD_ligand_anchor_mode: str = 'lig_ha',
         sMD_autostop_freq: int = 50, #moves
         extract_milestones: bool = True,
         n_milestones: int = 5,
@@ -97,6 +101,7 @@ class AutoPath:
         self.protocol_fname = protocol_fname
         # Steered MD
         self.run_sMDpulling = run_sMDpulling
+        self.sMD_outdir = sMD_outdir
         self.sMD_pulling_dir = sMD_pulling_dir
         self.sMD_max_pulling_dist = sMD_max_pulling_dist
         self.sMD_time = sMD_time
@@ -104,6 +109,7 @@ class AutoPath:
         self.sMD_steps_per_move = sMD_steps_per_move
         self.sMD_dx_per_move = sMD_dx_per_move
         self.sMD_spring_cte = sMD_spring_cte
+        self.sMD_ligand_anchor_mode = sMD_ligand_anchor_mode
         self.sMD_autostop_freq = sMD_autostop_freq
         # Milestones
         self.extract_milestones = extract_milestones
@@ -141,6 +147,8 @@ class AutoPath:
         else:
             sys_name = os.path.splitext(os.path.basename(self.protein_file))[0]
 
+        self.sMD_outdir = f"{sys_name}/{self.sMD_outdir}"
+
         os.makedirs(sys_name, exist_ok=True)
         
         logger.info(f"Processing system {sys_name}")
@@ -161,6 +169,7 @@ class AutoPath:
                 boxShape=self.boxShape,
                 padding=self.padding,
                 ionicStrength=self.ionicStrength,
+                ions=('Na+', 'Cl-'),
                 is_membrane=self.is_membrane,
                 lipid_type=self.lipid_type,
             )
@@ -213,57 +222,57 @@ class AutoPath:
         ##############################################################################################
         ############################# Post-equilibration Analysis ####################################
         ##############################################################################################
-
-        lig_anchor_mode = 'lig_ha'
-        lig_anchor_mode_atoms = 5
-
+        
         equilibrated_traj = equilibrated_traj.replace(".dcd", "_aligned.dcd")
-        u_eq = mda.Universe(equilibrated_pdb, equilibrated_traj, in_memory=True)
-        try:
-            rmsd = compute_rmsd(u_eq, u_eq,
-                                alig_select="backbone", 
-                                groupselections={"ligand":f"resname {ligand_resname} and not name H*", 
-                                                "protein":'protein and not name H*'},
-                                plots_outdir=f"{sys_name}/equilibration"
-                                )
-            rmsd.to_csv(f"{sys_name}/equilibration/{sys_name}_rmsd.csv", index=False)
-            plot_atomic_rmsf(u_eq, outname=f"{sys_name}/equilibration/{sys_name}_RMSF.png", log_rmsf=True)
-        except Exception as e:
-            logger.error(f"Error computing RMSD/RMSF: {e}")
-            pass
-        
-        # Equilibration VS checkpoint
-        # if self.equilibration_checkpoint:
-        #     final_rmsd = lig_rmsd_equilibration[-1:].values
-        #     if final_rmsd > self.eq_checkpoint_cutoff * 10:  # to Angs
-        #         logger.warning(f"Simulation for ligand {sys_name} terminated because ligand RMSD={final_rmsd:.2f} > {self.eq_checkpoint_cutoff}")
-        #         exit(1)
-        # ligand_atoms = u_eq.select_atoms(f'index {" ".join(map(str, ligand_atoms_indices))}')
-        # final_com = calculate_com_distance(u_eq, ligand_atoms, pocket_atoms, wrap=False)[-1] /10 # convert to nm
-        # logger.info(f"COM distance after equilibration is: {final_com:.2f} nm")
-        
-        pocket_atom_indices = get_pocket_atoms_idxs(u_eq, self.pocket_selection)
-        pocket_atoms = u_eq.select_atoms(f'index {" ".join(map(str, pocket_atom_indices))}')
-        pocket_residues = [f"{atom.resname}_{atom.resid}" for atom in pocket_atoms]
-        logger.info(f"Pocket residues are: {', '.join(set(pocket_residues))}")
-        
-        ligand_atoms_indices = get_ligand_anchor_atoms(u_eq, ligand_resname, 
-                                                       mode=lig_anchor_mode, 
-                                                       n_atoms=lig_anchor_mode_atoms,
-                                                       out_dir=sys_name)
-        logger.info(f"Ligand anchor atom indices are: {', '.join(map(str, ligand_atoms_indices))}")
-        # write out the pocket atoms to a pdb
-        #FIXME this should be a function that writes a pymol sesh
-        try:
-            with mda.Writer(f"{sys_name}/pocket_definition.pdb", u_eq.atoms.n_atoms) as W:
-                W.write(pocket_atoms)
-            with mda.Writer(f"{sys_name}/pocket_prote.pdb", u_eq.atoms.n_atoms) as W:
-                W.write(u_eq.select_atoms(f'protein'))
-            with mda.Writer(f"{sys_name}/pocket_lig.pdb", u_eq.atoms.n_atoms) as W:
-                W.write(u_eq.select_atoms(f'resname {ligand_resname}'))
-        except Exception as e:
-            logger.error(f"Error writing pocket/ligand/protein pdbs: {e}")
-            pass
+        if os.path.exists(equilibrated_traj):
+            u_eq = mda.Universe(equilibrated_pdb, equilibrated_traj, in_memory=True)
+            try:
+                rmsd = compute_rmsd(u_eq, u_eq,
+                                    alig_select="backbone", 
+                                    groupselections={"ligand":f"resname {ligand_resname} and not name H*", 
+                                                    "protein":'protein and not name H*'},
+                                    plots_outdir=f"{sys_name}/equilibration"
+                                    )
+                rmsd.to_csv(f"{sys_name}/equilibration/{sys_name}_rmsd.csv", index=False)
+                plot_atomic_rmsf(u_eq, outname=f"{sys_name}/equilibration/{sys_name}_RMSF.png", log_rmsf=True)
+            except Exception as e:
+                logger.error(f"Error computing RMSD/RMSF: {e}")
+                pass
+            
+            # Equilibration VS checkpoint
+            # if self.equilibration_checkpoint:
+            #     final_rmsd = lig_rmsd_equilibration[-1:].values
+            #     if final_rmsd > self.eq_checkpoint_cutoff * 10:  # to Angs
+            #         logger.warning(f"Simulation for ligand {sys_name} terminated because ligand RMSD={final_rmsd:.2f} > {self.eq_checkpoint_cutoff}")
+            #         exit(1)
+            # ligand_atoms = u_eq.select_atoms(f'index {" ".join(map(str, ligand_atoms_indices))}')
+            # final_com = calculate_com_distance(u_eq, ligand_atoms, pocket_atoms, wrap=False)[-1] /10 # convert to nm
+            # logger.info(f"COM distance after equilibration is: {final_com:.2f} nm")
+            
+            pocket_atom_indices = get_pocket_atoms_idxs(u_eq, self.pocket_selection)
+            pocket_atoms = u_eq.select_atoms(f'index {" ".join(map(str, pocket_atom_indices))}')
+            pocket_residues = [f"{atom.resname}_{atom.resid}" for atom in pocket_atoms]
+            logger.info(f"Pocket residues are: {', '.join(set(pocket_residues))}")
+            
+            ligand_total_hatoms = [a.index for a in u_eq.select_atoms(f'resname {ligand_resname} and not name H*')]
+            lig_anchor_mode_atoms = 5
+            ligand_atoms_indices = get_ligand_anchor_atoms(u_eq, ligand_resname, 
+                                                        mode=self.sMD_ligand_anchor_mode,
+                                                        n_atoms=lig_anchor_mode_atoms,
+                                                        out_dir=sys_name)
+            logger.info(f"Ligand anchor atom indices are: {', '.join(map(str, ligand_atoms_indices))}")
+            # write out the pocket atoms to a pdb
+            #FIXME this should be a function that writes a pymol sesh
+            try:
+                with mda.Writer(f"{sys_name}/pocket_definition.pdb", u_eq.atoms.n_atoms) as W:
+                    W.write(pocket_atoms)
+                with mda.Writer(f"{sys_name}/pocket_prote.pdb", u_eq.atoms.n_atoms) as W:
+                    W.write(u_eq.select_atoms(f'protein'))
+                with mda.Writer(f"{sys_name}/pocket_lig.pdb", u_eq.atoms.n_atoms) as W:
+                    W.write(u_eq.select_atoms(f'resname {ligand_resname}'))
+            except Exception as e:
+                logger.error(f"Error writing pocket/ligand/protein pdbs: {e}")
+                pass
 
         ##############################################################################################
         ##################################### Steered MD simulations #################################
@@ -273,13 +282,12 @@ class AutoPath:
         # sMD_outdir = f"{sys_name}/sMD_{lig_anchor_mode}_{sMD_timestep}ps_{sMD_collision_frequency}ps_200stm"
         # in this paper they used 80 kcal·mol−1? units don match tho. Ziada et al 2022.
         sMD_spring_cte_per_atom = 100 * 4.184  # KJ/mol/nm2, converted from kcal. This affects thermal fluctuations
-        sMD_outdir=f"{sys_name}/sMD"
         
         if self.run_sMDpulling:
             equilibrated_system = load_system(f"{sys_name}/equilibration/system_equil_{sys_name}.xml")
 
             if self.sMD_spring_cte is None:
-                sMD_spring_cte = sMD_spring_cte_per_atom * len(ligand_atoms_indices)  # Normalize by ligand size
+                sMD_spring_cte = sMD_spring_cte_per_atom * len(ligand_total_hatoms)  # Normalize by ligand size
                 logger.info(f"Spring constant set to {sMD_spring_cte} KJ/mol/nm2 for {len(ligand_atoms_indices)} atoms.")
             else:
                 sMD_spring_cte = self.sMD_spring_cte
@@ -294,7 +302,7 @@ class AutoPath:
                 timestep=self.timestep,
                 temperature=self.temperature,
                 save_freq=1250,  # every 5 ps if timestep=0.004 ps
-                out_dir=sMD_outdir,
+                out_dir=self.sMD_outdir,
             )
 
             for speed, reps in self.sMD_pulling_speeds.items():
@@ -316,7 +324,7 @@ class AutoPath:
                     logger.info(f"Running sMD for speed {speed} nm/ps until convergence.")
                     CONVERGED = False
                     while not CONVERGED:
-                        log_files = glob(f"{sMD_outdir}/sMD_*_v{speed}_{self.sMD_pulling_dir}.dat")
+                        log_files = glob(f"{self.sMD_outdir}/sMD_*_v{speed}_{self.sMD_pulling_dir}.dat")
                         current_replica = len(log_files) + 1
                         logger.info(f"Starting replica {current_replica} for speed {speed} nm/ps.")
                         
@@ -326,30 +334,27 @@ class AutoPath:
                             break
                         
                         if len(log_files) >= 5:  # need at least 5 replicas to assess convergence
-                            smd = SteeredMDAnalysis(
-                                log_files, sys_name, 
-                                outdir=f'{sMD_outdir}/analysis',
-                                reference_pdb=equilibrated_pdb,
-                                ligand_select=f'resname {ligand_resname} and not name H*',
-                                timestep=self.timestep,
-                                temperature=self.temperature,
-                                pulling_direction=self.sMD_pulling_dir
-                            )
-                            metrics_df, traces_df = smd.check_seq_rep_conv(
-                                speed=speed, quantities=['dG', 'Wdiss', 'dG_Jarzynski'],
-                            )
-
-                            metrics_df.to_csv(f"{sMD_outdir}/analysis/sMD_conv_v{speed}_metrics.csv", index=False)
-                            traces_df.to_csv(f"{sMD_outdir}/analysis/sMD_conv_v{speed}_traces.csv", index=False)
+                            
+                            # loads the sMD data
+                            smdanalysis = SMDAnalysis(sysname=sys_name, path_model='dtw', estimators=['cumulant'],
+                                                    do_plots=False, seed=self.random_state,
+                                                    temperature=self.temperature,
+                                                    outdir=f"{self.sMD_outdir}/analysis")
+                            
+                            # check convergence for this speed
+                            conv_df, traces_df = smdanalysis.check_convergence(logs=log_files, speeds=[speed])
+                            conv_df.to_csv(f"{self.sMD_outdir}/analysis/sMD_conv_v{speed}_metrics.csv", index=False)
+                            traces_df.to_csv(f"{self.sMD_outdir}/analysis/sMD_conv_v{speed}_traces.csv", index=False)
 
                             # Plot convergence results
-                            smd_conv_traces = glob(f"{sMD_outdir}/analysis/sMD_conv_*_traces.csv")
-                            smd.plot_convergence_traces(smd_conv_traces, f"{sMD_outdir}/analysis")
-                            smd_conv_metrics = glob(f"{sMD_outdir}/analysis/sMD_conv_*_metrics.csv")
-                            smd.plot_convergence_metrics(smd_conv_metrics, f"{sMD_outdir}/analysis")
+                            conv_traces = glob(f"{self.sMD_outdir}/analysis/sMD_conv_*_traces.csv")
+                            conv_metrics = glob(f"{self.sMD_outdir}/analysis/sMD_conv_*_traces.csv")
 
+                            plot_convergence_traces(conv_traces, outdir=f"{self.sMD_outdir}/analysis")
+                            plot_convergence_metrics(conv_metrics, outdir=f"{self.MD_outdir}/analysis")
+                            
                             # Check convergence. Two last replicas must be converged
-                            CONVERGED = metrics_df['converged'].iloc[-2] and metrics_df['converged'].iloc[-1]
+                            CONVERGED = conv_df['converged'].iloc[-2] and conv_df['converged'].iloc[-1]
                             if CONVERGED:
                                 logger.warning(f"sMD pulling for speed {speed} nm/ps CONVERGED after {current_replica} replicas.")
                                 break
@@ -370,7 +375,7 @@ class AutoPath:
         ##############################################################################################
         ############################### Load and align sMD trajectories ##############################
         ##############################################################################################
-        sMD_trajs = glob(f"{sMD_outdir}/sMD_replica-*_*_*.dcd")
+        sMD_trajs = glob(f"{self.sMD_outdir}/sMD_replica-*_*_*.dcd")
         logger.info(f"Found {len(sMD_trajs)} sMD trajectories to align.")        
         for traj_file in sMD_trajs:
             traj = md.load(traj_file, top=solvated_system_pdb)
@@ -381,34 +386,43 @@ class AutoPath:
                 traj = traj.superpose(traj[0], atom_indices=backbone)
             except Exception as e:
                 logger.warning(f"Superposition failed: {e}. Proceeding without superposition.")
-            traj.save(traj_file.replace(".dcd", ".dcd"))
-            os.remove(traj_file) # remove the dcds
+            traj.save(traj_file) #overwrite
+            # traj.save(traj_file.replace(".dcd", "_aligned.dcd"))
+            # os.remove(traj_file) # remove the dcds
 
         ##############################################################################################
         ######################################### sMD Analysis #######################################
         ##############################################################################################
         
         # load all the aligned xtc trajectories
-        logs = glob(f"{sMD_outdir}/sMD_*_*_{self.sMD_pulling_dir}.dat")
-        sMD_trajs = glob(f"{sMD_outdir}/sMD_*_*_{self.sMD_pulling_dir}.dcd")
-        logger.info(f"Found {len(sMD_trajs)} sMD trajectories for analysis.")
+        logs = glob(f"{self.sMD_outdir}/sMD_*_*_{self.sMD_pulling_dir}.dat")
+        sMD_trajs = glob(f"{self.sMD_outdir}/sMD_replica-*_*_*.dcd")
+        logger.info(f"Found {len(logs)} sMD trajectories for analysis.")
         
-        smd = SteeredMDAnalysis(logs, 
-                                sys_name, 
-                                outdir=f'{sMD_outdir}/analysis',
-                                trajectories=sMD_trajs,
-                                reference_pdb=equilibrated_pdb,
-                                pocket_select=f'protein and around 6.0 resname {ligand_resname} and name CA',
-                                ligand_select=f'resname {ligand_resname} and not name H*',
-                                timestep=self.timestep,
-                                temperature=self.temperature,
-                                pulling_direction=self.sMD_pulling_dir
-                                )
+        # loads the sMD data
+        smd_data = SMDData(logs, sys_name, reference_pdb=equilibrated_pdb)
         
-        results, gmm_results = smd.run_analysis(use_target_grid=True,
-                                                # speeds=[0.001, 0.005],
-                                                fit_GMM=True)
-        results.to_csv(f"{sMD_outdir}/analysis/sMD_analysis_results.csv")
+        # cluster trajectories into pathways
+        cluster_model = DTWPathModel(seed=self.random_state,
+                                    outdir=f"{self.sMD_outdir}/analysis")
+
+        smdanalysis = SMDAnalysis(sys_name, cluster_model,
+                                  estimators=['cumulant', 'jarzynski'],
+                                  do_plots=True, seed=self.random_state,
+                                  temperature=self.temperature,
+                                  outdir=f"{self.sMD_outdir}/analysis")
+
+        smd_data = smdanalysis.run(smd_data)
+
+        # check convergence regardless of speed and autopstop
+        conv_df, traces_df = smdanalysis.check_convergence(logs=logs)
+        conv_df.to_csv(f"{self.sMD_outdir}/analysis/sMD_conv_vALL_metrics.csv", index=False)
+        traces_df.to_csv(f"{self.sMD_outdir}/analysis/sMD_conv_vALL_traces.csv", index=False)
+
+        smd_conv_traces = glob(f"{self.sMD_outdir}/analysis/sMD_conv_*_traces.csv")
+        plot_convergence_traces(smd_conv_traces, outdir=f"{self.sMD_outdir}/analysis")
+        smd_conv_metrics = glob(f"{self.sMD_outdir}/analysis/sMD_conv_*_metrics.csv")
+        plot_convergence_metrics(smd_conv_metrics, outdir=f"{self.sMD_outdir}/analysis")
 
         ##############################################################################################
         ###################################### Extract Milestones ####################################
@@ -483,7 +497,7 @@ class AutoPath:
 
         if self.run_metadynamics:
             try:
-                smd_raw = pd.read_csv(f'{sMD_outdir}_analysis/sMD_data_raw.csv')
+                smd_raw = pd.read_csv(f'{self.sMD_outdir}/analysis/sMD_data_raw.csv')
                 min_com = smd_raw['r_before'].min() * 0.75  # nm
                 max_com = smd_raw['r_before'].max() * 1.1 # nm
             except Exception as e:
