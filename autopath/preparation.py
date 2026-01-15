@@ -27,7 +27,7 @@ from rdkit import Chem
 from autopath.utils import assign_bondOrders, add_variants, save_pdb, save_system, save_amber_files
 
 import logging
-logger = logging.getLogger("autopath")
+logger = logging.getLogger("autopath.preparation")
 
 class SystemPreparation:
     def __init__(
@@ -43,6 +43,7 @@ class SystemPreparation:
         padding: float = 1.2,
         num_solvent: int = None,
         ionicStrength: float = 0.15,
+        ions: tuple[str] = ("Na+", "Cl-"), # positiveIon, negativeIon
         is_membrane: bool = False,
         lipid_type: str = 'POPC',
         out_dir: str = "system",
@@ -80,7 +81,8 @@ class SystemPreparation:
             exit(1)
             
         self.ionicStrength = ionicStrength * openmmunit.molar
-
+        self.ions = ions  # positiveIon, negativeIon
+        
         self.is_membrane = is_membrane
         self.lipid_type = lipid_type
         self._available_lipids = [
@@ -304,11 +306,13 @@ class SystemPreparation:
                 neutralize=True,
                 numAdded=self.num_solvent,
                 ionicStrength=self.ionicStrength,
+                positiveIon=self.ions[0],
+                negativeIon=self.ions[1],
                 boxShape=self.boxShape,
                 padding=self.padding,
             )
 
-        logger.info(f"Creating the an OpenMM system..")
+        logger.info(f"Creating the OpenMM system..")
         system = self.forcefield.createSystem(
             modeller.topology,
             nonbondedMethod=PME,
