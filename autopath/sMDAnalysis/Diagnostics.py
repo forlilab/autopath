@@ -123,6 +123,9 @@ def plot_convergence_traces(smd_conv_traces:list[str], outdir: str):
     Each cluster/path is shown with a different line style,
     while color encodes the number of replicas (per speed).
     """
+    if len(smd_conv_traces) == 0:
+        logger.warning("No data files provided for convergence traces plotting.")
+        return
 
     # load all data
     all_data = []
@@ -197,6 +200,9 @@ def plot_convergence_metrics(smd_conv_metrics: list[str], outdir: str):
     Each path/cluster is shown with a different line style,
     while color encodes pulling speed.
     """
+    if len(smd_conv_metrics) == 0:
+        logger.warning("No data files provided for convergence metrics plotting.")
+        return
     
     # load all data
     all_data = []
