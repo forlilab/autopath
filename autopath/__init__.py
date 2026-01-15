@@ -12,13 +12,13 @@ from .steered_md import SteeredMD
 from .metadynamics import MetadynamicsMD
 from .relax_md import RelaxMD
 from .vanilla_md import VanillaMD
-from autopath.SMDAnalysis import SMDAnalysis
+from autopath import sMDAnalysis
 
 __all__ = [
     "Equilibration",
     "SystemPreparation",
     "SteeredMD",
-    "SMDAnalysis",
+    "sMDAnalysis",
     "MetadynamicsMD",
     "RelaxMD",
     "VanillaMD",

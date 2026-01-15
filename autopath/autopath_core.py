@@ -21,13 +21,15 @@ from autopath import (
     SystemPreparation,
     Equilibration,
     SteeredMD,
-    SteeredMDAnalysis,
     RelaxMD,
     MetadynamicsMD,
 )
+from autopath.sMDAnalysis import SMDData, SMDAnalysis
+from autopath.sMDAnalysis.PathModel import DTWPathModel
+from autopath.sMDAnalysis.Diagnostics import plot_convergence_traces, plot_convergence_metrics
 
 import logging
-logger = logging.getLogger('autopath')
+logger = logging.getLogger('autopath.core')
 
 class AutoPath:
     def __init__(
@@ -217,7 +219,7 @@ class AutoPath:
         lig_anchor_mode = 'lig_ha'
         lig_anchor_mode_atoms = 5
 
-        equilibrated_traj = equilibrated_traj.replace(".dcd", "_aligned.dcd")
+        equilibrated_traj = equilibrated_traj.replace(".dcd", "_aligned.xtc")
         u_eq = mda.Universe(equilibrated_pdb, equilibrated_traj, in_memory=True)
         try:
             rmsd = compute_rmsd(u_eq, u_eq,
@@ -326,30 +328,26 @@ class AutoPath:
                             break
                         
                         if len(log_files) >= 5:  # need at least 5 replicas to assess convergence
-                            smd = SteeredMDAnalysis(
-                                log_files, sys_name, 
-                                outdir=f'{sMD_outdir}/analysis',
-                                reference_pdb=equilibrated_pdb,
-                                ligand_select=f'resname {ligand_resname} and not name H*',
-                                timestep=self.timestep,
-                                temperature=self.temperature,
-                                pulling_direction=self.sMD_pulling_dir
-                            )
-                            metrics_df, traces_df = smd.check_seq_rep_conv(
-                                speed=speed, quantities=['dG', 'Wdiss', 'dG_Jarzynski'],
-                            )
-
-                            metrics_df.to_csv(f"{sMD_outdir}/analysis/sMD_conv_v{speed}_metrics.csv", index=False)
+                            
+                            # loads the sMD data
+                            smdanalysis = SMDAnalysis(sysname=sys_name, path_model='dtw', estimators=['cumulant'],
+                                                    do_plots=False, seed=self.random_state,
+                                                    temperature=self.temperature,
+                                                    outdir=f"{sMD_outdir}/analysis")
+                            
+                            conv_df, traces_df = smdanalysis.check_convergence(logs=log_files, speeds=[speed])
+                            conv_df.to_csv(f"{sMD_outdir}/analysis/sMD_conv_v{speed}_metrics.csv", index=False)
                             traces_df.to_csv(f"{sMD_outdir}/analysis/sMD_conv_v{speed}_traces.csv", index=False)
 
                             # Plot convergence results
-                            smd_conv_traces = glob(f"{sMD_outdir}/analysis/sMD_conv_*_traces.csv")
-                            smd.plot_convergence_traces(smd_conv_traces, f"{sMD_outdir}/analysis")
-                            smd_conv_metrics = glob(f"{sMD_outdir}/analysis/sMD_conv_*_metrics.csv")
-                            smd.plot_convergence_metrics(smd_conv_metrics, f"{sMD_outdir}/analysis")
+                            conv_traces = glob(f"{sMD_outdir}/analysis/sMD_conv_*_traces.csv")
+                            conv_metrics = glob(f"{sMD_outdir}/analysis/sMD_conv_*_traces.csv")
 
+                            plot_convergence_traces(conv_traces, outdir=f"{sMD_outdir}/analysis")
+                            plot_convergence_metrics(conv_metrics, outdir=f"{sMD_outdir}/analysis")
+                            
                             # Check convergence. Two last replicas must be converged
-                            CONVERGED = metrics_df['converged'].iloc[-2] and metrics_df['converged'].iloc[-1]
+                            CONVERGED = conv_df['converged'].iloc[-2] and conv_df['converged'].iloc[-1]
                             if CONVERGED:
                                 logger.warning(f"sMD pulling for speed {speed} nm/ps CONVERGED after {current_replica} replicas.")
                                 break
@@ -390,25 +388,22 @@ class AutoPath:
         
         # load all the aligned xtc trajectories
         logs = glob(f"{sMD_outdir}/sMD_*_*_{self.sMD_pulling_dir}.dat")
-        sMD_trajs = glob(f"{sMD_outdir}/sMD_*_*_{self.sMD_pulling_dir}.dcd")
-        logger.info(f"Found {len(sMD_trajs)} sMD trajectories for analysis.")
+        logger.info(f"Found {len(logs)} sMD trajectories for analysis.")
         
-        smd = SteeredMDAnalysis(logs, 
-                                sys_name, 
-                                outdir=f'{sMD_outdir}/analysis',
-                                trajectories=sMD_trajs,
-                                reference_pdb=equilibrated_pdb,
-                                pocket_select=f'protein and around 6.0 resname {ligand_resname} and name CA',
-                                ligand_select=f'resname {ligand_resname} and not name H*',
-                                timestep=self.timestep,
-                                temperature=self.temperature,
-                                pulling_direction=self.sMD_pulling_dir
-                                )
+        # loads the sMD data
+        smd_data = SMDData(logs, sys_name, reference_pdb=equilibrated_pdb)
         
-        results, gmm_results = smd.run_analysis(use_target_grid=True,
-                                                # speeds=[0.001, 0.005],
-                                                fit_GMM=True)
-        results.to_csv(f"{sMD_outdir}/analysis/sMD_analysis_results.csv")
+        # cluster trajectories into pathways
+        cluster_model = DTWPathModel(seed=self.random_state,
+                                    outdir=f"{sMD_outdir}/analysis/cluster_paths")
+
+        smdanalysis = SMDAnalysis(sys_name, cluster_model,
+                                  estimators=['cumulant', 'jarzynski'],
+                                  do_plots=True, seed=self.random_state,
+                                  temperature=self.temperature,
+                                  outdir=f"{sMD_outdir}/analysis")
+
+        smd_data = smdanalysis.run(smd_data)
 
         ##############################################################################################
         ###################################### Extract Milestones ####################################
