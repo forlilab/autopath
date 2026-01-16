@@ -247,12 +247,11 @@ class SMDAnalysis:
                 yNm1 = prev_pmf.loc[common_r].values
                 
                 # trimm last chunk of the PMF as its noisy
-                print(f'Trimming PMF ends for convergence calculation, original points: {len(common_r)}')
                 trim_fraction = 0.2
                 trim_points = max(1, int(len(common_r) * trim_fraction))
                 yN = yN[:-trim_points]
                 yNm1 = yNm1[:-trim_points]
-                print(f'Trimmed points: {trim_points}, remaining points: {len(yN)}')
+                # print(f'Trimmed points: {trim_points}, remaining points: {len(yN)}')
                 
                 pmf_rmsd = np.sqrt(np.mean((yN - yNm1) ** 2))
                 delta_barrier = abs(yN.max() - yNm1.max())

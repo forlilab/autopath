@@ -236,7 +236,7 @@ def plot_convergence_metrics(smd_conv_metrics: list[str], outdir: str):
 
     fig, axes = plt.subplots(
         len(metrics), 1,
-        figsize=(8, 4 * len(metrics)),
+        figsize=(6, 3 * len(metrics)),
         sharex=True
     )
 
@@ -260,7 +260,7 @@ def plot_convergence_metrics(smd_conv_metrics: list[str], outdir: str):
                 ax.plot(
                     subset['n_replicas'],
                     subset[metric],
-                    color=speed_colors[speed],
+                    # color=speed_colors[speed],
                     linestyle=linestyle,
                     linewidth=2.0,
                     alpha=0.9,
