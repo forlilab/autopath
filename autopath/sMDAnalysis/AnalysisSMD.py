@@ -76,8 +76,12 @@ class SMDAnalysis:
             sMDDdata.filter_by_r_range(r_range, sMDDdata.r_column)
 
         # extract features
-        traces_feat_df = sMDDdata.get_trace_features(features=['work', 'lag', 'r_before' ])
-        
+        traces_feat_df = sMDDdata.get_trace_features(
+                            # features=['work', 'lag', 'r_before' ],
+                            features=['force', 'lag', 'r_before', 'r_after'],
+                            # features=['force', 'lag', 'r_before', 'r_after']
+        )
+
         # cluster trajectories into pathways
         clusterer = DTWPathModel(seed=self.seed, 
                                 do_plots=self.do_plots,
@@ -169,8 +173,10 @@ class SMDAnalysis:
                 
                 # extract features and cluster
                 traces_feat_df = smd.get_trace_features(
-                    features=['work', 'lag', 'r_before']
+                    features=['force', 'lag', 'r_before', 'r_after'],
+                    # features=['work', 'lag', 'r_before' ],
                 )
+                
                 clusterer = DTWPathModel(seed=self.seed,
                                         do_plots=False,
                                         outdir=self.outdir,
@@ -239,7 +245,15 @@ class SMDAnalysis:
 
                 yN = pmf_k.loc[common_r].values
                 yNm1 = prev_pmf.loc[common_r].values
-
+                
+                # trimm last chunk of the PMF as its noisy
+                print(f'Trimming PMF ends for convergence calculation, original points: {len(common_r)}')
+                trim_fraction = 0.2
+                trim_points = max(1, int(len(common_r) * trim_fraction))
+                yN = yN[:-trim_points]
+                yNm1 = yNm1[:-trim_points]
+                print(f'Trimmed points: {trim_points}, remaining points: {len(yN)}')
+                
                 pmf_rmsd = np.sqrt(np.mean((yN - yNm1) ** 2))
                 delta_barrier = abs(yN.max() - yNm1.max())
 
