@@ -348,16 +348,16 @@ class AutoPath:
 
                             # Plot convergence results
                             conv_traces = glob(f"{self.sMD_outdir}/analysis/sMD_conv_*_traces.csv")
-                            conv_metrics = glob(f"{self.sMD_outdir}/analysis/sMD_conv_*_traces.csv")
+                            conv_metrics = glob(f"{self.sMD_outdir}/analysis/sMD_conv_*_metrics.csv")
 
                             plot_convergence_traces(conv_traces, outdir=f"{self.sMD_outdir}/analysis")
-                            plot_convergence_metrics(conv_metrics, outdir=f"{self.MD_outdir}/analysis")
+                            plot_convergence_metrics(conv_metrics, outdir=f"{self.sMD_outdir}/analysis")
                             
                             # Check convergence. Two last replicas must be converged
                             CONVERGED = conv_df['converged'].iloc[-2] and conv_df['converged'].iloc[-1]
                             if CONVERGED:
                                 logger.warning(f"sMD pulling for speed {speed} nm/ps CONVERGED after {current_replica} replicas.")
-                                break
+                                continue # continue to next speed
 
                         # Run the next replica if not converged
                         try:
@@ -375,20 +375,20 @@ class AutoPath:
         ##############################################################################################
         ############################### Load and align sMD trajectories ##############################
         ##############################################################################################
-        sMD_trajs = glob(f"{self.sMD_outdir}/sMD_replica-*_*_*.dcd")
-        logger.info(f"Found {len(sMD_trajs)} sMD trajectories to align.")        
-        for traj_file in sMD_trajs:
-            traj = md.load(traj_file, top=solvated_system_pdb)
-            traj = traj.center_coordinates()
-            traj = traj.image_molecules()
-            try:
-                backbone = traj.topology.select("backbone")
-                traj = traj.superpose(traj[0], atom_indices=backbone)
-            except Exception as e:
-                logger.warning(f"Superposition failed: {e}. Proceeding without superposition.")
-            traj.save(traj_file) #overwrite
-            # traj.save(traj_file.replace(".dcd", "_aligned.dcd"))
-            # os.remove(traj_file) # remove the dcds
+        # sMD_trajs = glob(f"{self.sMD_outdir}/sMD_replica-*_*_*.dcd")
+        # logger.info(f"Found {len(sMD_trajs)} sMD trajectories to align.")        
+        # for traj_file in sMD_trajs:
+        #     traj = md.load(traj_file, top=solvated_system_pdb)
+        #     traj = traj.center_coordinates()
+        #     traj = traj.image_molecules()
+        #     try:
+        #         backbone = traj.topology.select("backbone")
+        #         traj = traj.superpose(traj[0], atom_indices=backbone)
+        #     except Exception as e:
+        #         logger.warning(f"Superposition failed: {e}. Proceeding without superposition.")
+        #     traj.save(traj_file) #overwrite
+        #     # traj.save(traj_file.replace(".dcd", "_aligned.dcd"))
+        #     # os.remove(traj_file) # remove the dcds
 
         ##############################################################################################
         ######################################### sMD Analysis #######################################
@@ -419,9 +419,9 @@ class AutoPath:
         conv_df.to_csv(f"{self.sMD_outdir}/analysis/sMD_conv_vALL_metrics.csv", index=False)
         traces_df.to_csv(f"{self.sMD_outdir}/analysis/sMD_conv_vALL_traces.csv", index=False)
 
-        smd_conv_traces = glob(f"{self.sMD_outdir}/analysis/sMD_conv_*_traces.csv")
+        smd_conv_traces = glob(f"{self.sMD_outdir}/analysis/sMD_conv_vALL_traces.csv")
         plot_convergence_traces(smd_conv_traces, outdir=f"{self.sMD_outdir}/analysis")
-        smd_conv_metrics = glob(f"{self.sMD_outdir}/analysis/sMD_conv_*_metrics.csv")
+        smd_conv_metrics = glob(f"{self.sMD_outdir}/analysis/sMD_conv_vALL_metrics.csv")
         plot_convergence_metrics(smd_conv_metrics, outdir=f"{self.sMD_outdir}/analysis")
 
         ##############################################################################################
