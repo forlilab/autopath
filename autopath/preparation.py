@@ -11,9 +11,11 @@ from openmm.app import *
 import openmm.unit as openmmunit
 
 # OpenFF-toolkit imports
+from openff import toolkit
 from openff.toolkit import Molecule
 from openff.toolkit import Topology as offTopology
 from openff.units.openmm import to_openmm as offquantity_to_openmm
+
 from openmmforcefields.generators import (
     EspalomaTemplateGenerator,
     SMIRNOFFTemplateGenerator,
@@ -34,6 +36,7 @@ class SystemPreparation:
         self,
         forcefield: list = [
             "amber14-all.xml",
+            # 'amber14/protein.ff14SB.xml',
             "amber14/tip3pfb.xml",
             "amber/tip3pfb_HFE_multivalent.xml",
         ],
@@ -156,17 +159,27 @@ class SystemPreparation:
 
     def _parametrize_ligand(self, ligand):
 
+        # if self.lig_ff == "OPENFF":
+        #     forcefield = toolkit.ForceField("openff-2.3.0.offxml")
+        #     interchange = forcefield.create_interchange(ligand.to_topology())
+        #     ligand_omm_topology = interchange.to_openmm_topology()
+        #     ligand_positions = interchange.positions.to_openmm()
+
+        #     return ligand_omm_topology, ligand_positions
+
         if self.lig_ff == "ESPALOMA":
             template_generator = EspalomaTemplateGenerator(
                 molecules=ligand, 
                 # template_generator_kwargs = {"reference_forcefield": "openff_unconstrained-2.2.1"}
                 # forcefield="espaloma-0.3.2"
             )
+            
         elif self.lig_ff == "OPENFF":
             template_generator = SMIRNOFFTemplateGenerator(
                 molecules=ligand, 
-                # forcefield="openff-1.2.0"
+                forcefield="openff-2.3.0"
             )
+        
         elif self.lig_ff == "GAFF":
             template_generator = GAFFTemplateGenerator(
                 molecules=ligand,
