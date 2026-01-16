@@ -535,10 +535,10 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
         
         with open(mmpbsa_in, 'r') as file:
             mmpbsa_template = file.readlines()
-
+        
         u = mda.Universe(prmtop, traj_fname, in_memory=True)
-        n_frames = len(u.trajectory[start:end:step])
         start, end, step = None, None, None
+
         if traj_slice is not None:
             start, end, step = traj_slice
             n_frames = len(u.trajectory[start:end:step])
