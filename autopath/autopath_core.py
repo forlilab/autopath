@@ -375,26 +375,26 @@ class AutoPath:
         ##############################################################################################
         ############################### Load and align sMD trajectories ##############################
         ##############################################################################################
-        # sMD_trajs = glob(f"{self.sMD_outdir}/sMD_replica-*_*_*.dcd")
-        # logger.info(f"Found {len(sMD_trajs)} sMD trajectories to align.")        
-        # for traj_file in sMD_trajs:
-        #     traj = md.load(traj_file, top=solvated_system_pdb)
-        #     traj = traj.center_coordinates()
-        #     traj = traj.image_molecules()
-        #     try:
-        #         backbone = traj.topology.select("backbone")
-        #         traj = traj.superpose(traj[0], atom_indices=backbone)
-        #     except Exception as e:
-        #         logger.warning(f"Superposition failed: {e}. Proceeding without superposition.")
-        #     traj.save(traj_file) #overwrite
-        #     # traj.save(traj_file.replace(".dcd", "_aligned.dcd"))
-        #     # os.remove(traj_file) # remove the dcds
+        sMD_trajs = glob(f"{self.sMD_outdir}/sMD_replica-*_*_*.dcd")
+        logger.info(f"Found {len(sMD_trajs)} sMD trajectories to align.")        
+        for traj_file in sMD_trajs:
+            traj = md.load(traj_file, top=solvated_system_pdb)
+            traj = traj.center_coordinates()
+            traj = traj.image_molecules()
+            try:
+                backbone = traj.topology.select("backbone")
+                traj = traj.superpose(traj[0], atom_indices=backbone)
+            except Exception as e:
+                logger.warning(f"Superposition failed: {e}. Proceeding without superposition.")
+            traj.save(traj_file) #overwrite
+            # traj.save(traj_file.replace(".dcd", "_aligned.dcd"))
+            # os.remove(traj_file) # remove the dcds
 
         ##############################################################################################
         ######################################### sMD Analysis #######################################
         ##############################################################################################
         
-        # load all the aligned xtc trajectories
+        # load all the aligned dcd trajectories
         logs = glob(f"{self.sMD_outdir}/sMD_*_*_{self.sMD_pulling_dir}.dat")
         sMD_trajs = glob(f"{self.sMD_outdir}/sMD_replica-*_*_*.dcd")
         logger.info(f"Found {len(logs)} sMD trajectories for analysis.")

@@ -129,6 +129,7 @@ def main():
             hydrogenMass=1.5,
             lig_ff="espaloma",
             ionicStrength=0.15,
+            ions=("K+", "Cl-"),
             is_membrane=False,
             lipid_type="POPC",
             out_dir=sys_name,
