@@ -7,6 +7,10 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import matplotlib.style as style
 style.use("fivethirtyeight")
+plt.rcParams["savefig.facecolor"] = 'white'
+plt.rcParams["savefig.edgecolor"] = 'white'
+plt.rcParams["axes.facecolor"] = 'white'
+# plt.rcParams["axes.edgecolor"] = 'black'
 
 from rdkit import Chem
 from rdkit.Chem.Draw import rdMolDraw2D, SimilarityMaps
