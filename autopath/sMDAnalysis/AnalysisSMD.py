@@ -77,8 +77,8 @@ class SMDAnalysis:
 
         # extract features
         traces_feat_df = sMDDdata.get_trace_features(
-                            # features=['work', 'lag', 'r_before' ],
-                            features=['force', 'lag', 'r_before', 'r_after'],
+                            features=['work', 'lag', 'r_before' ],
+                            # features=['force', 'lag', 'r_before', 'r_after'],
                             # features=['force', 'lag', 'r_before', 'r_after']
         )
 
@@ -173,8 +173,8 @@ class SMDAnalysis:
                 
                 # extract features and cluster
                 traces_feat_df = smd.get_trace_features(
-                    features=['force', 'lag', 'r_before', 'r_after'],
-                    # features=['work', 'lag', 'r_before' ],
+                    # features=['force', 'lag', 'r_before', 'r_after'],
+                    features=['work', 'lag', 'r_before' ],
                 )
                 
                 clusterer = DTWPathModel(seed=self.seed,
