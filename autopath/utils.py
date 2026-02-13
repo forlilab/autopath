@@ -954,7 +954,7 @@ def get_ligand_anchor_atoms(
         # sanity check
         # natoms = mol.GetNumAtoms()
         # highlight_rdk_indices = [i for i in highlight_rdk_indices if i < natoms]
-
+        mol = Chem.RemoveHs(mol)
         Chem.rdDepictor.Compute2DCoords(mol)
         img = Chem.Draw.MolToImage(
             mol,
