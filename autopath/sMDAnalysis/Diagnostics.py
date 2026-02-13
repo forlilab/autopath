@@ -60,7 +60,7 @@ def plot_work_profiles(
         # # just reference for trypsin
         # axes[i].axhline(27, color='k', lw=1, ls='--')
         
-        axes[i].set_title(f'Speed: {speed} nm/ps', fontsize=10)
+        axes[i].set_title(f'Speed={speed} nm/ps', fontsize=12)
         axes[i].set_xlabel(f'{r_coord} (nm)')
         if i == 0:
             axes[i].set_ylabel('Energy (kJ/mol)')
@@ -96,7 +96,6 @@ def plot_weighted_pmf(df: pd.DataFrame,
 
     """Plot weighted PMF from SMDAnalysis data."""
 
-
     os.makedirs(outdir, exist_ok=True)
     
     if 'estimator' in df.columns:
@@ -106,11 +105,18 @@ def plot_weighted_pmf(df: pd.DataFrame,
     
     for col in cols_to_plot:
         outfname = os.path.join(outdir, f"{col}.png")
-        # plt.figure(figsize=(8,6))
+        # plt.figure(figsize=(10,6))
         g = sns.FacetGrid(df, col="speed", hue=hue_col)
-        g.map(plt.plot, r_coord, col).add_legend()
+        g.map(plt.plot, r_coord, col)#.add_legend()
         # g.map(plt.plot, "r_coord", "Wdiss_weighted").add_legend()
         # g.map(plt.fill_between, "r_coord", "dG_weighted_lower", "dG_weighted_upper", alpha=0.3)    
+        g.set_titles(col_template="Speed = {col_name} nm/ps")
+        plt.legend(
+            # legend_handles, legend_labels,
+            title='Estimator',
+            bbox_to_anchor=(1.02, 0.8), loc='upper left',
+            borderaxespad=0.0, fontsize=10
+        )
         plt.tight_layout()
         plt.savefig(outfname, dpi=300)
         plt.show()

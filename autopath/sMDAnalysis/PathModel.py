@@ -262,6 +262,8 @@ class DTWPathModel(PathModel):
             color = palette[path_label]
 
             label = f'path-{path_label}_{trajname}'
+            label = f'path-{path_label}'#_{trajname}'
+
             # avoid duplicate legend entries
             if path_label in used_labels:
                 label = None
