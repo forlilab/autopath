@@ -1,12 +1,25 @@
 from autopath.sMDAnalysis.SMDData import SMDData
 import pandas as pd
 import os
+
 import seaborn as sns
 import matplotlib.pyplot as plt
 import matplotlib.style as style
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 from matplotlib.lines import Line2D
+style.use("fivethirtyeight")
+plt.rcParams["savefig.facecolor"] = 'white'
+plt.rcParams["savefig.edgecolor"] = 'white'
+plt.rcParams["axes.facecolor"] = 'white'
+# plt.rcParams["axes.edgecolor"] = 'black'
+
+from typing import Dict, List, Optional, Tuple
+from pathlib import Path
+import shutil
+import MDAnalysis as mda
+from MDAnalysis.analysis import align, density
+from scipy.ndimage import gaussian_filter
 
 import logging
 logger = logging.getLogger("autopath.sMDAnalysis.Diagnostics")
@@ -390,3 +403,108 @@ def plot_extrapolated_param(self,
     plt.close()
 
     return
+    
+def make_unbinding_paths_pml( 
+    paths: Dict[str, List[Tuple[str, str]]],
+    reference_pdb: str,
+    ligand_select: str,
+    outdir: str = "unbinding_paths_vis",
+    align_sel: str = "protein and backbone",
+    grid_spacing: float = 0.5,
+    cartoon_color: str = "palecyan",
+    sample_stride: int = 1,
+) -> str:
+    """Generate ligand-path density maps and a PyMOL .pml that uses only relative paths."""
+            
+    level = 0.000002
+    surface_transparency = 0.35
+    cartoon_transparency = 0.25
+    
+    os.makedirs(outdir, exist_ok=True)
+    outdir = Path(outdir)
+    protein_pdb = reference_pdb
+    ligand_sel = ligand_select
+    # Copy the reference PDB into OUTDIR so the .pml can run anywhere
+    prot_copy = outdir / os.path.basename(protein_pdb)
+    shutil.copy2(protein_pdb, prot_copy)
+
+    protein_abs = str(prot_copy.resolve())
+    u_ref = mda.Universe(protein_abs)
+
+    default_palette = ["violetpurple", "marine", "forest", "deepsalmon", "gold", "tv_red", "tv_blue"]
+    path_colors = {name: default_palette[i % len(default_palette)] for i, name in enumerate(paths)}
+
+    dx_files_rel = {}
+    for path_name, traj_list in paths.items():
+        dens_sum = None
+        total_frames = 0
+
+        for top, traj in traj_list:
+            # if not aligned, align to reference
+            u = mda.Universe(top, traj)
+            align.AlignTraj(u, u_ref, select=align_sel, in_memory=True).run()
+
+            lig = u.select_atoms(ligand_sel)
+            if lig.n_atoms == 0:
+                raise ValueError(f"No atoms found for '{ligand_sel}' in {traj}.")
+
+            da = density.DensityAnalysis(lig, delta=grid_spacing,padding=50.0)
+            da.run(step=sample_stride)
+            rho = da.results.density
+            
+            dens_sum = rho if dens_sum is None else dens_sum._replace(grid=dens_sum.grid + rho.grid) or dens_sum
+            total_frames += len(u.trajectory[::sample_stride])
+
+        # Normalize and write DX
+        if total_frames > 0:
+            dens_sum.grid /= float(total_frames)
+
+            #smooth the density a bit
+        dens_sum.grid = gaussian_filter(dens_sum.grid, sigma=1.0)
+            
+        dx_path = str((outdir / f"{path_name}_density.dx").resolve())
+        dens_sum.export(dx_path)
+        dx_files_rel[path_name] = dx_path
+
+    # dx_05 = np.quantile(dens_sum.grid, 0.05)
+    # print(f"0.05 quantile of last path density: {dx_05}")
+    
+    # Write the .pml using ONLY filenames (relative to outdir)
+    pml_path = os.path.join(outdir, "unbinding_paths.pml")
+    with open(pml_path, "w") as pml:
+        pml.write("# Relative-path PyMOL visualization for ligand unbinding paths\n")
+        pml.write("reinitialize\n")
+        pml.write("bg_color white\n")
+        pml.write("set ray_opaque_background, 0\n")
+        pml.write("set antialias, 2\n")
+        pml.write("set specular, 0.2\n")
+        pml.write("set ray_shadow, off\n")
+        pml.write(f"set cartoon_transparency, {cartoon_transparency:.2f}\n")
+        pml.write(f"load {protein_abs}, prot\n")
+        pml.write("hide everything, prot\n")
+        pml.write("show cartoon, prot\n")
+        pml.write(f"color {cartoon_color}, prot\n")
+
+        for path_name, dx_filename in dx_files_rel.items():
+            map_obj = f"map_{path_name}"
+            surf_obj = f"surf_{path_name}"
+            col = path_colors[path_name]
+            pml.write(f"load {dx_filename}, {map_obj}\n")
+            pml.write(f'map_double {map_obj}\n')
+            pml.write(f"isosurface {surf_obj}, {map_obj}, {level}\n")
+            pml.write(f"color {col}, {surf_obj}\n")
+            pml.write(f"set transparency, {surface_transparency:.2f}, {surf_obj}\n")
+            pml.write(f"set two_sided_lighting, on, {surf_obj}\n")
+
+        pml.write(f"select lig_ref, ({ligand_sel}) and prot\n")
+        pml.write("if sele count lig_ref > 0:\n")
+        pml.write("    create lig, lig_ref\n")
+        # pml.write("    show stick, lig\n")
+        pml.write("    show sphere, lig\n")
+        pml.write("    color yellow, lig\n")
+        pml.write("    set sphere_transparency, 0.9, lig\n")
+        pml.write("orient lig\n")
+        pml.write("zoom prot, 10.0\n")
+        pml.write("png preview.png, ray=1, dpi=300\n")
+
+    return str(pml_path)
