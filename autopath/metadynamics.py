@@ -119,6 +119,7 @@ class MetadynamicsMD:
         grid_points: int = 125,
         biasFrequency: int = 2,
         saveFrequency: int = 50,
+        funnel_force: Force = None,
     ) -> None:
 
         start_time = time.monotonic()
@@ -198,6 +199,11 @@ class MetadynamicsMD:
                 "k_CA",
                 14,
             )
+
+        # Add funnel potential if provided
+        if funnel_force is not None:
+            system.addForce(funnel_force)
+            logging.info(f"Added funnel potential with force group {funnel_force.getForceGroup()}")
 
         logging.debug(f"Setting up reporters for {run_id}..")
         add_reporters(
