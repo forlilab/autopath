@@ -8,6 +8,7 @@ from sys import exit
 from glob import glob
 import MDAnalysis as mda
 import mdtraj as md
+from sklearn.preprocessing import StandardScaler
 
 # OpenMM imports
 from openmm import *
@@ -23,6 +24,10 @@ from autopath import (
     SteeredMD,
     RelaxMD,
     MetadynamicsMD,
+)
+from autopath.customForces import (
+    generate_funnel_parameters_from_trajectory,
+    create_funnel_force_from_trajectory_analysis,
 )
 from autopath.sMDAnalysis import SMDData, SMDAnalysis
 from autopath.sMDAnalysis.PathModel import DTWPathModel
@@ -73,6 +78,7 @@ class AutoPath:
         n_milestones: int = 5,
         relax_steps: int = 25000,
         run_metadynamics: bool = True,
+        mMD_use_funnel_potential: bool = True,
         mMD_bias_factor: int = 10,
         mMD_bias_frequency: int = 2,  # ps
         mMD_hill_height: float = 1.2,  # kJ/mol approx 0.5KT
@@ -117,6 +123,7 @@ class AutoPath:
         self.relax_steps = relax_steps
         # Metadynamics
         self.run_metadynamics = run_metadynamics
+        self.mMD_use_funnel_potential = mMD_use_funnel_potential
         self.mMD_bias_factor = mMD_bias_factor
         self.mMD_bias_frequency = mMD_bias_frequency
         self.mMD_hill_height = mMD_hill_height
@@ -373,56 +380,55 @@ class AutoPath:
                             continue
                             
         ##############################################################################################
-        ############################### Load and align sMD trajectories ##############################
-        ##############################################################################################
-        sMD_trajs = glob(f"{self.sMD_outdir}/sMD_replica-*_*_*.dcd")
-        logger.info(f"Found {len(sMD_trajs)} sMD trajectories to align.")        
-        for traj_file in sMD_trajs:
-            traj = md.load(traj_file, top=solvated_system_pdb)
-            traj = traj.center_coordinates()
-            traj = traj.image_molecules()
-            try:
-                backbone = traj.topology.select("backbone")
-                traj = traj.superpose(traj[0], atom_indices=backbone)
-            except Exception as e:
-                logger.warning(f"Superposition failed: {e}. Proceeding without superposition.")
-            traj.save(traj_file) #overwrite
-            # traj.save(traj_file.replace(".dcd", "_aligned.dcd"))
-            # os.remove(traj_file) # remove the dcds
-
-        ##############################################################################################
         ######################################### sMD Analysis #######################################
         ##############################################################################################
+        sMD_run_analysis = False
         
-        # load all the aligned dcd trajectories
-        logs = glob(f"{self.sMD_outdir}/sMD_*_*_{self.sMD_pulling_dir}.dat")
-        sMD_trajs = glob(f"{self.sMD_outdir}/sMD_replica-*_*_*.dcd")
-        logger.info(f"Found {len(logs)} sMD trajectories for analysis.")
-        
-        # loads the sMD data
-        smd_data = SMDData(logs, sys_name, reference_pdb=equilibrated_pdb)
-        
-        # cluster trajectories into pathways
-        cluster_model = DTWPathModel(seed=self.random_state,
+        if sMD_run_analysis:
+            # Load and align sMD trajectories
+            sMD_trajs = glob(f"{self.sMD_outdir}/sMD_replica-*_*_*.dcd")
+            logger.info(f"Found {len(sMD_trajs)} sMD trajectories to align.")        
+            for traj_file in sMD_trajs:
+                traj = md.load(traj_file, top=solvated_system_pdb)
+                traj = traj.center_coordinates()
+                traj = traj.image_molecules()
+                try:
+                    backbone = traj.topology.select("backbone")
+                    traj = traj.superpose(traj[0], atom_indices=backbone)
+                except Exception as e:
+                    logger.warning(f"Superposition failed: {e}. Proceeding without superposition.")
+                traj.save(traj_file) #overwrite
+                # traj.save(traj_file.replace(".dcd", "_aligned.dcd"))
+                # os.remove(traj_file) # remove the dcds
+                
+            # load all the aligned dcd trajectories
+            logs = glob(f"{self.sMD_outdir}/sMD_*_*_{self.sMD_pulling_dir}.dat")
+            logger.info(f"Found {len(logs)} sMD logs for analysis.")
+            
+            # loads the sMD data
+            smd_data = SMDData(logs, sys_name, reference_pdb=equilibrated_pdb)
+            
+            # cluster trajectories into pathways
+            cluster_model = DTWPathModel(seed=self.random_state,
+                                        outdir=f"{self.sMD_outdir}/analysis")
+
+            smdanalysis = SMDAnalysis(sys_name, cluster_model,
+                                    estimators=['cumulant', 'jarzynski'],
+                                    do_plots=True, seed=self.random_state,
+                                    temperature=self.temperature,
                                     outdir=f"{self.sMD_outdir}/analysis")
 
-        smdanalysis = SMDAnalysis(sys_name, cluster_model,
-                                  estimators=['cumulant', 'jarzynski'],
-                                  do_plots=True, seed=self.random_state,
-                                  temperature=self.temperature,
-                                  outdir=f"{self.sMD_outdir}/analysis")
+            smd_data = smdanalysis.run(smd_data)
 
-        smd_data = smdanalysis.run(smd_data)
+            # check convergence regardless of speed and autopstop
+            conv_df, traces_df = smdanalysis.check_convergence(logs=logs)
+            conv_df.to_csv(f"{self.sMD_outdir}/analysis/sMD_conv_vALL_metrics.csv", index=False)
+            traces_df.to_csv(f"{self.sMD_outdir}/analysis/sMD_conv_vALL_traces.csv", index=False)
 
-        # check convergence regardless of speed and autopstop
-        conv_df, traces_df = smdanalysis.check_convergence(logs=logs)
-        conv_df.to_csv(f"{self.sMD_outdir}/analysis/sMD_conv_vALL_metrics.csv", index=False)
-        traces_df.to_csv(f"{self.sMD_outdir}/analysis/sMD_conv_vALL_traces.csv", index=False)
-
-        smd_conv_traces = glob(f"{self.sMD_outdir}/analysis/sMD_conv_vALL_traces.csv")
-        plot_convergence_traces(smd_conv_traces, outdir=f"{self.sMD_outdir}/analysis")
-        smd_conv_metrics = glob(f"{self.sMD_outdir}/analysis/sMD_conv_vALL_metrics.csv")
-        plot_convergence_metrics(smd_conv_metrics, outdir=f"{self.sMD_outdir}/analysis")
+            smd_conv_traces = glob(f"{self.sMD_outdir}/analysis/sMD_conv_vALL_traces.csv")
+            plot_convergence_traces(smd_conv_traces, outdir=f"{self.sMD_outdir}/analysis")
+            smd_conv_metrics = glob(f"{self.sMD_outdir}/analysis/sMD_conv_vALL_metrics.csv")
+            plot_convergence_metrics(smd_conv_metrics, outdir=f"{self.sMD_outdir}/analysis")
 
         ##############################################################################################
         ###################################### Extract Milestones ####################################
@@ -430,7 +436,9 @@ class AutoPath:
 
         milestones_outdir = f"{sys_name}/milestones"
         min_dist = 1.0 # minimum distance between clusters of milestones
-    
+        
+        sMD_trajs = glob(f"{self.sMD_outdir}/sMD_replica-*_*_*.dcd")
+
         # use the same pocket selection as in the equilibration, but create a new atomgroup for this Universe
         u_sMD = mda.Universe(solvated_system_pdb, sMD_trajs)
         pocket_atoms = u_sMD.select_atoms(f'index {" ".join(map(str, pocket_atom_indices))}')
@@ -441,29 +449,24 @@ class AutoPath:
             
             os.makedirs(milestones_outdir, exist_ok=True)
 
-            # sMD_trajs = glob(f"{sMD_outdir}/sMD_replica-*_*_*.xtc")
             logger.info(f"Found {len(sMD_trajs)} sMD trajectories for milestone extraction.")
-            # sMD_trajs = [t for t in sMD_trajs if not t.endswith("_aligned.dcd")]
 
             if len(sMD_trajs) == 0:
                 logger.error("No sMD trajectories found. Please check the sMD pulling step.")
                 exit(1)
         
             # calculate some features for clustering
-            coms = calculate_com_distance(u_sMD, ligand_atoms_full, pocket_atoms, wrap=False)
+            coms = calculate_com_distance(u_sMD, ligand_atoms_full, pocket_atoms, wrap=True)
             rmsd = compute_rmsd(u_sMD, u_sMD, 
                                 alig_select=f"resname {ligand_resname} and not name H*",
                                 groupselections={'ligand': f"resname {ligand_resname} and not name H*"},
                                 plots_outdir=None)
             rmsd['COM'] = coms
             X = rmsd[['RMSD_ligand', 'COM']].values
-            from sklearn.preprocessing import StandardScaler
+            
             scaler = StandardScaler()
             X = scaler.fit_transform(X)
-            
-            # I didn't use the wrapped trajs for COM distances to avoid imaging artifacts
-            # sMD_trajs_aligned = [traj.replace(".dcd", ".xtc") for traj in sMD_trajs]
-            
+                        
             # CAREFULL: mdanalysis scrambles the residues names. Ig using pdb for topo fucks up waters here 
             u_sMD_aligned = mda.Universe(prmtop_file, sMD_trajs)
 
@@ -496,15 +499,16 @@ class AutoPath:
                             }
 
         if self.run_metadynamics:
+            min_com = 0.0
+            max_com = 3.0
             try:
-                smd_raw = pd.read_csv(f'{self.sMD_outdir}/analysis/sMD_data_raw.csv')
+                smd_raw = pd.read_csv(f'{self.sMD_outdir}/analysis/sMD_processed_data.csv')
                 min_com = smd_raw['r_before'].min() * 0.75  # nm
                 max_com = smd_raw['r_before'].max() * 1.1 # nm
             except Exception as e:
                 logger.error(f"Error loading sMD raw data: {e}")
-                logger.warning("Using default min and max COM distances for metadynamics: 0.0 and 3.0 nm.")
-                min_com = 0.0
-                max_com = 3.0
+
+            logger.info(f"Using COM distance range for metadynamics: [{min_com}, {max_com}] nm")
 
             milestones = glob(f'{milestones_outdir}/milestone_*_*_*.pdb')           
             if len(milestones) == 0:
@@ -534,6 +538,42 @@ class AutoPath:
                 temp=self.temperature,
                 out_dir=f"{sys_name}/metadynamics",
             )
+
+            # Generate funnel potential if requested
+            funnel_force = None
+            if self.mMD_use_funnel_potential:
+                logger.info("Generating funnel potential from sMD trajectories...")
+                try:
+                    # Collect all sMD trajectories
+                    smd_trajs = glob(f"{self.sMD_outdir}/*.dcd")
+                    
+                    if not smd_trajs:
+                        logger.warning("No sMD trajectories found. Skipping funnel potential generation.")
+                    else:                       
+                        # Create MDAnalysis Universe with all trajectories
+                        universe = mda.Universe(solvated_system_pdb, smd_trajs)
+                        logger.info(f"Loaded {len(universe.trajectory)} frames total")
+                        
+                        # Generate funnel parameters from trajectories
+                        funnel_params = generate_funnel_parameters_from_trajectory(
+                            universe,
+                            host_selection="protein",
+                            guest_selection="resname UNK",
+                            use_pca=True,
+                            percentile_z=95.0,
+                            percentile_r_cyl=90.0,
+                            percentile_r_funnel=85.0,
+                            alpha_cone_degrees=35.0,
+                            verbose=True,
+                        )
+                        
+                        # Create funnel force from parameters
+                        funnel_force = create_funnel_force_from_trajectory_analysis(funnel_params)
+                        logger.info("Funnel potential successfully generated from trajectories")
+                except Exception as e:
+                    logger.error(f"Error generating funnel potential: {e}")
+                    logger.warning("Continuing without funnel potential")
+                    funnel_force = None
 
             for milestone in milestones:
                 milestone_name = os.path.basename(milestone).split('.')[0]
@@ -565,7 +605,8 @@ class AutoPath:
                         hill_height=biasing_scheme[milestone_number]['height'] if use_biasing_scheme else self.mMD_hill_height, #kcal/mol
                         hill_width=biasing_scheme[milestone_number]['width'] if use_biasing_scheme else self.mMD_hill_width, #nm
                         biasFrequency=self.mMD_bias_frequency, #ps
-                        grid_dimensions=(min_com, max_com)
+                        grid_dimensions=(min_com, max_com),
+                        funnel_force=funnel_force
                     )
                 except Exception as e:
                     logger.error(f"Error during WTMetaD for {milestone_name}: {e}")
@@ -582,8 +623,9 @@ class AutoPath:
                 traj = traj.superpose(traj[0], atom_indices=backbone)
             except Exception as e:
                 logger.warning(f"Superposition failed: {e}. Proceeding without superposition.")
-            traj.save(traj_file.replace(".dcd", "_aligned.xtc"))
-            os.remove(traj_file) # remove the dcd
+            traj.save(traj_file) #overwrite
+            # traj.save(traj_file.replace(".dcd", "_aligned.dcd"))
+            # os.remove(traj_file) # remove the dcds
 
         simulation_time = time.monotonic() - start_time
         logger.info(f"Finished AutoPath simulation in {simulation_time/60:.2f} min.")
