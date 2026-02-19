@@ -205,7 +205,8 @@ class DTWPathModel(PathModel):
     
     def plot_elbow(self, scores: dict, K: int):
         plt.figure(figsize=(6, 5))
-        sns.lineplot(x=list(scores.keys()), y=list(scores.values()))
+        K_values = [int(k) for k in scores.keys()]
+        sns.lineplot(x=K_values, y=[scores[k] for k in K_values])
         plt.title(f"Optimal number of paths: {K}")
         plt.axvline(x=K, color='red', linestyle='--', label=f'Optimal K={K}')
         plt.xlabel("Number of clusters")

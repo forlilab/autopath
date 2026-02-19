@@ -223,7 +223,7 @@ class SMDData:
         Map a log file path to the corresponding trajectory file name.
         """
         traj_name = log_path.replace('log', 'traj')
-        traj_name = traj_name.replace('.dat', '.xtc')
+        traj_name = traj_name.replace('.dat', '.dcd')
         return traj_name
         
     def get_trace_features(self, 

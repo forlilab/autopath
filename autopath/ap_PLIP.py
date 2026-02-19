@@ -14,6 +14,11 @@ import matplotlib.pyplot as plt
 from matplotlib import style
 import seaborn as sns
 style.use("fivethirtyeight")
+style.use("fivethirtyeight")
+plt.rcParams["savefig.facecolor"] = 'white'
+plt.rcParams["savefig.edgecolor"] = 'white'
+plt.rcParams["axes.facecolor"] = 'white'
+# plt.rcParams["axes.edgecolor"] = 'black'
 
 import logging
 logger = logging.getLogger("autopath")
@@ -446,7 +451,7 @@ class ProteinLigandAnalyzer:
                     gpu_num=1, 
                     time="3-0",
                     omp_threads=64,
-                    partition="forli,alphafold,shared"
+                    partition="forli,alphafold,shared,forli-pro"
                     ):
         """Function to write a SLURM qfile for MMPBSA calculations."""    
         
@@ -519,7 +524,7 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
             radii:str='mbondi2',
             output_folder:str="mmpbsa_results",
             bash_fname:str="run_mmpbsa_batch.sh",
-            mpi_threads:int=128,
+            mpi_threads:int=256,
             ):
         """Prepare MMPBSA batch script and qfiles."""
         
