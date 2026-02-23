@@ -13,6 +13,7 @@ from sklearn.metrics import silhouette_score
 from sklearn.decomposition import PCA
 
 from .SMDData import SMDData
+from .Diagnostics import make_unbinding_paths_pml
 from abc import ABC, abstractmethod
 
 import logging
@@ -55,7 +56,10 @@ class DTWPathModel(PathModel):
                     r_range: tuple = None,  # e.g., (0, 1.5)
                     n_paths: int = None,
                     cluster_across_speeds: bool = False,
-                    ) -> SMDData:
+                    reference_pdb: str = None,
+                    ligand_select: str = None,
+                    trajectory_files: dict = None,
+                    ) -> dict:
         """
         Fit and transform trajectory clustering.
 
@@ -64,6 +68,13 @@ class DTWPathModel(PathModel):
         cluster_across_speeds : bool
             If True, cluster all trajectories together regardless of speed.
             If False (default), cluster trajectories independently per speed.
+        reference_pdb : str, optional
+            Path to reference PDB file for unbinding path visualization.
+        ligand_select : str, optional
+            MDAnalysis selection string for ligand atoms.
+        trajectory_files : dict, optional
+            Dictionary mapping trajectory names to (topology, trajectory) tuples
+            for unbinding path visualization.
         """
         
         # r-range filtering. You may want to cluster only around the TS region
@@ -89,6 +100,7 @@ class DTWPathModel(PathModel):
             grouping_iter = feature_df.groupby("speed")
 
         all_path_mappings = {}
+        all_medoid_names = set()  # Track medoids across all speeds
 
         for speed_key, speed_df in grouping_iter:
 
@@ -164,6 +176,7 @@ class DTWPathModel(PathModel):
             )
 
             self.medoid_names = [trajnames[idx] for idx in cluster_model.medoids]
+            all_medoid_names.update(self.medoid_names)  # Accumulate medoids across speeds
 
             # Report cluster sizes
             unique, counts = np.unique(cluster_model.labels, return_counts=True)
@@ -173,10 +186,15 @@ class DTWPathModel(PathModel):
                     f"Path {u} has {c} trajectories"
                 )
 
-            # Map cluster labels
-            path_mapping_dic = pd.DataFrame(
-                {"trajname": trajnames, "cluster": cluster_model.labels}
-            ).set_index('trajname')['cluster'].to_dict()
+            # Map cluster labels with speed-aware path IDs to ensure uniqueness across speeds
+            path_mapping_dic = {}
+            for trajname, cluster_id in zip(trajnames, cluster_model.labels):
+                # Create globally unique path ID: include speed if clustering per speed
+                if speed_key is not None:
+                    unique_path_id = f"speed_{speed_key}_path_{cluster_id}"
+                else:
+                    unique_path_id = cluster_id
+                path_mapping_dic[trajname] = unique_path_id
 
             all_path_mappings.update(path_mapping_dic)
 
@@ -190,6 +208,32 @@ class DTWPathModel(PathModel):
                     path_mapping_dic=path_mapping_dic,
                     vectors_stacked_scaled=vectors_stacked_scaled,
                 )
+
+        # Generate unbinding paths visualization if trajectories and reference PDB are available
+        if self.do_plots and trajectory_files is not None and reference_pdb is not None and ligand_select is not None:
+            # Build paths dictionary: path_id -> [(topology, trajectory), ...] 
+            # Only include medoid trajectories (one representative per path)
+            paths_dict = {}
+            for trajname, path_id in all_path_mappings.items():
+                # Only include if this trajectory is a medoid
+                if trajname not in all_medoid_names:
+                    continue
+                if path_id not in paths_dict:
+                    paths_dict[path_id] = []
+                if trajname in trajectory_files:
+                    paths_dict[path_id].append(trajectory_files[trajname])
+            
+            if paths_dict:
+                try:
+                    make_unbinding_paths_pml(
+                        paths=paths_dict,
+                        reference_pdb=reference_pdb,
+                        ligand_select=ligand_select,
+                        outdir=os.path.join(self.outdir, "unbinding_paths")
+                    )
+                    logger.info(f"Unbinding paths visualization generated in {self.outdir}")
+                except Exception as e:
+                    logger.warning(f"Could not generate unbinding paths visualization: {e}")
 
         return all_path_mappings
     
@@ -260,7 +304,7 @@ class DTWPathModel(PathModel):
             start = i * min_len
             end = start + min_len
             path_label = path_mapping_dic[trajname]
-            color = palette[path_label]
+            # color = palette[path_label]
 
             label = f'path-{path_label}_{trajname}'
             label = f'path-{path_label}'#_{trajname}'
