@@ -1235,3 +1235,81 @@ def assign_bondOrders(mol: Chem.Mol=None, template_smiles: str=None):
         return mol
             
     return new_mol
+
+
+def write_pocket_pymol_pml(
+    u: mda.Universe,
+    out_dir: str,
+    protein_selection: str = "protein",
+    ligand_selection: str = "resname UNK",
+    pocket_selection: str = "same residue as protein and (around 4 resname UNK) and (not name H*)",
+    show_surface: bool = True,
+    ligand_color: str = "yellow",
+    pocket_color: str = "orange",
+    protein_color: str = "slate",
+    com_color: str = "red",
+    com_sphere_radius: float = 0.5,
+) -> None:
+    """Write PDBs and a PyMOL .pml script to visualize protein, ligand, pocket, and pocket COM sphere."""
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    protein_pdb = os.path.join(out_dir, "pocket_prote.pdb")
+    ligand_pdb = os.path.join(out_dir, "pocket_lig.pdb")
+    out_pml_path = os.path.join(out_dir, "pocket_view.pml")
+
+    protein_atoms = u.select_atoms(protein_selection)
+    ligand_atoms = u.select_atoms(ligand_selection)
+    pocket_atoms = u.select_atoms(pocket_selection)
+
+    with mda.Writer(protein_pdb, u.atoms.n_atoms) as w:
+        w.write(protein_atoms)
+    with mda.Writer(ligand_pdb, u.atoms.n_atoms) as w:
+        w.write(ligand_atoms)
+    
+    pocket_pdb = os.path.join(out_dir, "pocket_definition.pdb")
+    with mda.Writer(pocket_pdb, u.atoms.n_atoms) as w:
+        w.write(pocket_atoms)
+
+    # Calculate center of mass of pocket atoms
+    pocket_com = pocket_atoms.center_of_mass()
+    
+    # Write a PDB file with a single pseudoatom at the COM position
+    com_pdb = os.path.join(out_dir, "pocket_com.pdb")
+    with open(com_pdb, "w") as f:
+        f.write("REMARK Pocket center of mass\n")
+        f.write(f"ATOM      1  COM COM SYS A   1    {pocket_com[0]:8.3f}{pocket_com[1]:8.3f}{pocket_com[2]:8.3f}  1.00  0.00           C\n")
+        f.write("END\n")
+
+    lines = [
+        "reinitialize",
+        f"load {protein_pdb}, protein",
+        f"load {ligand_pdb}, ligand",
+        f"load {pocket_pdb}, pocket",
+        f"load {com_pdb}, pocket_com",
+        "hide everything",
+        "show cartoon, protein",
+        "show sticks, ligand",
+        "show sticks, pocket",
+        "show spheres, pocket_com",
+        f"color {protein_color}, protein",
+        f"color {ligand_color}, ligand",
+        f"color {pocket_color}, pocket",
+        f"color {com_color}, pocket_com",
+        "set sphere_scale, " + str(com_sphere_radius),
+        "set stick_radius, 0.2",
+        "set cartoon_transparency, 0.2",
+        "zoom ligand, 12",
+        "bg_color white",
+    ]
+
+    if show_surface:
+        lines.extend([
+            "show surface, protein",
+            "set surface_color, gray70, protein",
+            "set transparency, 0.35, protein",
+        ])
+
+    Path(out_pml_path).write_text("\n".join(lines))
+
+    return None

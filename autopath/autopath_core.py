@@ -74,6 +74,7 @@ class AutoPath:
         sMD_spring_cte: float = None,  # KJ/mol/nm2
         sMD_ligand_anchor_mode: str = 'lig_ha',
         sMD_autostop_freq: int = 50, #moves
+        sMD_run_analysis: bool = True,
         extract_milestones: bool = True,
         n_milestones: int = 5,
         relax_steps: int = 25000,
@@ -117,6 +118,7 @@ class AutoPath:
         self.sMD_spring_cte = sMD_spring_cte
         self.sMD_ligand_anchor_mode = sMD_ligand_anchor_mode
         self.sMD_autostop_freq = sMD_autostop_freq
+        self.sMD_run_analysis = sMD_run_analysis
         # Milestones
         self.extract_milestones = extract_milestones
         self.n_milestones = n_milestones
@@ -262,21 +264,20 @@ class AutoPath:
             logger.info(f"Pocket residues are: {', '.join(set(pocket_residues))}")
             
             ligand_total_hatoms = [a.index for a in u_eq.select_atoms(f'resname {ligand_resname} and not name H*')]
-            lig_anchor_mode_atoms = 5
             ligand_atoms_indices = get_ligand_anchor_atoms(u_eq, ligand_resname, 
                                                         mode=self.sMD_ligand_anchor_mode,
-                                                        n_atoms=lig_anchor_mode_atoms,
+                                                        n_atoms=5,
                                                         out_dir=sys_name)
             logger.info(f"Ligand anchor atom indices are: {', '.join(map(str, ligand_atoms_indices))}")
-            # write out the pocket atoms to a pdb
-            #FIXME this should be a function that writes a pymol sesh
+            # write out the protein/ligand/pocket PDBs and PyMOL session
             try:
-                with mda.Writer(f"{sys_name}/pocket_definition.pdb", u_eq.atoms.n_atoms) as W:
-                    W.write(pocket_atoms)
-                with mda.Writer(f"{sys_name}/pocket_prote.pdb", u_eq.atoms.n_atoms) as W:
-                    W.write(u_eq.select_atoms(f'protein'))
-                with mda.Writer(f"{sys_name}/pocket_lig.pdb", u_eq.atoms.n_atoms) as W:
-                    W.write(u_eq.select_atoms(f'resname {ligand_resname}'))
+                write_pocket_pymol_pml(
+                    u=u_eq,
+                    out_dir=sys_name,
+                    protein_selection="protein",
+                    ligand_selection=f"resname {ligand_resname}",
+                    pocket_selection=self.pocket_selection,
+                )
             except Exception as e:
                 logger.error(f"Error writing pocket/ligand/protein pdbs: {e}")
                 pass
@@ -308,8 +309,9 @@ class AutoPath:
                 autostop_freq=self.sMD_autostop_freq,
                 timestep=self.timestep,
                 temperature=self.temperature,
-                save_freq=1250,  # every 5 ps if timestep=0.004 ps
+                save_freq=500,
                 out_dir=self.sMD_outdir,
+                # platform='OpenCL'
             )
 
             for speed, reps in self.sMD_pulling_speeds.items():
@@ -335,10 +337,10 @@ class AutoPath:
                         current_replica = len(log_files) + 1
                         logger.info(f"Starting replica {current_replica} for speed {speed} nm/ps.")
                         
-                        # cap the number of replicas to avoid infinite loops
-                        if current_replica > 50:
-                            logger.warning(f"Reached maximum number of replicas (50) for speed {speed} nm/ps without convergence. Stopping.")
-                            break
+                        # # cap the number of replicas to avoid infinite loops
+                        # if current_replica > 50:
+                        #     logger.warning(f"Reached maximum number of replicas (50) for speed {speed} nm/ps without convergence. Stopping.")
+                        #     break
                         
                         if len(log_files) >= 5:  # need at least 5 replicas to assess convergence
                             
@@ -349,7 +351,13 @@ class AutoPath:
                                                     outdir=f"{self.sMD_outdir}/analysis")
                             
                             # check convergence for this speed
-                            conv_df, traces_df = smdanalysis.check_convergence(logs=log_files, speeds=[speed])
+                            conv_df, traces_df = smdanalysis.check_convergence(
+                                logs=log_files,
+                                speeds=[speed],
+                                group_A=f"resname {ligand_resname} and not name H*",
+                                group_B=f'index {" ".join(map(str, pocket_atom_indices))}',
+                            )
+                            
                             conv_df.to_csv(f"{self.sMD_outdir}/analysis/sMD_conv_v{speed}_metrics.csv", index=False)
                             traces_df.to_csv(f"{self.sMD_outdir}/analysis/sMD_conv_v{speed}_traces.csv", index=False)
 
@@ -381,10 +389,8 @@ class AutoPath:
                             
         ##############################################################################################
         ######################################### sMD Analysis #######################################
-        ##############################################################################################
-        sMD_run_analysis = False
-        
-        if sMD_run_analysis:
+        ##############################################################################################        
+        if self.sMD_run_analysis:
             # Load and align sMD trajectories
             sMD_trajs = glob(f"{self.sMD_outdir}/sMD_replica-*_*_*.dcd")
             logger.info(f"Found {len(sMD_trajs)} sMD trajectories to align.")        
@@ -398,18 +404,15 @@ class AutoPath:
                 except Exception as e:
                     logger.warning(f"Superposition failed: {e}. Proceeding without superposition.")
                 traj.save(traj_file) #overwrite
-                # traj.save(traj_file.replace(".dcd", "_aligned.dcd"))
-                # os.remove(traj_file) # remove the dcds
-                
-            # load all the aligned dcd trajectories
+
+            # loads the sMD data
             logs = glob(f"{self.sMD_outdir}/sMD_*_*_{self.sMD_pulling_dir}.dat")
             logger.info(f"Found {len(logs)} sMD logs for analysis.")
-            
-            # loads the sMD data
-            smd_data = SMDData(logs, sys_name, reference_pdb=equilibrated_pdb)
+            smd_data = SMDData(logs, sys_name, temperature=self.temperature,
+                               reference_pdb=equilibrated_pdb)
             
             # cluster trajectories into pathways
-            cluster_model = DTWPathModel(seed=self.random_state,
+            cluster_model = DTWPathModel(seed=self.random_state, do_plots=True,
                                         outdir=f"{self.sMD_outdir}/analysis")
 
             smdanalysis = SMDAnalysis(sys_name, cluster_model,
@@ -418,10 +421,17 @@ class AutoPath:
                                     temperature=self.temperature,
                                     outdir=f"{self.sMD_outdir}/analysis")
 
-            smd_data = smdanalysis.run(smd_data)
+            smd_data = smdanalysis.run(smd_data,
+                                       group_A=f"resname {ligand_resname} and not name H*",
+                                       group_B=f'index {" ".join(map(str, pocket_atom_indices))}'
+                                       )
 
             # check convergence regardless of speed and autopstop
-            conv_df, traces_df = smdanalysis.check_convergence(logs=logs)
+            conv_df, traces_df = smdanalysis.check_convergence(
+                logs=logs,
+                group_A=f"resname {ligand_resname} and not name H*",
+                group_B=f'index {" ".join(map(str, pocket_atom_indices))}',
+            )
             conv_df.to_csv(f"{self.sMD_outdir}/analysis/sMD_conv_vALL_metrics.csv", index=False)
             traces_df.to_csv(f"{self.sMD_outdir}/analysis/sMD_conv_vALL_traces.csv", index=False)
 
