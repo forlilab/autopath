@@ -87,6 +87,8 @@ class SteeredMD:
         
         if self.save_freq is None:
             self.save_freq = self.steps_per_move
+            if self.save_freq <= 25:
+                self.save_freq = 25  # minimum save frequency of 10 steps to avoid too large files
             
         add_reporters(simulation, self.out_dir, f"sMD_{run_id}",
             total_steps=self.sMD_moves*self.steps_per_move, # total steps 

@@ -281,7 +281,7 @@ class SMDData:
                           group_A: str = None,
                           group_B: str = None,
                           recompute: bool = False,
-                          stride: int = 1,
+                          stride: int = 2,
                           ) -> pd.DataFrame:
         """
         Compute (or load) distance features between pocket and ligand.

@@ -471,7 +471,7 @@ module load openmpi/3.1.6
 # module load gcc
 
 source ~/.bashrc
-micromamba activate autopath3
+micromamba activate autopath
 
 module load amber/24
 #export OMP_NUM_THREADS=${omp_threads}

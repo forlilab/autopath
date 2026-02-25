@@ -119,7 +119,7 @@ def plot_weighted_pmf(df: pd.DataFrame,
     for col in cols_to_plot:
         outfname = os.path.join(outdir, f"{col}.png")
         # plt.figure(figsize=(10,6))
-        g = sns.FacetGrid(df, col="speed", hue=hue_col)
+        g = sns.FacetGrid(df, col="speed", hue=hue_col, sharey=True, sharex=True, height=3.5, aspect=1.5)
         g.map(plt.plot, r_coord, col)#.add_legend()
         # g.map(plt.plot, "r_coord", "Wdiss_weighted").add_legend()
         # g.map(plt.fill_between, "r_coord", "dG_weighted_lower", "dG_weighted_upper", alpha=0.3)    
@@ -215,9 +215,9 @@ def plot_convergence_traces(smd_conv_traces:list[str], outdir: str):
 
 def plot_convergence_metrics(smd_conv_metrics: list[str], outdir: str):
     """
-    Plot convergence metrics from sMD convergence analysis.
-    Each path/cluster is shown with a different line style,
-    while color encodes pulling speed.
+    Plot convergence metrics in a single combined figure.
+    One subplot column per metric, one color per speed.
+    Values are aggregated across paths for each (speed, n_replicas).
     """
     if len(smd_conv_metrics) == 0:
         logger.warning("No data files provided for convergence metrics plotting.")
@@ -235,89 +235,91 @@ def plot_convergence_metrics(smd_conv_metrics: list[str], outdir: str):
         logger.warning("No data available for convergence metrics plotting.")
         return
     
+    os.makedirs(outdir, exist_ok=True)
+
     # metrics to plot
     metrics = [
         c for c in metrics_df.columns
         if c not in ['speed', 'path', 'n_replicas', 'converged', 'decision_quantity', 'n_common_points']
     ]
 
+    if len(metrics) == 0:
+        logger.warning("No numeric convergence metrics found to plot.")
+        return
+
     speeds = sorted(metrics_df['speed'].unique())
-    paths = sorted(metrics_df['path'].unique())
 
     # color map for speeds
     cmap = cm.get_cmap("tab10")
     speed_colors = {s: cmap(i % cmap.N) for i, s in enumerate(speeds)}
 
-    # line styles for paths
-    LINESTYLES = [
-        "-", "--", "-.", ":", (0, (3, 1, 1, 1)), (0, (5, 1))
-    ]
-
     fig, axes = plt.subplots(
-        len(metrics), 1,
-        figsize=(6, 3 * len(metrics)),
-        sharex=True
+        1, len(metrics),
+        figsize=(5 * len(metrics), 4),
+        sharex=False,
+        sharey=False
     )
 
     if len(metrics) == 1:
         axes = [axes]
 
     for ax, metric in zip(axes, metrics):
+        metric_df = metrics_df[['speed', 'n_replicas', metric]].dropna()
 
-        for i, path in enumerate(paths):
-            linestyle = LINESTYLES[i % len(LINESTYLES)]
+        if metric_df.empty:
+            ax.set_title(metric)
+            ax.set_xlabel("Number of replicas")
+            ax.set_ylabel(metric)
+            ax.grid(True)
+            continue
 
-            for speed in speeds:
-                subset = metrics_df[
-                    (metrics_df['speed'] == speed) &
-                    (metrics_df['path'] == path)
-                ]
+        # aggregate across paths to produce one trend per speed
+        agg_df = (
+            metric_df
+            .groupby(['speed', 'n_replicas'], as_index=False)[metric]
+            .mean()
+            .sort_values(['speed', 'n_replicas'])
+        )
 
-                if subset.empty:
-                    continue
+        for speed in speeds:
+            subset = agg_df[agg_df['speed'] == speed]
+            if subset.empty:
+                continue
 
-                ax.plot(
-                    subset['n_replicas'],
-                    subset[metric],
-                    # color=speed_colors[speed],
-                    linestyle=linestyle,
-                    linewidth=2.0,
-                    alpha=0.9,
-                )
+            ax.plot(
+                subset['n_replicas'],
+                subset[metric],
+                color=speed_colors[speed],
+                marker='o',
+                linewidth=2.0,
+                alpha=0.95,
+                label=f"speed {speed}",
+            )
 
         ax.set_title(metric)
+        ax.set_xlabel("Number of replicas")
         ax.set_ylabel(metric)
         ax.grid(True)
 
-    axes[-1].set_xlabel("Number of replicas")
-
-    # build legend (speed colors + path styles)
+    # single legend for speeds
     speed_handles = [
-        Line2D([0], [0], color=speed_colors[s], lw=2, label=f"speed {s}")
+        Line2D([0], [0], color=speed_colors[s], marker='o', lw=2, label=f"speed {s}")
         for s in speeds
     ]
-
-    path_handles = [
-        Line2D([0], [0], color="black",
-            linestyle=LINESTYLES[i % len(LINESTYLES)],
-            lw=2, label=f"path {p}")
-        for i, p in enumerate(paths)
-    ]
-
-    axes[0].legend(
-        handles=speed_handles + path_handles,
-        loc="best",
+    fig.legend(
+        handles=speed_handles,
+        loc='upper center',
+        bbox_to_anchor=(0.5, 1.06),
         frameon=False,
-        ncol=2,
+        ncol=min(len(speeds), 4),
     )
 
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
     plt.savefig(f"{outdir}/sMD_convergence_metrics.png", dpi=300)
     plt.close()
     return
     
-def plot_extrapolated_param(self, 
-                            df: pd.DataFrame = None, 
+def plot_extrapolated_param(df: pd.DataFrame = None, 
                             param: str = 'dG_weighted_slope',
                             outfname: str = None
                             ):
@@ -408,9 +410,9 @@ def make_unbinding_paths_pml(
     paths: Dict[str, List[Tuple[str, str]]],
     reference_pdb: str,
     ligand_select: str,
-    outdir: str = "unbinding_paths_vis",
+    outdir: str = "unbinding_paths",
     align_sel: str = "protein and backbone",
-    grid_spacing: float = 0.5,
+    grid_spacing: float = 1.0,
     cartoon_color: str = "palecyan",
     sample_stride: int = 1,
 ) -> str:
@@ -436,32 +438,28 @@ def make_unbinding_paths_pml(
 
     dx_files_rel = {}
     for path_name, traj_list in paths.items():
-        dens_sum = None
-        total_frames = 0
+        # Only use the first (medoid) trajectory for each path
+        if not traj_list:
+            logger.warning(f"No trajectories found for path {path_name}")
+            continue
+        
+        top, traj = traj_list[0]  # Use only the medoid trajectory
+        
+        # if not aligned, align to reference
+        u = mda.Universe(top, traj)
+        align.AlignTraj(u, u_ref, select=align_sel, in_memory=True).run()
 
-        for top, traj in traj_list:
-            # if not aligned, align to reference
-            u = mda.Universe(top, traj)
-            align.AlignTraj(u, u_ref, select=align_sel, in_memory=True).run()
+        lig = u.select_atoms(ligand_sel)
+        if lig.n_atoms == 0:
+            raise ValueError(f"No atoms found for '{ligand_sel}' in {traj}.")
 
-            lig = u.select_atoms(ligand_sel)
-            if lig.n_atoms == 0:
-                raise ValueError(f"No atoms found for '{ligand_sel}' in {traj}.")
+        da = density.DensityAnalysis(lig, delta=grid_spacing, padding=50.0)
+        da.run(step=sample_stride)
+        dens_sum = da.results.density
 
-            da = density.DensityAnalysis(lig, delta=grid_spacing,padding=50.0)
-            da.run(step=sample_stride)
-            rho = da.results.density
-            
-            dens_sum = rho if dens_sum is None else dens_sum._replace(grid=dens_sum.grid + rho.grid) or dens_sum
-            total_frames += len(u.trajectory[::sample_stride])
-
-        # Normalize and write DX
-        if total_frames > 0:
-            dens_sum.grid /= float(total_frames)
-
-            #smooth the density a bit
+        # Smooth the density
         dens_sum.grid = gaussian_filter(dens_sum.grid, sigma=1.0)
-            
+        
         dx_path = str((outdir / f"{path_name}_density.dx").resolve())
         dens_sum.export(dx_path)
         dx_files_rel[path_name] = dx_path
@@ -505,6 +503,5 @@ def make_unbinding_paths_pml(
         pml.write("    set sphere_transparency, 0.9, lig\n")
         pml.write("orient lig\n")
         pml.write("zoom prot, 10.0\n")
-        pml.write("png preview.png, ray=1, dpi=300\n")
 
     return str(pml_path)
