@@ -6,8 +6,112 @@ import statsmodels.formula.api as smf
 from scipy import special
 from scipy.stats import linregress
 from scipy.interpolate import UnivariateSpline
+from sklearn.mixture import GaussianMixture
 
 from autopath.sMDAnalysis.SMDData import SMDData
+
+
+def _fit_gmm_to_work_values(
+    raw_work: np.ndarray,
+    max_components: int = 3,
+    max_iter: int = 100,
+    covariance_type: str = "diag",
+    random_state: int = 42,
+):
+    """Fit a Gaussian mixture to 1D work samples and return best model by BIC."""
+    raw_work = np.asarray(raw_work, dtype=float).reshape(-1, 1)
+    n_samples = raw_work.shape[0]
+
+    if n_samples < 2:
+        return None
+
+    k_max = min(max_components, n_samples)
+    models = []
+    scores = []
+
+    for n_comp in range(1, k_max + 1):
+        try:
+            gmm = GaussianMixture(
+                n_components=n_comp,
+                max_iter=max_iter,
+                covariance_type=covariance_type,
+                random_state=random_state,
+                init_params="k-means++",
+            )
+            gmm.fit(raw_work)
+            models.append(gmm)
+            scores.append(gmm.bic(raw_work))
+        except Exception:
+            continue
+
+    if len(models) == 0:
+        return None
+
+    best_model = models[int(np.argmin(scores))]
+    variances = best_model.covariances_.reshape(best_model.n_components, -1).flatten()
+
+    return {
+        "weights": np.asarray(best_model.weights_, dtype=float),
+        "means": np.asarray(best_model.means_, dtype=float).ravel(),
+        "variances": np.asarray(variances, dtype=float),
+        "n_components": int(best_model.n_components),
+        "bic": float(np.min(scores)),
+    }
+
+
+def _fit_gmm_and_get_components(
+    raw_W: np.ndarray,
+    max_components: int = 3,
+    max_iter: int = 100,
+    covariance_type: str = "diag",
+    random_state: int = 42,
+    min_samples: int = 2,
+    weight_cutoff: float = 0.0,
+    **kwargs,
+) -> dict | None:
+    """Fit GMM to 1-D work samples, normalize weights, and return components.
+
+    Returns a dict with keys: w, mu, sig2, Wmean, Wvar,
+    gmm_n_components, gmm_bic — or None on failure.
+    """
+    raw_W = np.asarray(raw_W, dtype=float)
+    if raw_W.size < min_samples:
+        return None
+
+    gmm_dict = _fit_gmm_to_work_values(
+        raw_work=raw_W,
+        max_components=max_components,
+        max_iter=max_iter,
+        covariance_type=covariance_type,
+        random_state=random_state,
+    )
+    if gmm_dict is None:
+        return None
+
+    w = np.asarray(gmm_dict["weights"], dtype=float)
+    mu = np.asarray(gmm_dict["means"], dtype=float)
+    sig2 = np.asarray(gmm_dict["variances"], dtype=float)
+
+    if np.any(w < weight_cutoff):
+        w = np.where(w < weight_cutoff, 0.0, w)
+    wsum = w.sum()
+    if wsum <= 0.0:
+        return None
+    w = w / wsum
+
+    Wmean = float(np.dot(w, mu))
+    Wvar = float(np.dot(w, sig2 + (mu - Wmean) ** 2))
+
+    return {
+        "w": w,
+        "mu": mu,
+        "sig2": sig2,
+        "Wmean": Wmean,
+        "Wvar": Wvar,
+        "gmm_n_components": gmm_dict["n_components"],
+        "gmm_bic": gmm_dict["bic"],
+    }
+
 
 class BaseEstimator(ABC):
     """
@@ -16,7 +120,16 @@ class BaseEstimator(ABC):
 
     def __init__(self):
         pass
-    
+
+    @staticmethod
+    def estimate_dG(raw_W: np.ndarray, beta: float, **kwargs) -> dict | None:
+        """Estimate free energy from raw work values.
+
+        Returns a dict with at least 'Wmean', 'dG', 'Wdiss' keys,
+        or None if estimation fails.
+        """
+        raise NotImplementedError
+
     @abstractmethod
     def fit_transform(self, smd_data: SMDData):
         """Fit the estimator to the provided SMD data."""
@@ -27,39 +140,40 @@ class JarzynskiEstimator(BaseEstimator):
     @property
     def name(self):
         return 'jarzynski'
-    
-    def fit_transform(self, smd_data: SMDData) -> SMDData:
 
+    @staticmethod
+    def estimate_dG(raw_W: np.ndarray, beta: float, **kwargs) -> dict | None:
+        raw_W = np.asarray(raw_W, dtype=float)
+        if raw_W.size == 0:
+            return None
+        Wmean = float(raw_W.mean())
+        dG = float(-(1.0 / beta) * (
+            special.logsumexp(-beta * raw_W) - np.log(raw_W.size)
+        ))
+        return {'Wmean': Wmean, 'dG': dG, 'Wdiss': Wmean - dG}
+
+    def fit_transform(self, smd_data: SMDData) -> SMDData:
         data = smd_data.raw_data.copy()
         group_keys = ['step', 'speed', 'path']
         results = []
         for (step, speed, path), group in data.groupby(group_keys):
-            
-            # protocol-anchored coordinate
             r_coord = smd_data.protocol_grids[speed].loc[
                 smd_data.protocol_grids[speed]['step'] == step,
                 'r_target_protocol'
             ].values[0]
-                        
-            # print(f'analyzing coord={coord:.2f}, r_bin={r_coord:.2f}, speed={speed:.5f}, path={path} with {len(group)} points.')
+
             raw_W = group['work'].astype(float).values
+            result = self.estimate_dG(raw_W, smd_data.beta)
+            if result is None:
+                continue
 
-            Wmean = raw_W.mean()
-
-            # plain Jarzynski on the samples
-            dG_Jarzynski = -(1.0/smd_data.beta) * (
-                special.logsumexp(-smd_data.beta * raw_W) - np.log(raw_W.size)
-            )
-            
             results.append({
                 'r_coord': r_coord,
                 'step': step,
                 'speed': speed,
                 'path': path,
                 'n_samples': raw_W.size,
-                'Wmean': Wmean,
-                'Wdiss': Wmean - dG_Jarzynski,
-                'dG': dG_Jarzynski
+                **result,
             })
         results_df = pd.DataFrame(results)
         smd_data.add_estimator_results(self.name, results_df)
@@ -70,39 +184,268 @@ class CumulantEstimator(BaseEstimator):
     @property
     def name(self):
         return 'cumulant'
-    
-    def fit_transform(self, smd_data: SMDData) -> SMDData:
 
+    @staticmethod
+    def estimate_dG(raw_W: np.ndarray, beta: float, **kwargs) -> dict | None:
+        raw_W = np.asarray(raw_W, dtype=float)
+        if raw_W.size == 0:
+            return None
+        Wmean = float(raw_W.mean())
+        Wvar = float(raw_W.var())
+        dG = Wmean - (beta * Wvar) / 2.0
+        return {'Wmean': Wmean, 'dG': dG, 'Wdiss': Wmean - dG}
+
+    def fit_transform(self, smd_data: SMDData) -> SMDData:
         data = smd_data.raw_data.copy()
         group_keys = ['step', 'speed', 'path']
         results = []
         for (step, speed, path), group in data.groupby(group_keys):
-            
-            # protocol-anchored coordinate
             r_coord = smd_data.protocol_grids[speed].loc[
                 smd_data.protocol_grids[speed]['step'] == step,
                 'r_target_protocol'
             ].values[0]
-                  
-            # print(f'analyzing coord={coord:.2f}, r_bin={r_coord:.2f}, speed={speed:.5f}, path={path} with {len(group)} points.')
+
             raw_W = group['work'].astype(float).values
+            result = self.estimate_dG(raw_W, smd_data.beta)
+            if result is None:
+                continue
 
-            Wmean = raw_W.mean()
-            Wvar = raw_W.var()
-
-            # cumulant expansion to 2nd order
-            dG_cumulant = Wmean - (smd_data.beta * Wvar) / 2.0
-            
             results.append({
                 'r_coord': r_coord,
                 'step': step,
                 'speed': speed,
                 'path': path,
                 'n_samples': raw_W.size,
-                'Wmean': Wmean,
-                'Wdiss': Wmean - dG_cumulant,
-                'dG': dG_cumulant
+                **result,
             })
+        results_df = pd.DataFrame(results)
+        smd_data.add_estimator_results(self.name, results_df)
+        return smd_data
+
+
+class JarzynskiGMMEstimator(BaseEstimator):
+
+    def __init__(
+        self,
+        max_components: int = 3,
+        max_iter: int = 100,
+        covariance_type: str = "diag",
+        random_state: int = 42,
+        min_samples: int = 3,
+        weight_cutoff: float = 0.0,
+    ):
+        self.max_components = max_components
+        self.max_iter = max_iter
+        self.covariance_type = covariance_type
+        self.random_state = random_state
+        self.min_samples = min_samples
+        self.weight_cutoff = weight_cutoff
+
+    @property
+    def name(self):
+        return "jarzynski_gmm"
+
+    @staticmethod
+    def estimate_dG(raw_W: np.ndarray, beta: float, **kwargs) -> dict | None:
+        comp = _fit_gmm_and_get_components(raw_W, **kwargs)
+        if comp is None:
+            return None
+        log_terms = -beta * comp["mu"] + 0.5 * (beta ** 2) * comp["sig2"]
+        log_Z = special.logsumexp(log_terms, b=comp["w"])
+        dG = float(-(1.0 / beta) * log_Z)
+        return {
+            "Wmean": comp["Wmean"],
+            "Wvar": comp["Wvar"],
+            "dG": dG,
+            "Wdiss": comp["Wmean"] - dG,
+            "gmm_n_components": comp["gmm_n_components"],
+            "gmm_bic": comp["gmm_bic"],
+        }
+
+    def fit_transform(self, smd_data: SMDData) -> SMDData:
+        data = smd_data.raw_data.copy()
+        group_keys = ["step", "speed", "path"]
+        results = []
+
+        for (step, speed, path), group in data.groupby(group_keys):
+            r_coord = smd_data.protocol_grids[speed].loc[
+                smd_data.protocol_grids[speed]["step"] == step,
+                "r_target_protocol",
+            ].values[0]
+
+            raw_W = group["work"].astype(float).values
+            result = self.estimate_dG(
+                raw_W, smd_data.beta,
+                max_components=self.max_components,
+                max_iter=self.max_iter,
+                covariance_type=self.covariance_type,
+                random_state=self.random_state,
+                min_samples=self.min_samples,
+                weight_cutoff=self.weight_cutoff,
+            )
+            if result is None:
+                continue
+
+            results.append({
+                "r_coord": r_coord,
+                "step": step,
+                "speed": speed,
+                "path": path,
+                "n_samples": raw_W.size,
+                **result,
+            })
+
+        results_df = pd.DataFrame(results)
+        smd_data.add_estimator_results(self.name, results_df)
+        return smd_data
+
+
+class CumulantGMMEstimator(BaseEstimator):
+
+    def __init__(
+        self,
+        max_components: int = 3,
+        max_iter: int = 100,
+        covariance_type: str = "diag",
+        random_state: int = 42,
+        min_samples: int = 3,
+        weight_cutoff: float = 0.0,
+    ):
+        self.max_components = max_components
+        self.max_iter = max_iter
+        self.covariance_type = covariance_type
+        self.random_state = random_state
+        self.min_samples = min_samples
+        self.weight_cutoff = weight_cutoff
+
+    @property
+    def name(self):
+        return "cumulant_gmm"
+
+    @staticmethod
+    def estimate_dG(raw_W: np.ndarray, beta: float, **kwargs) -> dict | None:
+        comp = _fit_gmm_and_get_components(raw_W, **kwargs)
+        if comp is None:
+            return None
+        dG = comp["Wmean"] - (beta * comp["Wvar"]) / 2.0
+        return {
+            "Wmean": comp["Wmean"],
+            "Wvar": comp["Wvar"],
+            "dG": dG,
+            "Wdiss": comp["Wmean"] - dG,
+            "gmm_n_components": comp["gmm_n_components"],
+            "gmm_bic": comp["gmm_bic"],
+        }
+
+    def fit_transform(self, smd_data: SMDData) -> SMDData:
+        data = smd_data.raw_data.copy()
+        group_keys = ["step", "speed", "path"]
+        results = []
+
+        for (step, speed, path), group in data.groupby(group_keys):
+            r_coord = smd_data.protocol_grids[speed].loc[
+                smd_data.protocol_grids[speed]["step"] == step,
+                "r_target_protocol",
+            ].values[0]
+
+            raw_W = group["work"].astype(float).values
+            result = self.estimate_dG(
+                raw_W, smd_data.beta,
+                max_components=self.max_components,
+                max_iter=self.max_iter,
+                covariance_type=self.covariance_type,
+                random_state=self.random_state,
+                min_samples=self.min_samples,
+                weight_cutoff=self.weight_cutoff,
+            )
+            if result is None:
+                continue
+
+            results.append({
+                "r_coord": r_coord,
+                "step": step,
+                "speed": speed,
+                "path": path,
+                "n_samples": raw_W.size,
+                **result,
+            })
+
+        results_df = pd.DataFrame(results)
+        smd_data.add_estimator_results(self.name, results_df)
+        return smd_data
+
+
+class CumulantGMMComponentwiseEstimator(BaseEstimator):
+
+    def __init__(
+        self,
+        max_components: int = 3,
+        max_iter: int = 100,
+        covariance_type: str = "diag",
+        random_state: int = 42,
+        min_samples: int = 3,
+        weight_cutoff: float = 0.0,
+    ):
+        self.max_components = max_components
+        self.max_iter = max_iter
+        self.covariance_type = covariance_type
+        self.random_state = random_state
+        self.min_samples = min_samples
+        self.weight_cutoff = weight_cutoff
+
+    @property
+    def name(self):
+        return "cumulant_gmm_componentwise"
+
+    @staticmethod
+    def estimate_dG(raw_W: np.ndarray, beta: float, **kwargs) -> dict | None:
+        comp = _fit_gmm_and_get_components(raw_W, **kwargs)
+        if comp is None:
+            return None
+        dG_k = comp["mu"] - 0.5 * beta * comp["sig2"]
+        dG = float(np.dot(comp["w"], dG_k))
+        return {
+            "Wmean": comp["Wmean"],
+            "Wvar": comp["Wvar"],
+            "dG": dG,
+            "Wdiss": comp["Wmean"] - dG,
+            "gmm_n_components": comp["gmm_n_components"],
+            "gmm_bic": comp["gmm_bic"],
+        }
+
+    def fit_transform(self, smd_data: SMDData) -> SMDData:
+        data = smd_data.raw_data.copy()
+        group_keys = ["step", "speed", "path"]
+        results = []
+
+        for (step, speed, path), group in data.groupby(group_keys):
+            r_coord = smd_data.protocol_grids[speed].loc[
+                smd_data.protocol_grids[speed]["step"] == step,
+                "r_target_protocol",
+            ].values[0]
+
+            raw_W = group["work"].astype(float).values
+            result = self.estimate_dG(
+                raw_W, smd_data.beta,
+                max_components=self.max_components,
+                max_iter=self.max_iter,
+                covariance_type=self.covariance_type,
+                random_state=self.random_state,
+                min_samples=self.min_samples,
+                weight_cutoff=self.weight_cutoff,
+            )
+            if result is None:
+                continue
+
+            results.append({
+                "r_coord": r_coord,
+                "step": step,
+                "speed": speed,
+                "path": path,
+                "n_samples": raw_W.size,
+                **result,
+            })
+
         results_df = pd.DataFrame(results)
         smd_data.add_estimator_results(self.name, results_df)
         return smd_data
@@ -114,6 +457,16 @@ class FrictionEstimator(BaseEstimator):
     
     def fit_transform(self, smd_data: SMDData):
         return super().fit_transform(smd_data)
+
+
+ESTIMATOR_REGISTRY: dict[str, type[BaseEstimator]] = {
+    'jarzynski': JarzynskiEstimator,
+    'cumulant': CumulantEstimator,
+    'jarzynski_gmm': JarzynskiGMMEstimator,
+    'cumulant_gmm': CumulantGMMEstimator,
+    'cumulant_gmm_componentwise': CumulantGMMComponentwiseEstimator,
+}
+
 
 def calculate_weighted_pmf(
     smd_data: SMDData,

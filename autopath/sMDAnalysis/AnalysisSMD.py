@@ -4,12 +4,27 @@ import pandas as pd
 from glob import glob
 from typing import Optional, Union
 from collections import defaultdict
+import logging
 
 from autopath.sMDAnalysis import SMDData
 from autopath.sMDAnalysis.Estimators import BaseEstimator
 from autopath.sMDAnalysis.PathModel import DTWPathModel, PathModel
-from autopath.sMDAnalysis.Estimators import JarzynskiEstimator, CumulantEstimator, calculate_weighted_pmf, extrapolate_to_v0
-from autopath.sMDAnalysis.Diagnostics import plot_work_profiles, plot_weighted_pmf
+from autopath.sMDAnalysis.Estimators import (
+    JarzynskiEstimator,
+    CumulantEstimator,
+    JarzynskiGMMEstimator,
+    CumulantGMMEstimator,
+    CumulantGMMComponentwiseEstimator,
+    ESTIMATOR_REGISTRY,
+    calculate_weighted_pmf,
+    extrapolate_to_v0,
+)
+from autopath.sMDAnalysis.Diagnostics import (
+    plot_work_profiles,
+    plot_weighted_pmf,
+)
+
+logger = logging.getLogger("autopath.sMDAnalysis.core")
 
 class SMDAnalysis:
     def __init__(self,
@@ -41,6 +56,9 @@ class SMDAnalysis:
         estimator_map = {
             'jarzynski': JarzynskiEstimator(),
             'cumulant': CumulantEstimator(),
+            'jarzynski_gmm': JarzynskiGMMEstimator(),
+            'cumulant_gmm': CumulantGMMEstimator(),
+            'cumulant_gmm_componentwise': CumulantGMMComponentwiseEstimator(),
         }
         self.estimators = []
         for est in estimators:
@@ -80,23 +98,23 @@ class SMDAnalysis:
         
         if self.reference_pdb is None:
             self.reference_pdb = sMDDdata.reference_pdb
-            print(f"No reference PDB provided, using from SMDData: {self.reference_pdb}")
+            logger.warning(f"No reference PDB provided, using from SMDData: {self.reference_pdb}")
         
         # filter by r_range if provided
         if r_range is not None:
             sMDDdata.filter_by_r_range(r_range, sMDDdata.r_column)
 
         if group_A is not None and group_B is not None:
-            # extract geom features
-            print(f'Using distance features for path clustering')
+            # extract geometrical (distance) features
+            logger.info(f'Using distance features for path clustering')
             feat_df = sMDDdata.calculate_pocket_distances(
                         group_A=group_A,
                         group_B=group_B,
-                        recompute=True,  # force recomputation to ensure we have the latest data
+                        recompute=False,  # force recomputation to ensure we have the latest data
             )
         else:
             # extract trace features
-            print(f'Using trace features for path clustering')
+            logger.info(f'Using trace features for path clustering')
             feat_df = sMDDdata.get_trace_features(
                                 features=['work', 'lag', 'r_before' ],
                                 # features=['force', 'lag', 'r_before', 'r_after'],
@@ -120,6 +138,7 @@ class SMDAnalysis:
         
         # fit the estimators
         for estimator in self.estimators:
+            logger.info(f"Fitting estimator: {estimator.name}")
             sMDDdata = estimator.fit_transform(sMDDdata) 
             
         # optional path filtering
@@ -135,8 +154,8 @@ class SMDAnalysis:
         #     self.weighted_pmf_v0 = extrapolate_to_v0(self.weighted_pmf, param_cols=['Wdiss_weighted', 'dG_weighted'])      
         
         if self.do_plots:
-            plot_work_profiles(sMDDdata.results, estimator='jarzynski', outdir=self.outdir)
-            plot_work_profiles(sMDDdata.results, estimator='cumulant', outdir=self.outdir)
+            for estimator in self.estimators:
+                plot_work_profiles(sMDDdata.results, estimator=estimator.name, outdir=self.outdir)
             plot_weighted_pmf(self.weighted_pmf, outdir=self.outdir)
         
         # save processed data
@@ -155,6 +174,7 @@ class SMDAnalysis:
         tol_rmsd: float = 3.0,     # kJ/mol
         tol_barrier: float = 2.0,  # kJ/mol
         min_common_points: int = 5,
+        return_gmm_diagnostics: bool = False,
     ):
         """
         Sequential convergence check for a single pulling speed using
@@ -170,14 +190,25 @@ class SMDAnalysis:
         main_quantity = quantities[0]
         value_col = main_quantity[:-9] if main_quantity.endswith('_weighted') else main_quantity
 
-        if estimator_name not in {'jarzynski', 'cumulant'}:
-            raise ValueError(f"Unknown estimator: {estimator_name}")
+        allowed_estimators = {
+            'jarzynski',
+            'cumulant',
+            'jarzynski_gmm',
+            'cumulant_gmm',
+            'cumulant_gmm_componentwise',
+        }
+        if estimator_name not in allowed_estimators:
+            raise ValueError(
+                f"Unknown estimator '{estimator_name}'. "
+                f"Allowed values: {sorted(allowed_estimators)}"
+            )
 
         if speeds is None:
             speeds = sorted(set(self._speed_from_log(fn) for fn in logs))
 
         convergence_all_speeds = []
         traces_all_speeds = []
+        gmm_diag_all_speeds = []
         
         for speed in speeds:
             
@@ -191,7 +222,7 @@ class SMDAnalysis:
 
             # sort replicas sequentially
             speed_logs = sorted(speed_logs, key=self._replica_idx_from_log)
-            print(f"Checking convergence for speed={speed} with {len(speed_logs)} replicas")
+            logger.info(f"Checking convergence for speed={speed} with {len(speed_logs)} replicas")
 
             # Build SMDData and clustering ONCE for this speed
             smd = SMDData(
@@ -224,6 +255,7 @@ class SMDAnalysis:
             }
 
             running_stats = defaultdict(lambda: {'n': 0, 'sum_w': 0.0, 'sum_w2': 0.0, 'sum_exp': 0.0})
+            running_samples = defaultdict(list)
             path_traj_counts = defaultdict(int)
 
             rows = []
@@ -251,17 +283,28 @@ class SMDAnalysis:
                     stats['sum_w'] += work
                     stats['sum_w2'] += work * work
                     stats['sum_exp'] += np.exp(-smd.beta * work)
+                    running_samples[key].append(work)
 
                 if k < min_replicas:
                     continue
 
                 results_df = self._results_from_running_stats(
                     running_stats=running_stats,
+                    running_samples=running_samples,
                     speed=speed,
                     protocol_grid=protocol_grid,
                     estimator_name=estimator_name,
                     beta=smd.beta,
                 )
+
+                if not results_df.empty and {'gmm_n_components', 'gmm_bic'}.issubset(results_df.columns):
+                    gmm_diag_k = results_df[['step', 'r_coord', 'path', 'gmm_n_components', 'gmm_bic']].copy()
+                    gmm_diag_k['speed'] = speed
+                    gmm_diag_k['n_replicas'] = k
+                    gmm_diag_k['estimator'] = estimator_name
+                    gmm_diag_k = gmm_diag_k.dropna(subset=['gmm_n_components'], how='any')
+                    if not gmm_diag_k.empty:
+                        gmm_diag_all_speeds.append(gmm_diag_k)
 
                 pmf_k = self._weighted_series_from_results(
                     results_df=results_df,
@@ -349,17 +392,32 @@ class SMDAnalysis:
             
         convergence_all_speeds = pd.concat(convergence_all_speeds, ignore_index=True) if convergence_all_speeds else pd.DataFrame()
         traces_all_speeds = pd.concat(traces_all_speeds, ignore_index=True) if traces_all_speeds else pd.DataFrame()
-        
+        gmm_diag_df = pd.concat(gmm_diag_all_speeds, ignore_index=True) if gmm_diag_all_speeds else pd.DataFrame()
+
+        # keep diagnostics accessible after the call
+        self.convergence_gmm_diagnostics = gmm_diag_df
+
+        if return_gmm_diagnostics:
+            return convergence_all_speeds, traces_all_speeds, gmm_diag_df
+
         return convergence_all_speeds, traces_all_speeds
 
     @staticmethod
     def _results_from_running_stats(
         running_stats: dict,
+        running_samples: dict,
         speed: float,
         protocol_grid: pd.Series,
         estimator_name: str,
         beta: float,
     ) -> pd.DataFrame:
+        estimator_cls = ESTIMATOR_REGISTRY.get(estimator_name)
+        if estimator_cls is None:
+            raise ValueError(
+                f"Unknown estimator '{estimator_name}'. "
+                f"Allowed: {sorted(ESTIMATOR_REGISTRY)}"
+            )
+
         rows = []
 
         for (step, path), stats in running_stats.items():
@@ -367,23 +425,25 @@ class SMDAnalysis:
             if n <= 0:
                 continue
 
-            wmean = stats['sum_w'] / n
+            raw_W = np.asarray(running_samples.get((step, path), []), dtype=float)
+            if raw_W.size == 0:
+                continue
 
-            if estimator_name == 'cumulant':
-                wvar = max(stats['sum_w2'] / n - wmean * wmean, 0.0)
-                dG = wmean - (beta * wvar) / 2.0
-            else:
-                dG = -(1.0 / beta) * (np.log(stats['sum_exp']) - np.log(n))
+            result = estimator_cls.estimate_dG(raw_W, beta)
+            if result is None:
+                continue
 
             rows.append({
                 'step': step,
                 'speed': speed,
                 'path': path,
                 'n_samples': n,
-                'Wmean': wmean,
-                'Wdiss': wmean - dG,
-                'dG': dG,
+                'Wmean': result['Wmean'],
+                'Wdiss': result['Wdiss'],
+                'dG': result['dG'],
                 'r_coord': protocol_grid.loc[step],
+                'gmm_n_components': result.get('gmm_n_components', np.nan),
+                'gmm_bic': result.get('gmm_bic', np.nan),
             })
 
         if not rows:
@@ -401,44 +461,13 @@ class SMDAnalysis:
         if results_df.empty or value_col not in results_df.columns:
             return pd.Series(dtype=float)
 
-        # p_neq from current trajectory counts per path
-        total_trajs = sum(path_traj_counts.values())
-        if total_trajs <= 0:
+        p_neq = SMDData._compute_p_neq(path_traj_counts)
+        if not p_neq:
             return pd.Series(dtype=float)
 
-        p_neq = {
-            path: count / total_trajs
-            for path, count in path_traj_counts.items()
-            if count > 0
-        }
-
-        # p_eq from path partition function
-        weights = {}
-        for path, gpath in results_df.groupby('path'):
-            if path not in p_neq:
-                continue
-
-            gpath = gpath.sort_values('step')
-            dG = gpath['dG'].to_numpy(dtype=float)
-            x = gpath['r_coord'].to_numpy(dtype=float)
-
-            if len(dG) < 2:
-                continue
-
-            # dG0 = np.nanmin(dG)
-            dG0 = 0.0  # alternative: set reference to zero for each path (relative PMF)
-            integrand = np.exp(-beta * (dG - dG0))
-            Zk = np.trapz(integrand, x) * np.exp(-beta * dG0)
-            weights[path] = p_neq[path] * Zk
-
-        if not weights:
+        p_eq = SMDData._compute_p_eq(results_df, p_neq, beta)
+        if not p_eq:
             return pd.Series(dtype=float)
-
-        total_weight = sum(weights.values())
-        if total_weight <= 0:
-            return pd.Series(dtype=float)
-
-        p_eq = {path: w / total_weight for path, w in weights.items()}
 
         # common support over paths (same criterion used in calculate_weighted_pmf)
         path_last = results_df.groupby('path')['step'].max()
@@ -468,12 +497,73 @@ class SMDAnalysis:
     
     def _path_filtering(self, 
                         sMDDdata: SMDData,
-                        min_replicas: int = 3):
+                        min_replicas: int = 3,
+                        min_dG_allowed: float = -10.0,
+                        max_path_p_eq: float = 1.00) -> SMDData:
         """A simple path filtering based on minimum number of replicas speed and per path.
         This could be extended in the future to more sophisticated criteria.
         """
-        
-        sMDDdata.results = sMDDdata.results[sMDDdata.results['n_samples'] >= min_replicas]
+
+        # sampling filter by number of replicas per path (minimum sampling guard)
+        sMDDdata.results = sMDDdata.results[sMDDdata.results['n_samples'] >= min_replicas].copy()
+
+        if sMDDdata.results.empty:
+            logger.warning("All paths were filtered out by minimum replicas criterion.")
+            return sMDDdata
+
+        bad_keys: set[tuple[float, str]] = set()
+
+        # # dG floor filter (artifact guard)
+        # dG_min_by_path = (
+        #     sMDDdata.results
+        #     .groupby(['speed', 'path'])['dG']
+        #     .min()
+        #     .dropna()
+        # )
+        # for (speed, path), dgmin in dG_min_by_path.items():
+        #     if dgmin < min_dG_allowed:
+        #         logger.warning(
+        #             f"Excluding path '{path}' at speed={speed} nm/ps: "
+        #             f"min(dG)={dgmin:.3f} < {min_dG_allowed:.3f} kJ/mol"
+        #         )
+        #         bad_keys.add((speed, path))
+
+        # dominant p_eq filter (single-path domination guard)
+        try:
+            p_eq_dic = sMDDdata.get_p_eq(byspeed=True, results=sMDDdata.results)
+        except Exception as exc:
+            logger.warning(f"Could not compute p_eq for quality filtering: {exc}")
+            p_eq_dic = None
+
+        if p_eq_dic is not None:
+            for speed, path_weights in p_eq_dic.items():
+                for path, p_eq in path_weights.items():
+                    if p_eq > max_path_p_eq:
+                        logger.warning(
+                            f"Excluding path '{path}' at speed={speed} nm/ps: "
+                            f"p_eq={p_eq:.4f} > {max_path_p_eq:.4f}"
+                        )
+                        bad_keys.add((speed, path))
+
+        if bad_keys:
+            bad_df = pd.DataFrame(list(bad_keys), columns=['speed', 'path'])
+
+            sMDDdata.results = (
+                sMDDdata.results
+                .merge(bad_df, on=['speed', 'path'], how='left', indicator=True)
+                .query("_merge == 'left_only'")
+                .drop(columns=['_merge'])
+            )
+
+            sMDDdata.raw_data = (
+                sMDDdata.raw_data
+                .merge(bad_df, on=['speed', 'path'], how='left', indicator=True)
+                .query("_merge == 'left_only'")
+                .drop(columns=['_merge'])
+            )
+
+            logger.warning(f"Path quality filtering removed {len(bad_keys)} (speed, path) groups.")
+
         return sMDDdata    
     
     @staticmethod
