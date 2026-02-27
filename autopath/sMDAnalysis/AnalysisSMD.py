@@ -22,6 +22,7 @@ from autopath.sMDAnalysis.Estimators import (
 from autopath.sMDAnalysis.Diagnostics import (
     plot_work_profiles,
     plot_weighted_pmf,
+    plot_extrapolated_param,
 )
 
 logger = logging.getLogger("autopath.sMDAnalysis.core")
@@ -150,13 +151,23 @@ class SMDAnalysis:
         self.weighted_pmf.to_csv(f'{self.outdir}/weighted_pmf.csv', index=False)
         
         # extrapolate to v=0 for each estimator
-        # if self.weighted_pmf['speed'].nunique() > 2:
-        #     self.weighted_pmf_v0 = extrapolate_to_v0(self.weighted_pmf, param_cols=['Wdiss_weighted', 'dG_weighted'])      
+        self.weighted_pmf_v0 = {}
+        for pcol in ['dG_weighted', 'Wdiss_weighted']:
+            if pcol in self.weighted_pmf.columns:
+                v0_df = extrapolate_to_v0(self.weighted_pmf, param=pcol)
+                if not v0_df.empty:
+                    self.weighted_pmf_v0[pcol] = v0_df
+                    v0_df.to_csv(f'{self.outdir}/v0_extrapolation_{pcol}.csv', index=False)
         
         if self.do_plots:
             for estimator in self.estimators:
                 plot_work_profiles(sMDDdata.results, estimator=estimator.name, outdir=self.outdir)
             plot_weighted_pmf(self.weighted_pmf, outdir=self.outdir)
+            for pcol, v0_df in self.weighted_pmf_v0.items():
+                plot_extrapolated_param(
+                    v0_df, param=pcol,
+                    outfname=os.path.join(self.outdir, f'{pcol}_v0_extrapolation.png'),
+                )
         
         # save processed data
         sMDDdata.raw_data.to_csv(f'{self.outdir}/sMD_processed_data.csv', index=False)
@@ -505,12 +516,21 @@ class SMDAnalysis:
         """
 
         # sampling filter by number of replicas per path (minimum sampling guard)
-        sMDDdata.results = sMDDdata.results[sMDDdata.results['n_samples'] >= min_replicas].copy()
-
-        if sMDDdata.results.empty:
-            logger.warning("All paths were filtered out by minimum replicas criterion.")
-            return sMDDdata
-
+        for (speed, path), group in sMDDdata.results.groupby(['speed', 'path']):
+            n_replicas = len(group)
+            if n_replicas <= min_replicas:
+                logger.warning(
+                    f"Excluding path '{path}' at speed={speed} nm/ps: "
+                    f"only {n_replicas} replicas < {min_replicas}"
+                )
+                sMDDdata.results = sMDDdata.results.drop(group.index)
+                sMDDdata.raw_data = sMDDdata.raw_data.drop(
+                    sMDDdata.raw_data[
+                        (sMDDdata.raw_data['speed'] == speed) &
+                        (sMDDdata.raw_data['path'] == path)
+                    ].index
+                )
+    
         bad_keys: set[tuple[float, str]] = set()
 
         # # dG floor filter (artifact guard)
