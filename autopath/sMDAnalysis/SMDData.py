@@ -344,12 +344,88 @@ class SMDData:
         self.results = pd.concat([self.results, results_df], ignore_index=True)
         return None    
 
+    @staticmethod
+    def _compute_p_neq(path_traj_counts: dict) -> dict:
+        """Compute non-equilibrium path probabilities from trajectory counts.
+
+        Parameters
+        ----------
+        path_traj_counts :
+            Mapping of path label -> number of trajectories assigned to that path.
+
+        Returns
+        -------
+        dict
+            Mapping of path label -> p_neq (fraction of trajectories).  Empty
+            dict when the total count is zero.
+        """
+        total_trajs = sum(path_traj_counts.values())
+        if total_trajs <= 0:
+            return {}
+        return {
+            path: count / total_trajs
+            for path, count in path_traj_counts.items()
+            if count > 0
+        }
+
+    @staticmethod
+    def _compute_p_eq(results_df: pd.DataFrame, p_neq: dict, beta: float) -> dict:
+        """Compute normalised equilibrium path probabilities for a single speed.
+
+        Each path's unnormalised weight is p_neq[path] * Z_k, where Z_k is the
+        path partition function obtained by numerically integrating
+        exp(-beta * dG) over the reaction coordinate.
+
+        Parameters
+        ----------
+        results_df :
+            DataFrame with at least ``path``, ``step``, ``dG`` and ``r_coord``
+            columns for a **single speed** (typically the per-step estimator output).
+        p_neq :
+            Non-equilibrium path probabilities as returned by
+            :meth:`_compute_p_neq`.
+        beta :
+            Inverse thermal energy (1 / k_B T).
+
+        Returns
+        -------
+        dict
+            Mapping of path label -> normalised p_eq.  Empty dict when weights
+            cannot be computed.
+        """
+        weights = {}
+        for path, gpath in results_df.groupby('path'):
+            if path not in p_neq:
+                continue
+
+            gpath = gpath.sort_values('step')
+            dG = gpath['dG'].to_numpy(dtype=float)
+            x = gpath['r_coord'].to_numpy(dtype=float)
+
+            if len(dG) < 2:
+                continue
+
+            dG0 = np.nanmin(dG)
+            # dG0 = 0.0  # alternative: set reference to zero for each path (relative PMF)
+            integrand = np.exp(-beta * (dG - dG0))
+            Zk = np.trapz(integrand, x) * np.exp(-beta * dG0)
+            p_eq_raw = p_neq[path] * Zk
+            if p_eq_raw > 1.0:
+                logger.warning(f"p_eq={p_eq_raw:.3f} for path '{path}' is > 1 (unphysical). Setting weight to 0.")
+                p_eq_raw = 0.0
+            weights[path] = p_eq_raw
+
+        total_weight = sum(weights.values())
+        if total_weight <= 0:
+            return {}
+        return {path: w / total_weight for path, w in weights.items()}
+
     def get_p_neq(self,
                   byspeed: bool = True
                   ) -> dict[str, float]:
         """p_neq Non-equilibrium path probabilities from sMD analysis.
         Returns a dictionary mapping path labels to p_neq values."""
-        
+
         data = self.raw_data.copy()
 
         # decide grouping strategy
@@ -361,14 +437,13 @@ class SMDData:
         p_neq_dic = {}
         for speed, g in grouping_iter:
             logger.info(f"Speed {speed} nm/ps has {g['path'].nunique()} unique paths.")
-            df = g.groupby(['path'])[['trajname']].nunique()
-            df['p_neq'] = df['trajname'] / df['trajname'].sum()
+            path_traj_counts = g.groupby('path')['trajname'].nunique().to_dict()
             speed_key = speed if byspeed is not None else "all_speeds"
-            p_neq_dic[speed_key] = df['p_neq'].to_dict()
-        
+            p_neq_dic[speed_key] = SMDData._compute_p_neq(path_traj_counts)
+
         return p_neq_dic
 
-    def get_p_eq(self, 
+    def get_p_eq(self,
                  byspeed: bool = True,
                  results: pd.DataFrame = None
                  ) -> dict[str, float]:
@@ -381,42 +456,44 @@ class SMDData:
             results = self.results
         if results is None:
             logger.error("No results available to compute p_eq.")
-            return None    
+            return None
+
+        preferred_estimators = ['cumulant', 'cumulant_gmm', 'cumulant_gmm_componentwise']
+        available_estimators = results['estimator'].dropna().unique().tolist()
+
+        # estimator_for_weights = None
+        # for est in preferred_estimators:
+        #     if est in available_estimators:
+        #         estimator_for_weights = est
+        #         break
+
+        # if estimator_for_weights is None:
+        #     if len(available_estimators) == 0:
+        #         logger.error("No estimator results available to compute p_eq.")
+        #         return None
+        #     estimator_for_weights = available_estimators[0]
         
-        results = results[results['estimator'] == 'cumulant']  # use cumulant results only
-        # results = results[results['estimator'] == 'jarzynski']  # use cumulant results only
+        estimator_for_weights = 'cumulant'  # for now we just use the Jarzynski estimator, but we can easily switch to cumulant if needed.
+        logger.info(f"Computing p_eq from estimator '{estimator_for_weights}'.")
+        results = results[results['estimator'] == estimator_for_weights]
 
         # get p_neq first
         p_neq_dic = self.get_p_neq(byspeed=byspeed)
-        
-        weights = defaultdict(dict)  # weights[speed][path] = weight
-        for speed, gspeed in results.groupby('speed'):
-            for path, g in gspeed.groupby('path'):
-                dG = g['dG'].values
-                x = g['r_coord'].values
-                p_neq = p_neq_dic[speed][path]
-                # numerically stable log-sum-exp-like handling
-                dG0 = np.nanmin(dG)
-                # dG0 = 0
-                integrand = np.exp(-self.beta * (dG - dG0))
-                Zk = np.trapz(integrand, x) * np.exp(-self.beta * dG0)
-                weights[speed][path] = (p_neq * Zk)
-            
-        # normalize per speed
-        p_eq_dic = defaultdict(dict)
-        for speed in weights:
-            total = sum(weights[speed].values())
-            for path in weights[speed]:
-                p_eq_dic[speed][path] = weights[speed][path] / total
 
-        # print detailed weights info
+        p_eq_dic = defaultdict(dict)
+        for speed, gspeed in results.groupby('speed'):
+            speed_p_neq = p_neq_dic.get(speed, {})
+            p_eq_dic[speed] = SMDData._compute_p_eq(gspeed, speed_p_neq, self.beta)
+
+        # log details
         for speed in p_eq_dic:
             logger.info(f"Speed {speed} nm/ps path weights:")
-            # print('Speed', speed, 'nm/ps path weights:')
-            for path in weights[speed]:
-                # print(f"  Path {path}: p_neq = {p_neq_dic[speed][path]:.6f}, p_eq = {p_eq_dic[speed][path]:.6f}")
-                logger.info(f"Path {path}: p_neq = {p_neq_dic[speed][path]:.6f}, p_eq = {p_eq_dic[speed][path]:.6f}")
-        
+            for path in p_eq_dic[speed]:
+                logger.info(
+                    f"  Path {path}: p_neq = {p_neq_dic[speed].get(path, 0):.6f}, "
+                    f"p_eq = {p_eq_dic[speed][path]:.6f}"
+                )
+
         return p_eq_dic
         
     # def _bin_data(self,
