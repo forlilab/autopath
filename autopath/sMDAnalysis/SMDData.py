@@ -335,6 +335,8 @@ class SMDData:
         df.to_csv(distance_file, index=False)
         return df
     
+    
+    
     def add_estimator_results(self, estimator_name: str, results_df: pd.DataFrame):
         """Store estimator results in the SMDData object.
         """
@@ -407,11 +409,15 @@ class SMDData:
 
             dG0 = np.nanmin(dG)
             # dG0 = 0.0  # alternative: set reference to zero for each path (relative PMF)
+            
             integrand = np.exp(-beta * (dG - dG0))
             Zk = np.trapz(integrand, x) * np.exp(-beta * dG0)
             p_eq_raw = p_neq[path] * Zk
-            if p_eq_raw > 1.0:
-                logger.warning(f"p_eq={p_eq_raw:.3f} for path '{path}' is > 1 (unphysical). Setting weight to 0.")
+            if not np.isfinite(p_eq_raw) or p_eq_raw < 0.0:
+                logger.warning(
+                    f"p_eq_raw={p_eq_raw} for path '{path}' is non-finite or negative. "
+                    "Setting weight to 0."
+                )
                 p_eq_raw = 0.0
             weights[path] = p_eq_raw
 
@@ -458,22 +464,20 @@ class SMDData:
             logger.error("No results available to compute p_eq.")
             return None
 
-        preferred_estimators = ['cumulant', 'cumulant_gmm', 'cumulant_gmm_componentwise']
+        preferred_estimators = ['cumulant', 'jarzynski'] # order of preference for which estimator to use for weights
         available_estimators = results['estimator'].dropna().unique().tolist()
 
-        # estimator_for_weights = None
-        # for est in preferred_estimators:
-        #     if est in available_estimators:
-        #         estimator_for_weights = est
-        #         break
+        estimator_for_weights = None
+        for est in preferred_estimators:
+            if est in available_estimators:
+                estimator_for_weights = est
+                break
 
-        # if estimator_for_weights is None:
-        #     if len(available_estimators) == 0:
-        #         logger.error("No estimator results available to compute p_eq.")
-        #         return None
-        #     estimator_for_weights = available_estimators[0]
-        
-        estimator_for_weights = 'cumulant'  # for now we just use the Jarzynski estimator, but we can easily switch to cumulant if needed.
+        if estimator_for_weights is None:
+            if len(available_estimators) == 0:
+                logger.error("No estimator results available to compute p_eq.")
+                exit(1)
+                        
         logger.info(f"Computing p_eq from estimator '{estimator_for_weights}'.")
         results = results[results['estimator'] == estimator_for_weights]
 

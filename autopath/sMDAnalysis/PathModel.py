@@ -191,7 +191,7 @@ class DTWPathModel(PathModel):
             for trajname, cluster_id in zip(trajnames, cluster_model.labels):
                 # Create globally unique path ID: include speed if clustering per speed
                 if speed_key is not None:
-                    unique_path_id = f"speed_{speed_key}_path_{cluster_id}"
+                    unique_path_id = f"path-{cluster_id}_v{speed_key}"
                 else:
                     unique_path_id = cluster_id
                 path_mapping_dic[trajname] = unique_path_id
@@ -225,12 +225,12 @@ class DTWPathModel(PathModel):
             
             if paths_dict:
                 try:
-                    make_unbinding_paths_pml(
-                        paths=paths_dict,
-                        reference_pdb=reference_pdb,
-                        ligand_select=ligand_select,
-                        outdir=os.path.join(self.outdir, "unbinding_paths")
-                    )
+                    # make_unbinding_paths_pml(
+                    #     paths=paths_dict,
+                    #     reference_pdb=reference_pdb,
+                    #     ligand_select=ligand_select,
+                    #     outdir=os.path.join(self.outdir, "unbinding_paths")
+                    # )
                     logger.info(f"Unbinding paths visualization generated in {self.outdir}")
                 except Exception as e:
                     logger.warning(f"Could not generate unbinding paths visualization: {e}")
@@ -242,7 +242,7 @@ class DTWPathModel(PathModel):
         sns.heatmap(distmatrix, cmap='viridis')
         plt.title('DTW Distance Matrix');         plt.xlabel('Trajectories')
         plt.ylabel('Trajectories')
-        plt.savefig(os.path.join(self.outdir, f'dtw_distance_matrix_v{self.speed_name}.png'))
+        plt.savefig(os.path.join(self.outdir, f'dtw_heatmap_v{self.speed_name}.png'))
         plt.tight_layout()
         plt.close()
         return
@@ -293,7 +293,7 @@ class DTWPathModel(PathModel):
 
         # color palette by path label
         n_paths = len(set(path_mapping_dic.values()))
-        palette = sns.color_palette("tab10", n_colors=n_paths)
+        # palette = sns.color_palette("tab10", n_colors=n_paths)
 
         # overlay medoid trajectories, colored by path
         used_labels = set()
@@ -306,8 +306,8 @@ class DTWPathModel(PathModel):
             path_label = path_mapping_dic[trajname]
             # color = palette[path_label]
 
-            label = f'path-{path_label}_{trajname}'
-            label = f'path-{path_label}'#_{trajname}'
+            label = f'{path_label.split("_")[0]}'
+            # label = f'path-{path_label}'#_{trajname}'
 
             # avoid duplicate legend entries
             if path_label in used_labels:
@@ -323,9 +323,10 @@ class DTWPathModel(PathModel):
         if used_labels:
             plt.legend(frameon=False)
 
-        plt.xlabel("PC1");             plt.ylabel("PC2")
-        plt.title(f"Medoids in PCA space")
+        plt.xlabel(f"PC1 ({pca.explained_variance_ratio_[0]*100:.1f}%)")
+        plt.ylabel(f"PC2 ({pca.explained_variance_ratio_[1]*100:.1f}%)")
+        plt.title(f"PCA space - speed={self.speed_name} nm/ps")
         plt.tight_layout()
-        plt.savefig(os.path.join(self.outdir, f"pca_medoids_v{self.speed_name}.png"))
+        plt.savefig(os.path.join(self.outdir, f"pca_v{self.speed_name}.png"))
         plt.close()
         return
