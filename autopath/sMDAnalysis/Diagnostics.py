@@ -48,10 +48,13 @@ def plot_work_profiles(
     )
     axes = ax.flatten() if len(speeds) > 1 else [ax]
 
-    legend_handles, legend_labels = None, None
+    hue_legend_handles, hue_legend_labels = None, None
 
     for i, speed in enumerate(speeds):
         speed_df = results.loc[results['speed'] == speed, [r_coord, 'path', 'speed'] + cols_to_plot]
+
+        # Style order scoped to paths in this speed only
+        speed_style_order = [p for p in style_order if p in speed_df['path'].unique()]
 
         # Long format: metric is {Wmean, dG, Wdiss}, value = corresponding y
         long_df = speed_df.melt(
@@ -64,7 +67,7 @@ def plot_work_profiles(
         sns.lineplot(
             data=long_df,
             x=r_coord, y='value',
-            hue=estimator, style='path', style_order=style_order,
+            hue=estimator, style='path', style_order=speed_style_order,
             estimator=None, errorbar=None,  # don't aggregate across paths
             ax=axes[i]
         )
@@ -80,15 +83,53 @@ def plot_work_profiles(
         else:
             axes[i].set_ylabel('')
 
-        # Capture legend once, then remove per-axes legends
-        if legend_handles is None:
-            legend_handles, legend_labels = axes[i].get_legend_handles_labels()
+        # Separate legend into hue (metrics) and style (paths)
+        handles, labels = axes[i].get_legend_handles_labels()
+        style_handles, style_labels = [], []
+        hue_handles, hue_labels = [], []
+        for h, l in zip(handles, labels):
+            if l in cols_to_plot:
+                hue_handles.append(h)
+                hue_labels.append(l)
+            elif l in speed_style_order:
+                style_handles.append(h)
+                style_labels.append(l)
+
         axes[i].legend_.remove()
 
-    # Figure-level legend combining hue (metrics) and style (paths)
-    if legend_handles:
+        # Path legend (line style) inside each subplot — black lines, strip speed from labels
+        if style_handles:
+            clean_handles = []
+            seen_labels = set()
+            clean_labels = []
+            for h, l in zip(style_handles, style_labels):
+                # Strip speed suffix (e.g. path-0_v0.005 → path-0)
+                display = l.rsplit('_v', 1)[0] if '_v' in l else l
+                if display in seen_labels:
+                    continue
+                seen_labels.add(display)
+                clean_labels.append(display)
+                clean_handles.append(
+                    Line2D([0], [0], color='black', linestyle=h.get_linestyle(), lw=2)
+                )
+            axes[i].legend(
+                clean_handles, clean_labels,
+                title='Path', fontsize=8, title_fontsize=9,
+                loc='best', framealpha=0.8,
+            )
+
+        # Capture hue (metric) handles once for figure-level legend — solid colored lines
+        if hue_legend_handles is None and hue_handles:
+            hue_legend_handles = [
+                Line2D([0], [0], color=h.get_color(), linestyle='-', lw=2)
+                for h in hue_handles
+            ]
+            hue_legend_labels = hue_labels
+
+    # Figure-level legend for metrics (color) on the right
+    if hue_legend_handles:
         fig.legend(
-            legend_handles, legend_labels,
+            hue_legend_handles, hue_legend_labels,
             title='',
             bbox_to_anchor=(1.01, 0.8), loc='upper left',
             borderaxespad=0.0
@@ -320,84 +361,86 @@ def plot_convergence_metrics(smd_conv_metrics: list[str], outdir: str):
     return
    
 def plot_extrapolated_param(df: pd.DataFrame = None, 
-                            param: str = 'dG_weighted_slope',
+                            param: str = 'dG_weighted',
                             outfname: str = None
                             ):
-    """Plot the extrapolated parameter vs x_col with R2 color mapping and error bands.
+    """Plot the v→0 extrapolated parameter vs r_coord with R² color mapping and error bands.
     
-    If a 'path' column is present, creates one subplot per path in a single figure.
+    Works with the output of :func:`Estimators.extrapolate_to_v0`, which
+    produces columns ``{param}``, ``{param}_se``, and ``R2``.
+    
+    Creates one subplot row per estimator (columns in ``'estimator'``).
     """
     if outfname is None:
         outfname = f'{param}_extrapolated.png'
         
-    color_col = 'R2'  # Column for color mapping
+    color_col = 'R2'
     se_col = f'{param}_se'
 
     if df is None or df.empty:
         return
 
-    # Normalize R2 for colormap across all paths
-    vmin, vmax = df[color_col].min(), df[color_col].max()
+    # Determine estimators
+    if 'estimator' in df.columns:
+        estimators = sorted(df['estimator'].unique())
+    else:
+        estimators = [None]
+
+    n_panels = len(estimators)
+
+    # Normalize R2 for colormap across all data
+    vmin = max(df[color_col].min(), 0.0)
+    vmax = min(df[color_col].max(), 1.0)
+    if vmin >= vmax:
+        vmin, vmax = 0.0, 1.0
     norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
     cmap = cm.get_cmap('coolwarm')
 
-    # Determine paths
-    if 'path' in df.columns:
-        paths = sorted(df['path'].unique())
-    else:
-        paths = [None]  # single "path" (no splitting)
-
-    n_paths = len(paths)
     fig, axes = plt.subplots(
-        n_paths, 1,
-        figsize=(6, 4 * n_paths),
-        sharex=True
+        n_panels, 1,
+        figsize=(6, 4 * n_panels),
+        sharex=True,
+        squeeze=False,
     )
-    if n_paths == 1:
-        axes = [axes]  # make iterable
+    axes = axes.flatten()
 
-    for ax, path_val in zip(axes, paths):
-        if path_val is not None:
-            df_p = df[df['path'] == path_val].copy()
+    for ax, est_val in zip(axes, estimators):
+        if est_val is not None:
+            df_e = df[df['estimator'] == est_val].copy()
         else:
-            df_p = df.copy()
+            df_e = df.copy()
 
-        x = df_p['r_coord'].values
-        y = df_p[param].values
-        yerr = df_p[se_col].values if se_col in df_p.columns else None
+        # Sort by r_coord so segments connect in order
+        df_e = df_e.sort_values('r_coord').reset_index(drop=True)
 
-        # Plot shaded error bands and colored lines segment-wise
-        for i in range(len(df_p) - 1):
-            # x may be Series or Index
-            xi = x.iloc[i:i+2] if hasattr(x, 'iloc') else x[i:i+2]
+        x = df_e['r_coord'].values
+        y = df_e[param].values
+        yerr = df_e[se_col].values if se_col in df_e.columns else None
+        r2 = df_e[color_col].values
+
+        # Draw R²-colored segments with optional error bands
+        for i in range(len(df_e) - 1):
+            xi = x[i:i+2]
             yi = y[i:i+2]
-            yerri = yerr[i:i+2] if yerr is not None else None
-            r2_val = df_p[color_col].iloc[i]
+            color = cmap(norm(np.clip(r2[i], vmin, vmax)))
 
-            color = cmap(norm(r2_val))
-            ax.plot(xi, yi, color=color, lw=4)
+            ax.plot(xi, yi, color=color, lw=3)
 
-            if yerri is not None:
-                ax.fill_between(xi, yi - yerri, yi + yerri, color=color, alpha=0.3)
+            if yerr is not None:
+                yerri = yerr[i:i+2]
+                ax.fill_between(xi, yi - yerri, yi + yerri, color=color, alpha=0.25)
 
-        # Ax labels/titles per subplot
-        # if param == 'dG_v0_intercept':
-        #     ax.axhline(27, color='k', lw=2, ls='--')
-
-        ax.set_xlabel('r_coord (nm)');            ax.set_ylabel(param)
-        if path_val is not None:
-            ax.set_title(f'path {path_val}')
-        else:
-            ax.set_title(f'combined paths')
+        ax.set_xlabel('r_coord (nm)')
+        ax.set_ylabel(f'{param} (kJ/mol)')
+        title = est_val if est_val is not None else 'combined'
+        ax.set_title(f'{title}  (v→0 extrapolation)')
         ax.grid(True)
 
-    # Add a single colorbar for the whole figure
+    # Single colorbar
     sm = cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
-    cbar_ax = fig.add_axes([1.0, 0.15, 0.02, 0.7])  # Position for colorbar
-    cbar = fig.colorbar(sm, orientation='vertical', cax=cbar_ax)
-
-    cbar.set_label('$R^2$ of extrapolation')
+    cbar_ax = fig.add_axes([1.0, 0.15, 0.02, 0.7])
+    fig.colorbar(sm, orientation='vertical', cax=cbar_ax, label='$R^2$')
 
     plt.tight_layout()
     plt.savefig(outfname, dpi=300, bbox_inches='tight')
