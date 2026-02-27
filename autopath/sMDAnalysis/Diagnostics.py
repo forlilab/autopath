@@ -1,7 +1,7 @@
 from autopath.sMDAnalysis.SMDData import SMDData
 import pandas as pd
 import os
-
+import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
 import matplotlib.style as style
@@ -38,7 +38,7 @@ def plot_work_profiles(
     results = results[results['estimator'] == estimator]
     style_order = results['path'].unique().tolist()
     speeds = sorted(results['speed'].unique())
-    
+        
     fig, ax = plt.subplots(
         figsize=(12, 4),
         ncols=len(speeds),
@@ -314,11 +314,11 @@ def plot_convergence_metrics(smd_conv_metrics: list[str], outdir: str):
         ncol=min(len(speeds), 4),
     )
 
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.tight_layout()#rect=[0, 0, 1, 0.95])
     plt.savefig(f"{outdir}/sMD_convergence_metrics.png", dpi=300)
     plt.close()
     return
-    
+   
 def plot_extrapolated_param(df: pd.DataFrame = None, 
                             param: str = 'dG_weighted_slope',
                             outfname: str = None
@@ -412,7 +412,7 @@ def make_unbinding_paths_pml(
     ligand_select: str,
     outdir: str = "unbinding_paths",
     align_sel: str = "protein and backbone",
-    grid_spacing: float = 1.0,
+    grid_spacing: float = 0.5,
     cartoon_color: str = "palecyan",
     sample_stride: int = 1,
 ) -> str:
@@ -453,12 +453,12 @@ def make_unbinding_paths_pml(
         if lig.n_atoms == 0:
             raise ValueError(f"No atoms found for '{ligand_sel}' in {traj}.")
 
-        da = density.DensityAnalysis(lig, delta=grid_spacing, padding=50.0)
+        da = density.DensityAnalysis(lig, delta=grid_spacing, padding=25.0)
         da.run(step=sample_stride)
         dens_sum = da.results.density
 
         # Smooth the density
-        dens_sum.grid = gaussian_filter(dens_sum.grid, sigma=1.0)
+        dens_sum.grid = gaussian_filter(dens_sum.grid, sigma=2.0)
         
         dx_path = str((outdir / f"{path_name}_density.dx").resolve())
         dens_sum.export(dx_path)
