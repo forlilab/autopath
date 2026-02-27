@@ -92,7 +92,8 @@ class SteeredMD:
             
         add_reporters(simulation, self.out_dir, f"sMD_{run_id}",
             total_steps=self.sMD_moves*self.steps_per_move, # total steps 
-            logperiod=self.save_freq, # steps
+            # logperiod=self.save_freq, # steps
+            logperiod=self.steps_per_move, # steps
             verbose=0 #verbose level
         )
 

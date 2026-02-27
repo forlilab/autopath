@@ -449,9 +449,9 @@ class ProteinLigandAnalyzer:
                     radii:str='mbondi2',
                     gpu_resource="rtxa6000", 
                     gpu_num=1, 
-                    time="3-0",
-                    omp_threads=64,
-                    partition="forli,alphafold,shared,forli-pro"
+                    time="0:10:00",
+                    omp_threads=222,
+                    partition="highmem,shared,gpu"
                     ):
         """Function to write a SLURM qfile for MMPBSA calculations."""    
         
