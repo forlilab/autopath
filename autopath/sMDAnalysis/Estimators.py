@@ -5,11 +5,12 @@ from abc import ABC, abstractmethod
 import statsmodels.formula.api as smf
 from scipy import special
 from scipy.stats import linregress
-from scipy.interpolate import UnivariateSpline
 from sklearn.mixture import GaussianMixture
 
 from autopath.sMDAnalysis.SMDData import SMDData
 
+import logging
+logger = logging.getLogger("autopath.sMDAnalysis.Estimators")
 
 def _fit_gmm_to_work_values(
     raw_work: np.ndarray,
@@ -551,24 +552,58 @@ def calculate_weighted_pmf(
     
 def extrapolate_to_v0(
     results: pd.DataFrame,
-    param_cols: list[str] = ['Wdiss_weighted', 'dG_weighted'],
+    param: str = 'dG_weighted',
     speeds: list[float] | None = None,
     mixed_models: bool = False,
 ) -> pd.DataFrame:
     """
-    #FIXME this wont work because now r_coord doesnt match across speeds
-    would need to bin or interpolate first or do windowed regression per r_coord
-    
-    Extrapolate parameters to zero pulling speed (v -> 0)
-    using per-r_coord regression across speeds.
+    Extrapolate a single parameter to zero pulling speed (v → 0)
+    using per-step regression across speeds.
 
-    Expected columns in `results`:
-    ['r_coord', <param_cols>, 'estimator', 'speed']
+    Because dx_per_move is fixed across all pulling speeds, the
+    protocol step index maps to the same r_target regardless of
+    speed.  The natural join key is therefore ``step``, not
+    ``r_coord`` (which may carry tiny r₀ jitter between speeds).
+    Only steps present at **all** included speeds are used.
+
+    Parameters
+    ----------
+    results : pd.DataFrame
+        Weighted PMF table produced by :func:`calculate_weighted_pmf`.
+        Required columns: ``['step', 'r_coord', 'speed', 'estimator',
+        param]``.
+    param : str
+        Column name to extrapolate, e.g. ``'dG_weighted'`` or
+        ``'Wdiss_weighted'``.
+    speeds : list[float] | None
+        Optional subset of speeds to include.  If *None*, all speeds
+        are used.
+    mixed_models : bool
+        If *True*, fit a mixed-effects linear model (random
+        intercept + slope per step); otherwise simple OLS per step.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per common step per estimator, with columns:
+        ``r_coord``, ``step``, ``estimator``, ``{param}`` (v→0
+        intercept), ``{param}_slope``, ``{param}_se``,
+        ``{param}_slope_se``, ``R2``, ``n_speeds``, ``model``,
+        ``speed`` (= 0.0).
+
+        This output is directly compatible with
+        :func:`Diagnostics.plot_extrapolated_param`.
     """
 
     df = results.copy()
 
-    # Optional speed filtering (e.g. keep only slow speeds)
+    if param not in df.columns:
+        raise ValueError(
+            f"Column '{param}' not found in results. "
+            f"Available: {list(df.columns)}"
+        )
+
+    # Optional speed filtering
     if speeds is not None:
         speeds = [float(s) for s in speeds]
         df = df[df['speed'].isin(speeds)]
@@ -576,62 +611,73 @@ def extrapolate_to_v0(
     if df['speed'].nunique() < 2:
         raise ValueError("Need at least two distinct speeds for extrapolation.")
 
-    out_rows = []
+    out_rows: list[dict] = []
 
-    # Loop over estimator and parameter independently
     for estimator, est_group in df.groupby('estimator'):
-        for param in param_cols:
+        sub = est_group.dropna(subset=[param])
 
-            sub = est_group.dropna(subset=[param])
+        # Keep only steps that appear in ALL speeds (common support)
+        step_speed_counts = sub.groupby('step')['speed'].nunique()
+        n_speeds_total = sub['speed'].nunique()
+        common_steps = step_speed_counts[step_speed_counts == n_speeds_total].index
+        sub = sub[sub['step'].isin(common_steps)].copy()
 
-            if mixed_models:
-                # Mixed-effects: random intercept & slope per r_coord
-                model = smf.mixedlm(
-                    f"{param} ~ speed",
-                    sub,
-                    groups=sub["r_coord"],
-                    re_formula="~speed",
-                )
-                res = model.fit(reml=False)
+        if sub.empty:
+            continue
 
-                fe_int = res.fe_params["Intercept"]
-                fe_slope = res.fe_params["speed"]
+        # Mean r_coord per step across speeds (should be nearly identical)
+        step_r_coord = sub.groupby('step')['r_coord'].mean()
 
-                for r_coord, re in res.random_effects.items():
-                    out_rows.append({
-                        "r_coord": r_coord,
-                        "estimator": estimator,
-                        "param": param,
-                        "v0_value": fe_int + re.get("Intercept", 0.0),
-                        "slope": fe_slope + re.get("speed", 0.0),
-                        "model": "mixedlm",
-                        "n_speeds": sub[sub["r_coord"] == r_coord]["speed"].nunique(),
-                        "R2": np.nan,  # not well-defined for MixedLM
-                        "speed": 0.0,
-                    })
+        if mixed_models:
+            model = smf.mixedlm(
+                f"{param} ~ speed",
+                sub,
+                groups=sub["step"],
+                re_formula="~speed",
+            )
+            res = model.fit(reml=False)
 
-            else:
-                # Simple linear regression per r_coord
-                for r_coord, g in sub.groupby("r_coord"):
-                    if g["speed"].nunique() < 2:
-                        continue
+            fe_int = res.fe_params["Intercept"]
+            fe_slope = res.fe_params["speed"]
 
-                    lr = linregress(g["speed"].values, g[param].values)
+            for step, re in res.random_effects.items():
+                out_rows.append({
+                    "step": step,
+                    "r_coord": step_r_coord.loc[step],
+                    "estimator": estimator,
+                    param: fe_int + re.get("Intercept", 0.0),
+                    f"{param}_slope": fe_slope + re.get("speed", 0.0),
+                    f"{param}_se": np.nan,
+                    f"{param}_slope_se": np.nan,
+                    "R2": np.nan,
+                    "n_speeds": n_speeds_total,
+                    "model": "mixedlm",
+                    "speed": 0.0,
+                })
+        else:
+            for step, g in sub.groupby("step"):
+                if g['speed'].nunique() < 2:
+                    continue
 
-                    out_rows.append({
-                        "r_coord": r_coord,
-                        "estimator": estimator,
-                        "param": param,
-                        "v0_value": lr.intercept,
-                        "slope": lr.slope,
-                        "intercept_se": lr.intercept_stderr,
-                        "slope_se": lr.stderr,
-                        "R2": lr.rvalue**2,
-                        "n_speeds": g["speed"].nunique(),
-                        "model": "linear",
-                        "speed": 0.0,
-                    })
+                lr = linregress(g['speed'].values, g[param].values)
+
+                out_rows.append({
+                    "step": step,
+                    "r_coord": step_r_coord.loc[step],
+                    "estimator": estimator,
+                    param: lr.intercept,
+                    f"{param}_slope": lr.slope,
+                    f"{param}_se": lr.intercept_stderr,
+                    f"{param}_slope_se": lr.stderr,
+                    "R2": lr.rvalue ** 2,
+                    "n_speeds": g['speed'].nunique(),
+                    "model": "linear",
+                    "speed": 0.0,
+                })
 
     v0_df = pd.DataFrame(out_rows)
-
+    if not v0_df.empty:
+        v0_df = v0_df.sort_values(['estimator', 'step']).reset_index(drop=True)
+    else:
+        logger.error("No valid data for extrapolation to v=0. Returning empty DataFrame.")
     return v0_df
