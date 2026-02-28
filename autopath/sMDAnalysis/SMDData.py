@@ -503,11 +503,25 @@ class SMDData:
             if len(dG) < 2:
                 continue
 
-            dG0 = np.nanmin(dG)
-            # dG0 = 0.0  # alternative: set reference to zero for each path (relative PMF)
-            
-            integrand = np.exp(-beta * (dG - dG0))
-            Zk = np.trapz(integrand, x) * np.exp(-beta * dG0)
+            # Guard: clip negative dG to zero before computing the partition
+            # function.  Negative dG values are almost always artifacts of
+            # the cumulant expansion with too few samples (Var >> Wmean).
+            # Without this clip, exp(-beta * negative_dG) blows up and
+            # completely distorts the p_eq weights.
+            n_negative = int(np.sum(dG < 0))
+            if n_negative > 0:
+                logger.warning(
+                    f"Path '{path}': {n_negative}/{len(dG)} dG values are negative "
+                    f"(min={np.nanmin(dG):.3f} kJ/mol). Clipping to 0 for p_eq."
+                )
+            dG_safe = np.clip(dG, 0.0, None)
+
+            # Numerically stable partition function via log-shift
+            log_integrand = -beta * dG_safe
+            shift = log_integrand.max()
+            integrand = np.exp(log_integrand - shift)
+            Zk = np.trapz(integrand, x) * np.exp(shift)
+
             p_eq_raw = p_neq[path] * Zk
             if not np.isfinite(p_eq_raw) or p_eq_raw < 0.0:
                 logger.warning(
