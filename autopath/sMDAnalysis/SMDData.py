@@ -334,9 +334,105 @@ class SMDData:
         df = pd.DataFrame(all_rows)
         df.to_csv(distance_file, index=False)
         return df
-    
-    
-    
+
+    @staticmethod
+    def build_merged_features(trace_df: pd.DataFrame,
+                              geom_df: pd.DataFrame,
+                              tolerance_ps: float | None = None) -> pd.DataFrame:
+        """
+        Merge trace features (fine-grained, from get_trace_features) with
+        geometry/distance features (coarser, from calculate_pocket_distances)
+        using a nearest-time asof merge done per trajectory.
+
+        This produces a combined feature table suitable for downstream
+        clustering (e.g. DTW-based path clustering on both force/work traces
+        and pocket-distance descriptors).
+
+        Parameters
+        ----------
+        trace_df : pd.DataFrame
+            Output of :meth:`get_trace_features`.  Must contain ``trajname``
+            and ``time`` columns.
+        geom_df : pd.DataFrame
+            Output of :meth:`calculate_pocket_distances`.  Must contain
+            ``trajname`` and ``time`` columns.
+        tolerance_ps : float or None
+            Maximum allowed time difference (in ps) for the asof merge.
+            Rows without a match within this tolerance are dropped.  If *None*
+            the nearest match is always kept regardless of distance.
+
+        Returns
+        -------
+        pd.DataFrame
+            One row per geometry frame, augmented with the nearest trace-data
+            columns.
+
+        Raises
+        ------
+        ValueError
+            If required columns are missing from either input.
+        RuntimeError
+            If no trajectories could be merged (e.g. disjoint trajnames or
+            incompatible time grids).
+        """
+        for name, df in (("trace_df", trace_df), ("geom_df", geom_df)):
+            if "trajname" not in df.columns:
+                raise ValueError(f"{name} is missing 'trajname' column")
+            if "time" not in df.columns:
+                raise ValueError(f"{name} is missing 'time' column")
+
+        g = geom_df.copy()
+        r = trace_df.copy()
+
+        g["time"] = pd.to_numeric(g["time"], errors="coerce")
+        r["time"] = pd.to_numeric(r["time"], errors="coerce")
+
+        g = g.dropna(subset=["time"])
+        r = r.dropna(subset=["time"])
+
+        merged_chunks = []
+
+        # only trajectories present in both DataFrames
+        common_traj = sorted(
+            set(g["trajname"].unique()) & set(r["trajname"].unique())
+        )
+
+        # Columns shared between both DataFrames (besides the merge key "time")
+        # are dropped from the right side to avoid _x/_y suffixes and to keep
+        # the left (geom) values for metadata like speed, trajname, step.
+        shared_cols = set(g.columns) & set(r.columns) - {"time"}
+        r_keep = [c for c in r.columns if c not in shared_cols]
+
+        for traj in common_traj:
+            g_traj = g[g["trajname"] == traj].sort_values("time").reset_index(drop=True)
+            r_traj = r.loc[r["trajname"] == traj, r_keep].sort_values("time").reset_index(drop=True)
+
+            if len(g_traj) == 0 or len(r_traj) == 0:
+                continue
+
+            kwargs = dict(
+                left=g_traj,
+                right=r_traj,
+                on="time",
+                direction="nearest",
+                allow_exact_matches=True,
+            )
+            if tolerance_ps is not None:
+                kwargs["tolerance"] = tolerance_ps
+
+            merged_traj = pd.merge_asof(**kwargs)
+            merged_traj["trajname"] = traj
+            merged_chunks.append(merged_traj)
+
+        if not merged_chunks:
+            raise RuntimeError(
+                "No trajectories could be merged. "
+                "Check that trajname and time columns are consistent between the two DataFrames."
+            )
+
+        merged = pd.concat(merged_chunks, ignore_index=True)
+        return merged
+
     def add_estimator_results(self, estimator_name: str, results_df: pd.DataFrame):
         """Store estimator results in the SMDData object.
         """
