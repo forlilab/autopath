@@ -94,7 +94,8 @@ class SMDAnalysis:
             sMDDdata: SMDData,
             r_range: tuple[float, float] | None = None,
             group_A: str = None,
-            group_B: str = None
+            group_B: str = None,
+            merge_features: bool = True,
             ) -> SMDData:
         
         if self.reference_pdb is None:
@@ -105,21 +106,31 @@ class SMDAnalysis:
         if r_range is not None:
             sMDDdata.filter_by_r_range(r_range, sMDDdata.r_column)
 
+        # Always extract trace features
+        traces_feat_df = sMDDdata.get_trace_features(
+            features=['work', 'lag', 'r_before'],
+        )
+        
+        # Extract geometrical (distance) features if available
+        dist_feat_df = None
         if group_A is not None and group_B is not None:
-            # extract geometrical (distance) features
-            logger.info(f'Using distance features for path clustering')
-            feat_df = sMDDdata.calculate_pocket_distances(
-                        group_A=group_A,
-                        group_B=group_B,
-                        recompute=False,  # force recomputation to ensure we have the latest data
+            dist_feat_df = sMDDdata.calculate_pocket_distances(
+                group_A=group_A,
+                group_B=group_B,
+                recompute=True,
             )
-        else:
-            # extract trace features
-            logger.info(f'Using trace features for path clustering')
-            feat_df = sMDDdata.get_trace_features(
-                                features=['work', 'lag', 'r_before' ],
-                                # features=['force', 'lag', 'r_before', 'r_after'],
-            )
+            
+        # Select feature dataframe based on availability and merge_features flag
+        if group_A is not None and group_B is not None and merge_features:
+            feat_df = SMDData.build_merged_features(trace_df=traces_feat_df, 
+                                                    geom_df=dist_feat_df)
+            logger.info(f'Clustering will be performed using merged (trace + distance) features')
+        elif group_A is not None and group_B is not None:
+            feat_df = dist_feat_df
+            logger.info(f'Clustering will be performed using distance features only')
+        else:       
+            feat_df = traces_feat_df
+            logger.info(f'Clustering will be performed using trace features only')
         
         # build trajectory files mapping for clustering
         trajectory_files = {}
@@ -516,20 +527,32 @@ class SMDAnalysis:
         """
 
         # sampling filter by number of replicas per path (minimum sampling guard)
+        keys_to_drop: list[tuple[float, str]] = []
         for (speed, path), group in sMDDdata.results.groupby(['speed', 'path']):
-            n_replicas = len(group)
-            if n_replicas <= min_replicas:
+            # n_samples at a given step == number of replicas that contributed;
+            # use the median across steps as a robust measure.
+            n_replicas = int(group['n_samples'].median())
+            if n_replicas < min_replicas:
                 logger.warning(
                     f"Excluding path '{path}' at speed={speed} nm/ps: "
                     f"only {n_replicas} replicas < {min_replicas}"
                 )
-                sMDDdata.results = sMDDdata.results.drop(group.index)
-                sMDDdata.raw_data = sMDDdata.raw_data.drop(
-                    sMDDdata.raw_data[
-                        (sMDDdata.raw_data['speed'] == speed) &
-                        (sMDDdata.raw_data['path'] == path)
-                    ].index
-                )
+                keys_to_drop.append((speed, path))
+
+        # Drop outside the iteration loop to avoid mutating while iterating
+        for speed, path in keys_to_drop:
+            sMDDdata.results = sMDDdata.results.drop(
+                sMDDdata.results[
+                    (sMDDdata.results['speed'] == speed) &
+                    (sMDDdata.results['path'] == path)
+                ].index
+            )
+            sMDDdata.raw_data = sMDDdata.raw_data.drop(
+                sMDDdata.raw_data[
+                    (sMDDdata.raw_data['speed'] == speed) &
+                    (sMDDdata.raw_data['path'] == path)
+                ].index
+            )
     
         bad_keys: set[tuple[float, str]] = set()
 
