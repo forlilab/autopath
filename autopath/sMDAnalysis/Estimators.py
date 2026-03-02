@@ -469,6 +469,107 @@ ESTIMATOR_REGISTRY: dict[str, type[BaseEstimator]] = {
 }
 
 
+def trim_results_by_n_samples_support(
+    results: pd.DataFrame,
+    min_samples: int = 3,
+    min_support_ratio: float = 0.7,
+    group_cols: tuple[str, ...] = ("estimator", "speed", "path"),
+    step_col: str = "step",
+    n_samples_col: str = "n_samples",
+    reference: str = "max",
+    keep_prefix: bool = True,
+    add_support_columns: bool = False,
+) -> pd.DataFrame:
+    """Trim low-support regions from fitted estimator results using ``n_samples``.
+
+    This is designed to be applied *after* estimator fitting, before plotting or
+    weighted PMF construction.
+
+    Parameters
+    ----------
+    results : pd.DataFrame
+        Fitted estimator table (typically ``smd_data.results``) containing at
+        least ``group_cols``, ``step_col`` and ``n_samples_col``.
+    min_samples : int
+        Absolute minimum number of replicas required at a point.
+    min_support_ratio : float
+        Relative support threshold, defined as ``n_samples / n_ref``.
+    group_cols : tuple[str, ...]
+        Grouping that defines an independent profile to trim.
+    step_col : str
+        Ordered protocol coordinate column.
+    n_samples_col : str
+        Column with number of replicas contributing to each point.
+    reference : str
+        How to define ``n_ref`` inside each group: ``'max'`` or ``'median'``.
+    keep_prefix : bool
+        If True, keep the contiguous prefix up to first failing point.
+        If False, keep all points that pass support criteria.
+    add_support_columns : bool
+        If True, include ``support_ratio``, ``support_ok`` and ``n_ref`` in output.
+
+    Returns
+    -------
+    pd.DataFrame
+        Trimmed results table.
+    """
+    if results is None or results.empty:
+        return pd.DataFrame(columns=[] if results is None else results.columns)
+
+    required_cols = set(group_cols) | {step_col, n_samples_col}
+    missing_cols = [c for c in required_cols if c not in results.columns]
+    if missing_cols:
+        raise ValueError(
+            f"Missing required columns for support trimming: {missing_cols}. "
+            f"Available: {list(results.columns)}"
+        )
+
+    if reference not in {"max", "median"}:
+        raise ValueError("reference must be either 'max' or 'median'.")
+
+    kept_groups = []
+
+    for _, group in results.groupby(list(group_cols), dropna=False):
+        g = group.sort_values(step_col).copy()
+        nvals = g[n_samples_col].astype(float)
+
+        if reference == "max":
+            n_ref = float(nvals.max())
+        else:
+            n_ref = float(nvals.median())
+
+        if not np.isfinite(n_ref) or n_ref <= 0:
+            support_ratio = pd.Series(np.zeros(len(g), dtype=float), index=g.index)
+        else:
+            support_ratio = nvals / n_ref
+
+        support_ok = (nvals >= float(min_samples)) & (support_ratio >= float(min_support_ratio))
+
+        if keep_prefix:
+            fail_idx = np.flatnonzero((~support_ok).to_numpy())
+            if fail_idx.size > 0:
+                g_keep = g.iloc[:fail_idx[0]].copy()
+            else:
+                g_keep = g.copy()
+        else:
+            g_keep = g.loc[support_ok].copy()
+
+        if add_support_columns and not g_keep.empty:
+            g_keep["support_ratio"] = support_ratio.loc[g_keep.index].values
+            g_keep["support_ok"] = support_ok.loc[g_keep.index].values
+            g_keep["n_ref"] = n_ref
+
+        kept_groups.append(g_keep)
+
+    if len(kept_groups) == 0:
+        return results.iloc[0:0].copy()
+
+    out = pd.concat(kept_groups, ignore_index=True)
+    if step_col in out.columns:
+        out = out.sort_values(list(group_cols) + [step_col]).reset_index(drop=True)
+    return out
+
+
 def calculate_weighted_pmf(
     smd_data: SMDData,
     weight_cols: list[str] = ['dG', 'Wdiss'],
