@@ -1124,12 +1124,180 @@ def match_cluster_centroids(X:np.ndarray, centroids:np.ndarray, N:int=1):
 
     return closest_points
 
+
+def match_cluster_centroids_unique(X: np.ndarray,
+                                   centroids: np.ndarray,
+                                   min_frame_separation: int = 10,
+                                   ) -> list[int]:
+    """Match each centroid to a unique frame index in X.
+
+    This prevents multiple milestones from collapsing onto the same frame and
+    optionally enforces a minimum index separation to avoid near-consecutive picks.
+    """
+    if X.ndim != 2:
+        raise ValueError("X must be a 2D array of shape (n_frames, n_features)")
+    if centroids.ndim != 2:
+        raise ValueError("centroids must be a 2D array of shape (n_centroids, n_features)")
+
+    selected: list[int] = []
+
+    for centroid in centroids:
+        distances = np.linalg.norm(X - centroid, axis=1)
+        candidate_indices = np.argsort(distances)
+
+        chosen = None
+        for idx in candidate_indices:
+            idx = int(idx)
+            if idx in selected:
+                continue
+            if min_frame_separation > 0 and any(abs(idx - j) < min_frame_separation for j in selected):
+                continue
+            chosen = idx
+            break
+
+        if chosen is None:
+            # Fallback: keep uniqueness if possible, even if separation is violated
+            for idx in candidate_indices:
+                idx = int(idx)
+                if idx not in selected:
+                    chosen = idx
+                    break
+
+        if chosen is None:
+            # Degenerate fallback (e.g., more centers than frames)
+            chosen = int(candidate_indices[0])
+
+        selected.append(chosen)
+
+    return selected
+
+
+def compute_distance_features(u: mda.Universe,
+                              ligand_sel: str,
+                              pocket_sel: str,
+                              stride: int = 1,
+                              ) -> np.ndarray:
+    """
+    Compute flattened pairwise distances between ligand and pocket atoms 
+    for each frame in the Universe trajectory.
+
+    Parameters
+    ----------
+    u : mda.Universe
+        MDAnalysis Universe with trajectory loaded.
+    ligand_sel : str
+        MDAnalysis selection string for ligand atoms.
+    pocket_sel : str
+        MDAnalysis selection string for pocket atoms.
+    stride : int
+        Process every `stride`-th frame.
+
+    Returns
+    -------
+    np.ndarray
+        Feature matrix of shape (n_frames, n_ligand * n_pocket).
+        Distances are in nm.
+    """
+    ligand_atoms = u.select_atoms(ligand_sel)
+    pocket_atoms = u.select_atoms(pocket_sel)
+
+    if ligand_atoms.n_atoms == 0 or pocket_atoms.n_atoms == 0:
+        raise ValueError(
+            f"Empty atom selection: ligand={ligand_atoms.n_atoms}, pocket={pocket_atoms.n_atoms}"
+        )
+
+    all_dists = []
+    for ts in u.trajectory[::stride]:
+        dists = distance_array(ligand_atoms.positions, pocket_atoms.positions)
+        all_dists.append(dists.flatten() / 10.0)  # Angstroms -> nm
+
+    return np.array(all_dists)
+
+
+def extract_milestones(u: mda.Universe,
+                       X: np.ndarray,
+                       n_milestones: int = 5,
+                       min_dist: float = 1.0,
+                       out_dir: str = None,
+                       prefix: str = "milestone",
+                       min_frame_separation: int = 0,
+                       ) -> Tuple[np.ndarray, np.ndarray, list]:
+    """
+    Extract milestone frames from trajectory data using RegularSpace clustering
+    on a pre-computed feature matrix (e.g., pocket-ligand distances).
+
+    Parameters
+    ----------
+    u : mda.Universe
+        MDAnalysis Universe with trajectories loaded (used for writing PDBs).
+    X : np.ndarray
+        Feature matrix of shape (n_frames, n_features), typically scaled by caller.
+    n_milestones : int
+        Maximum number of milestones (max_centers for RegularSpace).
+    min_dist : float
+        Minimum distance between cluster centers (RegularSpace dmin).
+    out_dir : str
+        Output directory for milestone PDB files.
+    prefix : str
+        Prefix for milestone file names.
+    min_frame_separation : int
+        Optional minimum separation between selected frame indices.
+
+    Returns
+    -------
+    labels : np.ndarray
+        Cluster assignment for each frame.
+    sorted_cluster_centers : np.ndarray
+        Cluster centers sorted by mean distance (ascending).
+    milestone_files : list[str]
+        Paths to the written milestone PDB files.
+    """
+    if X.ndim != 2:
+        raise ValueError("X must be a 2D array of shape (n_frames, n_features)")
+
+    cluster_estimator = RegularSpace(dmin=min_dist, max_centers=n_milestones)
+    fitted_model = cluster_estimator.fit(X).fetch_model()
+    cluster_centers = fitted_model.cluster_centers
+    labels = fitted_model.transform(X)
+
+    # sort by mean distance so milestone 1 = closest to pocket
+    mean_dists = cluster_centers.mean(axis=1)
+    sorted_indices = np.argsort(mean_dists)
+    sorted_cluster_centers = cluster_centers[sorted_indices]
+
+    closest_frames = match_cluster_centroids_unique(
+        X,
+        sorted_cluster_centers,
+        min_frame_separation=min_frame_separation,
+    )
+
+    os.makedirs(out_dir, exist_ok=True)
+    milestone_files = []
+    u.trajectory[0]  # reset
+    for i, frame_index in enumerate(closest_frames):
+        frame_index = int(frame_index)
+        u.trajectory[frame_index]
+        fname = os.path.join(out_dir, f"{prefix}_{i+1}_frame_{frame_index}.pdb")
+        with mda.Writer(fname, reindex=True) as W:
+            W.write(u.atoms)
+        milestone_files.append(fname)
+        logging.info(f"Wrote milestone {i+1} at frame {frame_index}: {fname}")
+
+    return labels, sorted_cluster_centers, milestone_files
+
+
 def cluster_sMD_trajectories(u: mda.Universe, 
                              X:np.ndarray, 
                              n_clusters:int = 5, 
                              min_dist:float = 2.0,
                              out_dir:str = None
                              ) -> Tuple[np.ndarray, np.ndarray]:
+    """Deprecated: use extract_milestones() instead."""
+    import warnings
+    warnings.warn(
+        "cluster_sMD_trajectories is deprecated, use extract_milestones() instead.",
+        DeprecationWarning, stacklevel=2,
+    )
 
     # cluster_estimator = KMeans(n_clusters=5)
     cluster_estimator = RegularSpace(dmin=min_dist, max_centers=n_clusters)
@@ -1141,10 +1309,6 @@ def cluster_sMD_trajectories(u: mda.Universe,
     sorted_indices = np.argsort(cluster_centers[:, 1])
     sorted_cluster_centers = cluster_centers[sorted_indices]
     closest_frames = match_cluster_centroids(X, sorted_cluster_centers) 
-
-    # for i, idx in enumerate(closest_frames):
-    #     dist = np.linalg.norm(X[idx] - cluster_centers[i])
-    #     logging.info(f"Cluster {i}: Closest frame is {idx} (distance = {dist:.3f})")
 
     # Write each representative frame to a PDB
     u.trajectory[0]  # reset

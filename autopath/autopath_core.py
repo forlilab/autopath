@@ -1,5 +1,6 @@
 # General imports
 import os
+import json
 import time
 import pandas as pd
 import warnings
@@ -8,7 +9,6 @@ from sys import exit
 from glob import glob
 import MDAnalysis as mda
 import mdtraj as md
-from sklearn.preprocessing import StandardScaler
 
 # OpenMM imports
 from openmm import *
@@ -76,6 +76,8 @@ class AutoPath:
         sMD_autostop_freq: int = 50, #moves
         sMD_run_analysis: bool = True,
         extract_milestones: bool = True,
+        milestone_mode: str = "all_medoids",  # "per_path" or "all_medoids"
+        milestone_min_frame_separation: int = 0,
         n_milestones: int = 5,
         relax_steps: int = 25000,
         run_metadynamics: bool = True,
@@ -121,6 +123,8 @@ class AutoPath:
         self.sMD_run_analysis = sMD_run_analysis
         # Milestones
         self.extract_milestones = extract_milestones
+        self.milestone_mode = milestone_mode
+        self.milestone_min_frame_separation = milestone_min_frame_separation
         self.n_milestones = n_milestones
         self.relax_steps = relax_steps
         # Metadynamics
@@ -311,7 +315,7 @@ class AutoPath:
                 temperature=self.temperature,
                 save_freq=500,
                 out_dir=self.sMD_outdir,
-                # platform='OpenCL'
+                platform='OpenCL'
             )
 
             for speed, reps in self.sMD_pulling_speeds.items():
@@ -348,7 +352,9 @@ class AutoPath:
                             smdanalysis = SMDAnalysis(sysname=sys_name, path_model='dtw', estimators=['cumulant'],
                                                     do_plots=False, seed=self.random_state,
                                                     temperature=self.temperature,
-                                                    outdir=f"{self.sMD_outdir}/analysis")
+                                                    outdir=f"{self.sMD_outdir}/analysis",
+                                                    ligand_select=f"resname {ligand_resname} and not name H*",
+                                                    )
                             
                             # check convergence for this speed
                             conv_df, traces_df = smdanalysis.check_convergence(
@@ -386,24 +392,30 @@ class AutoPath:
                         except Exception as e:
                             logger.error(f"Error during sMD pulling for speed {speed} nm/ps, replica {current_replica}: {e}")
                             continue
-                            
+                        
+        # Load and align sMD trajectories
+        sMD_trajs = glob(f"{self.sMD_outdir}/sMD_replica-*_*_*.dcd")
+        sMD_trajs = [f for f in sMD_trajs if "aligned" not in f]  # only process unaligned trajectories
+        logger.info(f"Found {len(sMD_trajs)} sMD trajectories to align.")        
+        for traj_file in sMD_trajs:
+            traj = md.load(traj_file, top=solvated_system_pdb)
+            traj = traj.center_coordinates()
+            traj = traj.image_molecules()
+            try:
+                backbone = traj.topology.select("backbone")
+                traj = traj.superpose(traj[0], atom_indices=backbone)
+            except Exception as e:
+                logger.warning(f"Superposition failed: {e}. Proceeding without superposition.")
+            traj.save(traj_file.replace(".dcd", "_aligned.dcd")) #overwrite
+            os.remove(traj_file) #remove original        
+                                
         ##############################################################################################
         ######################################### sMD Analysis #######################################
         ##############################################################################################        
+        
+        sMD_trajs = glob(f"{self.sMD_outdir}/sMD_replica-*_*_*_aligned.dcd")
+
         if self.sMD_run_analysis:
-            # Load and align sMD trajectories
-            sMD_trajs = glob(f"{self.sMD_outdir}/sMD_replica-*_*_*.dcd")
-            logger.info(f"Found {len(sMD_trajs)} sMD trajectories to align.")        
-            for traj_file in sMD_trajs:
-                traj = md.load(traj_file, top=solvated_system_pdb)
-                traj = traj.center_coordinates()
-                traj = traj.image_molecules()
-                try:
-                    backbone = traj.topology.select("backbone")
-                    traj = traj.superpose(traj[0], atom_indices=backbone)
-                except Exception as e:
-                    logger.warning(f"Superposition failed: {e}. Proceeding without superposition.")
-                traj.save(traj_file) #overwrite
 
             # loads the sMD data
             logs = glob(f"{self.sMD_outdir}/sMD_*_*_{self.sMD_pulling_dir}.dat")
@@ -419,18 +431,24 @@ class AutoPath:
                                     estimators=['cumulant', 'jarzynski'],
                                     do_plots=True, seed=self.random_state,
                                     temperature=self.temperature,
-                                    outdir=f"{self.sMD_outdir}/analysis")
+                                    ligand_select=f"resname {ligand_resname} and not name H*",
+                                    outdir=f"{self.sMD_outdir}/analysis",
+                                    )
 
             smd_data = smdanalysis.run(smd_data,
-                                       group_A=f"resname {ligand_resname} and not name H*",
-                                       group_B=f'index {" ".join(map(str, pocket_atom_indices))}'
+                                    #    group_A=f"resname {ligand_resname} and not name H*",
+                                    #    group_B=f'index {" ".join(map(str, pocket_atom_indices))}',
+                                       merge_features=True
                                        )
+
+            # Store for downstream milestone extraction
+            self._smdanalysis = smdanalysis
 
             # check convergence regardless of speed and autopstop
             conv_df, traces_df = smdanalysis.check_convergence(
                 logs=logs,
-                group_A=f"resname {ligand_resname} and not name H*",
-                group_B=f'index {" ".join(map(str, pocket_atom_indices))}',
+                # group_A=f"resname {ligand_resname} and not name H*",
+                # group_B=f'index {" ".join(map(str, pocket_atom_indices))}',
             )
             conv_df.to_csv(f"{self.sMD_outdir}/analysis/sMD_conv_vALL_metrics.csv", index=False)
             traces_df.to_csv(f"{self.sMD_outdir}/analysis/sMD_conv_vALL_traces.csv", index=False)
@@ -447,14 +465,14 @@ class AutoPath:
         milestones_outdir = f"{sys_name}/milestones"
         min_dist = 1.0 # minimum distance between clusters of milestones
         
-        sMD_trajs = glob(f"{self.sMD_outdir}/sMD_replica-*_*_*.dcd")
-
-        # use the same pocket selection as in the equilibration, but create a new atomgroup for this Universe
+        # Resolve ligand_atoms_full_indices for downstream use (metadynamics, relax)
         u_sMD = mda.Universe(solvated_system_pdb, sMD_trajs)
-        pocket_atoms = u_sMD.select_atoms(f'index {" ".join(map(str, pocket_atom_indices))}')
         ligand_atoms_full = u_sMD.select_atoms(f'resname {ligand_resname} and not name H*')
         ligand_atoms_full_indices = [atom.index for atom in ligand_atoms_full]
-            
+
+        ligand_sel = f"resname {ligand_resname} and not name H*"
+        pocket_sel = f'index {" ".join(map(str, pocket_atom_indices))}'
+
         if self.extract_milestones:
             
             os.makedirs(milestones_outdir, exist_ok=True)
@@ -464,37 +482,106 @@ class AutoPath:
             if len(sMD_trajs) == 0:
                 logger.error("No sMD trajectories found. Please check the sMD pulling step.")
                 exit(1)
-        
-            # calculate some features for clustering
-            coms = calculate_com_distance(u_sMD, ligand_atoms_full, pocket_atoms, wrap=True)
-            rmsd = compute_rmsd(u_sMD, u_sMD, 
-                                alig_select=f"resname {ligand_resname} and not name H*",
-                                groupselections={'ligand': f"resname {ligand_resname} and not name H*"},
-                                plots_outdir=None)
-            rmsd['COM'] = coms
-            X = rmsd[['RMSD_ligand', 'COM']].values
+
+            # ---- Load medoid info (from analysis or from saved file) ----
+            medoid_info_path = f"{self.sMD_outdir}/analysis/medoid_info.json"
+            medoid_to_path = {}
+            medoid_names = []
+
+            if hasattr(self, '_smdanalysis') and hasattr(self._smdanalysis.path_model, 'all_medoid_names'):
+                medoid_names = self._smdanalysis.path_model.all_medoid_names
+                medoid_to_path = self._smdanalysis.path_model.medoid_to_path
+            elif os.path.exists(medoid_info_path):
+                with open(medoid_info_path, "r") as f:
+                    medoid_info = json.load(f)
+                medoid_names = medoid_info.get("medoid_names", [])
+                medoid_to_path = medoid_info.get("medoid_to_path", {})
+                logger.info(f"Loaded medoid info from {medoid_info_path}: {len(medoid_names)} medoids.")
+            else:
+                logger.warning(
+                    "No medoid info found (run sMD analysis first, or provide medoid_info.json). "
+                    "Falling back to using all sMD trajectories."
+                )
             
-            scaler = StandardScaler()
-            X = scaler.fit_transform(X)
+            # ---- Map medoid names to DCD trajectory files ----
+            def _trajname_to_dcd(trajname: str) -> str:
+                """Convert a trajname (log basename without ext) to the corresponding .dcd path."""
+                dcd_name = trajname.replace("log", "traj") + "_aligned.dcd"
+                return os.path.join(self.sMD_outdir, dcd_name)
+
+            if medoid_names:
+                medoid_dcds = [_trajname_to_dcd(name) for name in medoid_names]
+                medoid_dcds = [f for f in medoid_dcds if os.path.exists(f)]
+                if not medoid_dcds:
+                    logger.warning("Could not locate medoid DCD files. Falling back to all trajectories.")
+                    medoid_dcds = sMD_trajs
+                    medoid_to_path = {}
+            else:
+                medoid_dcds = sMD_trajs
+                medoid_to_path = {}
+
+            logger.info(f"Using {len(medoid_dcds)} trajectories for milestone extraction (mode={self.milestone_mode}).")
+            
+            # Use prmtop for writing PDBs (avoids MDAnalysis residue name scrambling)
+            u_milestone = mda.Universe(prmtop_file, medoid_dcds)
+
+            if self.milestone_mode == "per_path":
+                # ---- Mode: extract milestones from each path's medoid independently ----
+                all_milestone_files = []
+                
+                if not medoid_to_path:
+                    logger.warning(
+                        "No path information available for per_path mode. "
+                        "Falling back to all_medoids mode."
+                    )
+                    self.milestone_mode = "all_medoids"
+                else:
+                    # Group medoids by path
+                    from collections import defaultdict
+                    path_to_medoids = defaultdict(list)
+                    for mname, pid in medoid_to_path.items():
+                        path_to_medoids[pid].append(mname)
+
+                    for path_id, med_names in sorted(path_to_medoids.items()):
+                        path_dcds = [_trajname_to_dcd(n) for n in med_names]
+                        path_dcds = [f for f in path_dcds if os.path.exists(f)]
+                        if not path_dcds:
+                            logger.warning(f"No DCD files found for path {path_id}. Skipping.")
+                            continue
                         
-            # CAREFULL: mdanalysis scrambles the residues names. Ig using pdb for topo fucks up waters here 
-            u_sMD_aligned = mda.Universe(prmtop_file, sMD_trajs)
+                        path_outdir = os.path.join(milestones_outdir, str(path_id))
+                        u_path = mda.Universe(prmtop_file, path_dcds)
+                        
+                        logger.info(f"Computing distance features for path {path_id} ({len(path_dcds)} trajs, {len(u_path.trajectory)} frames)...")
+                        X_path = compute_distance_features(u_path, ligand_sel, pocket_sel)
 
-            labels, sorted_cluster_centers = cluster_sMD_trajectories(u_sMD_aligned, X, 
-                                                                      n_clusters=self.n_milestones,
-                                                                      min_dist=min_dist,
-                                                                      out_dir=milestones_outdir)
+                        labels, centers, ms_files = extract_milestones(
+                            u_path, X_path,
+                            n_milestones=self.n_milestones,
+                            min_dist=min_dist,
+                            out_dir=path_outdir,
+                            prefix=f"milestone_{path_id}",
+                            min_frame_separation=self.milestone_min_frame_separation,
+                        )
+                        all_milestone_files.extend(ms_files)
 
-            # Plot the clustering results
-            plt.figure(figsize=(6, 5))
-            sns.scatterplot(x=rmsd['RMSD_ligand'], y=rmsd['COM'], hue=labels, palette='viridis', s=30, alpha=0.4)
-            plt.scatter(sorted_cluster_centers[:, 0], sorted_cluster_centers[:, 1], color='red', marker='x', s=100, label='Cluster Centers')
-            plt.xlabel('RMSD (A)'); plt.ylabel('COM Distance (A)')
-            plt.title(f"{sys_name} sMD clustering")
-            plt.tight_layout()
-            plt.legend()
-            plt.savefig(f"{milestones_outdir}/milestones_clustering_plot.png")
-            plt.close()
+                        logger.info(f"Path {path_id}: extracted {len(ms_files)} milestones.")
+
+            if self.milestone_mode == "all_medoids":
+                # ---- Mode: pool all medoid trajectories, cluster together ----
+                logger.info(f"Computing distance features for all medoids ({len(u_milestone.trajectory)} frames)...")
+                X_all = compute_distance_features(u_milestone, ligand_sel, pocket_sel)
+
+                labels, sorted_cluster_centers, milestone_files = extract_milestones(
+                    u_milestone, X_all,
+                    n_milestones=self.n_milestones,
+                    min_dist=min_dist,
+                    out_dir=milestones_outdir,
+                    prefix="milestone",
+                    min_frame_separation=self.milestone_min_frame_separation,
+                )
+
+                logger.info(f"Extracted {len(milestone_files)} milestones from {len(medoid_dcds)} medoid trajectories.")
 
         ##############################################################################################
         ##################################### Metadynamics simulations ###############################
@@ -520,13 +607,15 @@ class AutoPath:
 
             logger.info(f"Using COM distance range for metadynamics: [{min_com}, {max_com}] nm")
 
-            milestones = glob(f'{milestones_outdir}/milestone_*_*_*.pdb')           
+            milestones = glob(f'{milestones_outdir}/milestone_*_*_*.pdb') + \
+                        glob(f'{milestones_outdir}/**/milestone_*_*_*.pdb', recursive=True)
+            milestones = list(set(milestones))  # deduplicate
             if len(milestones) == 0:
                 logger.error("No milestones found. Please check the milestone extraction step.")
                 exit(1)
 
-            #sort the milestones by their index
-            milestones.sort(key=lambda x: int(os.path.basename(x).split('_')[1]))
+            #sort the milestones by their index (milestone number is the last token before 'frame')
+            milestones.sort(key=lambda x: int(os.path.basename(x).split('_frame_')[0].rsplit('_', 1)[-1]))
 
             milestone_relax = RelaxMD(
                 topology=topology,
@@ -587,7 +676,7 @@ class AutoPath:
 
             for milestone in milestones:
                 milestone_name = os.path.basename(milestone).split('.')[0]
-                milestone_number = int(milestone_name.split('_')[1])
+                milestone_number = int(milestone_name.split('_frame_')[0].rsplit('_', 1)[-1])
                 milestone_system = f"{milestones_outdir}/{milestone_name}_relax_system.xml"
                 milestone_chk = f"{milestones_outdir}/{milestone_name}_relax_checkpoint.chk"
 

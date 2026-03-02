@@ -1,4 +1,5 @@
 import os
+import json
 import numpy as np
 import pandas as pd
 
@@ -101,6 +102,7 @@ class DTWPathModel(PathModel):
 
         all_path_mappings = {}
         all_medoid_names = set()  # Track medoids across all speeds
+        medoid_to_path = {}  # Map medoid trajectory name -> path ID
 
         for speed_key, speed_df in grouping_iter:
 
@@ -178,6 +180,15 @@ class DTWPathModel(PathModel):
             self.medoid_names = [trajnames[idx] for idx in cluster_model.medoids]
             all_medoid_names.update(self.medoid_names)  # Accumulate medoids across speeds
 
+            # Record medoid → path mapping
+            for medoid_idx, cluster_id in zip(cluster_model.medoids, range(K)):
+                medoid_name = trajnames[medoid_idx]
+                if speed_key is not None:
+                    path_id = f"path-{cluster_id}_v{speed_key}"
+                else:
+                    path_id = f"path-{cluster_id}"
+                medoid_to_path[medoid_name] = path_id
+
             # Report cluster sizes
             unique, counts = np.unique(cluster_model.labels, return_counts=True)
             for u, c in zip(unique, counts):
@@ -234,6 +245,20 @@ class DTWPathModel(PathModel):
                     logger.info(f"Unbinding paths visualization generated in {self.outdir}")
                 except Exception as e:
                     logger.warning(f"Could not generate unbinding paths visualization: {e}")
+
+        # Persist medoid information as instance attributes
+        self.all_medoid_names = list(all_medoid_names)
+        self.medoid_to_path = medoid_to_path
+
+        # Save medoid info to disk for downstream use (e.g., milestone extraction)
+        medoid_info = {
+            "medoid_names": self.all_medoid_names,
+            "medoid_to_path": self.medoid_to_path,
+        }
+        medoid_info_path = os.path.join(self.outdir, "medoid_info.json")
+        with open(medoid_info_path, "w") as f:
+            json.dump(medoid_info, f, indent=2)
+        logger.info(f"Saved medoid info to {medoid_info_path}")
 
         return all_path_mappings
     
