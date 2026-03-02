@@ -16,6 +16,7 @@ from autopath.sMDAnalysis.Estimators import (
     CumulantGMMEstimator,
     CumulantGMMComponentwiseEstimator,
     ESTIMATOR_REGISTRY,
+    trim_results_by_n_samples_support,
     calculate_weighted_pmf,
     extrapolate_to_v0,
 )
@@ -90,12 +91,17 @@ class SMDAnalysis:
             raise ValueError(f"path_model must be a string or PathModel instance, got: {type(path_model)}")
         return
     
-    def run(self, 
+    def run(self,
             sMDDdata: SMDData,
             r_range: tuple[float, float] | None = None,
             group_A: str = None,
             group_B: str = None,
             merge_features: bool = True,
+            trim_low_support_results: bool = True,
+            trim_min_samples: int = 3,
+            trim_min_support_ratio: float = 0.7,
+            trim_reference: str = 'max',
+            trim_keep_prefix: bool = True,
             ) -> SMDData:
         
         if self.reference_pdb is None:
@@ -152,7 +158,27 @@ class SMDAnalysis:
         for estimator in self.estimators:
             logger.info(f"Fitting estimator: {estimator.name}")
             sMDDdata = estimator.fit_transform(sMDDdata) 
+
+        if trim_low_support_results:
+            n_before = len(sMDDdata.results)
+            sMDDdata.results = trim_results_by_n_samples_support(
+                sMDDdata.results,
+                min_samples=trim_min_samples,
+                min_support_ratio=trim_min_support_ratio,
+                reference=trim_reference,
+                keep_prefix=trim_keep_prefix,
+            )
+            n_after = len(sMDDdata.results)
+            logger.info(
+                "Applied post-fit support trimming on results: "
+                f"{n_before} -> {n_after} rows "
+                f"(min_samples={trim_min_samples}, "
+                f"min_support_ratio={trim_min_support_ratio}, "
+                f"reference='{trim_reference}', keep_prefix={trim_keep_prefix})"
+            )
             
+                
+    
         # optional path filtering
         sMDDdata = self._path_filtering(sMDDdata, min_replicas=3)
             
@@ -164,11 +190,13 @@ class SMDAnalysis:
         # extrapolate to v=0 for each estimator
         self.weighted_pmf_v0 = {}
         for pcol in ['dG_weighted', 'Wdiss_weighted']:
-            if pcol in self.weighted_pmf.columns:
-                v0_df = extrapolate_to_v0(self.weighted_pmf, param=pcol)
-                if not v0_df.empty:
-                    self.weighted_pmf_v0[pcol] = v0_df
-                    v0_df.to_csv(f'{self.outdir}/v0_extrapolation_{pcol}.csv', index=False)
+            if self.weighted_pmf['speed'].nunique() < 2:
+                logger.warning(f"Not enough speeds to perform v=0 extrapolation for '{pcol}'. Skipping.")
+                continue
+            v0_df = extrapolate_to_v0(self.weighted_pmf, param=pcol)
+            if not v0_df.empty:
+                self.weighted_pmf_v0[pcol] = v0_df
+                v0_df.to_csv(f'{self.outdir}/v0_extrapolation_{pcol}.csv', index=False)
         
         if self.do_plots:
             for estimator in self.estimators:
