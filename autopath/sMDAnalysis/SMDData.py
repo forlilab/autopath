@@ -223,7 +223,7 @@ class SMDData:
         Map a log file path to the corresponding trajectory file name.
         """
         traj_name = log_path.replace('log', 'traj')
-        traj_name = traj_name.replace('.dat', '.dcd')
+        traj_name = traj_name.replace('.dat', '_aligned.dcd')
         return traj_name
         
     def get_trace_features(self, 
@@ -510,7 +510,7 @@ class SMDData:
             # completely distorts the p_eq weights.
             n_negative = int(np.sum(dG < 0))
             if n_negative > 0:
-                logger.warning(
+                logger.debug(
                     f"Path '{path}': {n_negative}/{len(dG)} dG values are negative "
                     f"(min={np.nanmin(dG):.3f} kJ/mol). Clipping to 0 for p_eq."
                 )

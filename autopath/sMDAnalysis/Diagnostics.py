@@ -334,10 +334,10 @@ def plot_convergence_metrics(smd_conv_metrics: list[str], outdir: str):
                 marker='o',
                 linewidth=2.0,
                 alpha=0.95,
-                label=f"speed {speed}",
+                label=f"speed {speed} nm/ps",
             )
 
-        ax.set_title(metric)
+        ax.set_title(metric, fontsize=16)
         ax.set_xlabel("Number of replicas")
         ax.set_ylabel(metric)
         ax.grid(True)
@@ -349,14 +349,14 @@ def plot_convergence_metrics(smd_conv_metrics: list[str], outdir: str):
     ]
     fig.legend(
         handles=speed_handles,
-        loc='upper center',
-        bbox_to_anchor=(0.5, 1.06),
+        loc='lower center',
+        bbox_to_anchor=(0.5, -0.1),
         frameon=False,
         ncol=min(len(speeds), 4),
     )
 
     plt.tight_layout()#rect=[0, 0, 1, 0.95])
-    plt.savefig(f"{outdir}/sMD_convergence_metrics.png", dpi=300)
+    plt.savefig(f"{outdir}/sMD_convergence_metrics.png", dpi=300, bbox_inches='tight')
     plt.close()
     return
    
@@ -431,7 +431,7 @@ def plot_extrapolated_param(df: pd.DataFrame = None,
                 ax.fill_between(xi, yi - yerri, yi + yerri, color=color, alpha=0.25)
 
         ax.set_xlabel('r_coord (nm)')
-        ax.set_ylabel(f'{param} (kJ/mol)')
+        ax.set_ylabel(f'{param.strip("_weighted")} (kJ/mol)')
         title = est_val if est_val is not None else 'combined'
         ax.set_title(f'{title}  (v→0 extrapolation)')
         ax.grid(True)
