@@ -142,39 +142,127 @@ def plot_work_profiles(
     plt.close()
     return
 
-def plot_weighted_pmf(df: pd.DataFrame,
-                    r_coord: str = 'r_coord',
-                    cols_to_plot: list = ['Wdiss_weighted', 'dG_weighted'],
-                    outdir: str = 'analysis',
-                        ):
+def plot_profile(df: pd.DataFrame,
+                 value_col: str = 'dG',
+                 hue: str | None = None,
+                 row: str | None = None,
+                 col: str = 'speed',
+                 show_error_bands: bool = False,
+                 ylabel: str | None = None,
+                 outdir: str = 'analysis',
+                 prefix: str = '',
+                 ):
+    """Plot a single quantity vs reaction coordinate, faceted by speed.
 
-    """Plot weighted PMF from SMDAnalysis data."""
-
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Table with at least ``r_coord``, *col*, and *value_col* columns.
+    value_col : str
+        Column to plot on the y-axis (e.g. ``'dG'``, ``'Wdiss'``).
+    hue : str or None
+        Column used for colour encoding.  If *None*, auto-detected:
+        ``'source_estimator'`` if present, else ``'estimator'``,
+        else no hue.
+    row : str or None
+        Optional row facet variable (e.g. ``'path'``).
+    col : str
+        Column facet variable (default ``'speed'``).
+    show_error_bands : bool
+        If True and a column named ``{value_col}_se`` exists,
+        draw ±1 SE shading around each line.
+    ylabel : str or None
+        Shared y-axis label.  Defaults to *value_col*.
+    outdir : str
+        Directory for saved figures.
+    prefix : str
+        Optional filename prefix.
+    """
     os.makedirs(outdir, exist_ok=True)
-    
-    if 'estimator' in df.columns:
-        hue_col = 'estimator'
-    else:
-        hue_col = None
-    
-    for col in cols_to_plot:
-        outfname = os.path.join(outdir, f"{col}.png")
-        # plt.figure(figsize=(10,6))
-        g = sns.FacetGrid(df, col="speed", hue=hue_col, sharey=True, sharex=True, height=3.5, aspect=1.5)
-        g.map(plt.plot, r_coord, col)#.add_legend()
-        # g.map(plt.plot, "r_coord", "Wdiss_weighted").add_legend()
-        # g.map(plt.fill_between, "r_coord", "dG_weighted_lower", "dG_weighted_upper", alpha=0.3)    
-        g.set_titles(col_template="Speed = {col_name} nm/ps")
-        plt.legend(
-            # legend_handles, legend_labels,
-            title='Estimator',
-            bbox_to_anchor=(1.02, 0.8), loc='upper left',
-            borderaxespad=0.0, fontsize=10
+
+    # Auto-detect hue
+    if hue is None:
+        if 'estimator' in df.columns and df['estimator'].nunique() > 1:
+            hue = 'estimator'
+
+    outfname = os.path.join(outdir, f"{value_col}{prefix}.png")
+    se_col = f"{value_col}_se"
+    has_se = show_error_bands and se_col in df.columns
+
+    g = sns.FacetGrid(
+        df, col=col, row=row, hue=hue,
+        sharey=True, sharex=True,
+        height=3.5, aspect=1.5,
+        margin_titles=True,
+    )
+    g.map_dataframe(plt.plot, 'r_coord', value_col)
+
+    # Optional error bands
+    if has_se:
+        def _fill_band(data, x, y, se, **kwargs):
+            data = data.sort_values(x)
+            color = kwargs.get('color', 'C0')
+            plt.fill_between(
+                data[x], data[y] - data[se], data[y] + data[se],
+                color=color, alpha=0.2,
+            )
+        g.map_dataframe(_fill_band, x='r_coord', y=value_col, se=se_col)
+
+    col_template = f"{col.replace('_', ' ').title()} = {{col_name}}"
+    if col == 'speed':
+        col_template = "Speed = {col_name} nm/ps"
+    g.set_titles(col_template=col_template, row_template="{row_name}")
+
+    y_label = ylabel if ylabel else value_col
+    g.set_axis_labels('r_coord (nm)', y_label)
+
+    g.add_legend(title=hue.replace('_', ' ').title() if hue else '',
+                bbox_to_anchor=(1.01, 0.8), loc='upper left',
+                 )
+
+    plt.tight_layout()
+    plt.savefig(outfname, dpi=300, bbox_inches='tight')
+    # plt.show()
+    plt.close()
+
+    return
+
+
+def plot_friction(df: pd.DataFrame,
+                  outdir: str = 'analysis',
+                  ):
+    """Plot friction profiles from FrictionEstimator output.
+
+    Creates one figure per friction method (derivative / regression),
+    faceted by speed, coloured by estimator. Regression panels 
+    include ±1 SE error bands when available.
+    """
+    if df is None or df.empty:
+        logger.warning("No friction data to plot.")
+        return
+
+    for method, mdf in df.groupby('method'):
+        # Local friction (both methods)
+        plot_profile(
+            mdf,
+            value_col='Gamma',
+            hue='estimator',
+            show_error_bands=False,
+            ylabel='Γ (kJ·ps/nm²)',
+            outdir=outdir,
+            prefix=f'_{method}',
         )
-        plt.tight_layout()
-        plt.savefig(outfname, dpi=300)
-        plt.show()
-        plt.close()
+        # Integrated friction (regression only)
+        if 'Gamma_integrated' in mdf.columns and mdf['Gamma_integrated'].notna().any():
+            plot_profile(
+                mdf,
+                value_col='Gamma_integrated',
+                hue='estimator',
+                show_error_bands=False,
+                ylabel='∫Γ dr (kJ·ps/nm)',
+                outdir=outdir,
+                prefix=f'_{method}',
+            )
     return
 
 def plot_convergence_traces(smd_conv_traces:list[str], outdir: str):
@@ -361,7 +449,7 @@ def plot_convergence_metrics(smd_conv_metrics: list[str], outdir: str):
     return
    
 def plot_extrapolated_param(df: pd.DataFrame = None, 
-                            param: str = 'dG_weighted',
+                            param: str = 'dG',
                             outfname: str = None
                             ):
     """Plot the v→0 extrapolated parameter vs r_coord with R² color mapping and error bands.
@@ -369,7 +457,7 @@ def plot_extrapolated_param(df: pd.DataFrame = None,
     Works with the output of :func:`Estimators.extrapolate_to_v0`, which
     produces columns ``{param}``, ``{param}_se``, and ``R2``.
     
-    Creates one subplot row per estimator (columns in ``'estimator'``).
+    Creates one subplot column per estimator (values in ``'estimator'``).
     """
     if outfname is None:
         outfname = f'{param}_extrapolated.png'
@@ -397,9 +485,10 @@ def plot_extrapolated_param(df: pd.DataFrame = None,
     cmap = cm.get_cmap('coolwarm')
 
     fig, axes = plt.subplots(
-        n_panels, 1,
-        figsize=(6, 4 * n_panels),
-        sharex=True,
+        1, n_panels,
+        figsize=(6 * n_panels, 4),
+        sharex=False,
+        sharey=True,
         squeeze=False,
     )
     axes = axes.flatten()
@@ -431,20 +520,20 @@ def plot_extrapolated_param(df: pd.DataFrame = None,
                 ax.fill_between(xi, yi - yerri, yi + yerri, color=color, alpha=0.25)
 
         ax.set_xlabel('r_coord (nm)')
-        ax.set_ylabel(f'{param.strip("_weighted")} (kJ/mol)')
+        # ax.set_ylabel(f'{param.split("_")[0]} (kJ/mol)')
         title = est_val if est_val is not None else 'combined'
         ax.set_title(f'{title}  (v→0 extrapolation)')
         ax.grid(True)
 
-    # Single colorbar
+    # Single colorbar outside the subplot area (bottom)
     sm = cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
-    cbar_ax = fig.add_axes([1.0, 0.15, 0.02, 0.7])
-    fig.colorbar(sm, orientation='vertical', cax=cbar_ax, label='$R^2$')
+    fig.tight_layout(rect=[0.0, 0.14, 1.0, 1.0])
+    cbar_ax = fig.add_axes([0.20, 0.06, 0.60, 0.035])
+    fig.colorbar(sm, cax=cbar_ax, orientation='horizontal', label='$R^2$')
 
-    plt.tight_layout()
     plt.savefig(outfname, dpi=300, bbox_inches='tight')
-    plt.show()
+    # plt.show()
     plt.close()
 
     return
@@ -457,7 +546,8 @@ def make_unbinding_paths_pml(
     align_sel: str = "protein and backbone",
     grid_spacing: float = 0.5,
     cartoon_color: str = "palecyan",
-    sample_stride: int = 1,
+    sample_stride: int = 2,
+    pocket_select: str = None
 ) -> str:
     """Generate ligand-path density maps and a PyMOL .pml that uses only relative paths."""
             
@@ -510,6 +600,15 @@ def make_unbinding_paths_pml(
     # dx_05 = np.quantile(dens_sum.grid, 0.05)
     # print(f"0.05 quantile of last path density: {dx_05}")
     
+    pocket_resids = []
+    if pocket_select is not None:
+        # show pocket atoms in the .pml if a selection is provided and valid in the reference PDB
+        pocket = u_ref.select_atoms(pocket_select)
+        if pocket.n_atoms == 0:
+            raise ValueError(f"No atoms found for pocket selection '{pocket_select}' in reference PDB.")
+        pocket_resids = sorted(set(pocket.resids))
+        logger.info(f"Found pocket residues: {pocket_resids}")
+    
     # Write the .pml using ONLY filenames (relative to outdir)
     pml_path = os.path.join(outdir, "unbinding_paths.pml")
     with open(pml_path, "w") as pml:
@@ -525,7 +624,12 @@ def make_unbinding_paths_pml(
         pml.write("hide everything, prot\n")
         pml.write("show cartoon, prot\n")
         pml.write(f"color {cartoon_color}, prot\n")
-
+        
+        if pocket_resids:
+            pml.write(f"select pocket, resi {'+'.join(map(str, pocket_resids))} and prot\n")
+            pml.write("show sticks, pocket\n")
+            pml.write("color orange, pocket\n")
+                
         for path_name, dx_filename in dx_files_rel.items():
             map_obj = f"map_{path_name}"
             surf_obj = f"surf_{path_name}"
