@@ -19,7 +19,9 @@ class SMDData:
                 exclude_speeds: list[float] = None,
                 r_column: str = 'r_target',
                 temperature: float = 300.0,
-                reference_pdb: str = None
+                reference_pdb: str = None,
+                work_mode: str = 'auto',
+                protocol_work_column: str = 'dW_protocol',
                 ):
         
         self.sysname = sysname
@@ -44,6 +46,9 @@ class SMDData:
         if r_column not in ['r_target', 'r_before']:
             logger.error(f'Unknown r_column: {r_column}. Must be "r_target" or "r_before".')
             exit(1)
+
+        self.work_mode = work_mode
+        self.protocol_work_column = protocol_work_column
             
         # load the data        
         raw_data = self.load_logs()
@@ -70,8 +75,14 @@ class SMDData:
         
         raw_data = raw_data[~raw_data['trajname'].isin(to_drop)]
 
-        # integrate force over distance to get work
-        raw_data = self.integrate_force_dx(raw_data, r_column)
+        # Build cumulative work either from protocol increments (preferred when available)
+        # or from force-distance integration (legacy behavior).
+        raw_data = self.integrate_force_dx(
+            raw_data,
+            r_column,
+            work_mode=self.work_mode,
+            protocol_work_column=self.protocol_work_column,
+        )
         
         raw_data['lag'] = raw_data['r_after'] - raw_data['r_target']
         
@@ -171,16 +182,57 @@ class SMDData:
 
         return df
     
-    def integrate_force_dx(self, raw_data, r_column) -> pd.DataFrame:
-        """Integrate the force over distance to compute work done.
+    def integrate_force_dx(self,
+                           raw_data: pd.DataFrame,
+                           r_column: str,
+                           work_mode: str = 'auto',
+                           protocol_work_column: str = 'dW_protocol') -> pd.DataFrame:
+        """Build cumulative work per trajectory.
+
+        Modes
+        -----
+        - 'force_dx': legacy definition using trapezoidal integration of force over r_column.
+        - 'protocol': cumulative sum of per-move protocol increments (default column dW_protocol).
+        - 'auto': use 'protocol' when the column is present, else fallback to 'force_dx'.
         """
-        grouped = raw_data.groupby("trajname")
+
+        valid_modes = {'auto', 'force_dx', 'protocol'}
+        if work_mode not in valid_modes:
+            raise ValueError(f"Unknown work_mode '{work_mode}'. Allowed: {sorted(valid_modes)}")
+
+        resolved_mode = work_mode
+        if work_mode == 'auto':
+            resolved_mode = 'protocol' if protocol_work_column in raw_data.columns else 'force_dx'
+
+        grouped = raw_data.groupby('trajname')
         for traj, group in grouped:
-            # group = group.sort_values(by=r_column)  # ensure sorted by distance
-            group = group.sort_values(by='time')  # ensure sorted by time
-            work = cumulative_trapezoid(group[self.force_column], group[r_column], initial=0.0)
+            group = group.sort_values(by='time')
+
+            if resolved_mode == 'protocol':
+                if protocol_work_column not in group.columns:
+                    raise ValueError(
+                        f"work_mode='protocol' but column '{protocol_work_column}' was not found in logs."
+                    )
+                dW = pd.to_numeric(group[protocol_work_column], errors='coerce').fillna(0.0).to_numpy(dtype=float)
+                work = np.cumsum(dW)
+            else:
+                work = cumulative_trapezoid(
+                    group[self.force_column],
+                    group[r_column],
+                    initial=0.0,
+                )
+
             raw_data.loc[raw_data['trajname'] == traj, 'work'] = work
-        
+
+        if resolved_mode == 'protocol':
+            logger.info(
+                f"Computed cumulative work from protocol increments column '{protocol_work_column}'."
+            )
+        else:
+            logger.info(
+                f"Computed cumulative work by integrating '{self.force_column}' over '{r_column}'."
+            )
+
         return raw_data
     
     def filter_by_r_range(self, r_range, r_column) -> pd.DataFrame:
@@ -557,61 +609,110 @@ class SMDData:
         for speed, g in grouping_iter:
             logger.info(f"Speed {speed} nm/ps has {g['path'].nunique()} unique paths.")
             path_traj_counts = g.groupby('path')['trajname'].nunique().to_dict()
-            speed_key = speed if byspeed is not None else "all_speeds"
+            speed_key = speed if byspeed else "all_speeds"
             p_neq_dic[speed_key] = SMDData._compute_p_neq(path_traj_counts)
 
         return p_neq_dic
 
+    @staticmethod
+    def _choose_estimator_for_weights(results: pd.DataFrame, estimator: str = 'auto') -> str:
+        """Resolve which estimator column should be used for p_eq computation."""
+        if 'estimator' not in results.columns:
+            raise ValueError("results must include an 'estimator' column.")
+
+        available_estimators = results['estimator'].dropna().unique().tolist()
+        if len(available_estimators) == 0:
+            raise ValueError("No estimator results available to compute p_eq.")
+
+        if estimator == 'auto':
+            preferred_estimators = ['cumulant', 'jarzynski']
+            for est in preferred_estimators:
+                if est in available_estimators:
+                    return est
+            return available_estimators[0]
+
+        if estimator not in available_estimators:
+            raise ValueError(
+                f"Estimator '{estimator}' not available in results. "
+                f"Available: {sorted(available_estimators)}"
+            )
+        return estimator
+
     def get_p_eq(self,
                  byspeed: bool = True,
-                 results: pd.DataFrame = None
-                 ) -> dict[str, float]:
+                 results: pd.DataFrame = None,
+                 estimator: str = 'auto',
+                 per_estimator: bool = False,
+                 ) -> dict:
         """p_eq Equilibrium path probabilities from sMD analysis.
         Returns a dictionary mapping path labels to p_eq values.
         As described in https://doi.org/10.1063/5.0138761
         If weights are too different means the CV is not good enough.
+
+        Parameters
+        ----------
+        byspeed : bool
+            If True, compute independent weights per speed. Otherwise pool all
+            speeds together under the key ``'all_speeds'``.
+        results : pd.DataFrame | None
+            Estimator results table. If None, uses ``self.results``.
+        estimator : str
+            Estimator used to compute p_eq when ``per_estimator=False``.
+            ``'auto'`` keeps backward-compatible preference order.
+        per_estimator : bool
+            If True, return a nested dictionary keyed as
+            ``{estimator: {speed_or_all: {path: p_eq}}}``.
         """
         if results is None:
             results = self.results
-        if results is None:
+        if results is None or results.empty:
             logger.error("No results available to compute p_eq.")
-            return None
+            return {}
 
-        preferred_estimators = ['cumulant', 'jarzynski'] # order of preference for which estimator to use for weights
-        available_estimators = results['estimator'].dropna().unique().tolist()
+        if per_estimator:
+            if 'estimator' not in results.columns:
+                raise ValueError("results must include an 'estimator' column when per_estimator=True.")
 
+            out = {}
+            for est in sorted(results['estimator'].dropna().unique()):
+                est_results = results[results['estimator'] == est]
+                out[est] = self.get_p_eq(
+                    byspeed=byspeed,
+                    results=est_results,
+                    estimator=est,
+                    per_estimator=False,
+                )
+            return out
+
+        results_for_weights = results
         estimator_for_weights = None
-        for est in preferred_estimators:
-            if est in available_estimators:
-                estimator_for_weights = est
-                break
-
-        if estimator_for_weights is None:
-            if len(available_estimators) == 0:
-                logger.error("No estimator results available to compute p_eq.")
-                exit(1)
-                        
-        logger.info(f"Computing p_eq from estimator '{estimator_for_weights}'.")
-        results = results[results['estimator'] == estimator_for_weights]
+        if 'estimator' in results.columns:
+            estimator_for_weights = self._choose_estimator_for_weights(results, estimator=estimator)
+            logger.info(f"Computing p_eq from estimator '{estimator_for_weights}'.")
+            results_for_weights = results[results['estimator'] == estimator_for_weights]
 
         # get p_neq first
         p_neq_dic = self.get_p_neq(byspeed=byspeed)
 
         p_eq_dic = defaultdict(dict)
-        for speed, gspeed in results.groupby('speed'):
-            speed_p_neq = p_neq_dic.get(speed, {})
-            p_eq_dic[speed] = SMDData._compute_p_eq(gspeed, speed_p_neq, self.beta)
+        grouping_iter = results_for_weights.groupby('speed') if byspeed else [("all_speeds", results_for_weights)]
+        for speed_key, gspeed in grouping_iter:
+            speed_p_neq = p_neq_dic.get(speed_key, {})
+            p_eq_dic[speed_key] = SMDData._compute_p_eq(gspeed, speed_p_neq, self.beta)
 
         # log details
         for speed in p_eq_dic:
-            logger.info(f"Speed {speed} nm/ps path weights:")
+            if byspeed:
+                logger.info(f"Speed {speed} nm/ps path weights:")
+            else:
+                logger.info("Pooled path weights across all speeds:")
             for path in p_eq_dic[speed]:
                 logger.info(
-                    f"  Path {path}: p_neq = {p_neq_dic[speed].get(path, 0):.6f}, "
+                    f"  Path {path}: p_neq = {p_neq_dic.get(speed, {}).get(path, 0):.6f}, "
                     f"p_eq = {p_eq_dic[speed][path]:.6f}"
                 )
 
-        return p_eq_dic
+        return dict(p_eq_dic)
         
         
         
