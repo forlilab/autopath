@@ -111,7 +111,7 @@ class SteeredMD:
         simulation.context.setParameter("r0_smd", initial_r0)
 
         with open(f"{self.out_dir}/sMD_{run_id}.dat","w") as f:
-            f.write("step,time,r_target,r_before,r_after,NC,force,U_cvpack,m_eff\n")
+            f.write("step,time,r_target,r_before,r_after,NC,force,U_cvpack,dW_protocol,m_eff\n")
             
             r_before_nm = 0.0
             r_after_nm = 0.0
@@ -125,6 +125,8 @@ class SteeredMD:
             for i in range(self.sMD_moves):
 
                 r_before = self.com_dist.getValue(simulation.context, allowReinitialization=False)
+                time_before = simulation.context.getState().getTime().value_in_unit(openmmunit.picoseconds)
+                U_pre_old = self.com_force.getValue(simulation.context, allowReinitialization=False)
                 # m_eff_dalton = self.com_dist.getEffectiveMass(simulation.context).value_in_unit(openmmunit.dalton)
                 
                 # r_before_theoretical = initial_r0 + (i)*self.dx_per_move if direction == "forward" else initial_r0 - (i)*self.dx_per_move
@@ -147,6 +149,7 @@ class SteeredMD:
                 
                 # get the potential energy of the spring from the COM CV
                 U_cvpack = self.com_force.getValue(simulation.context, allowReinitialization=False) # kJ/mols
+                dW_protocol = U_cvpack - U_pre_old
                 # sigma = np.sqrt((2*U_cvpack/self.sMD_spring_cte).value_in_unit(openmmunit.nanometers**2))
                 # print(f'delta: {delta.value_in_unit(openmmunit.nanometers):.4f} nm, sigma: {sigma:.4f} nm')
                 
@@ -159,14 +162,13 @@ class SteeredMD:
                 # actual distance after
                 # if self.verbose > 0:
                 r_after_nm = self.com_dist.getValue(simulation.context, allowReinitialization=False).value_in_unit(openmmunit.nanometers)
-                
-                time_now = simulation.context.getState().getTime().value_in_unit(openmmunit.picoseconds)
-                
+
                 #log everything
                 r_target_nm = r_target.value_in_unit(openmmunit.nanometers)
                 r_before_nm = r_before.value_in_unit(openmmunit.nanometers)
                 force_kjmnm = force.value_in_unit(openmmunit.kilojoules_per_mole / openmmunit.nanometer)
                 U_cvpack_kjm = U_cvpack.value_in_unit(openmmunit.kilojoules_per_mole)
+                dW_protocol_kjm = dW_protocol.value_in_unit(openmmunit.kilojoules_per_mole)
 
                 # Check if the ligand is unbound. Only for forward pulling
                 # Check the distance is 0 for the backward pulling
@@ -175,18 +177,18 @@ class SteeredMD:
                         nc_now = self.nc_cv.getValue(simulation.context, allowReinitialization=False).value_in_unit(openmmunit.dimensionless)
                         print(f"Step {i+1}/{self.sMD_moves}: r_target={r_target_nm:.2f} nm, r_before={r_before_nm:.2f} nm, r_after={r_after_nm:.2f} nm, nc={nc_now}")
                         if nc_now < 1:
-                            f.write(f"{i},{time_now},{r_target_nm},{r_before_nm},{r_after_nm},{nc_now},{force_kjmnm},{U_cvpack_kjm},{m_eff_dalton}\n")
+                            f.write(f"{i},{time_before},{r_target_nm},{r_before_nm},{r_after_nm},{nc_now},{force_kjmnm},{U_cvpack_kjm},{dW_protocol_kjm},{m_eff_dalton}\n")
                             logger.warning(f"Stopping pulling at step {i} because n_contacts={nc_now}.")
                             break
                     else:
                         print(f"Step {i+1}/{self.sMD_moves}: r_target={r_target_nm:.2f} nm, r_before={r_before_nm:.2f} nm, r_after={r_after_nm:.2f} nm")
                         # if (r_target_nm - r_before_nm) > 0.1:
                         if r_before_nm < 0.05:
-                            f.write(f"{i},{time_now},{r_target_nm},{r_before_nm},{r_after_nm},{nc_now},{force_kjmnm},{U_cvpack_kjm},{m_eff_dalton}\n")
+                            f.write(f"{i},{time_before},{r_target_nm},{r_before_nm},{r_after_nm},{nc_now},{force_kjmnm},{U_cvpack_kjm},{dW_protocol_kjm},{m_eff_dalton}\n")
                             logger.warning(f"Stopping backward pulling at step {i} with r_target={r_target_nm:.2f} nm and r_before={r_before_nm:.2f} nm.")
                             # logger.warning(f"Stopping backward pulling at step {i} because r_after={r_after_nm:.2f} nm.")
                             break
-                f.write(f"{i},{time_now},{r_target_nm},{r_before_nm},{r_after_nm},{nc_now},{force_kjmnm},{U_cvpack_kjm},{m_eff_dalton}\n")
+                f.write(f"{i},{time_before},{r_target_nm},{r_before_nm},{r_after_nm},{nc_now},{force_kjmnm},{U_cvpack_kjm},{dW_protocol_kjm},{m_eff_dalton}\n")
                 
         # Save final positions
         final_positions = simulation.context.getState(getPositions=True).getPositions()
