@@ -9,6 +9,7 @@ from sys import exit
 from glob import glob
 import MDAnalysis as mda
 import mdtraj as md
+from collections import defaultdict
 
 # OpenMM imports
 from openmm import *
@@ -46,6 +47,7 @@ class AutoPath:
         use_murcko_scaffold: bool = True,
         temperature: float = 300,
         random_state: int = 42,
+        platform: str = 'fastest',  # or 'CUDA', 'OpenCL', 'CPU'
         run_preparation: bool = True,
         forcefield: list = [
             "amber14-all.xml",
@@ -75,6 +77,7 @@ class AutoPath:
         sMD_ligand_anchor_mode: str = 'lig_ha',
         sMD_autostop_freq: int = 50, #moves
         sMD_run_analysis: bool = True,
+        sMD_clust_selection:str = None,
         extract_milestones: bool = True,
         milestone_mode: str = "all_medoids",  # "per_path" or "all_medoids"
         milestone_min_frame_separation: int = 0,
@@ -93,6 +96,7 @@ class AutoPath:
         self.use_murcko_scaffold = use_murcko_scaffold
         self.temperature = temperature
         self.random_state = random_state
+        self.platform = platform
         # Preparation
         self.run_preparation = run_preparation
         self.forcefield = forcefield
@@ -121,6 +125,7 @@ class AutoPath:
         self.sMD_ligand_anchor_mode = sMD_ligand_anchor_mode
         self.sMD_autostop_freq = sMD_autostop_freq
         self.sMD_run_analysis = sMD_run_analysis
+        self.sMD_clust_selection = sMD_clust_selection
         # Milestones
         self.extract_milestones = extract_milestones
         self.milestone_mode = milestone_mode
@@ -191,7 +196,6 @@ class AutoPath:
         system = load_system(f"{sys_name}/system.xml")
         topology = PDBFile(solvated_system_pdb).topology
 
-        #FIXME: this is a temporary solution, new parmed fails to save prmtops
         # prmtop_file = f"{sys_name}/system.pdb" 
         # try:
         #     topology = AmberPrmtopFile(prmtop_file).topology
@@ -215,7 +219,7 @@ class AutoPath:
                                 restrained_minimization=False,
                                 is_membrane=self.is_membrane,
                                 protocol_fname=self.protocol_fname,
-                                # platform='fastest'
+                                platform=self.platform
                                 )
             
             equilibrated_system = equilibration.run(solvated_system_pdb, run_id=sys_name)
@@ -315,7 +319,7 @@ class AutoPath:
                 temperature=self.temperature,
                 save_freq=500,
                 out_dir=self.sMD_outdir,
-                platform='OpenCL'
+                platform=self.platform
             )
 
             for speed, reps in self.sMD_pulling_speeds.items():
@@ -358,10 +362,9 @@ class AutoPath:
                             
                             # check convergence for this speed
                             conv_df, traces_df = smdanalysis.check_convergence(
-                                logs=log_files,
-                                speeds=[speed],
-                                group_A=f"resname {ligand_resname} and not name H*",
-                                group_B=f'index {" ".join(map(str, pocket_atom_indices))}',
+                                logs=log_files, speeds=[speed],
+                                # group_A=f"resname {ligand_resname} and not name H*",
+                                # group_B=self.sMD_clust_selection
                             )
                             
                             conv_df.to_csv(f"{self.sMD_outdir}/analysis/sMD_conv_v{speed}_metrics.csv", index=False)
@@ -416,7 +419,14 @@ class AutoPath:
         sMD_trajs = glob(f"{self.sMD_outdir}/sMD_replica-*_*_*_aligned.dcd")
 
         if self.sMD_run_analysis:
-
+            
+            if self.sMD_clust_selection is not None:
+                # check that the selection is valid
+                u_clust = mda.Universe(equilibrated_pdb, equilibrated_pdb)
+                pocket_atoms = u_clust.select_atoms(self.sMD_clust_selection)
+                pocket_residues = [f"{atom.resname}_{atom.resid}" for atom in pocket_atoms]
+                logger.info(f"Auto-selected clustering selection: {', '.join(set(pocket_residues))}")
+            
             # loads the sMD data
             logs = glob(f"{self.sMD_outdir}/sMD_*_*_{self.sMD_pulling_dir}.dat")
             logger.info(f"Found {len(logs)} sMD logs for analysis.")
@@ -436,9 +446,10 @@ class AutoPath:
                                     )
 
             smd_data = smdanalysis.run(smd_data,
-                                    #    group_A=f"resname {ligand_resname} and not name H*",
-                                    #    group_B=f'index {" ".join(map(str, pocket_atom_indices))}',
-                                       merge_features=True
+                                       group_A=f"resname {ligand_resname} and not name H*",
+                                       group_B=self.sMD_clust_selection,
+                                       merge_features=True,
+                                    #    r_range=(0, 1.75)
                                        )
 
             # Store for downstream milestone extraction
@@ -446,9 +457,10 @@ class AutoPath:
 
             # check convergence regardless of speed and autopstop
             conv_df, traces_df = smdanalysis.check_convergence(
+                # quantities=['jarzynski_gmm'],
                 logs=logs,
-                # group_A=f"resname {ligand_resname} and not name H*",
-                # group_B=f'index {" ".join(map(str, pocket_atom_indices))}',
+                group_A=f"resname {ligand_resname} and not name H*",
+                group_B=self.sMD_clust_selection
             )
             conv_df.to_csv(f"{self.sMD_outdir}/analysis/sMD_conv_vALL_metrics.csv", index=False)
             traces_df.to_csv(f"{self.sMD_outdir}/analysis/sMD_conv_vALL_traces.csv", index=False)
@@ -483,7 +495,7 @@ class AutoPath:
                 logger.error("No sMD trajectories found. Please check the sMD pulling step.")
                 exit(1)
 
-            # ---- Load medoid info (from analysis or from saved file) ----
+            # Load medoid info (from analysis or from saved file)
             medoid_info_path = f"{self.sMD_outdir}/analysis/medoid_info.json"
             medoid_to_path = {}
             medoid_names = []
@@ -503,7 +515,7 @@ class AutoPath:
                     "Falling back to using all sMD trajectories."
                 )
             
-            # ---- Map medoid names to DCD trajectory files ----
+            # Map medoid names to DCD trajectory files
             def _trajname_to_dcd(trajname: str) -> str:
                 """Convert a trajname (log basename without ext) to the corresponding .dcd path."""
                 dcd_name = trajname.replace("log", "traj") + "_aligned.dcd"
@@ -526,7 +538,7 @@ class AutoPath:
             u_milestone = mda.Universe(prmtop_file, medoid_dcds)
 
             if self.milestone_mode == "per_path":
-                # ---- Mode: extract milestones from each path's medoid independently ----
+                # Mode: extract milestones from each path's medoid independently
                 all_milestone_files = []
                 
                 if not medoid_to_path:
@@ -537,7 +549,6 @@ class AutoPath:
                     self.milestone_mode = "all_medoids"
                 else:
                     # Group medoids by path
-                    from collections import defaultdict
                     path_to_medoids = defaultdict(list)
                     for mname, pid in medoid_to_path.items():
                         path_to_medoids[pid].append(mname)
@@ -624,7 +635,8 @@ class AutoPath:
                 out_dir=milestones_outdir,
                 is_membrane=self.is_membrane,
                 temp=self.temperature,
-                timestep=self.timestep
+                timestep=self.timestep,
+                platform=self.platform
             )
 
             WTMetaD = MetadynamicsMD(
@@ -636,6 +648,7 @@ class AutoPath:
                 timestep=self.timestep,
                 temp=self.temperature,
                 out_dir=f"{sys_name}/metadynamics",
+                platform=self.platform
             )
 
             # Generate funnel potential if requested
@@ -710,9 +723,11 @@ class AutoPath:
                 except Exception as e:
                     logger.error(f"Error during WTMetaD for {milestone_name}: {e}")
                     continue
-
+                 
         # Load and align the WTMetaD trajectories
         WTMetaD_trajs = glob(f"{sys_name}/metadynamics/trajectory_metadynamics_milestone_*_frame_*.dcd")
+        WTMetaD_trajs = [f for f in WTMetaD_trajs if "aligned" not in f]  # only process unaligned trajectories
+
         for traj_file in WTMetaD_trajs:
             traj = md.load(traj_file, top=solvated_system_pdb)
             traj = traj.center_coordinates()
@@ -722,9 +737,8 @@ class AutoPath:
                 traj = traj.superpose(traj[0], atom_indices=backbone)
             except Exception as e:
                 logger.warning(f"Superposition failed: {e}. Proceeding without superposition.")
-            traj.save(traj_file) #overwrite
-            # traj.save(traj_file.replace(".dcd", "_aligned.dcd"))
-            # os.remove(traj_file) # remove the dcds
+            traj.save(traj_file.replace(".dcd", "_aligned.dcd")) #overwrite
+            os.remove(traj_file) #remove original
 
         simulation_time = time.monotonic() - start_time
         logger.info(f"Finished AutoPath simulation in {simulation_time/60:.2f} min.")
