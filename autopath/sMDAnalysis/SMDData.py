@@ -215,6 +215,7 @@ class SMDData:
         base = os.path.basename(traj_path)
         root, ext = os.path.splitext(base)
         log_name = root.replace('traj', 'log')
+        log_name = log_name.replace('_aligned', '')
         return log_name
     
     @staticmethod
@@ -508,6 +509,8 @@ class SMDData:
             # the cumulant expansion with too few samples (Var >> Wmean).
             # Without this clip, exp(-beta * negative_dG) blows up and
             # completely distorts the p_eq weights.
+            # NOTE: pathological paths with many negative dG values should
+            # be removed upstream by _path_filtering (max_neg_dG_frac).
             n_negative = int(np.sum(dG < 0))
             if n_negative > 0:
                 logger.debug(
@@ -609,6 +612,10 @@ class SMDData:
                 )
 
         return p_eq_dic
+        
+        
+        
+        
         
     # def _bin_data(self,
     #             x_col:str='r_before',

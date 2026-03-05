@@ -59,6 +59,7 @@ class DTWPathModel(PathModel):
                     cluster_across_speeds: bool = False,
                     reference_pdb: str = None,
                     ligand_select: str = None,
+                    pocket_select: str = None,
                     trajectory_files: dict = None,
                     ) -> dict:
         """
@@ -93,7 +94,20 @@ class DTWPathModel(PathModel):
             c for c in feature_df.columns
             if c not in ['trajname', 'time', 'step', 'speed', 'path']
         ]
-
+        
+        #IDK why this happens but sometimes we get NaN values in the features.
+        # Warn and drop those rows if present.
+        logger.debug(f'Features used for clustering: {feature_cols}')
+        if feature_df[feature_cols].isnull().any().any():
+            logger.warning(
+            "NaN values detected in features. "
+            "DTW distance matrix will be unreliable. Please check your data."
+            )
+            #drop rows with NaN values in feature columns
+            feature_df = feature_df.dropna(subset=feature_cols)
+                                 
+        logger.debug(f"Feature matrix shape after NaN removal: {feature_df.shape}")
+              
         # ecide grouping strategy
         if cluster_across_speeds:
             grouping_iter = [(None, feature_df)]
@@ -141,7 +155,7 @@ class DTWPathModel(PathModel):
 
             #choose number of clusters
             if n_paths is None:
-                K_MAX = min(5, len(trajnames))
+                K_MAX = min(6, len(trajnames))
                 if K_MAX < 2:
                     raise RuntimeError(
                         "Not enough trajectories to form at least 2 clusters."
@@ -189,13 +203,13 @@ class DTWPathModel(PathModel):
                     path_id = f"path-{cluster_id}"
                 medoid_to_path[medoid_name] = path_id
 
-            # Report cluster sizes
-            unique, counts = np.unique(cluster_model.labels, return_counts=True)
-            for u, c in zip(unique, counts):
-                logger.info(
-                    f"{'Global' if speed_key is None else f'Speed {speed_key}'} "
-                    f"Path {u} has {c} trajectories"
-                )
+            # # Report cluster sizes
+            # unique, counts = np.unique(cluster_model.labels, return_counts=True)
+            # for u, c in zip(unique, counts):
+            #     logger.info(
+            #         f"{'Global' if speed_key is None else f'Speed {speed_key}'} "
+            #         f"Path {u} has {c} trajectories"
+            #     )
 
             # Map cluster labels with speed-aware path IDs to ensure uniqueness across speeds
             path_mapping_dic = {}
@@ -208,7 +222,7 @@ class DTWPathModel(PathModel):
                 path_mapping_dic[trajname] = unique_path_id
 
             all_path_mappings.update(path_mapping_dic)
-
+            
             # Optional plots (per clustering run)
             if self.do_plots:
                 self.speed_name = speed_key if speed_key is not None else 'Global'
@@ -236,12 +250,13 @@ class DTWPathModel(PathModel):
             
             if paths_dict:
                 try:
-                    # make_unbinding_paths_pml(
-                    #     paths=paths_dict,
-                    #     reference_pdb=reference_pdb,
-                    #     ligand_select=ligand_select,
-                    #     outdir=os.path.join(self.outdir, "unbinding_paths")
-                    # )
+                    make_unbinding_paths_pml(
+                        paths=paths_dict,
+                        reference_pdb=reference_pdb,
+                        ligand_select=ligand_select,
+                        outdir=os.path.join(self.outdir, "unbinding_paths"),
+                        pocket_select=pocket_select
+                    )
                     logger.info(f"Unbinding paths visualization generated in {self.outdir}")
                 except Exception as e:
                     logger.warning(f"Could not generate unbinding paths visualization: {e}")
@@ -280,6 +295,7 @@ class DTWPathModel(PathModel):
         plt.axvline(x=K, color='red', linestyle='--', label=f'Optimal K={K}')
         plt.xlabel("Number of clusters")
         plt.ylabel("Silhouette score" if self._use_silhouette else "Score")
+        plt.xticks(K_values)
         plt.tight_layout()
         plt.savefig(os.path.join(self.outdir, f"elbowplot_v{self.speed_name}.png"))
         plt.close()
