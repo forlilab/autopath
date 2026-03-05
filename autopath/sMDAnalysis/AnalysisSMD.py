@@ -7,7 +7,7 @@ from collections import defaultdict
 import logging
 
 from autopath.sMDAnalysis import SMDData
-from autopath.sMDAnalysis.Estimators import BaseEstimator
+from autopath.sMDAnalysis.Estimators import BaseEstimator, FrictionEstimator
 from autopath.sMDAnalysis.PathModel import DTWPathModel, PathModel
 from autopath.sMDAnalysis.Estimators import (
     JarzynskiEstimator,
@@ -22,7 +22,8 @@ from autopath.sMDAnalysis.Estimators import (
 )
 from autopath.sMDAnalysis.Diagnostics import (
     plot_work_profiles,
-    plot_weighted_pmf,
+    plot_profile,
+    plot_friction,
     plot_extrapolated_param,
 )
 
@@ -102,62 +103,59 @@ class SMDAnalysis:
             trim_min_support_ratio: float = 0.7,
             trim_reference: str = 'max',
             trim_keep_prefix: bool = True,
+            p_eq_estimator: str = 'auto',
             ) -> SMDData:
-        
+
         if self.reference_pdb is None:
             self.reference_pdb = sMDDdata.reference_pdb
             logger.warning(f"No reference PDB provided, using from SMDData: {self.reference_pdb}")
-        
-        # filter by r_range if provided
+
         if r_range is not None:
             sMDDdata.filter_by_r_range(r_range, sMDDdata.r_column)
 
-        # Always extract trace features
         traces_feat_df = sMDDdata.get_trace_features(
-            features=['work', 'lag', 'r_before'],
+            features=['work', 'lag', 'force','r_before'],
         )
-        
-        # Extract geometrical (distance) features if available
+
         dist_feat_df = None
         if group_A is not None and group_B is not None:
             dist_feat_df = sMDDdata.calculate_pocket_distances(
                 group_A=group_A,
                 group_B=group_B,
-                recompute=True,
+                recompute=False,
             )
-            
-        # Select feature dataframe based on availability and merge_features flag
+
         if group_A is not None and group_B is not None and merge_features:
-            feat_df = SMDData.build_merged_features(trace_df=traces_feat_df, 
-                                                    geom_df=dist_feat_df)
-            logger.info(f'Clustering will be performed using merged (trace + distance) features')
+            feat_df = SMDData.build_merged_features(
+                trace_df=traces_feat_df,
+                geom_df=dist_feat_df,
+            )
+            logger.info('Clustering will be performed using merged (trace + distance) features')
         elif group_A is not None and group_B is not None:
             feat_df = dist_feat_df
-            logger.info(f'Clustering will be performed using distance features only')
-        else:       
+            logger.info('Clustering will be performed using distance features only')
+        else:
             feat_df = traces_feat_df
-            logger.info(f'Clustering will be performed using trace features only')
-        
-        # build trajectory files mapping for clustering
+            logger.info('Clustering will be performed using trace features only')
+
         trajectory_files = {}
         for traj in sMDDdata.traj_files:
-            trajname = os.path.basename(traj).split(".dcd")[0]
+            trajname = SMDData._traj_to_log_name(traj)
             trajectory_files[trajname] = (self.reference_pdb, traj)
 
-        # cluster trajectories into pathways using the path model
-        path_mappings = self.path_model.fit_transform(feat_df,
-                                                      reference_pdb=self.reference_pdb,
-                                                      ligand_select=self.ligand_select,
-                                                      trajectory_files=trajectory_files
-                                                      )
+        path_mappings = self.path_model.fit_transform(
+            feat_df,
+            reference_pdb=self.reference_pdb,
+            ligand_select=self.ligand_select,
+            trajectory_files=trajectory_files,
+            pocket_select=group_B
+        )
 
-        # Map back to full raw_data
-        sMDDdata.raw_data['path'] = (sMDDdata.raw_data['trajname'].map(path_mappings))
-        
-        # fit the estimators
+        sMDDdata.raw_data['path'] = sMDDdata.raw_data['trajname'].map(path_mappings)
+
         for estimator in self.estimators:
             logger.info(f"Fitting estimator: {estimator.name}")
-            sMDDdata = estimator.fit_transform(sMDDdata) 
+            sMDDdata = estimator.fit_transform(sMDDdata)
 
         if trim_low_support_results:
             n_before = len(sMDDdata.results)
@@ -176,41 +174,65 @@ class SMDAnalysis:
                 f"min_support_ratio={trim_min_support_ratio}, "
                 f"reference='{trim_reference}', keep_prefix={trim_keep_prefix})"
             )
-            
-                
-    
-        # optional path filtering
-        sMDDdata = self._path_filtering(sMDDdata, min_replicas=3)
-            
-        #Calculate weighted PMF across paths using p_eq weights for multiple columns.
-        self.weighted_pmf = calculate_weighted_pmf(sMDDdata, weight_cols=['dG', 'Wdiss'])
-        self.weighted_pmf['path'] = 'mixture'  # indicate mixed paths
-        self.weighted_pmf.to_csv(f'{self.outdir}/weighted_pmf.csv', index=False)
-        
-        # extrapolate to v=0 for each estimator
-        self.weighted_pmf_v0 = {}
-        for pcol in ['dG_weighted', 'Wdiss_weighted']:
-            if self.weighted_pmf['speed'].nunique() < 2:
+
+        sMDDdata = self._path_filtering(
+            sMDDdata,
+            min_replicas=3,
+            p_eq_estimator=p_eq_estimator,
+        )
+
+        self.mixture_pmfs = calculate_weighted_pmf(
+            smd_data=sMDDdata,
+            # p_eq_estimator=p_eq_estimator,
+        )
+        self.mixture_pmfs.to_csv(f'{self.outdir}/mixture_pmfs.csv', index=False)
+
+        weighted_pmf_v0 = {}
+        for pcol in ['dG', 'Wdiss']:
+            if self.mixture_pmfs['speed'].nunique() < 2:
                 logger.warning(f"Not enough speeds to perform v=0 extrapolation for '{pcol}'. Skipping.")
                 continue
-            v0_df = extrapolate_to_v0(self.weighted_pmf, param=pcol)
+            v0_df = extrapolate_to_v0(self.mixture_pmfs, param=pcol)
             if not v0_df.empty:
-                self.weighted_pmf_v0[pcol] = v0_df
-                v0_df.to_csv(f'{self.outdir}/v0_extrapolation_{pcol}.csv', index=False)
-        
+                weighted_pmf_v0[pcol] = v0_df
+                v0_df.to_csv(f'{self.outdir}/{pcol}_extrapolated.csv', index=False)
+
+        friction_est = FrictionEstimator(use_spline=False)
+        df = self.mixture_pmfs.copy()
+
+        friction_deriv_results = []
+        friction_regress_results = []
+        for estimator in self.estimators:
+            f_deriv = friction_est.gamma_from_wdiss_derivative(df, estimator=estimator.name)
+            f_regress = friction_est.gamma_from_wdiss_regression(df, estimator=estimator.name)
+            friction_deriv_results.append(f_deriv)
+            friction_regress_results.append(f_regress)
+
+        friction_df = pd.concat(friction_deriv_results + friction_regress_results, ignore_index=True)
+        friction_df.to_csv(os.path.join(self.outdir, 'friction.csv'), index=False)
+
         if self.do_plots:
             for estimator in self.estimators:
                 plot_work_profiles(sMDDdata.results, estimator=estimator.name, outdir=self.outdir)
-            plot_weighted_pmf(self.weighted_pmf, outdir=self.outdir)
-            for pcol, v0_df in self.weighted_pmf_v0.items():
-                plot_extrapolated_param(
-                    v0_df, param=pcol,
-                    outfname=os.path.join(self.outdir, f'{pcol}_v0_extrapolation.png'),
+            for vcol in ['Wdiss', 'dG']:
+                plot_profile(
+                    self.mixture_pmfs,
+                    value_col=vcol,
+                    hue='estimator',
+                    ylabel='Energy (kJ/mol)',
+                    outdir=self.outdir,
                 )
-        
-        # save processed data
+            if friction_df is not None and not friction_df.empty:
+                plot_friction(friction_df, outdir=self.outdir)
+            for pcol, v0_df in weighted_pmf_v0.items():
+                plot_extrapolated_param(
+                    v0_df,
+                    param=pcol,
+                    outfname=os.path.join(self.outdir, f'{pcol}_extrapolated.png'),
+                )
+
         sMDDdata.raw_data.to_csv(f'{self.outdir}/sMD_processed_data.csv', index=False)
-        
+
         return sMDDdata
         
     def check_convergence(self,
@@ -545,20 +567,58 @@ class SMDAnalysis:
 
         return pd.Series(out).sort_index()
     
-    def _path_filtering(self, 
-                        sMDDdata: SMDData,
-                        min_replicas: int = 3,
-                        min_dG_allowed: float = -10.0,
-                        max_path_p_eq: float = 1.00) -> SMDData:
-        """A simple path filtering based on minimum number of replicas speed and per path.
-        This could be extended in the future to more sophisticated criteria.
+    def _path_filtering(
+        self,
+        sMDDdata: SMDData,
+        min_replicas: int = 3,
+        min_dG_allowed: float | None = None,
+        max_neg_dG_frac: float | None = 0.15,
+        max_path_p_eq: float = None,
+        p_eq_estimator: str = 'auto',
+    ) -> SMDData:
+        """Filter out pathological or under-sampled (speed, path) groups.
+
+        Applied **after** estimator fitting and support trimming, but
+        **before** weighted-PMF construction.
+
+        Filters (applied in order):
+        1. **min_replicas** — drop paths whose median ``n_samples`` is
+           below this threshold (under-sampled).
+        2. **min_dG_allowed** — drop paths whose minimum dG falls below
+           this floor (artifact guard).  Set *None* to disable.
+        3. **max_neg_dG_frac** — drop paths where the fraction of
+           negative-dG steps exceeds this value.  Negative dG is
+           almost always an artifact of the cumulant expansion with
+           too few samples (Var >> Wmean); keeping such a path
+           distorts p_eq weighting.  Set *None* to disable.
+        4. **max_path_p_eq** — drop paths whose p_eq exceeds this
+           threshold (single-path domination guard).
+
+        Parameters
+        ----------
+        sMDDdata : SMDData
+            Data object with fitted estimator ``results``.
+        min_replicas : int
+            Minimum median n_samples per (speed, path).
+        min_dG_allowed : float or None
+            dG floor in kJ/mol.
+        max_neg_dG_frac : float or None
+            Maximum tolerated fraction of negative-dG steps per path.
+        max_path_p_eq : float
+            Maximum p_eq allowed for a single path.
+        p_eq_estimator : str
+            Estimator used to compute p_eq for the dominance guard.
+            Allowed: ``'auto'``, ``'cumulant'``, ``'jarzynski'``, ``'p_neq'``.
+
+        Returns
+        -------
+        SMDData
+            Filtered data object (modified in place and returned).
         """
 
-        # sampling filter by number of replicas per path (minimum sampling guard)
+        # ---- 1. Minimum replicas filter ----
         keys_to_drop: list[tuple[float, str]] = []
         for (speed, path), group in sMDDdata.results.groupby(['speed', 'path']):
-            # n_samples at a given step == number of replicas that contributed;
-            # use the median across steps as a robust measure.
             n_replicas = int(group['n_samples'].median())
             if n_replicas < min_replicas:
                 logger.warning(
@@ -567,7 +627,6 @@ class SMDAnalysis:
                 )
                 keys_to_drop.append((speed, path))
 
-        # Drop outside the iteration loop to avoid mutating while iterating
         for speed, path in keys_to_drop:
             sMDDdata.results = sMDDdata.results.drop(
                 sMDDdata.results[
@@ -581,41 +640,67 @@ class SMDAnalysis:
                     (sMDDdata.raw_data['path'] == path)
                 ].index
             )
-    
+
         bad_keys: set[tuple[float, str]] = set()
 
-        # # dG floor filter (artifact guard)
-        # dG_min_by_path = (
-        #     sMDDdata.results
-        #     .groupby(['speed', 'path'])['dG']
-        #     .min()
-        #     .dropna()
-        # )
-        # for (speed, path), dgmin in dG_min_by_path.items():
-        #     if dgmin < min_dG_allowed:
-        #         logger.warning(
-        #             f"Excluding path '{path}' at speed={speed} nm/ps: "
-        #             f"min(dG)={dgmin:.3f} < {min_dG_allowed:.3f} kJ/mol"
-        #         )
-        #         bad_keys.add((speed, path))
+        # ---- 2. dG floor filter (artifact guard) ----
+        if min_dG_allowed is not None:
+            dG_min_by_path = (
+                sMDDdata.results
+                .groupby(['speed', 'path'])['dG']
+                .min()
+                .dropna()
+            )
+            for (speed, path), dgmin in dG_min_by_path.items():
+                if dgmin < min_dG_allowed:
+                    logger.warning(
+                        f"Excluding path '{path}' at speed={speed} nm/ps: "
+                        f"min(dG)={dgmin:.1f} kJ/mol < floor {min_dG_allowed:.1f} kJ/mol"
+                    )
+                    bad_keys.add((speed, path))
 
-        # dominant p_eq filter (single-path domination guard)
-        try:
-            p_eq_dic = sMDDdata.get_p_eq(byspeed=True, results=sMDDdata.results)
-        except Exception as exc:
-            logger.warning(f"Could not compute p_eq for quality filtering: {exc}")
-            p_eq_dic = None
+        # ---- 3. Negative-dG fraction filter ----
+        if max_neg_dG_frac is not None:
+            for (speed, path), group in sMDDdata.results.groupby(['speed', 'path']):
+                if (speed, path) in bad_keys:
+                    continue  # already flagged
+                dG_vals = group['dG'].dropna().to_numpy(dtype=float)
+                if len(dG_vals) == 0:
+                    continue
+                neg_frac = float(np.sum(dG_vals < 0)) / len(dG_vals)
+                if neg_frac > max_neg_dG_frac:
+                    logger.warning(
+                        f"Excluding path '{path}' at speed={speed} nm/ps: "
+                        f"{neg_frac:.0%} of dG values are negative "
+                        f"(threshold={max_neg_dG_frac:.0%}, "
+                        f"min dG={np.nanmin(dG_vals):.1f} kJ/mol). "
+                        f"Likely cumulant artifact from high variance."
+                    )
+                    bad_keys.add((speed, path))
 
-        if p_eq_dic is not None:
-            for speed, path_weights in p_eq_dic.items():
-                for path, p_eq in path_weights.items():
-                    if p_eq > max_path_p_eq:
-                        logger.warning(
-                            f"Excluding path '{path}' at speed={speed} nm/ps: "
-                            f"p_eq={p_eq:.4f} > {max_path_p_eq:.4f}"
-                        )
-                        bad_keys.add((speed, path))
+        # ---- 4. Dominant p_eq filter ----
+        if max_path_p_eq is not None:
+            try:
+                p_eq_dic = sMDDdata.get_p_eq(
+                    byspeed=True,
+                    results=sMDDdata.results,
+                    p_eq_estimator=p_eq_estimator,
+                )
+            except Exception as exc:
+                logger.warning(f"Could not compute p_eq for quality filtering: {exc}")
+                p_eq_dic = None
 
+            if p_eq_dic is not None:
+                for speed, path_weights in p_eq_dic.items():
+                    for path, p_eq in path_weights.items():
+                        if p_eq > max_path_p_eq:
+                            logger.warning(
+                                f"Excluding path '{path}' at speed={speed} nm/ps: "
+                                f"p_eq={p_eq:.4f} > {max_path_p_eq:.4f}"
+                            )
+                            bad_keys.add((speed, path))
+
+        # ---- Apply removals ----
         if bad_keys:
             bad_df = pd.DataFrame(list(bad_keys), columns=['speed', 'path'])
 
