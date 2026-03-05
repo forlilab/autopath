@@ -5,6 +5,8 @@ from abc import ABC, abstractmethod
 import statsmodels.formula.api as smf
 from scipy import special
 from scipy.stats import linregress
+from scipy.signal import savgol_filter
+from scipy.ndimage import gaussian_filter1d
 from sklearn.mixture import GaussianMixture
 
 from autopath.sMDAnalysis.SMDData import SMDData
@@ -452,12 +454,214 @@ class CumulantGMMComponentwiseEstimator(BaseEstimator):
         return smd_data
     
 class FrictionEstimator(BaseEstimator):
+    """Estimate friction profiles from Wdiss.
+
+    Two complementary estimators are provided:
+    1) Derivative method (per speed): Gamma(r) = (dWdiss/dr) / v
+    2) Regression method (across speeds): Wdiss(r, v) ≈ Gamma(r) * v + b(r)
+    """
+
+    def __init__(
+        self,
+        w_col: str = 'Wdiss',
+        use_spline: bool = False,
+        smooth_window: int | None = 11,
+        smooth_method: str = 'savgol',
+        smooth_polyorder: int = 3,
+        speeds: list[float] | None = None,
+    ):
+        self.w_col = w_col
+        self.use_spline = use_spline
+        self.smooth_window = smooth_window
+        self.smooth_method = smooth_method
+        self.smooth_polyorder = smooth_polyorder
+        self.speeds = speeds
+
     @property
     def name(self):
         return 'friction'
-    
+
     def fit_transform(self, smd_data: SMDData):
         return super().fit_transform(smd_data)
+
+    @staticmethod
+    def _cumulative_integral(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        if len(x) == 0:
+            return np.array([])
+        if len(x) == 1:
+            return np.array([0.0])
+        dx = np.diff(x)
+        trap = 0.5 * (y[1:] + y[:-1]) * dx
+        out = np.zeros_like(x, dtype=float)
+        out[1:] = np.cumsum(trap)
+        return out
+
+    def _compute_gamma_derivative(
+        self,
+        r: np.ndarray,
+        wdiss: np.ndarray,
+        speed: float,
+    ) -> np.ndarray:
+        if len(r) < 2 or speed <= 0:
+            return np.full_like(r, np.nan, dtype=float)
+
+        wd = self._smooth_profile(np.asarray(wdiss, dtype=float))
+
+        dwd_dr = np.gradient(wd, r)
+        
+        return dwd_dr / speed
+
+    def _smooth_profile(self, y: np.ndarray) -> np.ndarray:
+        """Optionally smooth a 1D profile using Savitzky–Golay or Gaussian filter."""
+        arr = np.asarray(y, dtype=float)
+        n = len(arr)
+        if n < 3 or self.smooth_window is None:
+            return arr
+
+        method = str(self.smooth_method).lower()
+        if method == 'savgol':
+            win = int(self.smooth_window)
+            if win < 3:
+                return arr
+            if win % 2 == 0:
+                win += 1
+            if win > n:
+                win = n if n % 2 == 1 else n - 1
+            if win < 3:
+                return arr
+
+            poly = int(self.smooth_polyorder)
+            if poly >= win:
+                poly = win - 1
+            if poly < 1:
+                poly = 1
+
+            return savgol_filter(arr, window_length=win, polyorder=poly, mode='interp')
+
+        if method == 'gaussian':
+            sigma = float(self.smooth_window)
+            if sigma <= 0:
+                return arr
+            return gaussian_filter1d(arr, sigma=sigma, mode='nearest')
+
+        raise ValueError(
+            f"Unknown smooth_method '{self.smooth_method}'. Allowed values: 'savgol', 'gaussian'."
+        )
+
+    def gamma_from_wdiss_derivative(
+        self,
+        df: pd.DataFrame,
+        estimator: str | None = None,
+    ) -> pd.DataFrame:
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        if self.w_col not in df.columns:
+            raise ValueError(f"Column '{self.w_col}' not found in input DataFrame.")
+
+        data = df.copy()
+        if estimator is not None and 'estimator' in data.columns:
+            data = data[data['estimator'] == estimator]
+        if self.speeds is not None:
+            data = data[data['speed'].isin(self.speeds)]
+
+        group_cols = ['estimator', 'speed']
+        if 'path' in data.columns:
+            group_cols.append('path')
+
+        rows = []
+        for keys, g in data.groupby(group_cols, dropna=False):
+            g = g.sort_values('r_coord').dropna(subset=['r_coord', self.w_col])
+            if g.empty:
+                continue
+
+            r = g['r_coord'].to_numpy(dtype=float)
+            wdiss = g[self.w_col].to_numpy(dtype=float)
+            speed = float(g['speed'].iloc[0])
+
+            gamma = self._compute_gamma_derivative(r, wdiss, speed)
+            gamma_int = self._cumulative_integral(r, gamma)
+
+            out = g[['step', 'r_coord', 'speed']].copy() if 'step' in g.columns else g[['r_coord', 'speed']].copy()
+            out['Gamma'] = gamma
+            out['Gamma_integrated'] = gamma_int
+            out['method'] = 'derivative'
+            out['estimator'] = g['estimator'].iloc[0] if 'estimator' in g.columns else estimator
+            if 'path' in g.columns:
+                out['path'] = g['path'].iloc[0]
+
+            rows.append(out)
+
+        if not rows:
+            return pd.DataFrame()
+        return pd.concat(rows, ignore_index=True)
+
+    def gamma_from_wdiss_regression(
+        self,
+        df: pd.DataFrame,
+        estimator: str | None = None,
+    ) -> pd.DataFrame:
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        if self.w_col not in df.columns:
+            raise ValueError(f"Column '{self.w_col}' not found in input DataFrame.")
+
+        data = df.copy()
+        if estimator is not None and 'estimator' in data.columns:
+            data = data[data['estimator'] == estimator]
+        if self.speeds is not None:
+            data = data[data['speed'].isin(self.speeds)]
+
+        if 'estimator' not in data.columns:
+            data['estimator'] = estimator if estimator is not None else 'unknown'
+
+        v0_df = extrapolate_to_v0(
+            results=data,
+            param=self.w_col,
+            speeds=self.speeds,
+        )
+
+        if v0_df is None or v0_df.empty:
+            return pd.DataFrame()
+
+        slope_col = f"{self.w_col}_slope"
+
+        if slope_col not in v0_df.columns:
+            raise ValueError(
+                f"Expected slope column '{slope_col}' in extrapolation output. "
+                f"Available: {list(v0_df.columns)}"
+            )
+
+        out = v0_df.copy()
+        out['Gamma_integrated'] = out[slope_col].astype(float)
+        out['method'] = 'regression'
+
+        key_col = 'step' if 'step' in out.columns else 'r_coord'
+        out = out.sort_values(['estimator', key_col]).reset_index(drop=True)
+
+        # Local friction: Gamma(r) = d/dr [Gamma_integrated(r)]
+        out['Gamma'] = np.nan
+        for est, g in out.groupby('estimator', dropna=False):
+            idx = g.index
+            gg = g.sort_values('r_coord')
+            r = gg['r_coord'].to_numpy(dtype=float)
+            gint = gg['Gamma_integrated'].to_numpy(dtype=float)
+
+            gint = self._smooth_profile(gint)
+
+            if len(r) < 2:
+                gamma_local = np.full(len(r), np.nan, dtype=float)
+            else:
+                gamma_local = np.gradient(gint, r)
+
+            out.loc[gg.index, 'Gamma'] = gamma_local
+
+        drop_cols = [c for c in out.columns if c.endswith('_se') or c in {'R2', 'n_speeds'}]
+        if drop_cols:
+            out = out.drop(columns=drop_cols)
+
+        return out
 
 
 ESTIMATOR_REGISTRY: dict[str, type[BaseEstimator]] = {
@@ -634,12 +838,12 @@ def calculate_weighted_pmf(
 
                     for col in weight_cols:
                         if len(vals_per_col[col]) > 0 and np.sum(w_per_col[col]) > 0:
-                            row[f"{col}_weighted"] = (
+                            row[f"{col}"] = (
                                 np.sum(np.array(vals_per_col[col]) * np.array(w_per_col[col]))
                                 / np.sum(w_per_col[col])
                             )
                         else:
-                            row[f"{col}_weighted"] = np.nan
+                            row[f"{col}"] = np.nan
 
                     rows.append(row)
 
