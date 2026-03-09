@@ -44,7 +44,6 @@ class SteeredMD:
         use_GReweighting: bool = False,
         out_dir: str = None,
         platform: str = "fastest",
-        save_freq: int = None,
         verbose: int = 0,
     ):
         
@@ -62,7 +61,6 @@ class SteeredMD:
 
         self.verbose = verbose
         self.autostop_freq = autostop_freq  # In moves. Stop pulling if the ligand is unbound
-        self.save_freq = save_freq  # In steps, for writing DCD
         self.use_NVT = use_NVT
 
         self.integrator_friction = 1.0 / openmmunit.picoseconds  # Friction coefficient for Langevin integrator
@@ -84,16 +82,10 @@ class SteeredMD:
                               direction: str = "forward",
                              ):
         """Run the pulling process in a single direction (forward or backward) for a single replica."""
-        
-        if self.save_freq is None:
-            self.save_freq = self.steps_per_move
-            if self.save_freq <= 25:
-                self.save_freq = 25  # minimum save frequency of 10 steps to avoid too large files
-            
+                    
         add_reporters(simulation, self.out_dir, f"sMD_{run_id}",
             total_steps=self.sMD_moves*self.steps_per_move, # total steps 
-            # logperiod=self.save_freq, # steps
-            logperiod=self.steps_per_move, # steps
+            logperiod=self.save_freq, # steps
             verbose=0 #verbose level
         )
 
@@ -199,8 +191,6 @@ class SteeredMD:
 
     def run(self,
         max_displacement: float = 5.0,  # nm
-        # max_time: float = 2000,  # ps
-        # steps_per_move: int = None,
         dx_per_move: float = 0.001,  # nm
         pulling_speed: float = 0.001,  # nm/ps equi 1 nm/ns 1 m/s
         sMD_spring_cte: int = 10000, # kJ/mol/nm^2
@@ -208,9 +198,11 @@ class SteeredMD:
         checkpoint_file: str = None,
         pdb_file: str = None,
         pulling_direction: str = "forward",
+        save_freq: int = None # in steps, for writing DCD. If None, will be set to steps_per_move
+
     ):
         """Main method to run steered MD in both directions (forward and backward)."""
-
+        
         if pulling_direction not in ["forward", "backward"]:
             raise ValueError("pulling_direction must be either 'forward' or 'backward'.")
 
@@ -243,6 +235,10 @@ class SteeredMD:
 
         self.sMD_moves = int(math.ceil(self.max_displacement / dx_per_move))
         
+        self.save_freq = save_freq  # In steps, for writing DCD
+        if self.save_freq is None:
+            self.save_freq = self.steps_per_move
+            
         ########################################################################################        
         logger.info("#"*80)
         logger.info(f"Steered MD parameters for {run_id}:")
@@ -250,7 +246,9 @@ class SteeredMD:
         logger.info(f"Pulling speed: {pulling_speed} nm/ps")
         logger.info(f"dx_per_move: {self.dx_per_move.value_in_unit(openmmunit.nanometers):.4f} nm")
         logger.info(f"steps_per_move: {self.steps_per_move} steps")
+        logger.info(f"Time per move: {self.steps_per_move * self.timestep.value_in_unit(openmmunit.picoseconds):.3f} ps")
         logger.info(f"Total sMD moves: {self.sMD_moves}")
+        logger.info(f'Saving DCD every {self.save_freq} steps')
         logger.info("#"*80)
         ########################################################################################
         
