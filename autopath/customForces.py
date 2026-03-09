@@ -279,6 +279,7 @@ def generate_funnel_parameters_from_trajectory(
     percentile_r_cyl: float = 90.0,
     percentile_r_funnel: float = 85.0,
     alpha_cone_degrees: float = 35.0,
+    stride: int = 3,
     verbose: bool = True,
 ) -> Dict:
     """
@@ -358,7 +359,7 @@ def generate_funnel_parameters_from_trajectory(
     axial_distances = []
     
     # Analyze trajectory
-    for frame in universe.trajectory:
+    for frame in universe.trajectory[::stride]:
         # Calculate centers of mass
         host_com = host_atoms.center_of_mass()
         guest_com = guest_atoms.center_of_mass()

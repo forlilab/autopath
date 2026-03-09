@@ -42,7 +42,7 @@ from rdkit.Chem import AllChem
 
 from molscrub import Scrub 
 
-from deeptime.clustering import RegularSpace
+from deeptime.clustering import RegularSpace, KMeans
 
 def setup_logging(logfile: str = 'autopath.log',
                   logname: str = "autopath",
@@ -427,7 +427,7 @@ def fix_pdb(
     pdbfile: str,
     replace_nonstandard_residues: bool = True,
     keep_heterogens: bool = False,
-    ignore_terminal_missing_residues: bool = True,
+    ignore_terminal_missing_residues: bool = False,
     pH: float = 7.4,
     discard_input_hydrogens: bool = False,
 ) -> PDBFixer:
@@ -1217,7 +1217,7 @@ def compute_distance_features(u: mda.Universe,
 def extract_milestones(u: mda.Universe,
                        X: np.ndarray,
                        n_milestones: int = 5,
-                       min_dist: float = 1.0,
+                       min_dist: float = 10.0,
                        out_dir: str = None,
                        prefix: str = "milestone",
                        min_frame_separation: int = 0,
@@ -1255,8 +1255,10 @@ def extract_milestones(u: mda.Universe,
     if X.ndim != 2:
         raise ValueError("X must be a 2D array of shape (n_frames, n_features)")
 
-    cluster_estimator = RegularSpace(dmin=min_dist, max_centers=n_milestones)
+    # cluster_estimator = RegularSpace(dmin=min_dist, max_centers=n_milestones)
+    cluster_estimator = KMeans(n_clusters=n_milestones)
     fitted_model = cluster_estimator.fit(X).fetch_model()
+
     cluster_centers = fitted_model.cluster_centers
     labels = fitted_model.transform(X)
 
