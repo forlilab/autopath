@@ -99,9 +99,7 @@ class SMDAnalysis:
             group_B: str = None,
             merge_features: bool = True,
             trim_low_support_results: bool = True,
-            trim_min_samples: int = 3,
-            trim_min_support_ratio: float = 0.7,
-            trim_reference: str = 'max',
+            trim_min_support_ratio: float = 0.9,
             trim_keep_prefix: bool = True,
             p_eq_estimator: str = 'auto',
             ) -> SMDData:
@@ -114,7 +112,7 @@ class SMDAnalysis:
             sMDDdata.filter_by_r_range(r_range, sMDDdata.r_column)
 
         traces_feat_df = sMDDdata.get_trace_features(
-            features=['work', 'lag', 'force','r_before'],
+            features=['lag','force','work','dW_protocol','r_before','NC'],
         )
 
         dist_feat_df = None
@@ -153,27 +151,18 @@ class SMDAnalysis:
 
         sMDDdata.raw_data['path'] = sMDDdata.raw_data['trajname'].map(path_mappings)
 
+        if trim_low_support_results:
+            sMDDdata.raw_data = trim_results_by_n_samples_support(
+                sMDDdata.raw_data,
+                min_samples=5,
+                min_support_ratio=trim_min_support_ratio,
+                keep_prefix=trim_keep_prefix,
+                add_support_columns=True,
+            )
+            
         for estimator in self.estimators:
             logger.info(f"Fitting estimator: {estimator.name}")
             sMDDdata = estimator.fit_transform(sMDDdata)
-
-        if trim_low_support_results:
-            n_before = len(sMDDdata.results)
-            sMDDdata.results = trim_results_by_n_samples_support(
-                sMDDdata.results,
-                min_samples=trim_min_samples,
-                min_support_ratio=trim_min_support_ratio,
-                reference=trim_reference,
-                keep_prefix=trim_keep_prefix,
-            )
-            n_after = len(sMDDdata.results)
-            logger.info(
-                "Applied post-fit support trimming on results: "
-                f"{n_before} -> {n_after} rows "
-                f"(min_samples={trim_min_samples}, "
-                f"min_support_ratio={trim_min_support_ratio}, "
-                f"reference='{trim_reference}', keep_prefix={trim_keep_prefix})"
-            )
 
         sMDDdata = self._path_filtering(
             sMDDdata,
@@ -183,7 +172,6 @@ class SMDAnalysis:
 
         self.mixture_pmfs = calculate_weighted_pmf(
             smd_data=sMDDdata,
-            # p_eq_estimator=p_eq_estimator,
         )
         self.mixture_pmfs.to_csv(f'{self.outdir}/mixture_pmfs.csv', index=False)
 
@@ -307,7 +295,7 @@ class SMDAnalysis:
             if group_A is not None and group_B is not None:
                 feat_df = smd.calculate_pocket_distances(group_A=group_A, group_B=group_B)
             else:
-                feat_df = smd.get_trace_features(features=['work', 'lag', 'r_before'])
+                feat_df = smd.get_trace_features(features=['work', 'force', 'lag', 'r_before'])
 
             clusterer = DTWPathModel(
                 seed=self.seed,
@@ -573,7 +561,7 @@ class SMDAnalysis:
         min_replicas: int = 3,
         min_dG_allowed: float | None = None,
         max_neg_dG_frac: float | None = 0.15,
-        max_path_p_eq: float = None,
+        max_path_p_eq: float = 1.0,
         p_eq_estimator: str = 'auto',
     ) -> SMDData:
         """Filter out pathological or under-sampled (speed, path) groups.
@@ -621,6 +609,7 @@ class SMDAnalysis:
         for (speed, path), group in sMDDdata.results.groupby(['speed', 'path']):
             n_replicas = int(group['n_samples'].median())
             if n_replicas < min_replicas:
+                
                 logger.warning(
                     f"Excluding path '{path}' at speed={speed} nm/ps: "
                     f"only {n_replicas} replicas < {min_replicas}"
@@ -684,7 +673,7 @@ class SMDAnalysis:
                 p_eq_dic = sMDDdata.get_p_eq(
                     byspeed=True,
                     results=sMDDdata.results,
-                    p_eq_estimator=p_eq_estimator,
+                    estimator=p_eq_estimator,
                 )
             except Exception as exc:
                 logger.warning(f"Could not compute p_eq for quality filtering: {exc}")

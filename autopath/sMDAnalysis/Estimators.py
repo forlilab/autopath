@@ -677,17 +677,15 @@ def trim_results_by_n_samples_support(
     results: pd.DataFrame,
     min_samples: int = 3,
     min_support_ratio: float = 0.7,
-    group_cols: tuple[str, ...] = ("estimator", "speed", "path"),
-    step_col: str = "step",
-    n_samples_col: str = "n_samples",
-    reference: str = "max",
     keep_prefix: bool = True,
     add_support_columns: bool = False,
 ) -> pd.DataFrame:
-    """Trim low-support regions from fitted estimator results using ``n_samples``.
+    """Trim low-support regions using per-step sample support.
 
-    This is designed to be applied *after* estimator fitting, before plotting or
-    weighted PMF construction.
+    Works for:
+    - fitted estimator tables (already containing ``n_samples``), and
+    - raw trajectory tables (computes ``n_samples`` from unique ``trajname``
+      per ``group_cols + step_col``).
 
     Parameters
     ----------
@@ -698,69 +696,81 @@ def trim_results_by_n_samples_support(
         Absolute minimum number of replicas required at a point.
     min_support_ratio : float
         Relative support threshold, defined as ``n_samples / n_ref``.
-    group_cols : tuple[str, ...]
-        Grouping that defines an independent profile to trim.
-    step_col : str
-        Ordered protocol coordinate column.
-    n_samples_col : str
-        Column with number of replicas contributing to each point.
-    reference : str
-        How to define ``n_ref`` inside each group: ``'max'`` or ``'median'``.
     keep_prefix : bool
         If True, keep the contiguous prefix up to first failing point.
         If False, keep all points that pass support criteria.
     add_support_columns : bool
-        If True, include ``support_ratio``, ``support_ok`` and ``n_ref`` in output.
+        If True, include ``support_frac``, ``support_ok`` and ``n_ref`` in output.
 
     Returns
     -------
     pd.DataFrame
         Trimmed results table.
     """
+    group_cols= ["speed", "path"]
+    step_col = "step"
+    n_samples_col = "n_samples"
+    traj_col = "trajname"
+    reference = "max"
+    
     if results is None or results.empty:
         return pd.DataFrame(columns=[] if results is None else results.columns)
 
-    required_cols = set(group_cols) | {step_col, n_samples_col}
-    missing_cols = [c for c in required_cols if c not in results.columns]
-    if missing_cols:
-        raise ValueError(
-            f"Missing required columns for support trimming: {missing_cols}. "
-            f"Available: {list(results.columns)}"
+    data = results.copy()
+    if n_samples_col not in data.columns:
+        if traj_col not in data.columns:
+            raise ValueError(
+                f"'{n_samples_col}' not found and '{traj_col}' is missing; cannot infer per-step support."
+            )
+        n_by_step = (
+            data.groupby(list(group_cols) + [step_col], dropna=False)[traj_col]
+            .nunique()
+            .reset_index(name=n_samples_col)
         )
-
-    if reference not in {"max", "median"}:
-        raise ValueError("reference must be either 'max' or 'median'.")
+        data = data.merge(n_by_step, on=list(group_cols) + [step_col], how='left')
 
     kept_groups = []
 
-    for _, group in results.groupby(list(group_cols), dropna=False):
+    for _, group in data.groupby(list(group_cols), dropna=False):
         g = group.sort_values(step_col).copy()
-        nvals = g[n_samples_col].astype(float)
 
-        if reference == "max":
-            n_ref = float(nvals.max())
-        else:
-            n_ref = float(nvals.median())
+        # Support is defined at step-level (same support for all rows in a step)
+        nvals_by_step = (
+            g.groupby(step_col, dropna=False)[n_samples_col]
+            .max()
+            .sort_index()
+            .astype(float)
+        )
+
+        n_ref = float(nvals_by_step.max())
 
         if not np.isfinite(n_ref) or n_ref <= 0:
-            support_ratio = pd.Series(np.zeros(len(g), dtype=float), index=g.index)
+            support_frac_by_step = pd.Series(
+                np.zeros(len(nvals_by_step), dtype=float),
+                index=nvals_by_step.index,
+            )
         else:
-            support_ratio = nvals / n_ref
+            support_frac_by_step = nvals_by_step / n_ref
 
-        support_ok = (nvals >= float(min_samples)) & (support_ratio >= float(min_support_ratio))
+        support_ok_by_step = (
+            (nvals_by_step >= float(min_samples))
+            & (support_frac_by_step >= float(min_support_ratio))
+        )
 
         if keep_prefix:
-            fail_idx = np.flatnonzero((~support_ok).to_numpy())
+            fail_idx = np.flatnonzero((~support_ok_by_step).to_numpy())
             if fail_idx.size > 0:
-                g_keep = g.iloc[:fail_idx[0]].copy()
+                keep_steps = nvals_by_step.index[:fail_idx[0]]
             else:
-                g_keep = g.copy()
+                keep_steps = nvals_by_step.index
         else:
-            g_keep = g.loc[support_ok].copy()
+            keep_steps = support_ok_by_step[support_ok_by_step].index
+
+        g_keep = g[g[step_col].isin(keep_steps)].copy()
 
         if add_support_columns and not g_keep.empty:
-            g_keep["support_ratio"] = support_ratio.loc[g_keep.index].values
-            g_keep["support_ok"] = support_ok.loc[g_keep.index].values
+            g_keep["support_frac"] = g_keep[step_col].map(support_frac_by_step.to_dict())
+            g_keep["support_ok"] = g_keep[step_col].map(support_ok_by_step.to_dict())
             g_keep["n_ref"] = n_ref
 
         kept_groups.append(g_keep)
@@ -781,16 +791,31 @@ def calculate_weighted_pmf(
 ) -> pd.DataFrame:
 
     results = smd_data.results.copy()
-    weights = smd_data.get_p_eq(byspeed=True, results=results)
-    estimators = results['estimator'].unique()
+    if results is None or results.empty:
+        return pd.DataFrame()
+
+    if 'estimator' not in results.columns:
+        raise ValueError("results must include an 'estimator' column for weighted PMF calculation.")
+
+    # Build p_eq independently for each estimator so each PMF is weighted
+    # with its own thermodynamic model.
+    weights_by_estimator = smd_data.get_p_eq(
+        byspeed=True,
+        results=results,
+        per_estimator=True,
+    )
+    estimators = results['estimator'].dropna().unique()
 
     weighted_pmfs = []
 
     for estimator in estimators:
         df_est = results[results['estimator'] == estimator]
+        est_weights = weights_by_estimator.get(estimator, {})
 
         for speed, speedg in df_est.groupby('speed'):
-            speed_weights = weights[speed]
+            speed_weights = est_weights.get(speed, {})
+            if not speed_weights:
+                continue
 
             # grid_vals = sorted(speedg[grid_col].dropna().unique())
             # restrict to steps where ALL paths have data (common support)
@@ -914,8 +939,9 @@ def extrapolate_to_v0(
         df = df[df['speed'].isin(speeds)]
 
     if df['speed'].nunique() < 2:
-        raise ValueError("Need at least two distinct speeds for extrapolation.")
-
+        logger.error("Need at least two distinct speeds for extrapolation.")
+        return pd.DataFrame()
+    
     out_rows: list[dict] = []
 
     for estimator, est_group in df.groupby('estimator'):
