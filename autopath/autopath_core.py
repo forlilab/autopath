@@ -44,7 +44,6 @@ class AutoPath:
         pdb_path: str = None,
         do_fix_pdb: bool = True,
         pocket_selection: str = "same residue as protein and (around 4 resname UNK) and (not name H*)",
-        use_murcko_scaffold: bool = True,
         temperature: float = 300,
         random_state: int = 42,
         platform: str = 'fastest',  # or 'CUDA', 'OpenCL', 'CPU'
@@ -68,8 +67,8 @@ class AutoPath:
         run_sMDpulling: bool = True,
         sMD_outdir: str = "sMD",
         sMD_pulling_dir: str = "forward",  # "forward" or "backward"
-        sMD_pulling_speeds: dict = {0.001:None, 0.002:None, 0.003:None},  # nm/ps
-        sMD_max_pulling_dist: float = 2.0,  # nm
+        sMD_pulling_speeds: dict = {0.005:None, 0.0025:None, 0.001:None},  # nm/ps
+        sMD_max_pulling_dist: float = 3.0,  # nm
         sMD_time: int = None,  # ns
         sMD_steps_per_move: int = None,
         sMD_dx_per_move: float = 0.001,  # nm, this is the displacement per move
@@ -79,7 +78,7 @@ class AutoPath:
         sMD_run_analysis: bool = True,
         sMD_clust_selection:str = None,
         extract_milestones: bool = True,
-        milestone_mode: str = "all_medoids",  # "per_path" or "all_medoids"
+        milestone_mode: str = "per_path",  # "per_path" or "all_medoids"
         milestone_min_frame_separation: int = 0,
         n_milestones: int = 5,
         relax_steps: int = 25000,
@@ -93,7 +92,6 @@ class AutoPath:
     ):
         # General
         self.pocket_selection = pocket_selection
-        self.use_murcko_scaffold = use_murcko_scaffold
         self.temperature = temperature
         self.random_state = random_state
         self.platform = platform
@@ -298,6 +296,8 @@ class AutoPath:
         # sMD_outdir = f"{sys_name}/sMD_{lig_anchor_mode}_{sMD_timestep}ps_{sMD_collision_frequency}ps_200stm"
         # in this paper they used 80 kcal·mol−1? units don match tho. Ziada et al 2022.
         sMD_spring_cte_per_atom = 100 * 4.184  # KJ/mol/nm2, converted from kcal. This affects thermal fluctuations
+        sMD_traj_outdir = f"{self.sMD_outdir}/trajectories"
+        sMD_analysis_outdir = f"{self.sMD_outdir}/analysis"
         
         if self.run_sMDpulling:
             equilibrated_system = load_system(f"{sys_name}/equilibration/system_equil_{sys_name}.xml")
@@ -317,8 +317,7 @@ class AutoPath:
                 autostop_freq=self.sMD_autostop_freq,
                 timestep=self.timestep,
                 temperature=self.temperature,
-                save_freq=500,
-                out_dir=self.sMD_outdir,
+                out_dir=sMD_traj_outdir,
                 platform=self.platform
             )
 
@@ -333,6 +332,7 @@ class AutoPath:
                                 dx_per_move=self.sMD_dx_per_move,  # nm, this is the displacement per move
                                 sMD_spring_cte=sMD_spring_cte,
                                 pulling_direction=self.sMD_pulling_dir,
+                                save_freq=None, # will use steps_per_move
                             )
                         except Exception as e:  
                             logger.error(f"Error during sMD pulling for speed {speed} nm/ps, replica {i+1}: {e}")
@@ -341,7 +341,7 @@ class AutoPath:
                     logger.info(f"Running sMD for speed {speed} nm/ps until convergence.")
                     CONVERGED = False
                     while not CONVERGED:
-                        log_files = glob(f"{self.sMD_outdir}/sMD_*_v{speed}_{self.sMD_pulling_dir}.dat")
+                        log_files = glob(f"{sMD_traj_outdir}/sMD_*_v{speed}_{self.sMD_pulling_dir}.dat")
                         current_replica = len(log_files) + 1
                         logger.info(f"Starting replica {current_replica} for speed {speed} nm/ps.")
                         
@@ -356,7 +356,7 @@ class AutoPath:
                             smdanalysis = SMDAnalysis(sysname=sys_name, path_model='dtw', estimators=['cumulant'],
                                                     do_plots=False, seed=self.random_state,
                                                     temperature=self.temperature,
-                                                    outdir=f"{self.sMD_outdir}/analysis",
+                                                    outdir=sMD_analysis_outdir,
                                                     ligand_select=f"resname {ligand_resname} and not name H*",
                                                     )
                             
@@ -367,15 +367,15 @@ class AutoPath:
                                 # group_B=self.sMD_clust_selection
                             )
                             
-                            conv_df.to_csv(f"{self.sMD_outdir}/analysis/sMD_conv_v{speed}_metrics.csv", index=False)
-                            traces_df.to_csv(f"{self.sMD_outdir}/analysis/sMD_conv_v{speed}_traces.csv", index=False)
+                            conv_df.to_csv(f"{sMD_analysis_outdir}/sMD_conv_v{speed}_metrics.csv", index=False)
+                            traces_df.to_csv(f"{sMD_analysis_outdir}/sMD_conv_v{speed}_traces.csv", index=False)
 
                             # Plot convergence results
-                            conv_traces = glob(f"{self.sMD_outdir}/analysis/sMD_conv_*_traces.csv")
-                            conv_metrics = glob(f"{self.sMD_outdir}/analysis/sMD_conv_*_metrics.csv")
+                            conv_traces = glob(f"{sMD_analysis_outdir}/sMD_conv_*_traces.csv")
+                            conv_metrics = glob(f"{sMD_analysis_outdir}/sMD_conv_*_metrics.csv")
 
-                            plot_convergence_traces(conv_traces, outdir=f"{self.sMD_outdir}/analysis")
-                            plot_convergence_metrics(conv_metrics, outdir=f"{self.sMD_outdir}/analysis")
+                            plot_convergence_traces(conv_traces, outdir=sMD_analysis_outdir)
+                            plot_convergence_metrics(conv_metrics, outdir=sMD_analysis_outdir)
                             
                             # Check convergence. Two last replicas must be converged
                             CONVERGED = conv_df['converged'].iloc[-2] and conv_df['converged'].iloc[-1]
@@ -397,7 +397,7 @@ class AutoPath:
                             continue
                         
         # Load and align sMD trajectories
-        sMD_trajs = glob(f"{self.sMD_outdir}/sMD_replica-*_*_*.dcd")
+        sMD_trajs = glob(f"{sMD_traj_outdir}/sMD_replica-*_*_*.dcd")
         sMD_trajs = [f for f in sMD_trajs if "aligned" not in f]  # only process unaligned trajectories
         logger.info(f"Found {len(sMD_trajs)} sMD trajectories to align.")        
         for traj_file in sMD_trajs:
@@ -416,7 +416,7 @@ class AutoPath:
         ######################################### sMD Analysis #######################################
         ##############################################################################################        
         
-        sMD_trajs = glob(f"{self.sMD_outdir}/sMD_replica-*_*_*_aligned.dcd")
+        sMD_trajs = glob(f"{sMD_traj_outdir}/sMD_replica-*_*_*_aligned.dcd")
 
         if self.sMD_run_analysis:
             
@@ -428,21 +428,21 @@ class AutoPath:
                 logger.info(f"Auto-selected clustering selection: {', '.join(set(pocket_residues))}")
             
             # loads the sMD data
-            logs = glob(f"{self.sMD_outdir}/sMD_*_*_{self.sMD_pulling_dir}.dat")
+            logs = glob(f"{sMD_traj_outdir}/sMD_*_*_{self.sMD_pulling_dir}.dat")
             logger.info(f"Found {len(logs)} sMD logs for analysis.")
             smd_data = SMDData(logs, sys_name, temperature=self.temperature,
                                reference_pdb=equilibrated_pdb)
             
             # cluster trajectories into pathways
             cluster_model = DTWPathModel(seed=self.random_state, do_plots=True,
-                                        outdir=f"{self.sMD_outdir}/analysis")
+                                        outdir=sMD_analysis_outdir)
 
             smdanalysis = SMDAnalysis(sys_name, cluster_model,
                                     estimators=['cumulant', 'jarzynski'],
                                     do_plots=True, seed=self.random_state,
                                     temperature=self.temperature,
                                     ligand_select=f"resname {ligand_resname} and not name H*",
-                                    outdir=f"{self.sMD_outdir}/analysis",
+                                    outdir=sMD_analysis_outdir,
                                     )
 
             smd_data = smdanalysis.run(smd_data,
@@ -456,19 +456,17 @@ class AutoPath:
             self._smdanalysis = smdanalysis
 
             # check convergence regardless of speed and autopstop
-            conv_df, traces_df = smdanalysis.check_convergence(
-                # quantities=['jarzynski_gmm'],
-                logs=logs,
+            conv_df, traces_df = smdanalysis.check_convergence(logs=logs,
                 group_A=f"resname {ligand_resname} and not name H*",
                 group_B=self.sMD_clust_selection
             )
-            conv_df.to_csv(f"{self.sMD_outdir}/analysis/sMD_conv_vALL_metrics.csv", index=False)
-            traces_df.to_csv(f"{self.sMD_outdir}/analysis/sMD_conv_vALL_traces.csv", index=False)
+            conv_df.to_csv(f"{sMD_analysis_outdir}/sMD_conv_vALL_metrics.csv", index=False)
+            traces_df.to_csv(f"{sMD_analysis_outdir}/sMD_conv_vALL_traces.csv", index=False)
 
-            smd_conv_traces = glob(f"{self.sMD_outdir}/analysis/sMD_conv_vALL_traces.csv")
-            plot_convergence_traces(smd_conv_traces, outdir=f"{self.sMD_outdir}/analysis")
-            smd_conv_metrics = glob(f"{self.sMD_outdir}/analysis/sMD_conv_vALL_metrics.csv")
-            plot_convergence_metrics(smd_conv_metrics, outdir=f"{self.sMD_outdir}/analysis")
+            smd_conv_traces = glob(f"{sMD_analysis_outdir}/sMD_conv_vALL_traces.csv")
+            plot_convergence_traces(smd_conv_traces, outdir=sMD_analysis_outdir)
+            smd_conv_metrics = glob(f"{sMD_analysis_outdir}/sMD_conv_vALL_metrics.csv")
+            plot_convergence_metrics(smd_conv_metrics, outdir=sMD_analysis_outdir)
 
         ##############################################################################################
         ###################################### Extract Milestones ####################################
@@ -496,7 +494,7 @@ class AutoPath:
                 exit(1)
 
             # Load medoid info (from analysis or from saved file)
-            medoid_info_path = f"{self.sMD_outdir}/analysis/medoid_info.json"
+            medoid_info_path = f"{sMD_analysis_outdir}/medoid_info.json"
             medoid_to_path = {}
             medoid_names = []
 
@@ -514,15 +512,9 @@ class AutoPath:
                     "No medoid info found (run sMD analysis first, or provide medoid_info.json). "
                     "Falling back to using all sMD trajectories."
                 )
-            
-            # Map medoid names to DCD trajectory files
-            def _trajname_to_dcd(trajname: str) -> str:
-                """Convert a trajname (log basename without ext) to the corresponding .dcd path."""
-                dcd_name = trajname.replace("log", "traj") + "_aligned.dcd"
-                return os.path.join(self.sMD_outdir, dcd_name)
 
             if medoid_names:
-                medoid_dcds = [_trajname_to_dcd(name) for name in medoid_names]
+                medoid_dcds = [self._trajname_to_dcd(name) for name in medoid_names]
                 medoid_dcds = [f for f in medoid_dcds if os.path.exists(f)]
                 if not medoid_dcds:
                     logger.warning("Could not locate medoid DCD files. Falling back to all trajectories.")
@@ -534,8 +526,7 @@ class AutoPath:
 
             logger.info(f"Using {len(medoid_dcds)} trajectories for milestone extraction (mode={self.milestone_mode}).")
             
-            # Use prmtop for writing PDBs (avoids MDAnalysis residue name scrambling)
-            u_milestone = mda.Universe(prmtop_file, medoid_dcds)
+            u_milestone = mda.Universe(solvated_system_pdb, medoid_dcds)
 
             if self.milestone_mode == "per_path":
                 # Mode: extract milestones from each path's medoid independently
@@ -554,14 +545,14 @@ class AutoPath:
                         path_to_medoids[pid].append(mname)
 
                     for path_id, med_names in sorted(path_to_medoids.items()):
-                        path_dcds = [_trajname_to_dcd(n) for n in med_names]
+                        path_dcds = [self._trajname_to_dcd(n) for n in med_names]
                         path_dcds = [f for f in path_dcds if os.path.exists(f)]
                         if not path_dcds:
                             logger.warning(f"No DCD files found for path {path_id}. Skipping.")
                             continue
                         
                         path_outdir = os.path.join(milestones_outdir, str(path_id))
-                        u_path = mda.Universe(prmtop_file, path_dcds)
+                        u_path = mda.Universe(solvated_system_pdb, path_dcds)
                         
                         logger.info(f"Computing distance features for path {path_id} ({len(path_dcds)} trajs, {len(u_path.trajectory)} frames)...")
                         X_path = compute_distance_features(u_path, ligand_sel, pocket_sel)
@@ -610,7 +601,7 @@ class AutoPath:
             min_com = 0.0
             max_com = 3.0
             try:
-                smd_raw = pd.read_csv(f'{self.sMD_outdir}/analysis/sMD_processed_data.csv')
+                smd_raw = pd.read_csv(f'{sMD_analysis_outdir}/sMD_processed_data.csv')
                 min_com = smd_raw['r_before'].min() * 0.75  # nm
                 max_com = smd_raw['r_before'].max() * 1.1 # nm
             except Exception as e:
@@ -657,7 +648,7 @@ class AutoPath:
                 logger.info("Generating funnel potential from sMD trajectories...")
                 try:
                     # Collect all sMD trajectories
-                    smd_trajs = glob(f"{self.sMD_outdir}/*.dcd")
+                    smd_trajs = glob(f"{sMD_traj_outdir}/*.dcd")
                     
                     if not smd_trajs:
                         logger.warning("No sMD trajectories found. Skipping funnel potential generation.")
@@ -689,7 +680,7 @@ class AutoPath:
 
             for milestone in milestones:
                 milestone_name = os.path.basename(milestone).split('.')[0]
-                milestone_number = int(milestone_name.split('_frame_')[0].rsplit('_', 1)[-1])
+                # milestone_number = int(milestone_name.split('_')[-3])
                 milestone_system = f"{milestones_outdir}/{milestone_name}_relax_system.xml"
                 milestone_chk = f"{milestones_outdir}/{milestone_name}_relax_checkpoint.chk"
 
@@ -714,8 +705,8 @@ class AutoPath:
                         mMD_CV='com',
                         mMD_time=self.mMD_time, #ns
                         bias_factor=self.mMD_bias_factor,
-                        hill_height=biasing_scheme[milestone_number]['height'] if use_biasing_scheme else self.mMD_hill_height, #kcal/mol
-                        hill_width=biasing_scheme[milestone_number]['width'] if use_biasing_scheme else self.mMD_hill_width, #nm
+                        # hill_height=biasing_scheme[milestone_number]['height'] if use_biasing_scheme else self.mMD_hill_height, #kcal/mol
+                        # hill_width=biasing_scheme[milestone_number]['width'] if use_biasing_scheme else self.mMD_hill_width, #nm
                         biasFrequency=self.mMD_bias_frequency, #ps
                         grid_dimensions=(min_com, max_com),
                         funnel_force=funnel_force
@@ -750,3 +741,10 @@ class AutoPath:
         base = os.path.basename(fn)[:-4]
         rep = base.split("_")[-3]
         return int(rep.split("-")[1])
+    
+    
+    # Map medoid names to DCD trajectory files
+    def _trajname_to_dcd(self, trajname: str) -> str:
+        """Convert a trajname (log basename without ext) to the corresponding .dcd path."""
+        dcd_name = trajname.replace("log", "traj") + "_aligned.dcd"
+        return os.path.join(self.sMD_outdir, "trajectories", dcd_name)
