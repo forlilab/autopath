@@ -4,44 +4,60 @@
         "pdb_path": null,
         "do_fix_pdb": true,
         "pocket_selection": "same residue as protein and (around 4 resname UNK) and (not name H*)",
-        "use_murcko_scaffold": true,
         "temperature": 300,
-        "random_state": 42
-},
+        "random_state": 42,
+        "platform": "fastest"
+    },
     "preparation": {
         "run_preparation": true,
-        "forcefield": ["amber14/protein.ff14SB.xml", "amber14/tip3pfb.xml", "amber/tip3p_HFE_multivalent.xml"],
+        "forcefield": ["amber14/protein.ff14SB.xml", "amber14/tip3pfb.xml", "amber/tip3pfb_HFE_multivalent.xml"],
         "hydrogenMass": 3.0,
+        "timestep": 0.004,
         "lig_ff": "espaloma",
         "boxShape": "dodecahedron",
         "padding": 1.2,
-        "ionicStrength": 0.15
+        "ionicStrength": 0.15,
+        "variants": null,
+        "is_membrane": false,
+        "lipid_type": null
     },
 
     "equilibration": {
         "run_equilibration": true,
-        "equilibration_scheme": "autopath/data/equilibration_lig_prot_memb.json"
+        "protocol_fname": "autopath/data/equilibration_lig_prot_memb.json"
     },
 
     "sMD": {
         "run_sMDpulling": true,
+        "sMD_outdir": "sMD",
         "sMD_pulling_dir": "forward",
-        "sMD_time": 1,
-        "sMD_replicas": 3,
+        "sMD_pulling_speeds": {
+            "0.001": 3
+        },
+        "sMD_max_pulling_dist": 2.0,
+        "sMD_time": null,
         "sMD_steps_per_move": null,
         "sMD_dx_per_move": 0.001,
-        "sMD_spring_cte": 50
+        "sMD_spring_cte": 50,
+        "sMD_ligand_anchor_mode": "lig_ha",
+        "sMD_autostop_freq": 50,
+        "sMD_run_analysis": true,
+        "sMD_clust_selection": null
     },
     "milestones": {
         "extract_milestones": true,
-        "n_milestones": 3
+        "milestone_mode": "per_path",
+        "milestone_min_frame_separation": 0,
+        "n_milestones": 3,
+        "relax_steps": 25000
     },
     "metadynamics": {
         "run_metadynamics": true,
-        "mMD_time": 2,
+        "mMD_use_funnel_potential": true,
         "mMD_bias_factor": 15,
         "mMD_bias_frequency": 2,
         "mMD_hill_height": 1.2,
-        "mMD_hill_width": 0.05
+        "mMD_hill_width": 0.05,
+        "mMD_time": 2
     }
 }

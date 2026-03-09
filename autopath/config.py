@@ -16,42 +16,52 @@ class Config(object):
         VS_mode: bool = False,
         pdb_path: str = None,
         do_fix_pdb: bool = True,
-        pocket_selection: str = "same residue as protein and (around 4 resname UNK) and name CA",
-        use_murcko_scaffold: bool = True,
+        pocket_selection: str = "same residue as protein and (around 4 resname UNK) and (not name H*)",
         temperature: float = 300,
         random_state: int = 42,
+        platform: str = "fastest",
         run_preparation: bool = True,
         forcefield: list = [
             "amber14-all.xml",
             "amber14/tip3pfb.xml",
-            "amber/tip3p_HFE_multivalent.xml",
+            "amber/tip3pfb_HFE_multivalent.xml",
         ],
         hydrogenMass: float = 1.5,  # amu
+        timestep: float = 0.004,  # ps
         lig_ff: str = "espaloma",
         boxShape: str = "dodecahedron",
         padding: float = 1.2,
         ionicStrength: float = 0.15,
+        variants: dict = None,
         is_membrane: bool = False,
         lipid_type: str = None,
-        variants: dict = None,
         run_equilibration: bool = True,
-        equilibration_scheme: str = "autopath/data/equilibration.json",
+        protocol_fname: str = None,
         run_sMDpulling: bool = True,
+        sMD_outdir: str = "sMD",
         sMD_pulling_dir: str = "forward",  # "forward" or "backward"
-        sMD_time: int = 1,  # ns
-        sMD_steps_per_move: int = 250,  # 1 ps
+        sMD_pulling_speeds: dict = {0.001: None, 0.002: None, 0.003: None},
+        sMD_max_pulling_dist: float = 2.0,  # nm
+        sMD_time: int = None,  # ns
+        sMD_steps_per_move: int = None,
         sMD_dx_per_move: float = 0.001,  # nm
-        sMD_spring_cte: float = 50,  # KJ/mol/nm2/atom
-        sMD_replicas: int = 5,
-        sMD_autostop: bool = 10,
+        sMD_spring_cte: float = None,  # KJ/mol/nm2
+        sMD_ligand_anchor_mode: str = "lig_ha",
+        sMD_autostop_freq: int = 50,
+        sMD_run_analysis: bool = True,
+        sMD_clust_selection: str = None,
         extract_milestones: bool = True,
+        milestone_mode: str = "per_path",
+        milestone_min_frame_separation: int = 0,
         n_milestones: int = 5,
+        relax_steps: int = 25000,
         run_metadynamics: bool = True,
-        mMD_time: int = 5,  # ns
-        mMD_bias_factor: int = 12,
+        mMD_use_funnel_potential: bool = True,
+        mMD_bias_factor: int = 10,
         mMD_bias_frequency: int = 2,  # ps
-        mMD_hill_height: float = 1.2,  # KJ/mol
+        mMD_hill_height: float = 1.2,  # kJ/mol
         mMD_hill_width: float = 0.05,
+        mMD_time: int = 10,  # ns
     ):
 
         # General
@@ -59,14 +69,15 @@ class Config(object):
         self.pdb_path = pdb_path
         self.do_fix_pdb = do_fix_pdb
         self.pocket_selection = pocket_selection
-        self.use_murcko_scaffold = use_murcko_scaffold
         self.temperature = temperature
         self.random_state = random_state
+        self.platform = platform
 
         # Preparation
         self.run_preparation = run_preparation
         self.forcefield = forcefield
         self.hydrogenMass = hydrogenMass
+        self.timestep = timestep
         self.lig_ff = lig_ff
         self.boxShape = boxShape
         self.padding = padding
@@ -77,29 +88,38 @@ class Config(object):
 
         # Equilibration
         self.run_equilibration = run_equilibration
-        self.equilibration_scheme = equilibration_scheme
+        self.protocol_fname = protocol_fname
 
         # Steered MD
         self.run_sMDpulling = run_sMDpulling
+        self.sMD_outdir = sMD_outdir
         self.sMD_pulling_dir = sMD_pulling_dir
+        self.sMD_pulling_speeds = sMD_pulling_speeds
+        self.sMD_max_pulling_dist = sMD_max_pulling_dist
         self.sMD_time = sMD_time  # ns
-        self.sMD_replicas = sMD_replicas
         self.sMD_steps_per_move = sMD_steps_per_move
         self.sMD_dx_per_move = sMD_dx_per_move
-        self.sMD_spring_cte = sMD_spring_cte  # KJ/mol/nm2/atom
-        self.sMD_autostop = sMD_autostop
+        self.sMD_spring_cte = sMD_spring_cte  # KJ/mol/nm2
+        self.sMD_ligand_anchor_mode = sMD_ligand_anchor_mode
+        self.sMD_autostop_freq = sMD_autostop_freq
+        self.sMD_run_analysis = sMD_run_analysis
+        self.sMD_clust_selection = sMD_clust_selection
 
         # Milestones
         self.extract_milestones = extract_milestones
+        self.milestone_mode = milestone_mode
+        self.milestone_min_frame_separation = milestone_min_frame_separation
         self.n_milestones = n_milestones
+        self.relax_steps = relax_steps
 
         # Metadynamics
         self.run_metadynamics = run_metadynamics
-        self.mMD_time = mMD_time
+        self.mMD_use_funnel_potential = mMD_use_funnel_potential
         self.mMD_bias_factor = mMD_bias_factor
         self.mMD_bias_frequency = mMD_bias_frequency
         self.mMD_hill_height = mMD_hill_height
         self.mMD_hill_width = mMD_hill_width
+        self.mMD_time = mMD_time
 
         self.equilibration_checkpoint = False
         if VS_mode:
@@ -145,8 +165,39 @@ class Config(object):
         # Flatten the nested dictionary structure
         flattened_config = {}
         for section, params in config_data.items():
-            for key, value in params.items():
-                flattened_config[key] = value
+            if isinstance(params, dict):
+                for key, value in params.items():
+                    flattened_config[key] = value
+
+        # Backward compatibility with old config keys
+        legacy_map = {
+            "equilibration_scheme": "protocol_fname",
+            "sMD_autostop": "sMD_autostop_freq",
+        }
+        for old_key, new_key in legacy_map.items():
+            if old_key in flattened_config and new_key not in flattened_config:
+                flattened_config[new_key] = flattened_config.pop(old_key)
+                logging.warning(
+                    f"Deprecated config key '{old_key}' detected. Please use '{new_key}'."
+                )
+
+        if "sMD_replicas" in flattened_config and "sMD_pulling_speeds" not in flattened_config:
+            reps = flattened_config.pop("sMD_replicas")
+            flattened_config["sMD_pulling_speeds"] = {0.001: reps}
+            logging.warning(
+                "Deprecated config key 'sMD_replicas' detected. "
+                "Mapped to 'sMD_pulling_speeds' as {0.001: sMD_replicas}."
+            )
+
+        # Normalize pulling speed keys loaded from JSON (string keys) to float keys
+        if "sMD_pulling_speeds" in flattened_config and isinstance(flattened_config["sMD_pulling_speeds"], dict):
+            speed_map = {}
+            for speed, reps in flattened_config["sMD_pulling_speeds"].items():
+                try:
+                    speed_map[float(speed)] = reps
+                except (TypeError, ValueError):
+                    speed_map[speed] = reps
+            flattened_config["sMD_pulling_speeds"] = speed_map
 
         expected_keys = cls.get_defaults_dict().keys()
         bad_keys = [k for k in flattened_config if k not in expected_keys]
