@@ -20,7 +20,7 @@ class SMDData:
                 r_column: str = 'r_target',
                 temperature: float = 300.0,
                 reference_pdb: str = None,
-                work_mode: str = 'auto',
+                work_mode: str = 'protocol',  # 'force_dx', 'protocol' or 'auto'
                 protocol_work_column: str = 'dW_protocol',
                 ):
         
