@@ -59,6 +59,7 @@ class AutoPath:
         boxShape: str = "dodecahedron",
         padding: float = 1.2,
         ionicStrength: float = 0.15,
+        ions: dict = ('Na+', 'Cl-'),
         variants: dict = None,
         is_membrane: bool = False,
         lipid_type: str = None,
@@ -104,6 +105,7 @@ class AutoPath:
         self.boxShape = boxShape
         self.padding = padding
         self.ionicStrength = ionicStrength
+        self.ions = ions
         self.variants = variants
         self.is_membrane = is_membrane
         self.lipid_type = lipid_type
@@ -185,7 +187,7 @@ class AutoPath:
                 boxShape=self.boxShape,
                 padding=self.padding,
                 ionicStrength=self.ionicStrength,
-                ions=('Na+', 'Cl-'),
+                ions=self.ions,
                 is_membrane=self.is_membrane,
                 lipid_type=self.lipid_type,
             )
