@@ -32,6 +32,7 @@ class Config(object):
         boxShape: str = "dodecahedron",
         padding: float = 1.2,
         ionicStrength: float = 0.15,
+        ions: tuple = ("Na+", "Cl-"),
         variants: dict = None,
         is_membrane: bool = False,
         lipid_type: str = None,
@@ -48,6 +49,7 @@ class Config(object):
         sMD_spring_cte: float = None,  # KJ/mol/nm2
         sMD_ligand_anchor_mode: str = "lig_ha",
         sMD_autostop_freq: int = 50,
+        sMD_max_replicas: int = 50,
         sMD_run_analysis: bool = True,
         sMD_clust_selection: str = None,
         extract_milestones: bool = True,
@@ -85,6 +87,7 @@ class Config(object):
         self.variants = variants
         self.is_membrane = is_membrane
         self.lipid_type = lipid_type
+        self.ions = ions
 
         # Equilibration
         self.run_equilibration = run_equilibration
@@ -102,6 +105,7 @@ class Config(object):
         self.sMD_spring_cte = sMD_spring_cte  # KJ/mol/nm2
         self.sMD_ligand_anchor_mode = sMD_ligand_anchor_mode
         self.sMD_autostop_freq = sMD_autostop_freq
+        self.sMD_max_replicas = sMD_max_replicas
         self.sMD_run_analysis = sMD_run_analysis
         self.sMD_clust_selection = sMD_clust_selection
 

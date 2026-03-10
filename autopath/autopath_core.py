@@ -59,7 +59,7 @@ class AutoPath:
         boxShape: str = "dodecahedron",
         padding: float = 1.2,
         ionicStrength: float = 0.15,
-        ions: dict = ('Na+', 'Cl-'),
+        ions: tuple = ('Na+', 'Cl-'),
         variants: dict = None,
         is_membrane: bool = False,
         lipid_type: str = None,
@@ -76,6 +76,7 @@ class AutoPath:
         sMD_spring_cte: float = None,  # KJ/mol/nm2
         sMD_ligand_anchor_mode: str = 'lig_ha',
         sMD_autostop_freq: int = 50, #moves
+        sMD_max_replicas: int = 50,  # max replicas per speed in convergence mode
         sMD_run_analysis: bool = True,
         sMD_clust_selection:str = None,
         extract_milestones: bool = True,
@@ -124,6 +125,7 @@ class AutoPath:
         self.sMD_spring_cte = sMD_spring_cte
         self.sMD_ligand_anchor_mode = sMD_ligand_anchor_mode
         self.sMD_autostop_freq = sMD_autostop_freq
+        self.sMD_max_replicas = sMD_max_replicas
         self.sMD_run_analysis = sMD_run_analysis
         self.sMD_clust_selection = sMD_clust_selection
         # Milestones
@@ -347,10 +349,10 @@ class AutoPath:
                         current_replica = len(log_files) + 1
                         logger.info(f"Starting replica {current_replica} for speed {speed} nm/ps.")
                         
-                        # # cap the number of replicas to avoid infinite loops
-                        # if current_replica > 50:
-                        #     logger.warning(f"Reached maximum number of replicas (50) for speed {speed} nm/ps without convergence. Stopping.")
-                        #     break
+                        # cap the number of replicas to avoid infinite loops
+                        if current_replica > self.sMD_max_replicas:
+                            logger.warning(f"Reached maximum number of replicas ({self.sMD_max_replicas}) for speed {speed} nm/ps without convergence. Stopping.")
+                            break
                         
                         if len(log_files) >= 5:  # need at least 5 replicas to assess convergence
                             

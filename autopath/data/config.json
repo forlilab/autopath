@@ -17,6 +17,7 @@
         "boxShape": "dodecahedron",
         "padding": 1.2,
         "ionicStrength": 0.15,
+        "ions": ["Na+", "Cl-"],
         "variants": null,
         "is_membrane": false,
         "lipid_type": null
