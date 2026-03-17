@@ -6,14 +6,16 @@ from typing import List, Optional
 from collections import Counter
 
 import MDAnalysis as mda
+from MDAnalysis.analysis.rms import RMSF
 import pytraj as pt
 from prolif import Fingerprint
 from rdkit import DataStructs
+from rdkit import Chem
+from rdkit.Chem.Draw import rdMolDraw2D, SimilarityMaps
 
-import matplotlib.pyplot as plt
-from matplotlib import style
 import seaborn as sns
-style.use("fivethirtyeight")
+import matplotlib.pyplot as plt
+import matplotlib.style as style
 style.use("fivethirtyeight")
 plt.rcParams["savefig.facecolor"] = 'white'
 plt.rcParams["savefig.edgecolor"] = 'white'
@@ -991,3 +993,73 @@ def _replace_line(lines: list,
             lines[i] = new_line + '\n'
             break
     return lines
+
+def plot_atomic_rmsf(u, lig_resname:str='UNK', outname:str='rmsf.png', log_rmsf:bool=True) -> None:
+    """
+    Draws a RMSF (Root Mean Square Fluctuation) plot for a specified ligand and saves it as an image file.
+    Parameters:
+    -----------
+    u : MDAnalysis.Universe
+        The MDAnalysis universe object containing the molecular dynamics trajectory and topology.
+    lig_resname : str, optional
+        The residue name of the ligand to analyze (default is 'UNK').
+    outname : str, optional
+        The name of the output image file where the RMSF plot will be saved (default is 'rmsf.png').
+    log_rmsf : bool, optional
+        If True, logs the RMSF values to a CSV file with the same name as the output image (default is False).
+    Returns:
+    --------
+    None
+        This function does not return any value. It saves the RMSF plot and optionally logs the RMSF values.
+    """
+
+    if outname.endswith('.svg'):
+        drawer = rdMolDraw2D.MolDraw2DSVG(300, 300)
+    else:
+        # Default to PNG if the file extension is not SVG
+        outname = outname.replace('.svg', '.png')
+        drawer = rdMolDraw2D.MolDraw2DCairo(300, 300)
+
+    lig_full = u.select_atoms(f'resname {lig_resname}')
+    lig_ha = u.select_atoms(f'resname {lig_resname} and not name H*')
+    r = RMSF(atomgroup=lig_ha).run()
+    probe_mol = lig_full.convert_to('RDKIT')
+    probe_mol.Compute2DCoords()
+    probe_mol = Chem.RemoveHs(probe_mol)
+    assert len(r.rmsf) == probe_mol.GetNumAtoms(), "Mismatch between RMSF length and atom count"
+
+    fig = SimilarityMaps.GetSimilarityMapFromWeights(mol=probe_mol, 
+                                                     weights=r.rmsf.tolist(), 
+                                                     draw2d=drawer,
+                                                     scale=2.0,
+                                                     step=0.1,
+                                                     alpha=0.5, 
+                                                     contourLines=5
+                                                     ) 
+    fig.FinishDrawing()
+    if outname.endswith('.svg'):
+        fig = fig.GetDrawingText()
+        with open(outname,'w+') as outf:
+            outf.write(fig)
+    else:
+        fig.WriteDrawingText(outname)
+
+    # Optionally, log the RMSF values for further analysis
+    if log_rmsf:
+        log_fname = os.path.splitext(outname)[0]
+        with open(f'{log_fname}.csv', 'w') as f:
+            for res_id, rmsf_value in enumerate(r.rmsf):
+                f.write(f'{res_id},{rmsf_value:.3f}\n')
+    return
+
+def plot_rmsd(rmsd_df:pd.DataFrame=None,
+              sys_name:str=None,
+              out_dir:str=None) -> None:
+    plt.figure(figsize=(10, 5))
+    sns.lineplot(data=rmsd_df, y="rmsd", x=rmsd_df.index)
+    plt.ylabel("RMSD (nm)");     plt.xlabel("Frame #")
+    plt.title(f"RMSD {sys_name}", fontsize=15)
+    plt.tight_layout()
+    plt.savefig(f"{out_dir}/{sys_name}_rmsd.png")
+    plt.close()
+    return

@@ -18,6 +18,7 @@ from openmm.unit import *
 
 # AutoPath imports
 from autopath.utils import *
+from autopath.ap_PLIP import plot_atomic_rmsf
 from autopath.analysis import *
 from autopath import (
     SystemPreparation,
