@@ -112,7 +112,8 @@ class SMDAnalysis:
             sMDDdata.filter_by_r_range(r_range, sMDDdata.r_column)
 
         traces_feat_df = sMDDdata.get_trace_features(
-            features=['lag','force','work','dW_protocol','r_before','NC'],
+            features=['lag','force','work','r_before'],
+            # features=['lag','dW_protocol','r_before'],           
         )
 
         dist_feat_df = None

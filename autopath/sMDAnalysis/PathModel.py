@@ -39,16 +39,20 @@ class DTWPathModel(PathModel):
                                      https://dtaidistance.readthedocs.io/en/latest/index.html
     """
     def __init__(self,
-                 seed: int = 42, 
+                 seed: int = 42,
                  do_plots: bool = True,
                  outdir: str = 'clustering_results',
+                 n_geom_pcs: int | None = 3,
+                 geom_feature_prefix: str = 'dist_',
                  ):
-        
+
         self.seed = seed
         self.outdir = outdir
         os.makedirs(self.outdir, exist_ok=True)
         self.do_plots = do_plots
         self._use_silhouette = True
+        self.n_geom_pcs = n_geom_pcs
+        self.geom_feature_prefix = geom_feature_prefix
 
         return None
     
@@ -147,6 +151,37 @@ class DTWPathModel(PathModel):
             vectors_stacked_scaled = [
                 scaler.transform(arr) for arr in vectors_stacked
             ]
+
+            # PCA reduction of geometric features to equalize contribution
+            # with trace features when both are present (merged feature mode).
+            geom_idx = [
+                i for i, c in enumerate(feature_cols)
+                if c.startswith(self.geom_feature_prefix)
+            ]
+            other_idx = [
+                i for i, c in enumerate(feature_cols)
+                if not c.startswith(self.geom_feature_prefix)
+            ]
+            if geom_idx and other_idx and self.n_geom_pcs is not None:
+                n_components = min(self.n_geom_pcs, len(geom_idx))
+                logger.info(
+                    f"Applying PCA to {len(geom_idx)} geometric features "
+                    f"(prefix='{self.geom_feature_prefix}') → {n_components} components."
+                )
+                X_geom_all = np.vstack([arr[:, geom_idx] for arr in vectors_stacked_scaled])
+                pca_geom = PCA(n_components=n_components)
+                pca_geom.fit(X_geom_all)
+                vectors_stacked_scaled = [
+                    np.hstack([
+                        pca_geom.transform(arr[:, geom_idx]),
+                        arr[:, other_idx],
+                    ])
+                    for arr in vectors_stacked_scaled
+                ]
+                logger.info(
+                    f"Geometric PCA explained variance: "
+                    f"{pca_geom.explained_variance_ratio_.sum()*100:.1f}%"
+                )
 
             # DTW distance matrix
             distmatrix = dtw_ndim.distance_matrix_fast(
@@ -282,7 +317,7 @@ class DTWPathModel(PathModel):
         sns.heatmap(distmatrix, cmap='viridis')
         plt.title('DTW Distance Matrix');         plt.xlabel('Trajectories')
         plt.ylabel('Trajectories')
-        plt.savefig(os.path.join(self.outdir, f'dtw_heatmap_v{self.speed_name}.png'))
+        plt.savefig(os.path.join(self.outdir, f'cluster_dtw_heatmap_v{self.speed_name}.png'))
         plt.tight_layout()
         plt.close()
         return
@@ -297,7 +332,7 @@ class DTWPathModel(PathModel):
         plt.ylabel("Silhouette score" if self._use_silhouette else "Score")
         plt.xticks(K_values)
         plt.tight_layout()
-        plt.savefig(os.path.join(self.outdir, f"elbowplot_v{self.speed_name}.png"))
+        plt.savefig(os.path.join(self.outdir, f"cluster_elbowplot_v{self.speed_name}.png"))
         plt.close()
         return
         
@@ -368,6 +403,6 @@ class DTWPathModel(PathModel):
         plt.ylabel(f"PC2 ({pca.explained_variance_ratio_[1]*100:.1f}%)")
         plt.title(f"PCA space - speed={self.speed_name} nm/ps")
         plt.tight_layout()
-        plt.savefig(os.path.join(self.outdir, f"pca_v{self.speed_name}.png"))
+        plt.savefig(os.path.join(self.outdir, f"cluster_pca_v{self.speed_name}.png"))
         plt.close()
         return

@@ -389,102 +389,112 @@ class SMDData:
         return df
 
     @staticmethod
-    def build_merged_features(trace_df: pd.DataFrame,
-                              geom_df: pd.DataFrame,
-                              tolerance_ps: float | None = None) -> pd.DataFrame:
+    def merge_feature_sets(*feature_dfs: pd.DataFrame,
+                           tolerance_ps: float | None = None) -> pd.DataFrame:
         """
-        Merge trace features (fine-grained, from get_trace_features) with
-        geometry/distance features (coarser, from calculate_pocket_distances)
-        using a nearest-time asof merge done per trajectory.
+        Merge N feature DataFrames using a nearest-time asof merge per trajectory.
 
-        This produces a combined feature table suitable for downstream
-        clustering (e.g. DTW-based path clustering on both force/work traces
-        and pocket-distance descriptors).
+        The first DataFrame is the reference (left side); subsequent DataFrames
+        are merged onto it one by one.  This allows combining any number of
+        feature sources — e.g. trace features, pocket distances, 3D ligand
+        descriptors — into a single feature table for downstream clustering.
+
+        All DataFrames must contain ``trajname`` and ``time`` columns.
+        Metadata columns shared with the reference (trajname, step, speed, …)
+        are taken from the reference to avoid duplicate columns.
 
         Parameters
         ----------
-        trace_df : pd.DataFrame
-            Output of :meth:`get_trace_features`.  Must contain ``trajname``
-            and ``time`` columns.
-        geom_df : pd.DataFrame
-            Output of :meth:`calculate_pocket_distances`.  Must contain
-            ``trajname`` and ``time`` columns.
+        *feature_dfs : pd.DataFrame
+            Two or more feature DataFrames.  The first is the reference.
         tolerance_ps : float or None
-            Maximum allowed time difference (in ps) for the asof merge.
-            Rows without a match within this tolerance are dropped.  If *None*
-            the nearest match is always kept regardless of distance.
+            Maximum allowed time gap (ps) for the asof match.  *None* always
+            keeps the nearest match.
 
         Returns
         -------
         pd.DataFrame
-            One row per geometry frame, augmented with the nearest trace-data
-            columns.
+            One row per reference frame, augmented with columns from all
+            subsequent DataFrames.
 
         Raises
         ------
         ValueError
-            If required columns are missing from either input.
+            If fewer than two DataFrames are provided, or required columns
+            are missing.
         RuntimeError
-            If no trajectories could be merged (e.g. disjoint trajnames or
-            incompatible time grids).
+            If no trajectories could be merged.
         """
-        for name, df in (("trace_df", trace_df), ("geom_df", geom_df)):
+        if len(feature_dfs) < 2:
+            raise ValueError("merge_feature_sets requires at least two DataFrames.")
+
+        for idx, df in enumerate(feature_dfs):
             if "trajname" not in df.columns:
-                raise ValueError(f"{name} is missing 'trajname' column")
+                raise ValueError(f"DataFrame {idx} is missing 'trajname' column")
             if "time" not in df.columns:
-                raise ValueError(f"{name} is missing 'time' column")
+                raise ValueError(f"DataFrame {idx} is missing 'time' column")
 
-        g = geom_df.copy()
-        r = trace_df.copy()
+        # Start with the reference (first df) and merge the rest onto it
+        result = feature_dfs[0].copy()
+        result["time"] = pd.to_numeric(result["time"], errors="coerce")
+        result = result.dropna(subset=["time"])
 
-        g["time"] = pd.to_numeric(g["time"], errors="coerce")
-        r["time"] = pd.to_numeric(r["time"], errors="coerce")
+        for right_df in feature_dfs[1:]:
+            r = right_df.copy()
+            r["time"] = pd.to_numeric(r["time"], errors="coerce")
+            r = r.dropna(subset=["time"])
 
-        g = g.dropna(subset=["time"])
-        r = r.dropna(subset=["time"])
-
-        merged_chunks = []
-
-        # only trajectories present in both DataFrames
-        common_traj = sorted(
-            set(g["trajname"].unique()) & set(r["trajname"].unique())
-        )
-
-        # Columns shared between both DataFrames (besides the merge key "time")
-        # are dropped from the right side to avoid _x/_y suffixes and to keep
-        # the left (geom) values for metadata like speed, trajname, step.
-        shared_cols = set(g.columns) & set(r.columns) - {"time"}
-        r_keep = [c for c in r.columns if c not in shared_cols]
-
-        for traj in common_traj:
-            g_traj = g[g["trajname"] == traj].sort_values("time").reset_index(drop=True)
-            r_traj = r.loc[r["trajname"] == traj, r_keep].sort_values("time").reset_index(drop=True)
-
-            if len(g_traj) == 0 or len(r_traj) == 0:
-                continue
-
-            kwargs = dict(
-                left=g_traj,
-                right=r_traj,
-                on="time",
-                direction="nearest",
-                allow_exact_matches=True,
-            )
-            if tolerance_ps is not None:
-                kwargs["tolerance"] = tolerance_ps
-
-            merged_traj = pd.merge_asof(**kwargs)
-            merged_traj["trajname"] = traj
-            merged_chunks.append(merged_traj)
-
-        if not merged_chunks:
-            raise RuntimeError(
-                "No trajectories could be merged. "
-                "Check that trajname and time columns are consistent between the two DataFrames."
+            common_traj = sorted(
+                set(result["trajname"].unique()) & set(r["trajname"].unique())
             )
 
-        merged = pd.concat(merged_chunks, ignore_index=True)
-        return merged
+            # Drop shared metadata columns from the right side to avoid _x/_y suffixes.
+            shared_cols = (set(result.columns) & set(r.columns)) - {"time"}
+            r_keep = [c for c in r.columns if c not in shared_cols]
+
+            merged_chunks = []
+            for traj in common_traj:
+                left_traj = result[result["trajname"] == traj].sort_values("time").reset_index(drop=True)
+                right_traj = r.loc[r["trajname"] == traj, r_keep].sort_values("time").reset_index(drop=True)
+
+                if len(left_traj) == 0 or len(right_traj) == 0:
+                    continue
+
+                kwargs = dict(
+                    left=left_traj,
+                    right=right_traj,
+                    on="time",
+                    direction="nearest",
+                    allow_exact_matches=True,
+                )
+                if tolerance_ps is not None:
+                    kwargs["tolerance"] = tolerance_ps
+
+                merged_traj = pd.merge_asof(**kwargs)
+                merged_traj["trajname"] = traj
+                merged_chunks.append(merged_traj)
+
+            if not merged_chunks:
+                raise RuntimeError(
+                    "No trajectories could be merged. "
+                    "Check that trajname and time columns are consistent between DataFrames."
+                )
+
+            result = pd.concat(merged_chunks, ignore_index=True)
+
+        return result
+
+    @staticmethod
+    def build_merged_features(trace_df: pd.DataFrame,
+                              geom_df: pd.DataFrame,
+                              tolerance_ps: float | None = None) -> pd.DataFrame:
+        """Merge geometry and trace feature DataFrames.
+
+        Convenience wrapper around :meth:`merge_feature_sets` that preserves
+        the original two-argument signature.  The geometry DataFrame is used
+        as the reference (left side) and trace features are merged onto it.
+        """
+        return SMDData.merge_feature_sets(geom_df, trace_df, tolerance_ps=tolerance_ps)
 
     def add_estimator_results(self, estimator_name: str, results_df: pd.DataFrame):
         """Store estimator results in the SMDData object.
