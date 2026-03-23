@@ -40,7 +40,7 @@ def plot_work_profiles(
     speeds = sorted(results['speed'].unique())
         
     fig, ax = plt.subplots(
-        figsize=(12, 4),
+        figsize=(12, 3),
         ncols=len(speeds),
         nrows=1,
         sharey=True,
@@ -192,7 +192,7 @@ def plot_profile(df: pd.DataFrame,
     g = sns.FacetGrid(
         df, col=col, row=row, hue=hue,
         sharey=True, sharex=True,
-        height=3.5, aspect=1.5,
+        height=4.0, aspect=1,
         margin_titles=True,
     )
     g.map_dataframe(plt.plot, 'r_coord', value_col)
@@ -528,9 +528,9 @@ def plot_extrapolated_param(df: pd.DataFrame = None,
     # Single colorbar outside the subplot area (bottom)
     sm = cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
-    fig.tight_layout(rect=[0.0, 0.14, 1.0, 1.0])
-    cbar_ax = fig.add_axes([0.20, 0.06, 0.60, 0.035])
-    fig.colorbar(sm, cax=cbar_ax, orientation='horizontal', label='$R^2$')
+    fig.tight_layout(rect=[0.0, 0.0, 0.88, 1.0])
+    cbar_ax = fig.add_axes([0.90, 0.15, 0.02, 0.70])
+    fig.colorbar(sm, cax=cbar_ax, orientation='vertical', label='$R^2$')
 
     plt.savefig(outfname, dpi=300, bbox_inches='tight')
     # plt.show()

@@ -452,7 +452,7 @@ class ProteinLigandAnalyzer:
                     gpu_resource="rtxa6000", 
                     gpu_num=1, 
                     time="0:10:00",
-                    omp_threads=222,
+                    omp_threads=223,
                     partition="highmem,shared,gpu"
                     ):
         """Function to write a SLURM qfile for MMPBSA calculations."""    
@@ -552,7 +552,7 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
         else:
             n_frames = len(u.trajectory)
             
-        mpi_threads = min(mpi_threads, n_frames) #avoid problems with too many threads
+        mpi_threads = min(mpi_threads, n_frames+1) #avoid problems with too many threads
         logger.info(f"Writing MMPBSA qfile for {sysname} with {n_frames} frames and {mpi_threads} MPI threads.")
 
         mmpbsa_template = _replace_line(mmpbsa_template,line_to_match='#startframe', 
