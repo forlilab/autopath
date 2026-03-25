@@ -29,6 +29,9 @@ setup(
     long_description=open(os.path.join(base_dir, 'README.md')).read(),
     long_description_content_type="text/markdown",
     packages=find_packages(exclude=['docs']),
+    package_data={
+        "autopath": ["data/*.json", "data/*.q"],
+    },
     scripts=['autopath/cli/run_AutoPath.py'
             ],
     zip_safe=False,
