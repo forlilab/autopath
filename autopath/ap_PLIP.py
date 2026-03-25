@@ -1,5 +1,6 @@
 import os
 import re
+import string
 import numpy as np
 import pandas as pd
 from typing import List, Optional
@@ -144,7 +145,7 @@ class ProteinLigandAnalyzer:
             protein_sel: str = "protein",
             traj_slice: tuple = None,
             cutoff: float = 3.5,
-            fraction_persistence: float = 0.5,
+            fraction_persistence: float = 0.9,
             pdb_fname: str = None,
     ):
         """
@@ -441,76 +442,53 @@ class ProteinLigandAnalyzer:
     # -----------------------------------------------------------
     @staticmethod
     def _write_qfile_mmpbsa(
-                    sysname:str=None,
-                    out_dir:str=None,
-                    mmpbsa_in:str=None,
-                    system_prmtop:str=None,
-                    trajectory:str=None,
-                    lig_selection:str=None,
-                    strip_selection:str=":POP:WAT:Na+:Cl-:Mg+:K+:HOH:NA:CL:K:MG",
-                    radii:str='mbondi2',
-                    gpu_resource="rtxa6000", 
-                    gpu_num=1, 
-                    time="0:10:00",
-                    omp_threads=223,
-                    partition="highmem,shared,gpu"
+                    sysname: str = None,
+                    out_dir: str = None,
+                    mmpbsa_in: str = None,
+                    system_prmtop: str = None,
+                    trajectory: str = None,
+                    lig_selection: str = None,
+                    strip_selection: str = ":POP:WAT:Na+:Cl-:Mg+:K+:HOH:NA:CL:K:MG",
+                    radii: str = 'mbondi2',
+                    time: str = "0:10:00",
+                    omp_threads: int = 223,
+                    partition: str = "highmem,shared,gpu",
+                    slurm_template_fname: str = None,
                     ):
-        """Function to write a SLURM qfile for MMPBSA calculations."""    
-        
-        template='''#!/bin/bash
-#SBATCH -e ${out_dir}/${sysname}_mmpbsa.err
-#SBATCH -o ${out_dir}/${sysname}_mmpbsa.out
-#SBATCH --time=${time}
-#SBATCH --partition=${partition}
-#SBATCH --exclude=nodea0111,nodea0110 # EXCLUDE KNOWN PROBLEMATIC NODES
-#SBATCH --ntasks=${omp_threads}  # Request 32 separate MPI processes/slots
-#SBATCH --cpus-per-task=1 # Each process uses 1 CPU. for MPI runs
-## SBATCH --cpus-per-task=${omp_threads} # Each process uses multiple CPUs. for OpenMP runs
-#SBATCH --job-name="mmpbsa_${sysname}"
+        """Write a SLURM qfile for MMPBSA calculations.
 
-# module purge
-module load openmpi/3.1.6
-# module load gcc
+        Parameters
+        ----------
+        slurm_template_fname : str, optional
+            Path to a custom SLURM bash template. If None, uses the bundled
+            autopath/data/mmpbsa_slurm_template.q. The template must use
+            ${variable} placeholders. Shell command substitutions like $(date)
+            must be written as $$(date) in the template file.
+        """
+        if slurm_template_fname is None:
+            slurm_template_fname = os.path.join(
+                os.path.dirname(__file__), "data", "mmpbsa_slurm_template.q"
+            )
 
-source ~/.bashrc
-micromamba activate autopath
+        with open(slurm_template_fname, "r") as f:
+            tmpl = string.Template(f.read())
 
-module load amber/24
-#export OMP_NUM_THREADS=${omp_threads}
-
-echo "Starting mmpbsa calculation for ${sysname} at $(date)"
-echo "Running on $(hostname)"
-echo "Entering output directory ${out_dir} ..."
-cd ${out_dir}
-
-echo "Running ante-mmpbsa to generate prmtop files..."
-ante-MMPBSA.py -p ${system_prmtop} -s "${strip_selection}" -n ${lig_selection} --radii ${radii} -c complex.prmtop -r receptor.prmtop -l ligand.prmtop
-
-echo "Finished ante-mmpbsa at $(date)"
-echo "Running mmpbsa.py for trajectory ${trajectory} ..."
-
-# MMPBSA.py -O -i ${mmpbsa_in} -o FINAL_RESULTS_mmpbsa.dat -do FINAL_DECOMP_mmpbsa.dat -sp ${system_prmtop} -y ${trajectory} -cp complex.prmtop -rp receptor.prmtop -lp ligand.prmtop
-mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} -o FINAL_RESULTS_mmpbsa.dat -do FINAL_DECOMP_mmpbsa.dat -sp ${system_prmtop} -y ${trajectory} -cp complex.prmtop -rp receptor.prmtop -lp ligand.prmtop
-
-    '''
+        rendered = tmpl.substitute(
+            sysname=sysname,
+            out_dir=out_dir,
+            mmpbsa_in=mmpbsa_in,
+            system_prmtop=system_prmtop,
+            trajectory=trajectory,
+            lig_selection=lig_selection,
+            strip_selection=strip_selection,
+            radii=radii,
+            time=time,
+            omp_threads=str(omp_threads),
+            partition=partition,
+        )
 
         with open(f"qfiles_mmpbsa/{sysname}_mmpbsa.q", "w") as f:
-            template = template.replace("${sysname}", sysname)
-            template = template.replace("${out_dir}", out_dir)
-            template = template.replace("${mmpbsa_in}", mmpbsa_in)
-            template = template.replace("${system_prmtop}", system_prmtop)
-            template = template.replace("${trajectory}", trajectory)
-            template = template.replace("${lig_selection}", lig_selection)
-            template = template.replace("${strip_selection}", strip_selection)
-            template = template.replace("${radii}", radii)
-            template = template.replace("${gpu_resource}", gpu_resource)
-            template = template.replace("${gpu_num}", str(gpu_num))
-            template = template.replace("${time}", time)
-            template = template.replace("${omp_threads}", str(omp_threads))
-            template = template.replace("${partition}", partition)
-            f.write(template)
-
-        return
+            f.write(rendered)
     
     @staticmethod
     def prepare_mmpbsa_batch(
@@ -527,6 +505,7 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
             output_folder:str="mmpbsa_results",
             bash_fname:str="run_mmpbsa_batch.sh",
             mpi_threads:int=256,
+            slurm_template_fname:str=None,
             ):
         """Prepare MMPBSA batch script and qfiles."""
         
@@ -603,7 +582,8 @@ mpirun -np ${omp_threads} --display-allocation MMPBSA.py.MPI -O -i ${mmpbsa_in} 
                                                 lig_selection=ligand_amber_selection,
                                                 strip_selection=strip_amber_selection,
                                                 radii=radii,
-                                                omp_threads=mpi_threads
+                                                omp_threads=mpi_threads,
+                                                slurm_template_fname=slurm_template_fname,
                                                 )
         
         # update batch bash script with all qfiles in folder
