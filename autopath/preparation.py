@@ -305,6 +305,8 @@ class SystemPreparation:
                     lipidType=lipid_patch,
                     neutralize=True,
                     ionicStrength=self.ionicStrength,
+                    positiveIon=self.ions[0],
+                    negativeIon=self.ions[1],
                     minimumPadding=self.padding + max_length,
                 )
 
