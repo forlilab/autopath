@@ -1,6 +1,7 @@
 import os
 import shutil
 import logging
+import tempfile
 import requests
 import numpy as np
 import pandas as pd
@@ -423,6 +424,165 @@ def save_receptor_and_ligand_from_openmm(
     return 
 
 
+def _create_cap_universe(n_atoms, name, resname, positions, resids, segid):
+    u_new = mda.Universe.empty(
+        n_atoms=n_atoms,
+        n_residues=n_atoms,
+        atom_resindex=np.arange(n_atoms),
+        residue_segindex=np.arange(n_atoms),
+        n_segments=n_atoms,
+        trajectory=True,
+    )
+    u_new.add_TopologyAttr('name', name)
+    u_new.add_TopologyAttr('resid', resids)
+    u_new.add_TopologyAttr('resname', resname)
+    u_new.atoms.positions = positions
+    u_new.add_TopologyAttr('segid', n_atoms * [segid])
+    u_new.add_TopologyAttr('chainID', n_atoms * [segid])
+    return u_new
+
+
+def _get_nme_pos(end_residue):
+    if "OXT" in end_residue.names:
+        index = np.where(end_residue.names == "OXT")[0][0]
+        N_position = end_residue.positions[index]
+        index_c = np.where(end_residue.names == "C")[0][0]
+        carbon_position = end_residue.positions[index_c]
+        vector = N_position - carbon_position
+        vector /= np.sqrt(sum(vector**2))
+        C_position = N_position + vector * 1.36
+    else:
+        index_o = np.where(end_residue.names == "O")[0][0]
+        index_ca = np.where(end_residue.names == "CA")[0][0]
+        mid_point = (end_residue.positions[index_o] + end_residue.positions[index_ca]) / 2
+        index_c = np.where(end_residue.names == "C")[0][0]
+        vector = end_residue.positions[index_c] - mid_point
+        vector /= np.sqrt(sum(vector**2))
+        N_position = end_residue.positions[index_c] + 1.36 * vector
+        C_position = N_position + 1.36 * vector
+    return N_position, C_position
+
+
+def _get_ace_pos(end_residue):
+    index_ca = np.where(end_residue.names == "CA")[0][0]
+    index_n = np.where(end_residue.names == "N")[0][0]
+    vector = end_residue.positions[index_n] - end_residue.positions[index_ca]
+    vector /= np.sqrt(sum(vector**2))
+    C1_position = end_residue.positions[index_n] + 1.36 * vector
+
+    xa, ya, za = end_residue.positions[index_ca]
+    xg, yg, zg = C1_position
+
+    orientation = np.array([2 * np.random.rand() - 1, 2 * np.random.rand() - 1, 2 * np.random.rand() - 1])
+    nx, ny, nz = orientation / np.sqrt(sum(orientation**2))
+
+    x1 = xg - (xa - xg) / 2 + np.sqrt(3) * (ny * (za - zg) - nz * (ya - yg)) / 2
+    y1 = yg - (ya - yg) / 2 + np.sqrt(3) * (nz * (xa - xg) - nx * (za - zg)) / 2
+    z1 = zg - (za - zg) / 2 + np.sqrt(3) * (nx * (ya - yg) - ny * (xa - xg)) / 2
+
+    x2 = xg - (xa - xg) / 2 - np.sqrt(3) * (ny * (za - zg) - nz * (ya - yg)) / 2
+    y2 = yg - (ya - yg) / 2 - np.sqrt(3) * (nz * (xa - xg) - nx * (za - zg)) / 2
+    z2 = zg - (za - zg) / 2 - np.sqrt(3) * (nx * (ya - yg) - ny * (xa - xg)) / 2
+
+    C2_position = np.array([x1, y1, z1])
+    O_position = np.array([x2, y2, z2])
+
+    vector = C2_position - C1_position
+    vector /= np.sqrt(sum(vector**2))
+    C2_position = C1_position + 1.36 * vector
+
+    vector = O_position - C1_position
+    vector /= np.sqrt(sum(vector**2))
+    O_position = C1_position + 1.36 * vector
+
+    return C1_position, C2_position, O_position
+
+
+def _apply_caps(pdb_in: str, pdb_out: str) -> None:
+    """Add ACE (N-terminus) and NME (C-terminus) capping groups to all protein chains.
+
+    Expects a hydrogen-free input PDB. Non-protein atoms (waters, ions) are
+    preserved unchanged. Writes the capped structure to pdb_out.
+    Implementation from https://github.com/ibrahim-mohd/Add-NME-ACE-residues-to-protein-terminal-residues
+    
+    """
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        u = mda.Universe(pdb_in)
+
+    # Work on protein only for capping; preserve non-protein atoms separately
+    protein_sel = u.select_atoms("protein")
+    non_protein_sel = u.select_atoms("not protein")
+
+    if len(protein_sel) == 0:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            u.atoms.write(pdb_out)
+        return
+
+    protein_u = mda.Merge(protein_sel)
+
+    res_start = 0
+    segment_universes = []
+
+    for seg in protein_u.segments:
+        segid = seg.segid
+
+        # ACE at N-terminus
+        first_res = seg.residues[0].atoms
+        ace_positions = _get_ace_pos(first_res)
+        ace_names = ["C", "CH3", "O"]
+        resid = seg.residues[0].resid
+        ace_universe = _create_cap_universe(
+            n_atoms=len(ace_positions),
+            name=ace_names,
+            resname=len(ace_names) * ["ACE"],
+            positions=ace_positions,
+            resids=resid * np.ones(len(ace_names)),
+            segid=segid,
+        )
+
+        # NME at C-terminus
+        last_res = seg.residues[-1].atoms
+        nme_positions = _get_nme_pos(last_res)
+        nme_names = ["N", "C"]
+        resid = seg.residues[-1].resid + 2
+        nme_universe = _create_cap_universe(
+            n_atoms=len(nme_names),
+            name=nme_names,
+            resname=len(nme_names) * ["NME"],
+            positions=nme_positions,
+            resids=resid * np.ones(len(nme_names)),
+            segid=segid,
+        )
+
+        # Remove OXT if present before merging
+        if "OXT" in last_res.names:
+            oxt_index = last_res.select_atoms("name OXT")[0].index
+            Chain = seg.atoms.select_atoms(f"not index {oxt_index}")
+        else:
+            Chain = seg.atoms
+
+        u_all = mda.Merge(ace_universe.atoms, Chain, nme_universe.atoms)
+
+        resids_ace = [res_start + 1] * 3
+        resids_pro = np.arange(resids_ace[0] + 1, Chain.residues.n_residues + resids_ace[0] + 1)
+        resids_nme = [resids_pro[-1] + 1, resids_pro[-1] + 1]
+        u_all.atoms.residues.resids = np.concatenate([resids_ace, resids_pro, resids_nme])
+
+        res_start = u_all.atoms.residues.resids[-1]
+        segment_universes.append(u_all)
+
+    parts = [seg.atoms for seg in segment_universes]
+    if len(non_protein_sel) > 0:
+        parts.append(non_protein_sel)
+    all_uni = mda.Merge(*parts)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        all_uni.atoms.write(pdb_out)
+
+
 def fix_pdb(
     pdbfile: str,
     replace_nonstandard_residues: bool = True,
@@ -430,6 +590,7 @@ def fix_pdb(
     ignore_terminal_missing_residues: bool = False,
     pH: float = 7.4,
     discard_input_hydrogens: bool = False,
+    cap_termini: bool = False,
 ) -> PDBFixer:
     """Fixes common problems in PDB such as:
             - missing atoms
@@ -444,6 +605,7 @@ def fix_pdb(
         ignore_terminal_missing_residues (bool): If missing residues at the beginning and the end of a chain should be ignored or built.
         pH (float):  pH value used to determine protonation state of residues
         discard_input_hydrogens (bool): removes all hydrogens from input structure (then readd with PDBFixer)
+        cap_termini (bool): if True, add ACE and NME neutral terminal capping groups to each chain before adding hydrogens.
     """
 
     fixer = PDBFixer(str(pdbfile))
@@ -475,6 +637,18 @@ def fix_pdb(
 
     fixer.findMissingAtoms()
     fixer.addMissingAtoms()
+
+    if cap_termini:
+        with tempfile.NamedTemporaryFile(suffix='.pdb', delete=False) as tmp_in, \
+             tempfile.NamedTemporaryFile(suffix='.pdb', delete=False) as tmp_out:
+            tmp_in_path = tmp_in.name
+            tmp_out_path = tmp_out.name
+        app.PDBFile.writeFile(fixer.topology, fixer.positions, tmp_in_path, keepIds=True)
+        _apply_caps(tmp_in_path, tmp_out_path)
+        fixer = PDBFixer(tmp_out_path)
+        os.unlink(tmp_in_path)
+        os.unlink(tmp_out_path)
+
     fixer.addMissingHydrogens(pH)
 
     return fixer

@@ -153,7 +153,9 @@ class AutoPath:
 
         # Process the input PDB
         if do_fix_pdb:
-            protein_pdb = fix_pdb(pdbfile=pdb_path, keep_heterogens=True, pH=7.4)
+            protein_pdb = fix_pdb(pdbfile=pdb_path, 
+                                  cap_termini=True,
+                                  keep_heterogens=True, pH=7.4)
             self.protein_file = pdb_path.replace(".pdb", "_fixed.pdb")
             save_pdb(protein_pdb.topology, protein_pdb.positions, self.protein_file)
         else:
