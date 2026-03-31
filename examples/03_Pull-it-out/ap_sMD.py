@@ -14,12 +14,8 @@ def cmd_lineparser():
     parser = argparse.ArgumentParser(
         description="Runs steered molecular dynamics simulation (sMD) for a protein-ligand complex.",
         epilog="""
-        REPORTING BUGS
-                Please report bugs to:
-                AutoDock mailing list   http://autodock.scripps.edu/mailing_list\n
-
         COPYRIGHT
-                Copyright (C) 2025 Forli Lab, Center for Computational Structural Biology,
+                Copyright (C) 2026 Forli Lab, Center for Computational Structural Biology,
                              Scripps Research.""",
     )
 
@@ -38,26 +34,27 @@ def main():
 
     args = cmd_lineparser()
     sys_name = args.sysname
+        
+    DATADIR = f'/gpfs/home/mllanos/forlilab/autopath/examples/01_Build_and_Equilibrate/{sys_name}'
+    N_REPS = 10 # how many pulling replicates to run
+    DIRECTION = 'forward' # 'forward' or 'backward'
+    SPEED = 0.01 #nm/ps
+    DX_PER_MOVE = 0.001 #nm, how often to update the reference position for the spring
+    SPRING_CTE = 50 * 4.184  # KJ/mol/nm2/atom, converted from kcal. This affects thermal fluctuations
     
     # Setup logging
     logger = setup_logging(f"{sys_name}/autopath.log", log_level="INFO")
-    logger.info("Starting equilibration process")
+    logger.info(f"Starting steered MD simulations for {sys_name} with {N_REPS} replicates in {DIRECTION} direction.")
     
-    N_REPS = 50 # how many pulling replicates to run
-    DIRECTION = 'forward' # 'forward' or 'backward'
-    SPEED = 0.005 #nm/ps
-    sMD_spring_cte_per_atom = 50 * 4.184  # KJ/mol/nm2, converted from kcal. This affects thermal fluctuations
-
     ligand_resname = "UNK"  # Change this to your ligand residue name
-    # pocket_residues = [218, 219, 262, 263, 305, 306, 49, 50, 91, 92, 133, 134, 175, 176]  # Change this to your pocket residue IDs
     pocket_residues = [134, 135, 136, 137, 138, 139, 140, 157, 158, 159, 160, 161, 162, 180,
                        181, 182, 183, 211, 212, 213, 214, 215, 226, 227, 228, 229]
-    checkpoint = f'../mdprep_and_eq/{sys_name}/equilibration/checkpoint_equil_{sys_name}.chk'
-    system_fname = f'../mdprep_and_eq/{sys_name}/equilibration/system_equil_{sys_name}.xml'
+    
+    checkpoint = f'{DATADIR}/equilibration/checkpoint_equil_{sys_name}.chk'
+    system_fname = f'{DATADIR}/equilibration/system_equil_{sys_name}.xml'
     system = load_system(system_fname)
-    prmtop_fname = f'../mdprep_and_eq/{sys_name}/system.prmtop'
-    # topology = AmberPrmtopFile(prmtop_fname).topology
-    pdb_fname = f'../mdprep_and_eq/{sys_name}/equilibration/{sys_name}_equilibrated.pdb'
+    prmtop_fname = f'{DATADIR}/system.prmtop'
+    pdb_fname = f'{DATADIR}/equilibration/{sys_name}_equilibrated.pdb'
     topology = PDBFile(pdb_fname).topology
     
     u = mda.Universe(pdb_fname)
@@ -72,7 +69,7 @@ def main():
     ###################################### Steered MD ######################################
     ########################################################################################
 
-    sMD_spring_cte = sMD_spring_cte_per_atom * len(ligand_atoms_idx)  # Normalize by ligand size
+    sMD_spring_cte = SPRING_CTE * len(ligand_atoms_idx)  # Normalize by ligand size
     logger.info(f"sMD spring constant set to {sMD_spring_cte} KJ/mol/nm2 for ligand of {len(ligand_atoms_idx)} atoms.")
     
     # Run steered MD
@@ -81,7 +78,7 @@ def main():
         topology=topology,
         groupA_atoms=ligand_atoms_idx,
         groupB_atoms=pocket_atoms_idx,
-        restrained_atoms=None, #restrained_atoms_indices,
+        restrained_atoms=None,
         restart_velocities=True,
         autostop_freq=50,
         out_dir=f"{sys_name}/sMD",
@@ -89,20 +86,20 @@ def main():
 
     for rep_idx in range(1, N_REPS+1):
         rep_id = sMD.run(
-                # max_time=1500, #ps
                 max_displacement=2.5, #nm 
-                # steps_per_move=2500,
-                dx_per_move=0.001, #nm
+                dx_per_move=DX_PER_MOVE, #nm
                 pulling_speed=SPEED, #nm/ps
                 sMD_spring_cte=sMD_spring_cte,
                 checkpoint_file=checkpoint,
-                pdb_file=None,
                 pulling_direction=DIRECTION,
                 )
-    
+        
+        logger.info(f"Completed sMD replicate {rep_idx}/{N_REPS} with ID: {rep_id}")
 
         ####################### Post-processing ######################
-        ### Wrap, align and save the clean trajectory
+        ########## Wrap, align and save the clean trajectory #########
+        ##############################################################
+        
         smd_traj = f"{sys_name}/sMD/sMD_{rep_id}.dcd"
         traj = md.load(smd_traj, top=prmtop_fname)
         traj = traj.center_coordinates()
@@ -111,9 +108,9 @@ def main():
             backbone = traj.topology.select("backbone")
             traj = traj.superpose(traj[0], atom_indices=backbone)
         except Exception as e:
-            logging.warning(f"Superposition failed: {e}. Proceeding without superposition.")
+            logger.warning(f"Superposition failed: {e}. Proceeding without superposition.")
         traj.save(smd_traj.replace(".dcd", "_aligned.dcd"))
-        # os.remove(smd_traj)
+        os.remove(smd_traj)
     
     return
 

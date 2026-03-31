@@ -12,14 +12,11 @@ from openmm.app import PDBFile
 
 def cmd_lineparser():
     parser = argparse.ArgumentParser(
-        description="Runs equilibration of a protein-ligand system.",
+        description="This script prepares and equilibrates a protein-ligand system using Autopath.",
+        
         epilog="""
-        REPORTING BUGS
-                Please report bugs to:
-                AutoDock mailing list   http://autodock.scripps.edu/mailing_list\n
-
         COPYRIGHT
-                Copyright (C) 2025 Forli Lab, Center for Computational Structural Biology,
+                Copyright (C) 2026 Forli Lab, Center for Computastional Structural Biology,
                              Scripps Research.""",
     )
 
@@ -115,7 +112,8 @@ def main():
         fixed_receptor = fix_pdb(pdbfile=receptor, 
                             replace_nonstandard_residues=True,
                             ignore_terminal_missing_residues=True,
-                            keep_heterogens=True, 
+                            keep_heterogens=True,
+                            cap_termini=True,
                             pH=7.4
                             )
         pdb_name = os.path.splitext(os.path.basename(receptor))[0]

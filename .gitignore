@@ -1,7 +1,11 @@
 scratch/*
-examples/*
+examples/*/3ptb/*
+*.err
+*.out
+
 *.dcd
 *.xtc
+.github/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
