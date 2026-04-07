@@ -1,0 +1,34 @@
+&general
+# take only 10-50ns for analysis
+use_sander=1,
+
+#startframe = 1,
+#endframe = 222,
+#interval = 1,
+
+# Calculate entropy with quasi-harmonic entropy approximation
+#entropy=1,
+
+# Keep all (temporary files) for later use of MMPBSA_API
+keep_files=0, 
+
+# Print all errors and tracebacks
+debug_printlevel=2, 
+
+# Use NetCDF
+netcdf=1,
+
+strip_mask= ":K+:Cl-:CL:CIO:CS:IB:K:LI:MG:NA:RB:PC:PA:OL:POP:WAT:Na+:Cl-:Mg+:K+:HOH:NA:CL:K:MG"
+
+/
+&gb
+igb=8,
+saltcon=0.15,
+
+/
+&decomp
+csv_format=1,
+idecomp=1,
+dec_verbose=3,
+#print_res=
+/
