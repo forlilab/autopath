@@ -451,7 +451,7 @@ class ProteinLigandAnalyzer:
                     strip_selection: str = ":POP:WAT:Na+:Cl-:Mg+:K+:HOH:NA:CL:K:MG",
                     radii: str = 'mbondi2',
                     time: str = "0:10:00",
-                    omp_threads: int = 223,
+                    omp_threads: int = 222,
                     partition: str = "highmem,shared,gpu",
                     slurm_template_fname: str = None,
                     ):
@@ -504,7 +504,7 @@ class ProteinLigandAnalyzer:
             radii:str='mbondi2',
             output_folder:str="mmpbsa_results",
             bash_fname:str="run_mmpbsa_batch.sh",
-            mpi_threads:int=256,
+            mpi_threads:int=222,
             slurm_template_fname:str=None,
             ):
         """Prepare MMPBSA batch script and qfiles."""
@@ -531,11 +531,11 @@ class ProteinLigandAnalyzer:
         else:
             n_frames = len(u.trajectory)
             
-        mpi_threads = min(mpi_threads, n_frames+1) #avoid problems with too many threads
+        mpi_threads = min(mpi_threads, n_frames) #avoid problems with too many threads
         logger.info(f"Writing MMPBSA qfile for {sysname} with {n_frames} frames and {mpi_threads} MPI threads.")
 
         mmpbsa_template = _replace_line(mmpbsa_template,line_to_match='#startframe', 
-                                            new_line=f'startframe = {start if start is not None else 0},'
+                                            new_line=f'startframe = {start if start is not None else 1},'
                                             )
         mmpbsa_template = _replace_line(mmpbsa_template,line_to_match='#endframe', 
                                             new_line=f'endframe = {end if end is not None else len(u.trajectory)},'
