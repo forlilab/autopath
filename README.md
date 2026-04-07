@@ -4,24 +4,19 @@
 [![made-with-python](https://img.shields.io/badge/Made%20with-Python-1f425f.svg)](https://www.python.org/)       
 [![Powered by RDKit](https://img.shields.io/badge/Powered%20by-RDKit-3838ff.svg?logo=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQBAMAAADt3eJSAAAABGdBTUEAALGPC/xhBQAAACBjSFJNAAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAAFVBMVEXc3NwUFP8UPP9kZP+MjP+0tP////9ZXZotAAAAAXRSTlMAQObYZgAAAAFiS0dEBmFmuH0AAAAHdElNRQfmAwsPGi+MyC9RAAAAQElEQVQI12NgQABGQUEBMENISUkRLKBsbGwEEhIyBgJFsICLC0iIUdnExcUZwnANQWfApKCK4doRBsKtQFgKAQC5Ww1JEHSEkAAAACV0RVh0ZGF0ZTpjcmVhdGUAMjAyMi0wMy0xMVQxNToyNjo0NyswMDowMDzr2J4AAAAldEVYdGRhdGU6bW9kaWZ5ADIwMjItMDMtMTFUMTU6MjY6NDcrMDA6MDBNtmAiAAAAAElFTkSuQmCC)](https://www.rdkit.org/)
 [![Powered by MDAnalysis](https://img.shields.io/badge/powered%20by-MDAnalysis-orange.svg?logoWidth=16&logo=data:image/x-icon;base64,AAABAAEAEBAAAAEAIAAoBAAAFgAAACgAAAAQAAAAIAAAAAEAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJD+XwCY/fEAkf3uAJf97wGT/a+HfHaoiIWE7n9/f+6Hh4fvgICAjwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACT/yYAlP//AJ///wCg//8JjvOchXly1oaGhv+Ghob/j4+P/39/f3IAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJH8aQCY/8wAkv2kfY+elJ6al/yVlZX7iIiI8H9/f7h/f38UAAAAAAAAAAAAAAAAAAAAAAAAAAB/f38egYF/noqAebF8gYaagnx3oFpUUtZpaWr/WFhY8zo6OmT///8BAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgICAn46Ojv+Hh4b/jouJ/4iGhfcAAADnAAAA/wAAAP8AAADIAAAAAwCj/zIAnf2VAJD/PAAAAAAAAAAAAAAAAICAgNGHh4f/gICA/4SEhP+Xl5f/AwMD/wAAAP8AAAD/AAAA/wAAAB8Aov9/ALr//wCS/Z0AAAAAAAAAAAAAAACBgYGOjo6O/4mJif+Pj4//iYmJ/wAAAOAAAAD+AAAA/wAAAP8AAABhAP7+FgCi/38Axf4fAAAAAAAAAAAAAAAAiIiID4GBgYKCgoKogoB+fYSEgZhgYGDZXl5e/m9vb/9ISEjpEBAQxw8AAFQAAAAAAAAANQAAADcAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAjo6Mb5iYmP+cnJz/jY2N95CQkO4pKSn/AAAA7gAAAP0AAAD7AAAAhgAAAAEAAAAAAAAAAACL/gsAkv2uAJX/QQAAAAB9fX3egoKC/4CAgP+NjY3/c3Nz+wAAAP8AAAD/AAAA/wAAAPUAAAAcAAAAAAAAAAAAnP4NAJL9rgCR/0YAAAAAfX19w4ODg/98fHz/i4uL/4qKivwAAAD/AAAA/wAAAP8AAAD1AAAAGwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAALGxsVyqqqr/mpqa/6mpqf9KSUn/AAAA5QAAAPkAAAD5AAAAhQAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADkUFBSuZ2dn/3V1df8uLi7bAAAATgBGfyQAAAA2AAAAMwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB0AAADoAAAA/wAAAP8AAAD/AAAAWgC3/2AAnv3eAJ/+dgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA9AAAA/wAAAP8AAAD/AAAA/wAKDzEAnP3WAKn//wCS/OgAf/8MAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIQAAANwAAADtAAAA7QAAAMAAABUMAJn9gwCe/e0Aj/2LAP//AQAAAAAAAAAA)](https://www.mdanalysis.org)
-# AutoPath: A Flexible Pipeline for Protein-Ligand Unbinding Simulations
+# AutoPath: A Flexible Framework for Protein-Ligand Unbinding Simulations
 
 **AutoPath**
 
 AutoPath is a modular and extensible framework designed, primarely, for running and analyzing protein-ligand unbinding simulations. AutoPath aims to bridge the gap between **high-throughput docking** and **high-cost physics-based refinement**. It is built for fast, reproducible triage of compounds after virtual screening, helping distinguish the **good, the bad, and the ugly** before expensive downstream simulations.
 
-. It integrates preparation, equilibration, milestone extraction, and enhanced sampling in a single interface, enabling efficient exploration of ligand dissociation pathways.
- using steered molecular dynamics (SMD) and metadynamics with OpenMM
+It integrates system assembly and parameterization, equilibration, and enhanced sampling in a single interface, enabling efficient exploration of ligand dissociation pathways
 
 Predicting ligand binding is a dual problem: **thermodynamics** (how strongly a ligand binds) and **kinetics** (how long it stays bound). Docking scales well but is often noisy; rigorous free-energy workflows can be accurate but computationally expensive.
-
-AutoPath is an open-source, Python-based framework that bridges the  
-
 AutoPath is designed for the practical middle ground:
 
-- Prioritize compounds by relative behavior, not absolute perfection
-- Couple stability, pathway consistency, and free-energy signals
-- Enable faster enrichment after large docking campaigns
+- Prioritize compounds by relative behavior.
+- Improve the hit enrichment after large docking campaigns
 - Keep workflows modular, reproducible, and scriptable end-to-end
 
 ---
@@ -32,9 +27,7 @@ AutoPath is designed for the practical middle ground:
 
 While it was initially designed for **small molecule–protein** systems, the Autopath pipeline can applied to **protein–protein assemblies** or **small molecule–nucleic acid complexes**. Moreover
 - Solvation, with optional membrane support using single-lipid bilayers or custom lipid patches.
-
 - Membrane-associated targets 
-
 The framework supports force fields available in OpenMM and multiple ligand parameterization strategies, including Espaloma, OpenFF, and GAFF2.
 
 ---
@@ -52,7 +45,7 @@ AutoPath orchestrates a complete workflow, from protein–ligand complexes to ac
 	- JSON-driven staged minimization, heating, and MD (NVT/NPT)
 	- Component-wise restraints using MDAnalysis selections.
 
-	An example template can be found at `autopath/data/equilibration_lig_prot_memb.json`
+	A detailed example of how to assemble and equilibrate a protein-ligand system can be found at `autopath/examples/01_Build_and_Equilibrate`
 
 3. **🎯 Steered MD (sMD)**
 	- Forward/backward pulling protocols
@@ -89,7 +82,8 @@ micromamba activate autopath
 micromamba install -c conda-forge \
   openmm openmmtools espaloma pdbfixer parmed mdanalysis ambertools \
   rdkit pandas deeptime kmedoids dtaidistance pymol-open-source \
-  "openff-toolkit>=0.17" "openff-forcefields==2026.01.0" -y
+  "openff-toolkit>=0.17" "openff-forcefields==2026.01.0" \
+  molscrub meeko -y
 
 micromamba install -c mdtools cvpack -y
 ```
@@ -146,38 +140,28 @@ AutoPath config files are organized into sections:
 An example template can be found @ `autopath/data/config.json`
 ---
 
-## 📊 Outputs
-
-Per system, AutoPath generates organized outputs such as:
-
-- Prepared models (`system.xml`, `system.pdb`, `system.prmtop`)
-- Equilibration trajectories and checkpoints
-- sMD trajectories, logs, and path-analysis artifacts
-- Milestone snapshots and relaxed states
-- Metadynamics bias/COLVAR files and free-energy surfaces
-
----
-
 ## 📚 Examples
 
-- `examples/mdprep_and_eq` — setup + equilibration
-- `examples/sMD` — steered MD workflows
-- `examples/WTmetaD_COM` — COM-based well-tempered metadynamics
-- `examples/vanillaMD` — conventional production MD
-- `examples/dockprep` — docking-oriented preparation
+- `examples/01_Build_and_Equilibrate` — setup + equilibration
+- `examples/03_Pull-it-out` — steered MD workflow
+- `examples/04_Full-Pipeline` — Full stack of autopath pipeline
+- `examples/05_VanillaMD` — conventional production MD
+- `examples/06_Docking_PrEP` — receptor/ligand preparation for docking
+- `examples/07_WTmetaD_COM` — COM-based well-tempered metadynamics
 
 ---
 
 ## 🧠 Python API
 
-AutoPath is also usable programmatically through key classes:
+AutoPath is also usable programmatically through key classes, so you can build up your own pipeline:
 
 - `SystemPreparation`
 - `Equilibration`
 - `SteeredMD`
+- `SMDAnalysis`
 - `MetadynamicsMD`
 - `VanillaMD`
-- `RelaxMD`
+- `ProteinLigandAnalyzer`
 
 ---
 
