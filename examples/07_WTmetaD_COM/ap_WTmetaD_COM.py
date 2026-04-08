@@ -8,6 +8,8 @@ import mdtraj as md
 from autopath import MetadynamicsMD
 from autopath.cv import com_cv
 from autopath.utils import load_system, calculate_com_distance
+from autopath.utils import setup_logging
+
 from openmm.app import PDBFile
 
 def cmd_lineparser():
@@ -45,37 +47,31 @@ def main():
     # If you only have few ligands it might be faster to spread the walkers across GPUs and run this in parallel.
     N_WALKERS = 3
     ligand_resname = "UNK"  # Change this to your ligand residue name
-    pocket_residues = [218, 219, 262, 263, 305, 306, 49, 50, 91, 92, 133, 134, 175, 176]  # Change this to your pocket residue IDs
-
+    pocket_selection = '(resid 145-153 183-190) and name CA'
+    
     # Setup logging
-    os.makedirs(sys_name, exist_ok=True)
-    logging.basicConfig(
-    level="INFO",
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(f"{sys_name}/{sys_name}.log", mode="a"),
-        logging.StreamHandler(),
-    ],
-    )
+    logger = setup_logging(f"{sys_name}/autopath.log", log_level="INFO")
     
     checkpoint = f'../01_Build_and_Equilibrate/{sys_name}/equilibration/checkpoint_equil_{sys_name}.chk'
     system_fname = f'../01_Build_and_Equilibrate/{sys_name}/equilibration/system_equil_{sys_name}.xml'
-    system = load_system(system_fname)
     prmtop_fname = f'../01_Build_and_Equilibrate/{sys_name}/system.prmtop'
-    # topology = AmberPrmtopFile(prmtop_fname).topology
     pdb_fname = f'../01_Build_and_Equilibrate/{sys_name}/equilibration/{sys_name}_equilibrated.pdb'
+    # topology = AmberPrmtopFile(prmtop_fname).topology
+    
     topology = PDBFile(pdb_fname).topology
+    system = load_system(system_fname)
 
     u = mda.Universe(pdb_fname)
-    pocket_atoms = u.select_atoms(f'resid {" ".join(map(str, pocket_residues))} and name CA')
+    pocket_atoms = u.select_atoms(pocket_selection)
     pocket_atoms_idx = [a.index for a in pocket_atoms]
     ligand_atoms = u.select_atoms(f'resname {ligand_resname} and not name H*')
     ligand_atoms_idx = [a.index for a in ligand_atoms]
     com_dist = calculate_com_distance(u, ligand_atoms, pocket_atoms, wrap=False)[0]/10
-    print(f'Initial COM distance is {com_dist:.2f} nm') # We'll use this for set the boundaries later
+    logger.info(f'Initial COM distance is {com_dist:.2f} nm') # We'll use this for set the boundaries later
     MIN_COM = com_dist * 0.75
-    MAX_COM = com_dist * 3.0
-
+    MAX_COM = com_dist * 2.0
+    logger.info(f'Setting COM CV boundaries to {MIN_COM:.2f} nm and {MAX_COM:.2f} nm')
+    
     ########################################################################################
     ############################## Well-tempered MD - COM CV ###############################
     ########################################################################################
@@ -98,8 +94,8 @@ def main():
         ligand_atoms=ligand_atoms_idx,
         grid_min=MIN_COM,
         grid_max=MAX_COM,
-        hill_width=0.05,   # nm
-        grid_points=125,
+        hill_width=0.025,   # nm
+        grid_points=100,
     )
 
     for walker in range(1, N_WALKERS+1):
@@ -108,8 +104,8 @@ def main():
                 checkpoint_file=checkpoint,
                 cv_specs=[cv],
                 run_id=f'{walker}',
-                mMD_time=1,       # ns
-                bias_factor=10,
+                mMD_time=2,       # ns
+                bias_factor=12,  # WTmetaD bias factor
                 hill_height=1.2,  # kJ/mol approx 0.5 KbT
                 biasFrequency=2,  # ps
                 saveFrequency=50,
@@ -125,7 +121,7 @@ def main():
             backbone = traj.topology.select("backbone")
             traj = traj.superpose(traj[0], atom_indices=backbone)
         except Exception as e:
-            logging.warning(f"Superposition failed: {e}. Proceeding without superposition.")
+            logger.warning(f"Superposition failed: {e}. Proceeding without superposition.")
         traj.save(traj_fname.replace(".dcd", "_aligned.dcd"))
         os.remove(traj_fname) # remove the unaligned trajectory to save space
 

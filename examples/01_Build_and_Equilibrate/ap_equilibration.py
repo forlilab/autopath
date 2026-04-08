@@ -179,13 +179,13 @@ def main():
         traj = traj.superpose(traj[0], atom_indices=backbone)
     except Exception as e:
         logging.warning(f"Superposition failed: {e}. Proceeding without superposition.")
-    traj.save(equilibrated_traj.replace(".dcd", "_aligned.xtc"))
+    traj.save(equilibrated_traj.replace(".dcd", "_aligned.dcd"))
     os.remove(equilibrated_traj)
-    logger.info(f"Aligned trajectory saved to {equilibrated_traj.replace('.dcd', '_aligned.xtc')}")
+    logger.info(f"Aligned trajectory saved to {equilibrated_traj.replace('.dcd', '_aligned.dcd')}")
 
     # Calculate RMSD and RMSF of the ligand
     # Make sure to customize/add the selections as needed
-    u_eq = mda.Universe(system_pdb_file, equilibrated_traj.replace(".dcd", "_aligned.xtc"), in_memory=True)
+    u_eq = mda.Universe(system_pdb_file, equilibrated_traj.replace(".dcd", "_aligned.dcd"), in_memory=True)
     rmsd_equilibration = compute_rmsd(u_eq, u_eq,
                                           alig_select="backbone", 
                                           groupselections={
