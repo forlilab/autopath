@@ -6,7 +6,7 @@ import MDAnalysis as mda
 import mdtraj as md
 
 from autopath import VanillaMD
-from autopath.analysis import plot_atomic_rmsf
+from autopath.ap_PLIP import plot_atomic_rmsf
 from autopath.utils import load_system, compute_rmsd
 from openmm.app import PDBFile
 
