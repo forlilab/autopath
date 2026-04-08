@@ -1,14 +1,17 @@
 #!/bin/bash
-#SBATCH -e 6e23_A.err
-#SBATCH -o 6e23_A.out
+#SBATCH -e WTmetaD-3ptb.err
+#SBATCH -o WTmetaD-3ptb.out
 #SBATCH --gres=gpu#:rtxa6000:1
-#SBATCH --time=3-0
-#SBATCH --partition=alphafold,forli
-#SBATCH --job-name="WTmetaD-6e23_A"
+#SBATCH --time=1-0
+#SBATCH --exclude=nodea0110,nodea0111
+#SBATCH --partition=forli-pro,alphafold,forli
+#SBATCH --job-name="WTmetaD-3ptb"
 
 export OPENMM_CUDA_COMPILER=$(which nvcc)
 nvidia-smi
 
+# module load cuda/12.9
+
 source ~/.bashrc
-micromamba activate autopath3
-python ap_WTmetaD_COM.py --sysname 6e23_A\
+micromamba activate autopath
+python ap_WTmetaD_COM.py --sysname 3ptb\

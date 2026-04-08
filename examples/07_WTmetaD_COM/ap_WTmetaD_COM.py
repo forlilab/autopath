@@ -5,9 +5,9 @@ import argparse
 import MDAnalysis as mda
 import mdtraj as md
 
-from autopath import SystemPreparation, Equilibration, MetadynamicsMD
-from autopath.analysis import plot_atomic_rmsf
-from autopath.utils import fix_pdb, save_pdb, load_system, align_trajectory, calculate_com_distance, compute_rmsd
+from autopath import MetadynamicsMD
+from autopath.cv import com_cv
+from autopath.utils import load_system, calculate_com_distance
 from openmm.app import PDBFile
 
 def cmd_lineparser():
@@ -58,12 +58,12 @@ def main():
     ],
     )
     
-    checkpoint = f'../equilibration/{sys_name}/equilibration/checkpoint_equil_{sys_name}.chk'
-    system_fname = f'../equilibration/{sys_name}/equilibration/system_equil_{sys_name}.xml'
+    checkpoint = f'../01_Build_and_Equilibrate/{sys_name}/equilibration/checkpoint_equil_{sys_name}.chk'
+    system_fname = f'../01_Build_and_Equilibrate/{sys_name}/equilibration/system_equil_{sys_name}.xml'
     system = load_system(system_fname)
-    prmtop_fname = f'../equilibration/{sys_name}/system.prmtop'
+    prmtop_fname = f'../01_Build_and_Equilibrate/{sys_name}/system.prmtop'
     # topology = AmberPrmtopFile(prmtop_fname).topology
-    pdb_fname = f'../equilibration/{sys_name}/equilibration/{sys_name}_equilibrated.pdb'
+    pdb_fname = f'../01_Build_and_Equilibrate/{sys_name}/equilibration/{sys_name}_equilibrated.pdb'
     topology = PDBFile(pdb_fname).topology
 
     u = mda.Universe(pdb_fname)
@@ -86,22 +86,33 @@ def main():
         topology=topology,
         out_dir=f"{sys_name}/WTmetaD_COM",
         timestep=0.004,
-        is_membrane=False
+        is_membrane=False,
+        # platform="CUDA",
+    )
+
+    # here is where you define your CV. In this case, we use a simple distance between the COM of the ligand and the COM of the pocket.
+    # The com_cv here is an instance of the CVSpec class, which is a wrapper around the CV definition that MetadynamicsMD expects. 
+    # check cv.py to see examples of how to define your own CVs, and some pre-packed examples like this one.
+    cv = com_cv(
+        pocket_atoms=pocket_atoms_idx,
+        ligand_atoms=ligand_atoms_idx,
+        grid_min=MIN_COM,
+        grid_max=MAX_COM,
+        hill_width=0.05,   # nm
+        grid_points=125,
     )
 
     for walker in range(1, N_WALKERS+1):
         rep_id = metad.run(
                 system=system,
                 checkpoint_file=checkpoint,
-                mMD_CV='com',
-                mMD_time=1, #ns
+                cv_specs=[cv],
+                run_id=f'{walker}',
+                mMD_time=1,       # ns
                 bias_factor=10,
-                hill_height=1.2, #kJ/mol approx 0.5 KbT 0.3 Kcal/mol
-                hill_width=0.05, #nm
-                biasFrequency=2, #ps
+                hill_height=1.2,  # kJ/mol approx 0.5 KbT
+                biasFrequency=2,  # ps
                 saveFrequency=50,
-                grid_dimensions=(MIN_COM, MAX_COM), #nm
-                grid_points=125
             )
 
         ####################### Post-processing ######################
@@ -116,7 +127,7 @@ def main():
         except Exception as e:
             logging.warning(f"Superposition failed: {e}. Proceeding without superposition.")
         traj.save(traj_fname.replace(".dcd", "_aligned.dcd"))
-        # os.remove(smd_traj)
+        os.remove(traj_fname) # remove the unaligned trajectory to save space
 
     return
 
