@@ -12,6 +12,7 @@ import pytraj as pt
 from prolif import Fingerprint
 from rdkit import DataStructs
 from rdkit import Chem
+from rdkit.Chem import AllChem
 from rdkit.Chem.Draw import rdMolDraw2D, SimilarityMaps
 
 import seaborn as sns
@@ -254,7 +255,8 @@ class ProteinLigandAnalyzer:
                 fp = fp.run(u.trajectory, #FIXME stride does not work here
                             protein_sel, 
                             ligand_sel,
-                            n_jobs=n_jobs
+                            n_jobs=n_jobs, # BROKEN IN PROLIF FOR DILL AND MULTIPROCESS version problems be careful
+                            # parallel_strategy='chunk' #chunk, queue
                             )
                 # TODO: another function should read and analyze these pickles
                 fp.to_pickle(fp_fname)
@@ -487,11 +489,11 @@ class ProteinLigandAnalyzer:
             partition=partition,
         )
 
-        with open(f"qfiles_mmpbsa/{sysname}_mmpbsa.q", "w") as f:
+        with open(f"qfiles_mmgbsa/{sysname}_mmgbsa.q", "w") as f:
             f.write(rendered)
     
     @staticmethod
-    def prepare_mmpbsa_batch(
+    def prepare_mmgbsa_batch(
             sysname:str=None,
             prmtop:str=None,
             traj_fname:str=None,
@@ -502,8 +504,8 @@ class ProteinLigandAnalyzer:
             persistent_waters_cutoff:float=None,
             mmpbsa_in:str="mmgbsa.in",
             radii:str='mbondi2',
-            output_folder:str="mmpbsa_results",
-            bash_fname:str="run_mmpbsa_batch.sh",
+            output_folder:str="mmgbsa_results",
+            bash_fname:str="run_mmgbsa_batch.sh",
             mpi_threads:int=222,
             slurm_template_fname:str=None,
             ):
@@ -512,7 +514,7 @@ class ProteinLigandAnalyzer:
         if sysname is None or prmtop is None or traj_fname is None:
             raise ValueError("sysname, prmtop, and traj_fname must be provided.")
         
-        os.makedirs('qfiles_mmpbsa', exist_ok=True)
+        os.makedirs('qfiles_mmgbsa', exist_ok=True)
         os.makedirs(output_folder, exist_ok=True)
 
         if ligand_mda_selection is None:
@@ -569,7 +571,7 @@ class ProteinLigandAnalyzer:
                 logger.info(f"No persistent interfacial waters found with the given cutoff {persistent_waters_cutoff}")
             
         # Write the modified content back to the file
-        mmpbsa_out = os.path.join(output_folder, f"mmpbsa_{sysname}_mmpbsa.in")
+        mmpbsa_out = os.path.join(output_folder, f"{sysname}_mmgbsa.in")
         mmpbsa_out_abs = os.path.abspath(mmpbsa_out)
         with open(mmpbsa_out_abs, 'w') as file:
             file.writelines(mmpbsa_template)
@@ -587,11 +589,11 @@ class ProteinLigandAnalyzer:
                                                 )
         
         # update batch bash script with all qfiles in folder
-        qfiles = [f for f in os.listdir('qfiles_mmpbsa') if f.endswith('_mmpbsa.q')]
+        qfiles = [f for f in os.listdir('qfiles_mmgbsa') if f.endswith('_mmgbsa.q')]
         with open(bash_fname, "w") as f:
             f.write("#!/bin/bash\n\n")
             for qf in qfiles:
-                f.write(f"sbatch {os.path.abspath(os.path.join('qfiles_mmpbsa', qf))}\n")
+                f.write(f"sbatch {os.path.abspath(os.path.join('qfiles_mmgbsa', qf))}\n")
 
         os.chmod(bash_fname, 0o755)
         
@@ -974,7 +976,7 @@ def _replace_line(lines: list,
             break
     return lines
 
-def plot_atomic_rmsf(u, lig_resname:str='UNK', outname:str='rmsf.png', log_rmsf:bool=True) -> None:
+def plot_atomic_rmsf(u, lig_resname:str='UNK', outname:str='rmsf.png', log_rmsf:bool=True, ref_mol=None) -> None:
     """
     Draws a RMSF (Root Mean Square Fluctuation) plot for a specified ligand and saves it as an image file.
     Parameters:
@@ -987,6 +989,9 @@ def plot_atomic_rmsf(u, lig_resname:str='UNK', outname:str='rmsf.png', log_rmsf:
         The name of the output image file where the RMSF plot will be saved (default is 'rmsf.png').
     log_rmsf : bool, optional
         If True, logs the RMSF values to a CSV file with the same name as the output image (default is False).
+    ref_mol : rdkit.Chem.Mol, optional
+        An RDKit molecule with correct bond orders to use for drawing. If None, the molecule is
+        derived from the MDAnalysis universe (which may not preserve bond orders correctly).
     Returns:
     --------
     None
@@ -1000,12 +1005,17 @@ def plot_atomic_rmsf(u, lig_resname:str='UNK', outname:str='rmsf.png', log_rmsf:
         outname = outname.replace('.svg', '.png')
         drawer = rdMolDraw2D.MolDraw2DCairo(300, 300)
 
-    lig_full = u.select_atoms(f'resname {lig_resname}')
     lig_ha = u.select_atoms(f'resname {lig_resname} and not name H*')
     r = RMSF(atomgroup=lig_ha).run()
-    probe_mol = lig_full.convert_to('RDKIT')
-    probe_mol.Compute2DCoords()
-    probe_mol = Chem.RemoveHs(probe_mol)
+
+    if ref_mol is not None:
+        probe_mol = Chem.RemoveHs(ref_mol)
+        AllChem.Compute2DCoords(probe_mol)
+    else:
+        lig_full = u.select_atoms(f'resname {lig_resname}')
+        probe_mol = lig_full.convert_to('RDKIT', NoImplicit=False)
+        probe_mol.Compute2DCoords()
+        probe_mol = Chem.RemoveHs(probe_mol)
     assert len(r.rmsf) == probe_mol.GetNumAtoms(), "Mismatch between RMSF length and atom count"
 
     fig = SimilarityMaps.GetSimilarityMapFromWeights(mol=probe_mol, 
