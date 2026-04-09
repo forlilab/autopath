@@ -12,7 +12,7 @@ import openmm.unit as openmmunit
 
 # AutoPath imports
 from autopath.utils import *
-from autopath.customForces import add_flatbottom_COM_restraints, print_current_forces
+from autopath.customForces import add_flatbottom_COM_restraints, add_harmonic_restraints, print_current_forces
 from autopath.equilibration import warm_up_system
 
 try:
@@ -99,21 +99,31 @@ class RelaxMD:
         startdist = get_COM_dist(simulation, self.ligand_atoms, self.pocket_atoms)
         # Add flat-bottom COM restraints to prevent ligand from drifting too far away
         logger.debug("Adding flat-bottom COM restraints..")
-        add_flatbottom_COM_restraints(system, self.ligand_atoms, self.pocket_atoms, 
-                                      r0=startdist,
-                                      upper_wall=0.01, # 0.1 nm upper wall
-                                      K_flat=500, # 500 kJ/mol/nm^2
-                                      )
+        # add_flatbottom_COM_restraints(system, self.ligand_atoms, self.pocket_atoms, 
+        #                               r0=startdist,
+        #                               upper_wall=0.001, # 0.1 nm upper wall
+        #                               K_flat=10000, # 500 kJ/mol/nm^2
+        #                               )
+        add_harmonic_restraints(
+                system,
+                initial_positions,
+                self.topology,
+                self.ligand_atoms,
+                restraint_force=5,
+                force_name=f"k_harmonic_restrain",
+                force_group=19, #Offset by 15 to avoid overlap with other forces
+            )
+                
         simulation.context.reinitialize(preserveState=True)
         # print_current_forces(system)
 
         logger.debug("Minimizing..")
-        simulation.minimizeEnergy()
+        simulation.minimizeEnergy(maxIterations=1000)
 
         logger.debug("Warming up the system..")
         warm_up_system(simulation, integrator, 
                        warming_steps=npt_steps, 
-                       timestep=0.002 * openmmunit.picoseconds, # lower timestep for warming
+                       timestep=0.004 * openmmunit.picoseconds, # lower timestep for warming
                        Tend=self.temperature.value_in_unit(openmmunit.kelvin))
 
         # logger.info("Minimizing..")
@@ -138,8 +148,9 @@ class RelaxMD:
         forces_to_remove = []
         for f_idx in range(system.getNumForces()):
             force = system.getForce(f_idx)
-            if force.getName().startswith("k_flat_com"):
-                logger.debug(f"Removing force {force.getName()} at index {f_idx}.")
+            # if force.getName().startswith("k_flat_com"):
+            if force.getName().startswith("k_harmonic_restrain"):
+                logger.info(f"Removing force {force.getName()} at index {f_idx}.")
                 forces_to_remove.append(f_idx)
 
         for f_idx in sorted(forces_to_remove, reverse=True):
