@@ -27,6 +27,7 @@ from autopath import (
     RelaxMD,
     MetadynamicsMD,
 )
+from autopath.cv import com_cv, pathCV_cv
 from autopath.customForces import (
     generate_funnel_parameters_from_trajectory,
     create_funnel_force_from_trajectory_analysis,
@@ -81,12 +82,12 @@ class AutoPath:
         sMD_run_analysis: bool = True,
         sMD_clust_selection:str = None,
         extract_milestones: bool = True,
-        milestone_mode: str = "per_path",  # "per_path" or "all_medoids"
+        milestone_mode: str = "all_medoids",  # "per_path" or "all_medoids"
         milestone_min_frame_separation: int = 0,
         n_milestones: int = 5,
         relax_steps: int = 25000,
         run_metadynamics: bool = True,
-        mMD_use_funnel_potential: bool = True,
+        mMD_use_funnel_potential: bool = False,
         mMD_bias_factor: int = 10,
         mMD_bias_frequency: int = 2,  # ps
         mMD_hill_height: float = 1.2,  # kJ/mol approx 0.5KT
@@ -577,7 +578,7 @@ class AutoPath:
                         logger.info(f"Path {path_id}: extracted {len(ms_files)} milestones.")
 
             if self.milestone_mode == "all_medoids":
-                # ---- Mode: pool all medoid trajectories, cluster together ----
+                # Mode: pool all medoid trajectories, cluster together
                 logger.info(f"Computing distance features for all medoids ({len(u_milestone.trajectory)} frames)...")
                 X_all = compute_distance_features(u_milestone, ligand_sel, pocket_sel)
 
@@ -614,11 +615,12 @@ class AutoPath:
             except Exception as e:
                 logger.error(f"Error loading sMD raw data: {e}")
 
-            logger.info(f"Using COM distance range for metadynamics: [{min_com}, {max_com}] nm")
+            logger.info(f"sMD COM distance range: [{min_com:.3f}, {max_com:.3f}] nm (informational; path CV uses [0.0, 1.0])")
 
-            milestones = glob(f'{milestones_outdir}/milestone_*_*_*.pdb') + \
-                        glob(f'{milestones_outdir}/**/milestone_*_*_*.pdb', recursive=True)
-            milestones = list(set(milestones))  # deduplicate
+            milestones = glob(f'{milestones_outdir}/**/milestone_*_*_*.pdb', recursive=True)
+            # filter milestones to only those that do not have relaxed systems yet (i.e. those that need to be processed in the loop below)
+            milestones = [m for m in milestones if not m.endswith('_relax.pdb')]  # Simplified check
+            
             if len(milestones) == 0:
                 logger.error("No milestones found. Please check the milestone extraction step.")
                 exit(1)
@@ -626,6 +628,24 @@ class AutoPath:
             #sort the milestones by their index (milestone number is the last token before 'frame')
             milestones.sort(key=lambda x: int(os.path.basename(x).split('_frame_')[0].rsplit('_', 1)[-1]))
 
+            base_system = load_system(f"{sys_name}/system.xml")
+            path_cv = pathCV_cv(
+                topology=topology,
+                milestones=milestones,
+                pocket_atoms=pocket_atom_indices,
+                ligand_atoms=ligand_atoms_indices,
+                system=base_system,
+                grid_min=0.0,
+                grid_max=1.0,
+                hill_width=self.mMD_hill_width,
+                sigma='auto', # related to distance between milestones
+                #sigma approz half the mean milestone spacing
+            )
+            # when you first run, check the logged line 
+            # PathCV milestone COM distances (nm): [...]. 
+            # If adjacent milestones differ by more than 3 × sigma = 0.3 nm, 
+            # the Gaussian kernels won't overlap well and you'll want to increase sigma. 
+            # If they're closer than 0.5 × sigma = 0.05 nm, decrease it.
             milestone_relax = RelaxMD(
                 topology=topology,
                 ligand_atoms=ligand_atoms_full_indices, # use all atoms
@@ -709,13 +729,10 @@ class AutoPath:
                         checkpoint_file=milestone_chk,
                         system=milestone_system,
                         run_id=milestone_name,
-                        mMD_CV='com',
+                        cv_specs=[path_cv],
                         mMD_time=self.mMD_time, #ns
                         bias_factor=self.mMD_bias_factor,
-                        # hill_height=biasing_scheme[milestone_number]['height'] if use_biasing_scheme else self.mMD_hill_height, #kcal/mol
-                        # hill_width=biasing_scheme[milestone_number]['width'] if use_biasing_scheme else self.mMD_hill_width, #nm
                         biasFrequency=self.mMD_bias_frequency, #ps
-                        grid_dimensions=(min_com, max_com),
                         funnel_force=funnel_force
                     )
                 except Exception as e:
