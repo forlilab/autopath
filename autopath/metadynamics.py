@@ -10,7 +10,7 @@ from openmm.app import *
 import openmm.unit as openmmunit
 
 import cvpack
-from glob import glob
+from autopath.cv import CVSpec
 from autopath.utils import *
 from autopath.customForces import *
 from autopath.analysis import (
@@ -79,74 +79,40 @@ class MetadynamicsMD:
 
         return
 
-    def _get_reference_dict(
-        self,
-        pdb_file,
-        atoms_names: list[str] = ["CA"],
-        system_atom_indexes: list[int] = None,
-    ) -> dict[int, tuple[float, float, float]]:
-        """
-        Get the reference dictionary for the RMSD CV
-        """
-        pdb = PDBFile(pdb_file)
-        reference_positions = pdb.positions
-        reference_atoms = pdb.topology.atoms()
-
-        reference_dict = {}
-        for atom in reference_atoms:
-            if atom.name in atoms_names:
-                reference_dict[atom.index] = (
-                    reference_positions[atom.index] / openmmunit.nanometers
-                )
-
-        reference_dict = dict(zip(system_atom_indexes, list(reference_dict.values())))
-
-        return reference_dict
-
     def run(
         self,
         pdb_file: str = None,
         system: str = None,
         checkpoint_file: str = None,
         run_id: str = None,
-        mMD_CV: str = "com",
-        milestones: list[str] = None,
+        cv_specs: list[CVSpec] = None,
         mMD_time: int = 10,
         bias_factor: float = 10,
-        hill_height: float = 1.2, #  # 1.2 kJ/mol approx 0.5 KbT
-        hill_width: float = 0.05,
-        grid_dimensions: tuple = (0.0, 1.0),
-        grid_points: int = 125,
+        hill_height: float = 1.2,  # kJ/mol approx 0.5 KbT
         biasFrequency: int = 2,
         saveFrequency: int = 50,
         funnel_force: Force = None,
-    ) -> None:
+    ) -> str:
 
         start_time = time.monotonic()
 
-        assert mMD_CV in [
-            "com",
-            "rmsd",
-            "rmsd_states",
-            "path_rmsd",
-            "path_cv",
-            "nc",
-        ], f"The selected colective variable {mMD_CV} is not implemented"
+        assert cv_specs is not None and len(cv_specs) > 0, \
+            "cv_specs must be a non-empty list of CVSpec objects. " \
+            "Use autopath.cv factory functions (e.g. com_cv, rmsd_cv) to build them."
 
-        # ensure proper formating of the file name
+        # ensure proper formatting of the file name
         if run_id is None:
             run_id = f'W-{datetime.now().strftime("%H%M%S")}'
 
         # Calculate the number of steps required
-        mMD_steps = math.ceil(mMD_time / self.timestep.value_in_unit(openmmunit.picoseconds) * 1000.0)  # 250.000 1ns at 4fs
-        biasFrequency = int((1/self.timestep.value_in_unit(openmmunit.picoseconds)) * biasFrequency)  # deposit bias every 2 ps (250 is 1ps at 4fs timestep)
-        saveFrequency = int((1/self.timestep.value_in_unit(openmmunit.picoseconds)) * saveFrequency)  # write bias every 50ps
+        mMD_steps = math.ceil(mMD_time / self.timestep.value_in_unit(openmmunit.picoseconds) * 1000.0)
+        biasFrequency = int((1/self.timestep.value_in_unit(openmmunit.picoseconds)) * biasFrequency)
+        saveFrequency = int((1/self.timestep.value_in_unit(openmmunit.picoseconds)) * saveFrequency)
 
         hill_height = hill_height * openmmunit.kilojoules_per_mole
-        grid_min, grid_max = grid_dimensions
 
-        logging.info(f"Running metadynamics with Colective Variable {mMD_CV}")
-        logging.info(f"Grid boundaries are min={grid_min:.3f} - max={grid_max:.3f} and sigma={hill_width:.3f} nm")
+        cv_names = ", ".join(s.name for s in cv_specs)
+        logging.info(f"Running metadynamics with CV(s): {cv_names}")
 
         logging.debug("Setting up the integrator..")
         if self.use_GReweighting:
@@ -200,9 +166,13 @@ class MetadynamicsMD:
                 14,
             )
 
-        # Add funnel potential if provided
+        # Add funnel potential if provided.
+        # system.addForce() transfers C++ ownership of the force, so reusing the same
+        # funnel_force object across multiple run() calls would leave it non-owning.
+        # Serializing and deserializing gives a fresh owned copy each time.
         if funnel_force is not None:
-            system.addForce(funnel_force)
+            fresh_funnel = XmlSerializer.deserialize(XmlSerializer.serialize(funnel_force))
+            system.addForce(fresh_funnel)
             logging.info(f"Added funnel potential with force group {funnel_force.getForceGroup()}")
 
         logging.debug(f"Setting up reporters for {run_id}..")
@@ -220,145 +190,26 @@ class MetadynamicsMD:
                                                             unperturebed=True,
                                                             firtsPertubation=True,
                                                             ))
-        if mMD_CV == "com":
-
-            groups = [self.pocket_atoms] + [self.ligand_atoms]
-
-            cv = cvpack.CentroidFunction(
-                f"sqrt(distance(g1,g2)^2)",
-                openmmunit.nanometers,
-                groups,
-                weighByMass=True,
-                pbc=False,
-            )
-
-        elif mMD_CV == "rmsd":
-            cv = cvpack.RMSD(input_positions, self.ligand_atoms, self.n_atoms)
-
-        elif mMD_CV == "rmsd_states":
-
-            atom_names_to_match = ["CA"]
-            system_residues = [r for r in self.topology.residues() if r.name not in ["UNK", "HOH", "NA", "CL", "K"]]
-
-            atom_indexes_to_match = []
-            for residue in system_residues:
-                for atom in residue.atoms():
-                    if atom.name in atom_names_to_match:
-                        atom_indexes_to_match.append(atom.index)
-
-            states_pdbs = glob("input/milestone_*.pdb")
-            milestones_dicts = [self._get_reference_dict(pdb, atom_names_to_match, atom_indexes_to_match) for pdb in states_pdbs]
-
-            cv = cvpack.PathInRMSDSpace(
-                metric=cvpack.path.progress,
-                milestones=milestones_dicts,
-                sigma=0.01 * openmmunit.nanometers,
-                numAtoms=self.n_atoms,
-            )
-        elif mMD_CV == "path_rmsd":
-
-            # atom_names_to_match = ["CA"]
-            ligand_residue = [r for r in self.topology.residues() if r.name == "UNK"]
-            ligand_atoms_to_match = [a.index for a in ligand_residue[0].atoms() if not a.name.startswith("H")]
-            ligand_names_to_match = [a.name for a in ligand_residue[0].atoms() if not a.name.startswith("H")]
-            logging.info(f"Matched {len(ligand_atoms_to_match)} heavy atoms from the ligand")
-
-            milestones.sort(key=lambda x: int(os.path.basename(x).split('_')[1]))
-       
-            milestones_dicts = [self._get_reference_dict(pdb, ligand_names_to_match, ligand_atoms_to_match) for pdb in milestones]
-            cv = cvpack.PathInRMSDSpace(
-                metric=cvpack.path.progress,
-                milestones=milestones_dicts,
-                sigma=0.001 * openmmunit.nanometers,
-                numAtoms=self.n_atoms,
-            )
-
-        elif mMD_CV == "path_cv":
-
-            from copy import deepcopy
-
-            ligand_residue = [r for r in self.topology.residues() if r.name == self.ligand_resname]
-            ligand_atoms_to_match = [a.index for a in ligand_residue[0].atoms() if not a.name.startswith("H")]
-            ligand_names_to_match = [a.name for a in ligand_residue[0].atoms() if not a.name.startswith("H")]
-            logging.info(f"Matched {len(ligand_atoms_to_match)} heavy atoms from the ligand")
-            print(ligand_atoms_to_match)
-                        
-            # TODO all of this should be done outside of the run function
-            milestones.sort(key=lambda x: int(os.path.basename(x).split('_')[1]))
-            print(milestones)
-            milestones_array = np.zeros((len(milestones), 2))
-            for i, milestone in enumerate(milestones):
-                milestone_name = os.path.basename(milestone)
-                _system = deepcopy(system)
-                _context = Context(_system, VerletIntegrator(1.0), self.platform)
-                milestone_positions = PDBFile(milestone).positions
-                _context.setPositions(milestone_positions)
-                logging.info(f"Calculating CVs for {milestone_name}..")
-                cv1 = cvpack.RMSD(milestone_positions, self.ligand_atoms, self.n_atoms)
-                cv2 = cvpack.CentroidFunction(
-                                            f"sqrt(distance(g1,g2)^2)",
-                                            openmmunit.nanometers,
-                                            groups=[self.pocket_atoms] + [self.ligand_atoms],
-                                            weighByMass=True,
-                                            pbc=False,
-                                            )
-                cv1.addToSystem(_system)
-                cv2.addToSystem(_system)
-                _context.reinitialize(preserveState=True)
-                _context.setPositions(milestone_positions)
-                logging.info(f"Milestone {milestone_name} CV1: {cv1.getValue(_context)}, CV2: {cv2.getValue(_context)}")
-                milestones_array[i, 0] = round(cv1.getValue(_context).value_in_unit(openmmunit.nanometers),2)
-                milestones_array[i, 1] = round(cv2.getValue(_context).value_in_unit(openmmunit.nanometers),2)    
             
-            print(milestones_array)
-            # slice to one cv
-            milestones_array = milestones_array[:, 1].reshape(-1, 1)
-            
-            cv1 = cvpack.RMSD(input_positions, self.ligand_atoms, self.n_atoms)
-            cv2 = cvpack.CentroidFunction(
-                                        f"sqrt(distance(g1,g2)^2)",
-                                        openmmunit.nanometers,
-                                        groups=[self.pocket_atoms] + [self.ligand_atoms],
-                                        weighByMass=True,
-                                        pbc=False,
-                                    )
- 
-            cv = cvpack.PathInCVSpace(
-                metric=cvpack.path.progress,
-                # variables=[cv1, cv2],
-                variables=[cv2],  # slicing to one cv
-                milestones=milestones_array,
-                sigma=0.0001 #* openmmunit.nanometers,
+        # Resolve deferred CVs (those that need input_positions to build)
+        resolved = [spec.resolve(input_positions, self.n_atoms, self.topology) for spec in cv_specs]
+
+        bias_variables = [
+            BiasVariable(
+                s.cv,
+                minValue=s.grid_min,
+                maxValue=s.grid_max,
+                biasWidth=s.hill_width,
+                gridWidth=s.grid_points,
+                periodic=s.periodic,
             )
-
-        elif mMD_CV == "nc":
-
-            forces = {f.getName(): f for f in system.getForces()}
-
-            cv = cvpack.NumberOfContacts(
-                self.pocket_atoms,
-                self.ligand_atoms,
-                forces["NonbondedForce"],
-                stepFunction="1/(1+x^6)",
-                thresholdDistance=0.35,
-                cutoffFactor=2.0,
-                switchFactor=1.5,
-                reference=50,
-            )
-
-        bias_variable = BiasVariable(
-            cv,
-            minValue=grid_min,
-            maxValue=grid_max,
-            biasWidth=hill_width,
-            gridWidth=grid_points,
-            periodic=False,
-        )
+            for s in resolved
+        ]
 
         # Set up the metadynamics object
         meta = Metadynamics(
             system,
-            [bias_variable],
+            bias_variables,
             self.temperature,
             bias_factor,
             hill_height,
@@ -367,33 +218,39 @@ class MetadynamicsMD:
             biasDir=self.out_dir,
         )
 
-        meta._force.setForceGroup(1)            # force group 1 for reweighting
-
-        simulation.context.reinitialize(preserveState=True)  
+        # meta._force.setForceGroup(1)  # force group 1 for reweighting girsanov
         
-        # print_current_forces(system)
+        simulation.context.setTime(0)  # reset simulation time
+        simulation.context.setStepCount(0)  # reset step count
 
-        if not self.verbose:
-            # # Advance all steps at once do not record CVs
-            meta.step(simulation, mMD_steps)
-        else:
-            # Record CVs along the way, might be usefull for debugging
-            colvar_array = np.array([meta.getCollectiveVariables(simulation)])
-            for i in range(0, int(mMD_steps), self.record_CV):
-                if i % self.store_CV == 0:
-                    np.save(os.path.join(self.out_dir, f"COLVAR_{run_id}.npy"), colvar_array)
+        simulation.context.reinitialize(preserveState=True)
 
-                meta.step(simulation, self.record_CV)
-                current_cvs = meta.getCollectiveVariables(simulation)
-                colvar_array = np.append(colvar_array, [current_cvs], axis=0)
+        colvar_array = np.array([meta.getCollectiveVariables(simulation)])
+        for i in range(0, int(mMD_steps), self.record_CV):
+            if self.verbose and i % self.store_CV == 0:
+                np.save(os.path.join(self.out_dir, f"COLVAR_{run_id}.npy"), colvar_array)
+
+            meta.step(simulation, self.record_CV)
+            current_cvs = meta.getCollectiveVariables(simulation)
+            colvar_array = np.append(colvar_array, [current_cvs], axis=0)
 
         np.save(os.path.join(self.out_dir, f"COLVAR_{run_id}.npy"), colvar_array)
         np.save(os.path.join(self.out_dir, f"FE_{run_id}.npy"), meta.getFreeEnergy())
 
-        # Create plots for all current runs
-        plot_colvar(self.out_dir, mMD_CV)
-        plot_bias(self.out_dir, grid_min, grid_max, grid_points, mMD_CV)
-        plot_FE(self.out_dir, grid_min, grid_max, grid_points, mMD_CV)
+        # Create plots
+        if len(resolved) == 1:
+            s = resolved[0]
+            plot_colvar(self.out_dir, s.name)
+            plot_bias(self.out_dir, s.grid_min, s.grid_max, s.grid_points, s.name)
+            plot_FE(self.out_dir, s.grid_min, s.grid_max, s.grid_points, s.name)
+        else:
+            a, b = resolved[0], resolved[1]
+            plot_colvar_2D(self.out_dir, a.name, b.name)
+            plot_FE_2D(
+                self.out_dir,
+                a.grid_min, a.grid_max, a.grid_points, a.name,
+                b.grid_min, b.grid_max, b.grid_points, b.name,
+            )
 
         # Save everything
         final_positions = simulation.context.getState(getPositions=True).getPositions()
@@ -407,304 +264,12 @@ class MetadynamicsMD:
 
         return run_id
 
-    def run2D(
-        self,
-        pdb_file: str = None,
-        # ref_ligand: str = None,
-        system: str = None,
-        checkpoint_file: str = None,
-        run_id: str = None,
-        mMD_time: int = 10,
-        bias_factor: float = 10,
-        hill_height: float = 0.3,
-        hill_width_A: float = 0.01,
-        grid_dimensions_A: tuple = (0.0, 1.0),
-        hill_width_B: float = 0.01,
-        grid_dimensions_B: tuple = (0.0, 1.0),
-        biasFrequency: int = 2,
-        saveFrequency: int = 50,
-    ) -> None:
-
-        start_time = time.monotonic()
-
-        # Metadynamics time in ns
-        mMD_steps = math.ceil(mMD_time / self.timestep * 1000.0)  # 250.000 1ns at 4fs
-        biasFrequency = 250 * biasFrequency  # deposit bias every 2 ps (250 is 1ns at 4fs timestep)
-        saveFrequency = 250 * saveFrequency  # write bias every 50ps
-
-        logging.debug("Setting up the integrator")
-        integrator = LangevinMiddleIntegrator(
-            self.temperature, 1 / openmmunit.picoseconds, self.timestep
+    def run2D(self, *args, **kwargs):
+        raise NotImplementedError(
+            "run2D() has been removed. Pass two CVSpec objects via cv_specs to run() instead. "
+            "Example:\n"
+            "  from autopath.cv import rmsd_cv\n"
+            "  cv_a = rmsd_cv(...)\n"
+            "  cv_b = rmsd_cv(...)\n"
+            "  metad.run(cv_specs=[cv_a, cv_b], ...)"
         )
-        # integrator.setRandomNumberSeed(int(rep_idx))
-
-        if self.topology is None:
-            if pdb_file is None:
-                logging.error(f"Either a PDB or a prmtop file must be provided to get the topology from")
-                exit(1)
-            else:
-                self.topology = PDBFile(pdb_file).topology
-
-        logging.debug(f"Creating the simulation for {run_id}")
-        simulation = Simulation(self.topology, system, integrator, self.platform)
-        simulation.context.setPeriodicBoxVectors(*self.topology.getPeriodicBoxVectors()) #loads the correct box vectors
-
-        if checkpoint_file is not None:
-            logging.debug(f"Loading simulation checkpoint {checkpoint_file}")
-            simulation.loadCheckpoint(checkpoint_file)
-        else:
-            if pdb_file is not None:
-                logging.debug(f"Setting positions from PDB file {pdb_file}")
-                simulation.context.setPositions(PDBFile(pdb_file).positions)
-            else:
-                logging.error(f"Either a PDB or a checkpoint file must be provided to get coordinates from")
-                exit(1)
-
-        # Add harmonic positional restraints to protein CA
-        input_positions = simulation.context.getState(getPositions=True).getPositions()
-
-        if self.restrained_atoms is not None:
-            add_harmonic_restraints(
-                system,
-                input_positions,
-                self.topology,
-                self.restrained_atoms,
-                10,
-                "k_CA",
-                14,
-            )
-
-        ##################### Number of contacts CV #################################
-
-        # forces = {f.getName(): f for f in system.getForces()}
-        # nc_cv = cvpack.NumberOfContacts(
-        #     self.pocket_atoms,
-        #     self.ligand_atoms,
-        #     forces["NonbondedForce"],
-        #     stepFunction="1/(1+x^6)",
-        #     thresholdDistance=0.35,
-        #     cutoffFactor=2.0,
-        #     switchFactor=1.5,
-        #     reference=50,
-        # )
-
-        # grid_width_A = hill_width_A / 5
-        # grid_min_A, grid_max_A = grid_dimensions_A
-        # grid_A = int(abs(grid_min_A - grid_max_A) / grid_width_A)
-        # nc_variable = BiasVariable(
-        #     nc_cv,
-        #     minValue=grid_min_A,
-        #     maxValue=grid_max_A,
-        #     biasWidth=hill_width_A,
-        #     periodic=False,
-        #     gridWidth=grid_A,
-        # )
-
-        # logging.info(
-        #     f"COM boundaries are min={grid_min_A:.3f} nM - max={grid_max_A:.3f} nM"
-        # )
-        # logging.info(f"Sigma is {hill_width_A} nm and there are {grid_A} grid points ")
-
-        ##################### COM CV #################################
-
-        # groups = [self.pocket_atoms] + [self.ligand_atoms]
-
-        # fb_eq = f"sqrt(distance(g1,g2)^2)"
-
-        # COM = cvpack.CentroidFunction(
-        #     fb_eq, openmmunit.nanometers, groups, weighByMass=False, pbc=True
-        # )
-
-        # grid_width_A = hill_width_A / 5
-        # grid_min_A, grid_max_A = grid_dimensions_A
-        # grid_A = int(abs(grid_min_A - grid_max_A) / grid_width_A)
-
-        # com_cv = BiasVariable(
-        #     COM,
-        #     minValue=grid_min_A,
-        #     maxValue=grid_max_A,
-        #     biasWidth=hill_width_A,
-        #     periodic=False,
-        #     gridWidth=grid_A,
-        # )
-
-        ##################### RMSD CV #################################
-
-        atom_names_to_match = ["CA"]
-        input_positions = simulation.context.getState(getPositions=True).getPositions()
-        n_atoms = self.topology.getNumAtoms()
-
-        system_residues = [
-            r
-            for r in self.topology.residues()
-            if r.name not in ["UNK", "HOH", "NA", "CL"]
-        ]
-
-        atom_indexes_to_match = []
-        for residue in system_residues:
-            for atom in residue.atoms():
-                if atom.name in atom_names_to_match:
-                    atom_indexes_to_match.append(atom.index)
-
-        print(
-            f"Matched {len(atom_indexes_to_match)} protein {atom_names_to_match} atoms from system"
-        )
-
-        reference_dict_6ydj = self._get_reference_dict(
-            "cluster_4_idx_5_plddt_96_openmm_refinement_relaxed_wrt_6ydj_A_openmm_refinement.pdb",
-            atom_names_to_match,
-            atom_indexes_to_match,
-        )
-        reference_dict_6hdh = self._get_reference_dict(
-            "cluster_7_idx_1_plddt_95_openmm_refinement_relaxed_wrt_6hdh_A_openmm_refinement.pdb",
-            atom_names_to_match,
-            atom_indexes_to_match,
-        )
-
-        print(f"Matched {len(reference_dict_6ydj)} heavy atoms from the reference 6ydj")
-        print(f"Matched {len(reference_dict_6hdh)} heavy atoms from the reference 6hdh")
-
-        rmsd_6ydj = cvpack.RMSD(
-            referencePositions=reference_dict_6ydj,
-            group=atom_indexes_to_match,
-            numAtoms=n_atoms,
-        )
-
-        grid_width_A = hill_width_A / 5
-        grid_min_A, grid_max_A = grid_dimensions_A
-        grid_A = int(abs(grid_min_A - grid_max_A) / grid_width_A)
-
-        rmsd_6ydj_cv = BiasVariable(
-            rmsd_6ydj,
-            minValue=grid_min_A,
-            maxValue=grid_max_A,
-            biasWidth=hill_width_A,
-            periodic=False,
-            gridWidth=grid_A,
-        )
-
-        rmsd_6hdh = cvpack.RMSD(
-            referencePositions=reference_dict_6hdh,
-            group=atom_indexes_to_match,
-            numAtoms=n_atoms,
-        )
-
-        grid_width_B = hill_width_B / 5
-        grid_min_B, grid_max_B = grid_dimensions_B
-        grid_B = int(abs(grid_min_B - grid_max_B) / grid_width_B)
-
-        rmsd_6hdh_cv = BiasVariable(
-            rmsd_6hdh,
-            minValue=grid_min_B,
-            maxValue=grid_max_B,
-            biasWidth=hill_width_B,
-            periodic=False,
-            gridWidth=grid_B,
-        )
-
-        ##################### RMSD STATES CV #################################
-
-        # ref_pdb = PDBFile(ref_ligand)
-        # reference_positions = ref_pdb.positions
-        # reference_atoms = ref_pdb.topology.atoms()
-
-        # reference_dict = {}
-        # for atom in reference_atoms:
-        #     if not atom.name.startswith("H"):
-        #         reference_dict[atom.index] = (
-        #             reference_positions[atom.index] / openmmunit.nanometers
-        #         )
-
-        # print(f"Matched {len(reference_dict)} heavy atoms from the reference")
-
-        # n_atoms = self.topology.getNumAtoms()
-
-        # system_residues = [r for r in self.topology.residues() if r.name == "UNK"]
-        # logging.info([f"SYSTEM {r.name}_{r.index}" for r in system_residues])
-
-        # system_atoms = []
-        # for residue in system_residues:
-        #     for atom in residue.atoms():
-        #         if not atom.name.startswith("H"):
-        #             system_atoms.append(atom.index)
-
-        # logging.info(f"Matched {len(system_atoms)} heavy atoms from the system")
-
-        # # changing keys of reference dictionary to match system's atom names
-        # reference_dict = dict(zip(system_atoms, list(reference_dict.values())))
-
-        # rmsd_cv = cvpack.PathInRMSDSpace(
-        #     metric=cvpack.path.progress,
-        #     milestones=[reference_dict],
-        #     sigma=0.01 * openmmunit.nanometers,
-        #     numAtoms=n_atoms,
-        # )
-
-        ##############################################################
-
-        meta = Metadynamics(
-            system,
-            [rmsd_6ydj_cv, rmsd_6hdh_cv],
-            self.temperature,
-            bias_factor,
-            hill_height,
-            frequency=biasFrequency,
-            saveFrequency=saveFrequency,
-            biasDir=self.out_dir,
-        )
-
-        simulation.context.reinitialize(preserveState=True)
-
-        logging.debug(f"Setting up reporters for {run_id}..")
-        add_reporters(
-            simulation,
-            self.out_dir,
-            f"metadynamics_{run_id}",
-            mMD_steps,
-            biasFrequency,
-        )
-
-        if not self.verbose:
-            # # Advance all steps at once do not record CVs
-            meta.step(simulation, mMD_steps)
-        else:
-            # Record CVs along the way, might be usefull for debugging
-            colvar_array = np.array([meta.getCollectiveVariables(simulation)])
-            for i in range(0, int(mMD_steps), self.record_CV):
-                if i % self.store_CV == 0:
-                    np.save(
-                        os.path.join(self.out_dir, f"COLVAR_{run_id}.npy"),
-                        colvar_array,
-                    )
-
-                meta.step(simulation, self.record_CV)
-                current_cvs = meta.getCollectiveVariables(simulation)
-                colvar_array = np.append(colvar_array, [current_cvs], axis=0)
-
-        np.save(os.path.join(self.out_dir, f"COLVAR_{run_id}.npy"), colvar_array)
-        np.save(os.path.join(self.out_dir, f"FE_{run_id}.npy"), meta.getFreeEnergy())
-
-        # Create plots for all current runs
-        plot_colvar_2D(self.out_dir, "RMSD_A", "RMSD_B")
-        plot_FE_2D(
-            self.out_dir,
-            grid_min_A,
-            grid_max_A,
-            grid_A,
-            "rmsd_6ydj",
-            grid_min_B,
-            grid_max_B,
-            grid_B,
-            "rmsd_6hdh",
-        )
-
-        final_positions = simulation.context.getState(getPositions=True).getPositions()
-        self.topology.setPeriodicBoxVectors(simulation.context.getState(getPositions=True).getPeriodicBoxVectors()) #saves correct box vectors to the pdb
-        save_system(system, f"{self.out_dir}/system_mMD_{run_id}.xml")
-        save_simulation(simulation, f"{self.out_dir}/mMD_checkpoint_{run_id}")
-        save_pdb(self.topology, final_positions, f"{self.out_dir}/mMD_{run_id}.pdb")
-
-        simulation_time = time.monotonic() - start_time
-        logging.info(f"Finished {run_id} metadynamics in {simulation_time/60:.2f} min.")
-
-        return run_id
