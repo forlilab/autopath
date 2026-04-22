@@ -257,7 +257,18 @@ class AutoPath:
                                     plots_outdir=f"{sys_name}/equilibration"
                                     )
                 rmsd.to_csv(f"{sys_name}/equilibration/{sys_name}_rmsd.csv", index=False)
-                plot_atomic_rmsf(u_eq, outname=f"{sys_name}/equilibration/{sys_name}_RMSF.png", log_rmsf=True)
+                lig_ha_eq = u_eq.select_atoms(f'resname {ligand_resname} and not name H*')
+                u_eq.trajectory[0]
+                pocket_eq  = u_eq.select_atoms(f'protein and not name H* and around 5 resname {ligand_resname}')
+                _contact_counts = np.zeros(len(lig_ha_eq))
+                # _nframes = min(100, len(u_eq.trajectory))
+                _nframes = len(u_eq.trajectory)
+                # for _ts in u_eq.trajectory[:_nframes]:
+                for _ts in u_eq.trajectory:#[-_nframes:]:
+                    _dmat = distance_array(lig_ha_eq.positions, pocket_eq.positions)
+                    _contact_counts += (_dmat < 3.5).any(axis=1)
+                _contact_freq = _contact_counts / _nframes
+                plot_atomic_rmsf(u_eq, outname=f"{sys_name}/equilibration/{sys_name}_RMSF-All.png", log_rmsf=True, contact_weights=_contact_freq)
             except Exception as e:
                 logger.error(f"Error computing RMSD/RMSF: {e}")
                 pass

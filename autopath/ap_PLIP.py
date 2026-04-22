@@ -976,7 +976,7 @@ def _replace_line(lines: list,
             break
     return lines
 
-def plot_atomic_rmsf(u, lig_resname:str='UNK', outname:str='rmsf.png', log_rmsf:bool=True, ref_mol=None) -> None:
+def plot_atomic_rmsf(u, lig_resname:str='UNK', outname:str='rmsf.png', log_rmsf:bool=True, ref_mol=None, contact_weights=None) -> None:
     """
     Draws a RMSF (Root Mean Square Fluctuation) plot for a specified ligand and saves it as an image file.
     Parameters:
@@ -1038,8 +1038,10 @@ def plot_atomic_rmsf(u, lig_resname:str='UNK', outname:str='rmsf.png', log_rmsf:
     if log_rmsf:
         log_fname = os.path.splitext(outname)[0]
         with open(f'{log_fname}.csv', 'w') as f:
-            for res_id, rmsf_value in enumerate(r.rmsf):
-                f.write(f'{res_id},{rmsf_value:.3f}\n')
+            f.write('atom_name,element,rmsf,contact_freq\n')
+            for i, atom in enumerate(lig_ha.atoms):
+                cw = contact_weights[i] if contact_weights is not None else float('nan')
+                f.write(f'{atom.name},{atom.element},{r.rmsf[i]:.4f},{cw:.4f}\n')
     return
 
 def plot_rmsd(rmsd_df:pd.DataFrame=None,
