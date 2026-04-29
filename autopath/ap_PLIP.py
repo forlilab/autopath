@@ -8,6 +8,7 @@ from collections import Counter
 
 import MDAnalysis as mda
 from MDAnalysis.analysis.rms import RMSF
+from MDAnalysis.analysis.distances import distance_array
 import pytraj as pt
 from prolif import Fingerprint
 from rdkit import DataStructs
@@ -976,37 +977,43 @@ def _replace_line(lines: list,
             break
     return lines
 
-def plot_atomic_rmsf(u, lig_resname:str='UNK', outname:str='rmsf.png', log_rmsf:bool=True, ref_mol=None, contact_weights=None) -> None:
+def calculate_contact_frequency(u, ligand_resname: str, pocket_cutoff: float = 5.0, contact_cutoff: float = 3.5) -> np.ndarray:
+    """Return per-atom contact frequency (fraction of frames) for ligand heavy atoms within contact_cutoff of pocket atoms."""
+    lig_ha = u.select_atoms(f'resname {ligand_resname} and not name H*')
+    u.trajectory[0]
+    pocket = u.select_atoms(f'protein and not name H* and around {pocket_cutoff} resname {ligand_resname}')
+    contact_counts = np.zeros(len(lig_ha))
+    for ts in u.trajectory:
+        dmat = distance_array(lig_ha.positions, pocket.positions)
+        contact_counts += (dmat < contact_cutoff).any(axis=1)
+    return contact_counts / len(u.trajectory)
+
+def calculate_ligand_rmsf(u, lig_resname: str = 'UNK') -> np.ndarray:
+    """Return RMSF values for ligand heavy atoms."""
+    lig_ha = u.select_atoms(f'resname {lig_resname} and not name H*')
+    return RMSF(atomgroup=lig_ha).run().rmsf
+
+def plot_atomic_property(u, weights: np.ndarray, lig_resname: str = 'UNK',
+                         outname: str = 'property.png', ref_mol=None,
+                         color=None, colormap=None) -> None:
+    """Plot a per-atom scalar property on the ligand 2D structure and save as image.
+
+    color: any matplotlib color ('blue', '#1f77b4', (r,g,b,a)) — sets the fill
+           gradient highlight for high positive values (white → color).
+           Takes precedence over colormap.
+    colormap: full 3-color colourMap as a matplotlib colormap object/string,
+              or a list of three RGBA tuples for [negative, zero, positive].
     """
-    Draws a RMSF (Root Mean Square Fluctuation) plot for a specified ligand and saves it as an image file.
-    Parameters:
-    -----------
-    u : MDAnalysis.Universe
-        The MDAnalysis universe object containing the molecular dynamics trajectory and topology.
-    lig_resname : str, optional
-        The residue name of the ligand to analyze (default is 'UNK').
-    outname : str, optional
-        The name of the output image file where the RMSF plot will be saved (default is 'rmsf.png').
-    log_rmsf : bool, optional
-        If True, logs the RMSF values to a CSV file with the same name as the output image (default is False).
-    ref_mol : rdkit.Chem.Mol, optional
-        An RDKit molecule with correct bond orders to use for drawing. If None, the molecule is
-        derived from the MDAnalysis universe (which may not preserve bond orders correctly).
-    Returns:
-    --------
-    None
-        This function does not return any value. It saves the RMSF plot and optionally logs the RMSF values.
-    """
+    from rdkit import Geometry
+    from rdkit.Chem import Draw, rdDepictor
 
     if outname.endswith('.svg'):
         drawer = rdMolDraw2D.MolDraw2DSVG(300, 300)
     else:
-        # Default to PNG if the file extension is not SVG
         outname = outname.replace('.svg', '.png')
         drawer = rdMolDraw2D.MolDraw2DCairo(300, 300)
 
-    lig_ha = u.select_atoms(f'resname {lig_resname} and not name H*')
-    r = RMSF(atomgroup=lig_ha).run()
+    drawer.drawOptions().setBackgroundColour((1.0, 1.0, 1.0, 0.0))
 
     if ref_mol is not None:
         probe_mol = Chem.RemoveHs(ref_mol)
@@ -1016,32 +1023,59 @@ def plot_atomic_rmsf(u, lig_resname:str='UNK', outname:str='rmsf.png', log_rmsf:
         probe_mol = lig_full.convert_to('RDKIT', NoImplicit=False)
         probe_mol.Compute2DCoords()
         probe_mol = Chem.RemoveHs(probe_mol)
-    assert len(r.rmsf) == probe_mol.GetNumAtoms(), "Mismatch between RMSF length and atom count"
+    assert len(weights) == probe_mol.GetNumAtoms(), "Mismatch between weights length and atom count"
 
-    fig = SimilarityMaps.GetSimilarityMapFromWeights(mol=probe_mol, 
-                                                     weights=r.rmsf.tolist(), 
-                                                     draw2d=drawer,
-                                                     scale=2.0,
-                                                     step=0.1,
-                                                     alpha=0.5, 
-                                                     contourLines=5
-                                                     ) 
-    fig.FinishDrawing()
-    if outname.endswith('.svg'):
-        fig = fig.GetDrawingText()
-        with open(outname,'w+') as outf:
-            outf.write(fig)
+    # Replicate the draw2d path from GetSimilarityMapFromWeights so we can
+    # set the colourMap directly — that field is not exposed through the public API.
+    mol_prepared = rdMolDraw2D.PrepareMolForDrawing(probe_mol, addChiralHs=False)
+    if not mol_prepared.GetNumConformers():
+        rdDepictor.Compute2DCoords(mol_prepared)
+
+    conf = mol_prepared.GetConformer()
+    if mol_prepared.GetNumBonds() > 0:
+        bond = mol_prepared.GetBondWithIdx(0)
+        p1 = conf.GetAtomPosition(bond.GetBeginAtomIdx())
+        p2 = conf.GetAtomPosition(bond.GetEndAtomIdx())
     else:
-        fig.WriteDrawingText(outname)
+        p1, p2 = conf.GetAtomPosition(0), conf.GetAtomPosition(1)
+    sigma = round(0.3 * (p1 - p2).Length(), 2)
 
-    # Optionally, log the RMSF values for further analysis
-    if log_rmsf:
-        log_fname = os.path.splitext(outname)[0]
-        with open(f'{log_fname}.csv', 'w') as f:
-            f.write('atom_name,element,rmsf,contact_freq\n')
-            for i, atom in enumerate(lig_ha.atoms):
-                cw = contact_weights[i] if contact_weights is not None else float('nan')
-                f.write(f'{atom.name},{atom.element},{r.rmsf[i]:.4f},{cw:.4f}\n')
+    sigmas = [sigma] * mol_prepared.GetNumAtoms()
+    locs = [Geometry.Point2D(conf.GetAtomPosition(i).x, conf.GetAtomPosition(i).y)
+            for i in range(mol_prepared.GetNumAtoms())]
+
+    drawer.ClearDrawing()
+    ps = Draw.ContourParams()
+    ps.fillGrid = True
+    ps.gridResolution = 0.1
+    ps.extraGridPadding = 0.5
+
+    if color is not None:
+        from matplotlib.colors import to_rgba
+        r, g, b, a = to_rgba(color)
+        # white for zero/negative, target color for high positive values
+        clrs = [(1.0, 1.0, 1.0, 0.3), (1.0, 1.0, 1.0, 0.1), (r, g, b, a)]
+        ps.setColourMap(clrs)
+    elif colormap is not None:
+        from matplotlib import cm as mpl_cm
+        if isinstance(colormap, str):
+            clrs = [tuple(x) for x in mpl_cm.get_cmap(colormap)([0, 0.5, 1])]
+        elif hasattr(colormap, '__call__'):
+            clrs = [tuple(x) for x in colormap([0, 0.5, 1])]
+        else:
+            clrs = [colormap[0], colormap[1], colormap[2]]
+        ps.setColourMap(clrs)
+
+    Draw.ContourAndDrawGaussians(drawer, locs, weights.tolist(), sigmas, nContours=5, params=ps)
+    drawer.drawOptions().clearBackground = False
+    drawer.DrawMolecule(mol_prepared)
+    drawer.FinishDrawing()
+
+    if outname.endswith('.svg'):
+        with open(outname, 'w+') as outf:
+            outf.write(drawer.GetDrawingText())
+    else:
+        drawer.WriteDrawingText(outname)
     return
 
 def plot_rmsd(rmsd_df:pd.DataFrame=None,

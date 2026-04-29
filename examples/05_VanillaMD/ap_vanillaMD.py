@@ -6,7 +6,7 @@ import MDAnalysis as mda
 import mdtraj as md
 
 from autopath import VanillaMD
-from autopath.ap_PLIP import plot_atomic_rmsf
+from autopath.ap_PLIP import plot_atomic_property, calculate_ligand_rmsf
 from autopath.utils import load_system, compute_rmsd
 from autopath.utils import setup_logging
 
@@ -137,7 +137,8 @@ def main():
     rmsd_df.to_csv(f"{sys_name}/MD/{run_id}_rmsd.csv", index=False)
     
     if lig_resname is not None:
-        plot_atomic_rmsf(u, outname=f"{sys_name}/MD/{run_id}_RMSF.png", log_rmsf=True)
+        _rmsf = calculate_ligand_rmsf(u)
+        plot_atomic_property(u, _rmsf, outname=f"{sys_name}/MD/{run_id}_RMSF.png")
 
     return
 

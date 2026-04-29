@@ -6,7 +6,7 @@ import MDAnalysis as mda
 import mdtraj as md
 
 from autopath import SystemPreparation, Equilibration
-from autopath.ap_PLIP import plot_atomic_rmsf
+from autopath.ap_PLIP import plot_atomic_property, calculate_ligand_rmsf
 from autopath.utils import fix_pdb, save_pdb, load_system, setup_logging, compute_rmsd
 from openmm.app import PDBFile
 
@@ -196,9 +196,9 @@ def main():
                                           )
     rmsd_equilibration.to_csv(f"{sys_name}/equilibration/RMSD_{sys_name}.csv", index=False)
     if ligands is not None:
-        plot_atomic_rmsf(u_eq, lig_resname,
-                         outname=f"{sys_name}/equilibration/RMSF_{sys_name}.png",
-                        )
+        _rmsf = calculate_ligand_rmsf(u_eq, lig_resname)
+        plot_atomic_property(u_eq, _rmsf, lig_resname=lig_resname,
+                             outname=f"{sys_name}/equilibration/RMSF_{sys_name}.png")
     return
 
 if __name__ == "__main__":

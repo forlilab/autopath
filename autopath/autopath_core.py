@@ -18,7 +18,7 @@ from openmm.unit import *
 
 # AutoPath imports
 from autopath.utils import *
-from autopath.ap_PLIP import plot_atomic_rmsf
+from autopath.ap_PLIP import plot_atomic_property, calculate_ligand_rmsf, calculate_contact_frequency
 from autopath.analysis import *
 from autopath import (
     SystemPreparation,
@@ -257,18 +257,22 @@ class AutoPath:
                                     plots_outdir=f"{sys_name}/equilibration"
                                     )
                 rmsd.to_csv(f"{sys_name}/equilibration/{sys_name}_rmsd.csv", index=False)
+                _contact_freq = calculate_contact_frequency(u_eq, ligand_resname)
+                _rmsf = calculate_ligand_rmsf(u_eq, ligand_resname)
+                lig_mol = Chem.SDMolSupplier(ligand_file)[0] #Avoid chemiperception problems
+                plot_atomic_property(u_eq, _rmsf, lig_resname=ligand_resname,
+                                     outname=f"{sys_name}/equilibration/{sys_name}_RMSF.svg",
+                                     ref_mol=lig_mol)
+                plot_atomic_property(u_eq, _contact_freq, lig_resname=ligand_resname,
+                                     outname=f"{sys_name}/equilibration/{sys_name}_contact_freq.svg",
+                                     ref_mol=lig_mol)
                 lig_ha_eq = u_eq.select_atoms(f'resname {ligand_resname} and not name H*')
-                u_eq.trajectory[0]
-                pocket_eq  = u_eq.select_atoms(f'protein and not name H* and around 5 resname {ligand_resname}')
-                _contact_counts = np.zeros(len(lig_ha_eq))
-                # _nframes = min(100, len(u_eq.trajectory))
-                _nframes = len(u_eq.trajectory)
-                # for _ts in u_eq.trajectory[:_nframes]:
-                for _ts in u_eq.trajectory:#[-_nframes:]:
-                    _dmat = distance_array(lig_ha_eq.positions, pocket_eq.positions)
-                    _contact_counts += (_dmat < 3.5).any(axis=1)
-                _contact_freq = _contact_counts / _nframes
-                plot_atomic_rmsf(u_eq, outname=f"{sys_name}/equilibration/{sys_name}_RMSF-All.png", log_rmsf=True, contact_weights=_contact_freq)
+                pd.DataFrame({
+                    'atom_name':    [a.name for a in lig_ha_eq.atoms],
+                    'element':      [a.element for a in lig_ha_eq.atoms],
+                    'rmsf':         _rmsf,
+                    'contact_freq': _contact_freq,
+                }).to_csv(f"{sys_name}/equilibration/{sys_name}_RMSF.csv", index=False)
             except Exception as e:
                 logger.error(f"Error computing RMSD/RMSF: {e}")
                 pass

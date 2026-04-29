@@ -58,8 +58,8 @@ def main():
     ap = AutoPath(pdb_path=receptor,
                     pocket_selection='(resid 145-153 183-190) and name CA',
 
-                    do_fix_pdb=True,
-                    run_preparation=True,
+                    do_fix_pdb=False,
+                    run_preparation=False,
                     padding=1.2,
                     hydrogenMass=1.5, 
                     ionicStrength=0.15,
@@ -67,10 +67,10 @@ def main():
 
                     lig_ff='OPENFF',
 
-                    run_equilibration=True,
+                    run_equilibration=False,
                     protocol_fname=protocol,
 
-                    run_sMDpulling=True,
+                    run_sMDpulling=False,
                     sMD_outdir='sMD',
                     sMD_ligand_anchor_mode='lig_com',
                     sMD_max_replicas = 50,
@@ -83,18 +83,18 @@ def main():
                     sMD_autostop_freq=250, #moves
                     sMD_dx_per_move=0.001, # nm
 
-                    sMD_run_analysis=True,
+                    sMD_run_analysis=False,
                     sMD_clust_selection=None,
                     
-                    extract_milestones=True,
+                    extract_milestones=False,
                     n_milestones=5,
 
-                    run_metadynamics=True,
-                    mMD_time=10,
+                    run_metadynamics=False,
+                    mMD_time=2,
                     mMD_bias_frequency=2,
                     mMD_hill_width=0.05,
                     mMD_hill_height=1.2,
-                    mMD_bias_factor=15
+                    mMD_bias_factor=12
                 )
     ap.run(ligand_file=ligand)
 

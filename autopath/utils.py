@@ -1275,7 +1275,7 @@ def compute_rmsd(u,
         plt.figure(figsize=(10, 5))
         for col in columns[3:]:
             sns.lineplot(x='frame', y=col, data=rmsd_df)
-            plt.xlabel('Frame');            plt.ylabel(f'RMSD (A)')
+            plt.xlabel('Frame');            plt.ylabel(f'RMSD (Å)')
             plt.title(f'{col} RMSD')
             plt.tight_layout()
             if suffix is not None:
