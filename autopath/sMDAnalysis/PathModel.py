@@ -31,6 +31,22 @@ class PathModel(ABC):
         pass
 
 
+class NullPathModel(PathModel):
+    """Assigns all trajectories to a single path, bypassing clustering entirely.
+
+    Useful for isolating the effect of clustering on downstream results.
+    All trajectories receive path label ``'path-0'``.
+    """
+
+    def fit_transform(self, feature_df: pd.DataFrame, **kwargs) -> dict:
+        trajnames = feature_df['trajname'].unique().tolist()
+        logger.info(
+            f"NullPathModel: assigning all {len(trajnames)} trajectories to 'path-0' "
+            "(no clustering performed)."
+        )
+        return {name: "path-0" for name in trajnames}
+
+
 class DTWPathModel(PathModel):
     
     """
@@ -71,6 +87,11 @@ class DTWPathModel(PathModel):
 
         Parameters
         ----------
+        r_range : tuple or float, optional
+            If a tuple (low, high), filter trajectories to that r_coord range before clustering.
+            If a float in (0, 1], use the first r_range fraction of each trajectory for
+            clustering (e.g. 0.8 uses the first 80% of frames). Plots always reflect the
+            full trajectory regardless.
         cluster_across_speeds : bool
             If True, cluster all trajectories together regardless of speed.
             If False (default), cluster trajectories independently per speed.
@@ -84,15 +105,23 @@ class DTWPathModel(PathModel):
         """
         
         # r-range filtering. You may want to cluster only around the TS region
+        cluster_fraction = None
         if r_range is not None:
-            low, high = map(float, r_range)
-            logger.warning(
-                f'Filtering trajectories to r_target in [{low}, {high}] for clustering.'
-            )
-            feature_df = feature_df[
-                (feature_df['r_coord'] >= low) &
-                (feature_df['r_coord'] <= high)
-            ]
+            if isinstance(r_range, float):
+                cluster_fraction = r_range
+                logger.warning(
+                    f'Clustering will use the first {cluster_fraction*100:.0f}% of frames per trajectory. '
+                    f'Plots will reflect the full trajectory.'
+                )
+            else:
+                low, high = map(float, r_range)
+                logger.warning(
+                    f'Filtering trajectories to r_target in [{low}, {high}] for clustering.'
+                )
+                feature_df = feature_df[
+                    (feature_df['r_coord'] >= low) &
+                    (feature_df['r_coord'] <= high)
+                ]
 
         feature_cols = [
             c for c in feature_df.columns
@@ -101,7 +130,7 @@ class DTWPathModel(PathModel):
         
         #IDK why this happens but sometimes we get NaN values in the features.
         # Warn and drop those rows if present.
-        logger.debug(f'Features used for clustering: {feature_cols}')
+        logger.info(f'Features used for clustering: {feature_cols}')
         if feature_df[feature_cols].isnull().any().any():
             logger.warning(
             "NaN values detected in features. "
@@ -110,7 +139,7 @@ class DTWPathModel(PathModel):
             #drop rows with NaN values in feature columns
             feature_df = feature_df.dropna(subset=feature_cols)
                                  
-        logger.debug(f"Feature matrix shape after NaN removal: {feature_df.shape}")
+        logger.info(f"Feature matrix shape after NaN removal: {feature_df.shape}")
               
         # ecide grouping strategy
         if cluster_across_speeds:
@@ -123,10 +152,20 @@ class DTWPathModel(PathModel):
         medoid_to_path = {}  # Map medoid trajectory name -> path ID
 
         for speed_key, speed_df in grouping_iter:
+            speed_df_full = speed_df
+
+            if cluster_fraction is not None:
+                speed_df_cluster = (
+                    speed_df_full
+                    .groupby('trajname', group_keys=False)
+                    .apply(lambda df: df.sort_values('step').iloc[:max(1, int(np.floor(cluster_fraction * len(df))))])
+                )
+            else:
+                speed_df_cluster = speed_df_full
 
             # Build per-trajectory arrays (required by dtw_ndim)
             data_struct = {}
-            for trajname, traj_df in speed_df.groupby("trajname"):
+            for trajname, traj_df in speed_df_cluster.groupby("trajname"):
                 traj_df = traj_df.sort_values('step')
                 if traj_df.shape[0] < 2:
                     logger.error(
@@ -263,10 +302,32 @@ class DTWPathModel(PathModel):
                 self.speed_name = speed_key if speed_key is not None else 'Global'
                 self.plot_distance_matrix(distmatrix)
                 self.plot_elbow(scores, K)
+
+                if cluster_fraction is not None:
+                    # Rebuild scaled vectors over the full trajectories for plotting
+                    vectors_full = [
+                        speed_df_full[speed_df_full['trajname'] == name]
+                        .sort_values('step')[feature_cols].to_numpy()
+                        for name in trajnames
+                    ]
+                    vectors_plot = [scaler.transform(arr) for arr in vectors_full]
+                    if geom_idx and other_idx and self.n_geom_pcs is not None:
+                        vectors_plot = [
+                            np.hstack([
+                                pca_geom.transform(arr[:, geom_idx]),
+                                arr[:, other_idx],
+                            ])
+                            for arr in vectors_plot
+                        ]
+                    speed_df_for_plot = speed_df_full[speed_df_full['trajname'].isin(trajnames)].copy()
+                else:
+                    vectors_plot = vectors_stacked_scaled
+                    speed_df_for_plot = speed_df_full
+
                 self.plot_clusters_PCA(
-                    feature_df=speed_df,
+                    feature_df=speed_df_for_plot,
                     path_mapping_dic=path_mapping_dic,
-                    vectors_stacked_scaled=vectors_stacked_scaled,
+                    vectors_stacked_scaled=vectors_plot,
                 )
 
         # Generate unbinding paths visualization if trajectories and reference PDB are available
