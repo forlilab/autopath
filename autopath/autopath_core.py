@@ -249,6 +249,7 @@ class AutoPath:
         equilibrated_traj = equilibrated_traj.replace(".dcd", "_aligned.dcd")
         if os.path.exists(equilibrated_traj):
             u_eq = mda.Universe(equilibrated_pdb, equilibrated_traj, in_memory=True)
+            lig_mol = None
             try:
                 rmsd = compute_rmsd(u_eq, u_eq,
                                     alig_select="backbone", 
@@ -293,10 +294,11 @@ class AutoPath:
             logger.info(f"Pocket residues are: {', '.join(set(pocket_residues))}")
             
             ligand_total_hatoms = [a.index for a in u_eq.select_atoms(f'resname {ligand_resname} and not name H*')]
-            ligand_atoms_indices = get_ligand_anchor_atoms(u_eq, ligand_resname, 
+            ligand_atoms_indices = get_ligand_anchor_atoms(u_eq, ligand_resname,
                                                         mode=self.sMD_ligand_anchor_mode,
                                                         n_atoms=5,
-                                                        out_dir=sys_name)
+                                                        out_dir=sys_name,
+                                                        ref_mol=lig_mol)
             logger.info(f"Ligand anchor atom indices are: {', '.join(map(str, ligand_atoms_indices))}")
             # write out the protein/ligand/pocket PDBs and PyMOL session
             try:
@@ -320,7 +322,7 @@ class AutoPath:
         # in this paper they used 80 kcal·mol−1? units don match tho. Ziada et al 2022.
         sMD_spring_cte_per_atom = 100 * 4.184  # KJ/mol/nm2, converted from kcal. This affects thermal fluctuations
         sMD_traj_outdir = f"{self.sMD_outdir}/trajectories"
-        sMD_analysis_outdir = f"{self.sMD_outdir}/analysis"
+        sMD_analysis_outdir = f"{self.sMD_outdir}/analysis_merged"
         
         if self.run_sMDpulling:
             equilibrated_system = load_system(f"{sys_name}/equilibration/system_equil_{sys_name}.xml")
@@ -498,13 +500,14 @@ class AutoPath:
         milestones_outdir = f"{sys_name}/milestones"
         min_dist = 1.0 # minimum distance between clusters of milestones
         
-        # Resolve ligand_atoms_full_indices for downstream use (metadynamics, relax)
-        u_sMD = mda.Universe(solvated_system_pdb, sMD_trajs)
-        ligand_atoms_full = u_sMD.select_atoms(f'resname {ligand_resname} and not name H*')
-        ligand_atoms_full_indices = [atom.index for atom in ligand_atoms_full]
+        if self.extract_milestones or self.run_metadynamics:
+            # Resolve ligand_atoms_full_indices for downstream use (metadynamics, relax)
+            u_sMD = mda.Universe(solvated_system_pdb, sMD_trajs)
+            ligand_atoms_full = u_sMD.select_atoms(f'resname {ligand_resname} and not name H*')
+            ligand_atoms_full_indices = [atom.index for atom in ligand_atoms_full]
 
-        ligand_sel = f"resname {ligand_resname} and not name H*"
-        pocket_sel = f'index {" ".join(map(str, pocket_atom_indices))}'
+            ligand_sel = f"resname {ligand_resname} and not name H*"
+            pocket_sel = f'index {" ".join(map(str, pocket_atom_indices))}'
 
         if self.extract_milestones:
             

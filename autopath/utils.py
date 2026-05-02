@@ -980,13 +980,14 @@ def get_ligand_anchor_atoms(
     u,
     lig_resname: str,
     pocket_sel: str = "protein and around 5 resname UNK and not name H*",
-    mode: str = "ha",
+    mode: str = "murcko",
     frames: int = 100,
     n_atoms: int = 5,
     reduce_before: bool = False,
     expand_rings: bool = True,
     out_dir: str = None,
     verbose: bool = True,
+    ref_mol=None,
 ):
     """
     Select anchor atoms in the ligand for pulling and optionally visualize them.
@@ -1052,14 +1053,14 @@ def get_ligand_anchor_atoms(
         dists = np.linalg.norm(ligand.positions - com, axis=1)
         anchor = ligand.atoms[np.argsort(dists)[:n_atoms]].indices
 
-    elif mode == "pocket_closest":
+    elif mode == "pocket_com":
         pocket_com = pocket.center_of_mass()
         dists = np.linalg.norm(ligand.positions - pocket_com, axis=1)
         anchor = ligand.atoms[np.argsort(dists)[:n_atoms]].indices
 
     elif mode == "contacts":
         contact_counts = np.zeros(len(ligand))
-        for ts in u.trajectory[:frames]:
+        for ts in u.trajectory:#[:frames]:
             dmat = distance_array(ligand.positions, pocket.positions)
             contacts = (dmat < 3.5).any(axis=1)
             contact_counts += contacts
@@ -1119,19 +1120,19 @@ def get_ligand_anchor_atoms(
 
     # Draw 2D image
     try:
-        # map MDA indices (all) to RDKit indices
-        idx_map = {a.index: i for i, a in enumerate(ligand_full.atoms)}
-        # skip hydrogens in highlight
-        # idx_map = {k: v for k, v in idx_map.items() if not ligand_full.atoms[k].name.startswith("H")}
-        highlight_rdk_indices = [idx_map[i] for i in anchor if i in idx_map]
-
-        # sanity check
-        # natoms = mol.GetNumAtoms()
-        # highlight_rdk_indices = [i for i in highlight_rdk_indices if i < natoms]
-        mol = Chem.RemoveHs(mol)
-        Chem.rdDepictor.Compute2DCoords(mol)
+        if ref_mol is not None:
+            mol_draw = Chem.RemoveHs(ref_mol)
+            Chem.rdDepictor.Compute2DCoords(mol_draw)
+            # anchor MDA indices → position among heavy atoms → ref_mol atom index
+            ha_indices = list(ligand_ha.atoms.indices)
+            highlight_rdk_indices = [ha_indices.index(i) for i in anchor if i in ha_indices]
+        else:
+            idx_map = {a.index: i for i, a in enumerate(ligand_full.atoms)}
+            highlight_rdk_indices = [idx_map[i] for i in anchor if i in idx_map]
+            mol_draw = Chem.RemoveHs(mol)
+            Chem.rdDepictor.Compute2DCoords(mol_draw)
         img = Chem.Draw.MolToImage(
-            mol,
+            mol_draw,
             size=(300, 300),
             highlightAtoms=highlight_rdk_indices,
         )
