@@ -8,7 +8,7 @@ import logging
 
 from autopath.sMDAnalysis import SMDData
 from autopath.sMDAnalysis.Estimators import BaseEstimator, FrictionEstimator
-from autopath.sMDAnalysis.PathModel import DTWPathModel, PathModel
+from autopath.sMDAnalysis.PathModel import DTWPathModel, NullPathModel, PathModel
 from autopath.sMDAnalysis.Estimators import (
     JarzynskiEstimator,
     CumulantEstimator,
@@ -84,6 +84,8 @@ class SMDAnalysis:
                     do_plots=self.do_plots,
                     outdir=self.outdir,
                 )
+            elif path_model == 'null':
+                self.path_model = NullPathModel()
             else:
                 raise ValueError(f"Unknown path model: {path_model}")
         elif isinstance(path_model, PathModel):
@@ -112,8 +114,8 @@ class SMDAnalysis:
             sMDDdata.filter_by_r_range(r_range, sMDDdata.r_column)
 
         traces_feat_df = sMDDdata.get_trace_features(
-            features=['lag','force','work','r_before'],
-            # features=['lag','dW_protocol','r_before'],           
+            # features=['lag','force','work','r_before', 'r_after'], # names traces
+            features=['lag','work','r_before'], # names tracesV2
         )
 
         dist_feat_df = None
@@ -144,6 +146,7 @@ class SMDAnalysis:
 
         path_mappings = self.path_model.fit_transform(
             feat_df,
+            r_range=0.75,  # use only the first 75% of frames for clustering to avoid noisy end states
             reference_pdb=self.reference_pdb,
             ligand_select=self.ligand_select,
             trajectory_files=trajectory_files,
@@ -217,7 +220,7 @@ class SMDAnalysis:
                 plot_extrapolated_param(
                     v0_df,
                     param=pcol,
-                    outfname=os.path.join(self.outdir, f'{pcol}_extrapolated.png'),
+                    outfname=os.path.join(self.outdir, f'{pcol}_extrapolated.svg'),
                 )
 
         sMDDdata.raw_data.to_csv(f'{self.outdir}/sMD_processed_data.csv', index=False)
@@ -296,14 +299,18 @@ class SMDAnalysis:
             if group_A is not None and group_B is not None:
                 feat_df = smd.calculate_pocket_distances(group_A=group_A, group_B=group_B)
             else:
-                feat_df = smd.get_trace_features(features=['work', 'force', 'lag', 'r_before'])
-
+                # feat_df = smd.get_trace_features(features=['work', 'force', 'lag', 'r_before', 'r_after'])
+                feat_df = smd.get_trace_features(features=['work', 'lag', 'r_before']) # tracesV2
+                
             clusterer = DTWPathModel(
                 seed=self.seed,
                 do_plots=False,
                 outdir=self.outdir,
             )
-            path_mappings = clusterer.fit_transform(feat_df)
+            path_mappings = clusterer.fit_transform(feat_df,
+                                                    r_range=0.75
+            )
+                                                    
             smd.raw_data['path'] = smd.raw_data['trajname'].map(path_mappings)
 
             speed_data = smd.raw_data[smd.raw_data['speed'] == speed].copy()
