@@ -33,14 +33,14 @@ def plot_work_profiles(
 ):
 
     os.makedirs(outdir, exist_ok=True)
-    outfile = os.path.join(outdir, f"work_profiles_{estimator}.png")
+    outfile = os.path.join(outdir, f"work_profiles_{estimator}.svg")
 
     results = results[results['estimator'] == estimator]
     style_order = results['path'].unique().tolist()
     speeds = sorted(results['speed'].unique())
         
     fig, ax = plt.subplots(
-        figsize=(12, 3),
+        figsize=(11, 3),
         ncols=len(speeds),
         nrows=1,
         sharey=True,
@@ -76,10 +76,10 @@ def plot_work_profiles(
         # # just reference for trypsin
         # axes[i].axhline(27, color='k', lw=1, ls='--')
         
-        axes[i].set_title(f'Speed={speed} nm/ps', fontsize=12)
-        axes[i].set_xlabel(f'{r_coord} (nm)')
+        axes[i].set_title(f'Speed={speed} nm/ps', fontsize=14)
+        axes[i].set_xlabel(f'{r_coord} (nm)', fontsize=12)
         if i == 0:
-            axes[i].set_ylabel('Energy (kJ/mol)')
+            axes[i].set_ylabel('Energy (kJ/mol)', fontsize=12)
         else:
             axes[i].set_ylabel('')
 
@@ -126,13 +126,15 @@ def plot_work_profiles(
             ]
             hue_legend_labels = hue_labels
 
-    # Figure-level legend for metrics (color) on the right
+    # Figure-level legend for metrics (color) at the bottom
     if hue_legend_handles:
         fig.legend(
             hue_legend_handles, hue_legend_labels,
             title='',
-            bbox_to_anchor=(1.01, 0.8), loc='upper left',
-            borderaxespad=0.0
+            loc='lower center',
+            bbox_to_anchor=(0.5, -0.05),
+            ncol=min(len(hue_legend_handles), 4),
+            borderaxespad=0.0,
         )
 
     # plt.title(f'Work Profiles {title_suffix}', fontsize=16)
@@ -185,7 +187,7 @@ def plot_profile(df: pd.DataFrame,
         if 'estimator' in df.columns and df['estimator'].nunique() > 1:
             hue = 'estimator'
 
-    outfname = os.path.join(outdir, f"{value_col}{prefix}.png")
+    outfname = os.path.join(outdir, f"{value_col}{prefix}.svg")
     se_col = f"{value_col}_se"
     has_se = show_error_bands and se_col in df.columns
 
@@ -337,7 +339,7 @@ def plot_convergence_traces(smd_conv_traces:list[str], outdir: str):
 
         axes[0].set_ylabel(f"{quantity} (kJ/mol)")
         plt.tight_layout()
-        plt.savefig(f"{outdir}/sMD_convergence_{quantity}.png", dpi=300)
+        plt.savefig(f"{outdir}/sMD_convergence_{quantity}.svg", dpi=300)
         plt.close()
 
     return
@@ -425,26 +427,18 @@ def plot_convergence_metrics(smd_conv_metrics: list[str], outdir: str):
                 label=f"speed {speed} nm/ps",
             )
 
+        speed_handles = [
+            Line2D([0], [0], color=speed_colors[s], marker='o', lw=2, label=f"speed {s}")
+            for s in speeds
+        ]
+        ax.legend(handles=speed_handles, loc="best")
         ax.set_title(metric, fontsize=16)
         ax.set_xlabel("Number of replicas")
         ax.set_ylabel(metric)
         ax.grid(True)
 
-    # single legend for speeds
-    speed_handles = [
-        Line2D([0], [0], color=speed_colors[s], marker='o', lw=2, label=f"speed {s}")
-        for s in speeds
-    ]
-    fig.legend(
-        handles=speed_handles,
-        loc='lower center',
-        bbox_to_anchor=(0.5, -0.1),
-        frameon=False,
-        ncol=min(len(speeds), 4),
-    )
-
     plt.tight_layout()#rect=[0, 0, 1, 0.95])
-    plt.savefig(f"{outdir}/sMD_convergence_metrics.png", dpi=300, bbox_inches='tight')
+    plt.savefig(f"{outdir}/sMD_convergence_metrics.svg", dpi=300, bbox_inches='tight')
     plt.close()
     return
    
@@ -460,7 +454,7 @@ def plot_extrapolated_param(df: pd.DataFrame = None,
     Creates one subplot column per estimator (values in ``'estimator'``).
     """
     if outfname is None:
-        outfname = f'{param}_extrapolated.png'
+        outfname = f'{param}_extrapolated.svg'
         
     color_col = 'R2'
     se_col = f'{param}_se'

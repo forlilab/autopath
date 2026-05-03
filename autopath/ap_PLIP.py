@@ -455,7 +455,7 @@ class ProteinLigandAnalyzer:
                     radii: str = 'mbondi2',
                     time: str = "0:10:00",
                     omp_threads: int = 222,
-                    partition: str = "highmem,shared,gpu",
+                    partition: str = "forli,forli-pro,shared,highmem,gpu",
                     slurm_template_fname: str = None,
                     ):
         """Write a SLURM qfile for MMPBSA calculations.

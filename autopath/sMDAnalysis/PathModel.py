@@ -58,7 +58,7 @@ class DTWPathModel(PathModel):
                  seed: int = 42,
                  do_plots: bool = True,
                  outdir: str = 'clustering_results',
-                 n_geom_pcs: int | None = 3,
+                 n_geom_pcs: int | None = 2,
                  geom_feature_prefix: str = 'dist_',
                  ):
 

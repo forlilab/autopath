@@ -322,7 +322,7 @@ class AutoPath:
         # in this paper they used 80 kcal·mol−1? units don match tho. Ziada et al 2022.
         sMD_spring_cte_per_atom = 100 * 4.184  # KJ/mol/nm2, converted from kcal. This affects thermal fluctuations
         sMD_traj_outdir = f"{self.sMD_outdir}/trajectories"
-        sMD_analysis_outdir = f"{self.sMD_outdir}/analysis_merged"
+        sMD_analysis_outdir = f"{self.sMD_outdir}/analysis_traces"
         
         if self.run_sMDpulling:
             equilibrated_system = load_system(f"{sys_name}/equilibration/system_equil_{sys_name}.xml")
