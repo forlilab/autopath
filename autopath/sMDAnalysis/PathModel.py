@@ -18,7 +18,7 @@ from .Diagnostics import make_unbinding_paths_pml
 from abc import ABC, abstractmethod
 
 import logging
-logger = logging.getLogger("autopath")
+logger = logging.getLogger("autopath.PathModel")
 
 class PathModel(ABC):
     """Abstract base class for path models in sMDAnalysis."""
@@ -94,7 +94,7 @@ class DTWPathModel(PathModel):
             full trajectory regardless.
         cluster_across_speeds : bool
             If True, cluster all trajectories together regardless of speed.
-            If False (default), cluster trajectories independently per speed.
+            If False, cluster trajectories independently per speed.
         reference_pdb : str, optional
             Path to reference PDB file for unbinding path visualization.
         ligand_select : str, optional
@@ -139,7 +139,7 @@ class DTWPathModel(PathModel):
             #drop rows with NaN values in feature columns
             feature_df = feature_df.dropna(subset=feature_cols)
                                  
-        logger.info(f"Feature matrix shape after NaN removal: {feature_df.shape}")
+        # logger.info(f"Feature matrix shape after NaN removal: {feature_df.shape}")
               
         # ecide grouping strategy
         if cluster_across_speeds:
@@ -292,7 +292,7 @@ class DTWPathModel(PathModel):
                 if speed_key is not None:
                     unique_path_id = f"path-{cluster_id}_v{speed_key}"
                 else:
-                    unique_path_id = cluster_id
+                    unique_path_id = f"path-{cluster_id}"
                 path_mapping_dic[trajname] = unique_path_id
 
             all_path_mappings.update(path_mapping_dic)
@@ -443,7 +443,7 @@ class DTWPathModel(PathModel):
             path_label = path_mapping_dic[trajname]
             # color = palette[path_label]
 
-            label = f'{path_label.split("_")[0]}'
+            label = f'{str(path_label).split("_")[0]}'
             # label = f'path-{path_label}'#_{trajname}'
 
             # avoid duplicate legend entries
