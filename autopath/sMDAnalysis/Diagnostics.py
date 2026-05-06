@@ -30,12 +30,16 @@ def plot_work_profiles(
     cols_to_plot: list = ['Wmean', 'dG', 'Wdiss'],
     estimator: str = 'cumulant',
     outdir: str = 'analysis',
+    mask_negative_dG: bool = False,
 ):
 
     os.makedirs(outdir, exist_ok=True)
     outfile = os.path.join(outdir, f"work_profiles_{estimator}.svg")
 
     results = results[results['estimator'] == estimator]
+    if mask_negative_dG and 'dG' in results.columns:
+        results = results.copy()
+        results.loc[results['dG'] < 0, 'dG'] = np.nan
     style_order = results['path'].unique().tolist()
     speeds = sorted(results['speed'].unique())
         
@@ -153,6 +157,7 @@ def plot_profile(df: pd.DataFrame,
                  ylabel: str | None = None,
                  outdir: str = 'analysis',
                  prefix: str = '',
+                 mask_negative_dG: bool = False,
                  ):
     """Plot a single quantity vs reaction coordinate, faceted by speed.
 
@@ -181,6 +186,10 @@ def plot_profile(df: pd.DataFrame,
         Optional filename prefix.
     """
     os.makedirs(outdir, exist_ok=True)
+
+    if mask_negative_dG and value_col == 'dG' and value_col in df.columns:
+        df = df.copy()
+        df.loc[df[value_col] < 0, value_col] = np.nan
 
     # Auto-detect hue
     if hue is None:
@@ -442,9 +451,10 @@ def plot_convergence_metrics(smd_conv_metrics: list[str], outdir: str):
     plt.close()
     return
    
-def plot_extrapolated_param(df: pd.DataFrame = None, 
+def plot_extrapolated_param(df: pd.DataFrame = None,
                             param: str = 'dG',
-                            outfname: str = None
+                            outfname: str = None,
+                            mask_negative_dG: bool = False,
                             ):
     """Plot the v→0 extrapolated parameter vs r_coord with R² color mapping and error bands.
     
@@ -461,6 +471,10 @@ def plot_extrapolated_param(df: pd.DataFrame = None,
 
     if df is None or df.empty:
         return
+
+    if mask_negative_dG and param == 'dG' and param in df.columns:
+        df = df.copy()
+        df.loc[df[param] < 0, param] = np.nan
 
     # Determine estimators
     if 'estimator' in df.columns:
