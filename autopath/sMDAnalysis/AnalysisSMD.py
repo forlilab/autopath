@@ -27,7 +27,7 @@ from autopath.sMDAnalysis.Diagnostics import (
     plot_extrapolated_param,
 )
 
-logger = logging.getLogger("autopath.sMDAnalysis.core")
+logger = logging.getLogger("autopath.sMDAnalysis")
 
 class SMDAnalysis:
     def __init__(self,
@@ -102,8 +102,7 @@ class SMDAnalysis:
             merge_features: bool = True,
             trim_low_support_results: bool = True,
             trim_min_support_ratio: float = 0.9,
-            trim_keep_prefix: bool = True,
-            p_eq_estimator: str = 'auto',
+            cluster_across_speeds: bool = False,
             ) -> SMDData:
 
         if self.reference_pdb is None:
@@ -114,7 +113,6 @@ class SMDAnalysis:
             sMDDdata.filter_by_r_range(r_range, sMDDdata.r_column)
 
         traces_feat_df = sMDDdata.get_trace_features(
-            # features=['lag','force','work','r_before', 'r_after'], # names traces
             features=['lag','work','r_before'], # names tracesV2
         )
 
@@ -123,8 +121,11 @@ class SMDAnalysis:
             dist_feat_df = sMDDdata.calculate_pocket_distances(
                 group_A=group_A,
                 group_B=group_B,
-                recompute=False,
+                recompute=True,
             )
+
+        if dist_feat_df is not None and cluster_across_speeds:
+            logger.warning("Clustering using all speeds together on trace features. Those depend on speed, so this may lead to suboptimal clustering. Consider setting cluster_across_speeds=False or using only distance features for clustering.")
 
         if group_A is not None and group_B is not None and merge_features:
             feat_df = SMDData.build_merged_features(
@@ -139,44 +140,71 @@ class SMDAnalysis:
             feat_df = traces_feat_df
             logger.info('Clustering will be performed using trace features only')
 
+        # assemble trajectory files for path model (if needed)
         trajectory_files = {}
         for traj in sMDDdata.traj_files:
             trajname = SMDData._traj_to_log_name(traj)
             trajectory_files[trajname] = (self.reference_pdb, traj)
 
+        # fit path model and assign paths to trajectories
         path_mappings = self.path_model.fit_transform(
             feat_df,
             r_range=0.75,  # use only the first 75% of frames for clustering to avoid noisy end states
             reference_pdb=self.reference_pdb,
             ligand_select=self.ligand_select,
             trajectory_files=trajectory_files,
+            cluster_across_speeds=cluster_across_speeds,
             pocket_select=group_B
         )
 
         sMDDdata.raw_data['path'] = sMDDdata.raw_data['trajname'].map(path_mappings)
 
+        # trim (speed, path) groups with insufficient sample support for reliable estimation
         if trim_low_support_results:
             sMDDdata.raw_data = trim_results_by_n_samples_support(
                 sMDDdata.raw_data,
-                min_samples=5,
+                min_samples=3,
                 min_support_ratio=trim_min_support_ratio,
-                keep_prefix=trim_keep_prefix,
-                add_support_columns=True,
             )
-            
+        
+        # fit estimators sequentially (some may rely on the path assignments, so do this before any path filtering)
         for estimator in self.estimators:
             logger.info(f"Fitting estimator: {estimator.name}")
             sMDDdata = estimator.fit_transform(sMDDdata)
 
-        sMDDdata = self._path_filtering(
-            sMDDdata,
-            min_replicas=3,
-            p_eq_estimator=p_eq_estimator,
-        )
+        
+        sMDDdata = self._path_filtering(sMDDdata, min_replicas=3)
+
+        if sMDDdata.results.empty:
+            raise RuntimeError(
+                "All (speed, path) groups were removed by path filtering — "
+                "no data remains for PMF construction. "
+                "Consider running more SMD replicas or using slower pulling speeds."
+            )
+
+        # Compute p_eq per estimator explicitly.
+        # Paths with negative dG values trigger a warning; those bins are
+        # excluded from the integrand (contribute 0 to Z), which smoothly
+        # downweights artifact-heavy paths in the mixture.
+        weights_by_estimator = {
+            est.name: self.compute_p_eq(sMDDdata, estimator=est.name)
+            for est in self.estimators
+        }
+
+        self._write_path_quality(sMDDdata, weights_by_estimator)
 
         self.mixture_pmfs = calculate_weighted_pmf(
             smd_data=sMDDdata,
+            weights_by_estimator=weights_by_estimator,
         )
+
+        if self.mixture_pmfs.empty or 'speed' not in self.mixture_pmfs.columns:
+            raise RuntimeError(
+                "Weighted PMF calculation produced no output. "
+                "All paths may have been excluded during PMF construction "
+                "(e.g. no common support across paths at any speed)."
+            )
+
         self.mixture_pmfs.to_csv(f'{self.outdir}/mixture_pmfs.csv', index=False)
 
         weighted_pmf_v0 = {}
@@ -533,7 +561,7 @@ class SMDAnalysis:
         if not p_neq:
             return pd.Series(dtype=float)
 
-        p_eq = SMDData._compute_p_eq(results_df, p_neq, beta)
+        p_eq = SMDAnalysis._compute_p_eq(results_df, p_neq, beta)
         if not p_eq:
             return pd.Series(dtype=float)
 
@@ -563,61 +591,61 @@ class SMDAnalysis:
 
         return pd.Series(out).sort_index()
     
+    def _write_path_quality(
+        self,
+        sMDDdata: SMDData,
+        weights_by_estimator: dict,
+    ) -> None:
+        """Write a per-(estimator, speed, path) quality summary to disk.
+
+        Captures negative-dG counts, replica counts, dG endpoints and the
+        final p_eq weight so the user can audit which paths the cumulant
+        estimator is struggling with.
+        """
+        rows = []
+        for est in self.estimators:
+            df_est = sMDDdata.results[sMDDdata.results['estimator'] == est.name]
+            weights = weights_by_estimator.get(est.name, {})
+            for (speed, path), gpath in df_est.groupby(['speed', 'path']):
+                gpath_sorted = gpath.sort_values('step')
+                dG = gpath_sorted['dG'].dropna().to_numpy(dtype=float)
+                if dG.size == 0:
+                    continue
+                n_neg = int((dG < 0).sum())
+                rows.append({
+                    'estimator': est.name,
+                    'speed': speed,
+                    'path': path,
+                    'n_replicas': int(gpath_sorted['n_samples'].median()),
+                    'n_steps': int(dG.size),
+                    'n_neg_dG': n_neg,
+                    'frac_neg_dG': n_neg / dG.size,
+                    'dG_min': float(dG.min()),
+                    'dG_final': float(dG[-1]),
+                    'p_eq': float(weights.get(speed, {}).get(path, 0.0)),
+                })
+        if rows:
+            pd.DataFrame(rows).to_csv(
+                f'{self.outdir}/path_quality.csv', index=False
+            )
+
     def _path_filtering(
         self,
         sMDDdata: SMDData,
         min_replicas: int = 3,
-        min_dG_allowed: float | None = None,
-        max_neg_dG_frac: float | None = 0.15,
-        max_path_p_eq: float = 1.0,
-        p_eq_estimator: str = 'auto',
     ) -> SMDData:
-        """Filter out pathological or under-sampled (speed, path) groups.
+        """Drop (speed, path) groups with fewer than ``min_replicas`` trajectories.
 
-        Applied **after** estimator fitting and support trimming, but
-        **before** weighted-PMF construction.
-
-        Filters (applied in order):
-        1. **min_replicas** — drop paths whose median ``n_samples`` is
-           below this threshold (under-sampled).
-        2. **min_dG_allowed** — drop paths whose minimum dG falls below
-           this floor (artifact guard).  Set *None* to disable.
-        3. **max_neg_dG_frac** — drop paths where the fraction of
-           negative-dG steps exceeds this value.  Negative dG is
-           almost always an artifact of the cumulant expansion with
-           too few samples (Var >> Wmean); keeping such a path
-           distorts p_eq weighting.  Set *None* to disable.
-        4. **max_path_p_eq** — drop paths whose p_eq exceeds this
-           threshold (single-path domination guard).
-
-        Parameters
-        ----------
-        sMDDdata : SMDData
-            Data object with fitted estimator ``results``.
-        min_replicas : int
-            Minimum median n_samples per (speed, path).
-        min_dG_allowed : float or None
-            dG floor in kJ/mol.
-        max_neg_dG_frac : float or None
-            Maximum tolerated fraction of negative-dG steps per path.
-        max_path_p_eq : float
-            Maximum p_eq allowed for a single path.
-        p_eq_estimator : str
-            Estimator used to compute p_eq for the dominance guard.
-            Allowed: ``'auto'``, ``'cumulant'``, ``'jarzynski'``, ``'p_neq'``.
-
-        Returns
-        -------
-        SMDData
-            Filtered data object (modified in place and returned).
+        Applied after estimator fitting and before p_eq computation and PMF
+        construction.  Negative-dG bins are excluded from the p_eq integrand
+        by :meth:`compute_p_eq`; per-(speed, path) quality details are
+        written to ``path_quality.csv``.  Also logs a per-speed replica
+        imbalance warning when the ratio of max/min replica counts exceeds 3.
         """
-
-        # ---- 1. Minimum replicas filter ----
         keys_to_drop: list[tuple[float, str]] = []
         for (speed, path), group in sMDDdata.results.groupby(['speed', 'path']):
             n_replicas = int(group['n_samples'].median())
             if n_replicas < min_replicas:
-                
                 logger.warning(
                     f"Excluding path '{path}' at speed={speed} nm/ps: "
                     f"only {n_replicas} replicas < {min_replicas}"
@@ -638,87 +666,137 @@ class SMDAnalysis:
                 ].index
             )
 
-        bad_keys: set[tuple[float, str]] = set()
-
-        # ---- 2. dG floor filter (artifact guard) ----
-        if min_dG_allowed is not None:
-            dG_min_by_path = (
-                sMDDdata.results
-                .groupby(['speed', 'path'])['dG']
-                .min()
-                .dropna()
-            )
-            for (speed, path), dgmin in dG_min_by_path.items():
-                if dgmin < min_dG_allowed:
-                    logger.warning(
-                        f"Excluding path '{path}' at speed={speed} nm/ps: "
-                        f"min(dG)={dgmin:.1f} kJ/mol < floor {min_dG_allowed:.1f} kJ/mol"
-                    )
-                    bad_keys.add((speed, path))
-
-        # ---- 3. Negative-dG fraction filter ----
-        if max_neg_dG_frac is not None:
-            for (speed, path), group in sMDDdata.results.groupby(['speed', 'path']):
-                if (speed, path) in bad_keys:
-                    continue  # already flagged
-                dG_vals = group['dG'].dropna().to_numpy(dtype=float)
-                if len(dG_vals) == 0:
-                    continue
-                neg_frac = float(np.sum(dG_vals < 0)) / len(dG_vals)
-                if neg_frac > max_neg_dG_frac:
-                    logger.warning(
-                        f"Excluding path '{path}' at speed={speed} nm/ps: "
-                        f"{neg_frac:.0%} of dG values are negative "
-                        f"(threshold={max_neg_dG_frac:.0%}, "
-                        f"min dG={np.nanmin(dG_vals):.1f} kJ/mol). "
-                        f"Likely cumulant artifact from high variance."
-                    )
-                    bad_keys.add((speed, path))
-
-        # ---- 4. Dominant p_eq filter ----
-        if max_path_p_eq is not None:
-            try:
-                p_eq_dic = sMDDdata.get_p_eq(
-                    byspeed=True,
-                    results=sMDDdata.results,
-                    estimator=p_eq_estimator,
+        # Replica balance report per speed
+        for speed, gspeed in sMDDdata.results.groupby('speed'):
+            counts = {
+                path: int(g['n_samples'].median())
+                for path, g in gspeed.groupby('path')
+            }
+            if not counts:
+                continue
+            logger.info(f"  Speed={speed} nm/ps  replicas: {counts}")
+            if max(counts.values()) / max(min(counts.values()), 1) > 3:
+                logger.warning(
+                    f"Replica imbalance at speed={speed} nm/ps: {counts}. "
+                    f"Cumulant variance scales with 1/N — under-sampled paths "
+                    f"may produce unreliable dG."
                 )
-            except Exception as exc:
-                logger.warning(f"Could not compute p_eq for quality filtering: {exc}")
-                p_eq_dic = None
 
-            if p_eq_dic is not None:
-                for speed, path_weights in p_eq_dic.items():
-                    for path, p_eq in path_weights.items():
-                        if p_eq > max_path_p_eq:
-                            logger.warning(
-                                f"Excluding path '{path}' at speed={speed} nm/ps: "
-                                f"p_eq={p_eq:.4f} > {max_path_p_eq:.4f}"
-                            )
-                            bad_keys.add((speed, path))
+        return sMDDdata
 
-        # ---- Apply removals ----
-        if bad_keys:
-            bad_df = pd.DataFrame(list(bad_keys), columns=['speed', 'path'])
+    @staticmethod
+    def _compute_p_eq(
+        results_df: pd.DataFrame,
+        p_neq: dict,
+        beta: float,
+    ) -> dict:
+        """Compute normalised equilibrium path probabilities for a single speed.
 
-            sMDDdata.results = (
-                sMDDdata.results
-                .merge(bad_df, on=['speed', 'path'], how='left', indicator=True)
-                .query("_merge == 'left_only'")
-                .drop(columns=['_merge'])
-            )
+        Negative dG bins are treated as missing data: the integrand is set to
+        ``0`` at those bins (equivalent to "infinite barrier, contributes
+        nothing to Z").  This naturally downweights paths whose cumulant
+        produced artifact bins, instead of inflating Z by ``exp(0)=1`` per bin
+        as a clip-to-0 strategy would.  A path whose dG is entirely negative
+        ends up with Zk=0 and p_eq=0.  Diagnostics for negative bins are
+        reported separately by :meth:`compute_p_eq` and ``path_quality.csv``.
 
-            sMDDdata.raw_data = (
-                sMDDdata.raw_data
-                .merge(bad_df, on=['speed', 'path'], how='left', indicator=True)
-                .query("_merge == 'left_only'")
-                .drop(columns=['_merge'])
-            )
+        Parameters
+        ----------
+        results_df :
+            DataFrame with 'path', 'step', 'dG', 'r_coord' for a single speed.
+        p_neq :
+            Non-equilibrium path probabilities {path: p_neq}.
+        beta :
+            Inverse thermal energy (1 / k_B T).
+        """
+        weights = {}
+        for path, gpath in results_df.groupby('path'):
+            if path not in p_neq:
+                continue
+            gpath = gpath.sort_values('step')
+            dG = gpath['dG'].to_numpy(dtype=float)
+            x = gpath['r_coord'].to_numpy(dtype=float)
+            if len(dG) < 2:
+                continue
+            mask = dG >= 0
+            if mask.sum() < 2:
+                weights[path] = 0.0
+                continue
+            log_integrand = -beta * dG[mask]
+            shift = log_integrand.max()
+            integrand = np.zeros_like(dG)
+            integrand[mask] = np.exp(log_integrand - shift)
+            Zk = np.trapz(integrand, x) * np.exp(shift)
+            p_eq_raw = p_neq[path] * Zk
+            if not np.isfinite(p_eq_raw) or p_eq_raw < 0.0:
+                p_eq_raw = 0.0
+            weights[path] = p_eq_raw
+        total = sum(weights.values())
+        if total <= 0:
+            return {}
+        return {path: w / total for path, w in weights.items()}
 
-            logger.warning(f"Path quality filtering removed {len(bad_keys)} (speed, path) groups.")
+    def compute_p_eq(
+        self,
+        sMDDdata: 'SMDData',
+        estimator: str = 'auto',
+    ) -> dict:
+        """Compute equilibrium path probabilities.
 
-        return sMDDdata    
-    
+        Negative dG bins are excluded from the partition-function integral
+        (see :meth:`_compute_p_eq`): they contribute 0 to Z, so paths with
+        many artifact bins are smoothly downweighted in the mixture rather
+        than inflating it.  The negative-bin counts are reported per path
+        via warnings and ``path_quality.csv``.
+
+        Parameters
+        ----------
+        sMDDdata : SMDData
+            Data object with fitted estimator results.
+        estimator : str
+            Which estimator's dG to use ('auto', 'cumulant', 'jarzynski', ...).
+
+        Returns
+        -------
+        dict
+            ``{speed: {path: p_eq}}`` normalised per speed.
+        """
+        results = sMDDdata.results
+        if results is None or results.empty:
+            return {}
+
+        estimator_name = SMDData._choose_estimator_for_weights(results, estimator)
+        results_for_weights = results[results['estimator'] == estimator_name]
+
+        p_neq_dic = sMDDdata.get_p_neq(byspeed=True)
+
+        p_eq_dic = {}
+        for speed, gspeed in results_for_weights.groupby('speed'):
+            p_neq = p_neq_dic.get(speed, {})
+
+            # Detect and warn about negative dG paths before computing weights
+            for path, gpath in gspeed.groupby('path'):
+                dG = gpath['dG'].dropna().to_numpy(dtype=float)
+                n_neg = int(np.sum(dG < 0))
+                if n_neg > 0:
+                    logger.warning(
+                        f"Path '{path}' at speed={speed} nm/ps: {n_neg}/{len(dG)} dG "
+                        f"values are negative (min={np.nanmin(dG):.1f} kJ/mol). "
+                        f"Likely a cumulant artifact from insufficient sampling. "
+                        f"Negative bins excluded from the p_eq integrand "
+                        f"(contribute 0 to Z), so this path is downweighted."
+                    )
+
+            p_eq_dic[speed] = self._compute_p_eq(gspeed, p_neq, sMDDdata.beta)
+
+            for path, w in p_eq_dic[speed].items():
+                logger.info(
+                    f"  Speed={speed} nm/ps  path={path}  "
+                    f"p_neq={p_neq.get(path, 0):.4f}  p_eq={w:.4f}"
+                )
+
+        return p_eq_dic
+
     @staticmethod
     def _speed_from_log(fn):
         # Example log name: sMD_replica-182557_v0.005_forward.dat
