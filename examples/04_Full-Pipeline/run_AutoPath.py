@@ -54,9 +54,13 @@ def main():
 
     # Setup logging
     logger = setup_logging(f"{sys_name}/autopath.log", log_level="INFO")
-
+    
+    pocket_residues = [134, 135, 136, 137, 138, 139, 140, 157, 158, 159, 160, 161,
+                       162, 180, 181, 182, 183, 211, 212, 213, 214, 215, 226, 227, 228, 229]
+    pocket_selection = f'resid {" ".join(map(str, pocket_residues))} and name CA'
+    
     ap = AutoPath(pdb_path=receptor,
-                    pocket_selection='(resid 145-153 183-190) and name CA',
+                    pocket_selection=pocket_selection,
 
                     do_fix_pdb=False,
                     run_preparation=False,
@@ -75,17 +79,18 @@ def main():
                     sMD_ligand_anchor_mode='lig_com',
                     sMD_max_replicas = 50,
                     sMD_pulling_speeds={
-                                        0.0050:None, # nm/ps equivalent to 5.0 m/s nm/ns
-                                        0.0010:None, # nm/ps equivalent to 1.0 m/s nm/ns
-                                        0.010:None, # nm/ps equivalent to 10.0 m/s nm/ns
+                                        0.010:15, # nm/ps equivalent to 10.0 m/s nm/ns
+                                        0.0050:10, # nm/ps equivalent to 5.0 m/s nm/ns
+                                        0.0010:5, # nm/ps equivalent to 1.0 m/s nm/ns
                                         },
 
                     sMD_autostop_freq=250, #moves
-                    sMD_dx_per_move=0.001, # nm
+                    sMD_dx_per_move=0.001, # nms
 
-                    sMD_run_analysis=False,
-                    sMD_clust_selection=None,
-                    
+                    sMD_run_analysis=True,
+                    sMD_clust_selection=f'resid {" ".join(map(str, pocket_residues))} and name CA',
+                    cluster_across_speeds=True,
+
                     extract_milestones=False,
                     n_milestones=5,
 
