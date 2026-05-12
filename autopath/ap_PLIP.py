@@ -1013,7 +1013,8 @@ def plot_atomic_property(u, weights: np.ndarray, lig_resname: str = 'UNK',
         outname = outname.replace('.svg', '.png')
         drawer = rdMolDraw2D.MolDraw2DCairo(300, 300)
 
-    drawer.drawOptions().setBackgroundColour((1.0, 1.0, 1.0, 0.0))
+    # make the background transparent
+    # drawer.drawOptions().setBackgroundColour((1.0, 1.0, 1.0, 0.0))
 
     if ref_mol is not None:
         probe_mol = Chem.RemoveHs(ref_mol)

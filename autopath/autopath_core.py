@@ -81,6 +81,7 @@ class AutoPath:
         sMD_max_replicas: int = 50,  # max replicas per speed in convergence mode
         sMD_run_analysis: bool = True,
         sMD_clust_selection:str = None,
+        cluster_across_speeds: bool = False,
         extract_milestones: bool = True,
         milestone_mode: str = "all_medoids",  # "per_path" or "all_medoids"
         milestone_min_frame_separation: int = 0,
@@ -130,6 +131,7 @@ class AutoPath:
         self.sMD_max_replicas = sMD_max_replicas
         self.sMD_run_analysis = sMD_run_analysis
         self.sMD_clust_selection = sMD_clust_selection
+        self.cluster_across_speeds = cluster_across_speeds
         # Milestones
         self.extract_milestones = extract_milestones
         self.milestone_mode = milestone_mode
@@ -155,7 +157,7 @@ class AutoPath:
         # Process the input PDB
         if do_fix_pdb:
             protein_pdb = fix_pdb(pdbfile=pdb_path, 
-                                  cap_termini=True,
+                                  cap_termini=False,
                                   keep_heterogens=True, pH=7.4)
             self.protein_file = pdb_path.replace(".pdb", "_fixed.pdb")
             save_pdb(protein_pdb.topology, protein_pdb.positions, self.protein_file)
@@ -322,7 +324,7 @@ class AutoPath:
         # in this paper they used 80 kcal·mol−1? units don match tho. Ziada et al 2022.
         sMD_spring_cte_per_atom = 100 * 4.184  # KJ/mol/nm2, converted from kcal. This affects thermal fluctuations
         sMD_traj_outdir = f"{self.sMD_outdir}/trajectories"
-        sMD_analysis_outdir = f"{self.sMD_outdir}/analysis_traces"
+        sMD_analysis_outdir = f"{self.sMD_outdir}/analysis"
         
         if self.run_sMDpulling:
             equilibrated_system = load_system(f"{sys_name}/equilibration/system_equil_{sys_name}.xml")
@@ -375,7 +377,7 @@ class AutoPath:
                             logger.warning(f"Reached maximum number of replicas ({self.sMD_max_replicas}) for speed {speed} nm/ps without convergence. Stopping.")
                             break
                         
-                        if len(log_files) >= 5:  # need at least 5 replicas to assess convergence
+                        if len(log_files) >= 3:  # need at least 3 replicas to assess convergence
                             
                             # loads the sMD data
                             smdanalysis = SMDAnalysis(sysname=sys_name, path_model='dtw', estimators=['cumulant'],
@@ -474,6 +476,7 @@ class AutoPath:
                                        group_A=f"resname {ligand_resname} and not name H*",
                                        group_B=self.sMD_clust_selection,
                                        merge_features=True,
+                                       cluster_across_speeds=self.cluster_across_speeds,
                                     #    r_range=(0, 1.75)
                                        )
 

@@ -676,9 +676,9 @@ ESTIMATOR_REGISTRY: dict[str, type[BaseEstimator]] = {
 def trim_results_by_n_samples_support(
     results: pd.DataFrame,
     min_samples: int = 3,
-    min_support_ratio: float = 0.7,
+    min_support_ratio: float = 0.9,
     keep_prefix: bool = True,
-    add_support_columns: bool = False,
+    add_support_columns: bool = True,
 ) -> pd.DataFrame:
     """Trim low-support regions using per-step sample support.
 
@@ -711,7 +711,6 @@ def trim_results_by_n_samples_support(
     step_col = "step"
     n_samples_col = "n_samples"
     traj_col = "trajname"
-    reference = "max"
     
     if results is None or results.empty:
         return pd.DataFrame(columns=[] if results is None else results.columns)
@@ -788,7 +787,22 @@ def calculate_weighted_pmf(
     smd_data: SMDData,
     weight_cols: list[str] = ['dG', 'Wdiss'],
     grid_col: str = "step",
+    weights_by_estimator: dict | None = None,
 ) -> pd.DataFrame:
+    """Build weighted PMFs over paths for each estimator and speed.
+
+    Parameters
+    ----------
+    smd_data : SMDData
+        Data object with fitted estimator results.
+    weight_cols : list[str]
+        Columns to weight.
+    grid_col : str
+        Grid column (default 'step').
+    weights_by_estimator : dict
+        Pre-computed weights ``{estimator: {speed: {path: p_eq}}}``.
+        Obtain these from :meth:`SMDAnalysis.compute_p_eq`.
+    """
 
     results = smd_data.results.copy()
     if results is None or results.empty:
@@ -797,13 +811,10 @@ def calculate_weighted_pmf(
     if 'estimator' not in results.columns:
         raise ValueError("results must include an 'estimator' column for weighted PMF calculation.")
 
-    # Build p_eq independently for each estimator so each PMF is weighted
-    # with its own thermodynamic model.
-    weights_by_estimator = smd_data.get_p_eq(
-        byspeed=True,
-        results=results,
-        per_estimator=True,
-    )
+    if weights_by_estimator is None:
+        raise ValueError(
+            "weights_by_estimator is required. Compute it with SMDAnalysis.compute_p_eq()."
+        )
     estimators = results['estimator'].dropna().unique()
 
     weighted_pmfs = []
