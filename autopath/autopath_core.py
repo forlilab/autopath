@@ -318,13 +318,22 @@ class AutoPath:
         ##############################################################################################
         ##################################### Steered MD simulations #################################
         ##############################################################################################
+        MERGE_CLUSTERING_FEATURES = True
         
         # sMD_collision_frequency = 1  # ps^-1
         # sMD_outdir = f"{sys_name}/sMD_{lig_anchor_mode}_{sMD_timestep}ps_{sMD_collision_frequency}ps_200stm"
         # in this paper they used 80 kcal·mol−1? units don match tho. Ziada et al 2022.
         sMD_spring_cte_per_atom = 100 * 4.184  # KJ/mol/nm2, converted from kcal. This affects thermal fluctuations
         sMD_traj_outdir = f"{self.sMD_outdir}/trajectories"
-        sMD_analysis_outdir = f"{self.sMD_outdir}/analysis"
+        
+        sMD_analysis_outdir = f"{self.sMD_outdir}/analysis_traces"
+        if self.sMD_clust_selection is not None:
+            logger.info(f"sMD clustering selection: {self.sMD_clust_selection}")
+            if MERGE_CLUSTERING_FEATURES:
+                logger.info("Merging clustering features for sMD analysis.")
+                sMD_analysis_outdir = f"{self.sMD_outdir}/analysis_merged"
+            else:
+                sMD_analysis_outdir = f"{self.sMD_outdir}/analysis_features"
         
         if self.run_sMDpulling:
             equilibrated_system = load_system(f"{sys_name}/equilibration/system_equil_{sys_name}.xml")
@@ -352,6 +361,13 @@ class AutoPath:
                 if reps is not None:
                     logger.info(f"Running sMD for speed {speed} nm/ps with {reps} replicas.")
                     for i in range(reps):
+                        existing = glob(f"{sMD_traj_outdir}/sMD_*_v{speed}_{self.sMD_pulling_dir}.dat")
+                        if len(existing) >= self.sMD_max_replicas:
+                            logger.warning(
+                                f"Reached maximum replicas ({self.sMD_max_replicas}) for speed {speed} nm/ps "
+                                f"(folder already has {len(existing)}). Stopping."
+                            )
+                            break
                         try:
                             sMD.run(
                                 checkpoint_file=equilibrated_chk,
@@ -361,7 +377,7 @@ class AutoPath:
                                 pulling_direction=self.sMD_pulling_dir,
                                 save_freq=None, # will use steps_per_move
                             )
-                        except Exception as e:  
+                        except Exception as e:
                             logger.error(f"Error during sMD pulling for speed {speed} nm/ps, replica {i+1}: {e}")
                             continue
                 else:
@@ -371,13 +387,13 @@ class AutoPath:
                         log_files = glob(f"{sMD_traj_outdir}/sMD_*_v{speed}_{self.sMD_pulling_dir}.dat")
                         current_replica = len(log_files) + 1
                         logger.info(f"Starting replica {current_replica} for speed {speed} nm/ps.")
-                        
+
                         # cap the number of replicas to avoid infinite loops
-                        if current_replica > self.sMD_max_replicas:
+                        if len(log_files) >= self.sMD_max_replicas:
                             logger.warning(f"Reached maximum number of replicas ({self.sMD_max_replicas}) for speed {speed} nm/ps without convergence. Stopping.")
                             break
                         
-                        if len(log_files) >= 3:  # need at least 3 replicas to assess convergence
+                        if len(log_files) >= 5:  # need at least 5 replicas to assess convergence
                             
                             # loads the sMD data
                             smdanalysis = SMDAnalysis(sysname=sys_name, path_model='dtw', estimators=['cumulant'],
@@ -418,6 +434,7 @@ class AutoPath:
                                 dx_per_move=self.sMD_dx_per_move,  # nm, this is the displacement per move
                                 sMD_spring_cte=sMD_spring_cte,
                                 pulling_direction=self.sMD_pulling_dir,
+                                save_freq=None, # will use steps_per_move
                             )
                         except Exception as e:
                             logger.error(f"Error during sMD pulling for speed {speed} nm/ps, replica {current_replica}: {e}")
@@ -475,7 +492,7 @@ class AutoPath:
             smd_data = smdanalysis.run(smd_data,
                                        group_A=f"resname {ligand_resname} and not name H*",
                                        group_B=self.sMD_clust_selection,
-                                       merge_features=True,
+                                       merge_features=MERGE_CLUSTERING_FEATURES,
                                        cluster_across_speeds=self.cluster_across_speeds,
                                     #    r_range=(0, 1.75)
                                        )
