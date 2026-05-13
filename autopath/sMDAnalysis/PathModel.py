@@ -265,37 +265,25 @@ class DTWPathModel(PathModel):
                 distmatrix, K, random_state=self.seed
             )
 
-            self.medoid_names = [trajnames[idx] for idx in cluster_model.medoids]
-            all_medoid_names.update(self.medoid_names)  # Accumulate medoids across speeds
+            speed_medoid_names = [trajnames[idx] for idx in cluster_model.medoids]
+            all_medoid_names.update(speed_medoid_names)
 
-            # Record medoid → path mapping
-            for medoid_idx, cluster_id in zip(cluster_model.medoids, range(K)):
-                medoid_name = trajnames[medoid_idx]
-                if speed_key is not None:
-                    path_id = f"path-{cluster_id}_v{speed_key}"
-                else:
-                    path_id = f"path-{cluster_id}"
-                medoid_to_path[medoid_name] = path_id
-
-            # # Report cluster sizes
-            # unique, counts = np.unique(cluster_model.labels, return_counts=True)
-            # for u, c in zip(unique, counts):
-            #     logger.info(
-            #         f"{'Global' if speed_key is None else f'Speed {speed_key}'} "
-            #         f"Path {u} has {c} trajectories"
-            #     )
-
-            # Map cluster labels with speed-aware path IDs to ensure uniqueness across speeds
-            path_mapping_dic = {}
-            for trajname, cluster_id in zip(trajnames, cluster_model.labels):
-                # Create globally unique path ID: include speed if clustering per speed
-                if speed_key is not None:
-                    unique_path_id = f"path-{cluster_id}_v{speed_key}"
-                else:
-                    unique_path_id = f"path-{cluster_id}"
-                path_mapping_dic[trajname] = unique_path_id
-
+            # Map every trajectory to its speed-aware path ID
+            path_mapping_dic = {
+                trajname: (
+                    f"path-{cluster_id}_v{speed_key}"
+                    if speed_key is not None
+                    else f"path-{cluster_id}"
+                )
+                for trajname, cluster_id in zip(trajnames, cluster_model.labels)
+            }
             all_path_mappings.update(path_mapping_dic)
+
+            # Medoid → path is just the subset of path_mapping_dic for medoid trajectories
+            medoid_to_path.update({name: path_mapping_dic[name] for name in speed_medoid_names})
+
+            # Set per-speed attribute used by plot_clusters_PCA below
+            self.medoid_names = speed_medoid_names
             
             # Optional plots (per clustering run)
             if self.do_plots:
@@ -357,8 +345,9 @@ class DTWPathModel(PathModel):
                 except Exception as e:
                     logger.warning(f"Could not generate unbinding paths visualization: {e}")
 
-        # Persist medoid information as instance attributes
+        # Persist medoid information as instance attributes (all speeds)
         self.all_medoid_names = list(all_medoid_names)
+        self.medoid_names = self.all_medoid_names
         self.medoid_to_path = medoid_to_path
 
         # Save medoid info to disk for downstream use (e.g., milestone extraction)
