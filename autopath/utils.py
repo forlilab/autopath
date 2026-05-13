@@ -947,6 +947,249 @@ def get_pocket_atoms_idxs(u:mda.Universe = None,
         
     return pocket_atoms_indices
 
+
+def _parse_pdb_ss_residues(pdb_path: str) -> set:
+    """Return the set of residue numbers declared in HELIX/SHEET PDB records."""
+    ss_residues = set()
+    with open(pdb_path) as fh:
+        for line in fh:
+            try:
+                if line.startswith("HELIX"):
+                    tokens = line.split()
+                    start, end = int(tokens[5]), int(tokens[8])
+                    ss_residues.update(range(start, end + 1))
+                elif line.startswith("SHEET"):
+                    tokens = line.split()
+                    start, end = int(tokens[6]), int(tokens[9])
+                    ss_residues.update(range(start, end + 1))
+            except (IndexError, ValueError):
+                pass
+    return ss_residues
+
+
+def generate_smd_pocket_selection(
+    pdb_path: str,
+    sdf_dir: str,
+    cutoff: float = 8.0,
+    max_pocket_radius: float = 15.0,
+    out_dir: str = None,
+    com_sphere_radius: float = 1.5,
+    verbose: bool = True,
+    use_pdb_ss: bool = True,
+) -> str:
+    """Generate a protein CA selection string for COM-based steered MD pulling.
+
+    Identifies pocket residues as the union of contacts across all docked
+    ligands in *sdf_dir*, then restricts them to those within
+    *max_pocket_radius* of the ligand ensemble COM to exclude spurious
+    contacts from ligand tails or outlier poses. Residues in secondary
+    structure elements (helices and sheets) are ranked first to minimise
+    pulling artefacts; all selections use CA atoms only.
+
+    When *use_pdb_ss* is True (default), secondary structure is read from the
+    HELIX/SHEET records already present in the PDB file. This is preferred over
+    DSSP for SMD selection because crystal-structure annotations identify stable
+    structural elements regardless of local conformation in any given MD frame.
+    Loop residues are additionally restricted to within *cutoff* Å of the
+    ligand ensemble COM, so flexible loops that would shift during pulling are
+    excluded. Falls back to DSSP if the PDB contains no HELIX/SHEET records.
+
+    Parameters
+    ----------
+    pdb_path : str
+        Path to the receptor PDB file.
+    sdf_dir : str
+        Directory containing individual ligand SDF files.
+    cutoff : float
+        Distance cutoff in Angstrom for pocket residue detection.
+        Also used as the maximum COM distance for loop residues when
+        *use_pdb_ss* is True.
+    max_pocket_radius : float
+        Maximum distance in Angstrom from the ligand ensemble COM for
+        SS residues. Loop residues use *cutoff* instead when *use_pdb_ss*
+        is True.
+    out_dir : str, optional
+        If provided, writes ``ligands_com.pdb``, ``pocket_com.pdb``, and
+        ``com_comparison.pml`` for visual QC in PyMOL.
+    com_sphere_radius : float
+        Sphere scale used for COM pseudoatoms in the PyMOL script.
+    verbose : bool
+        Log summary statistics via the standard logger.
+    use_pdb_ss : bool
+        If True, identify secondary structure from HELIX/SHEET records in the
+        PDB file and apply a tighter COM-distance filter (*cutoff*) to loop
+        residues. Falls back to DSSP when the PDB has no such records.
+        If False, use DSSP on the loaded structure for all residues.
+
+    Returns
+    -------
+    str
+        MDAnalysis-compatible selection string, e.g.
+        ``'(resid 63 64 65 316 317 318) and name CA'``
+    """
+    # --- 1. Load protein and assign secondary structure ---
+    u = mda.Universe(pdb_path)
+    protein_ca = u.select_atoms("protein and name CA")
+    ca_residues = protein_ca.residues
+
+    _use_pdb_ss = use_pdb_ss
+    if _use_pdb_ss:
+        ss_residues = _parse_pdb_ss_residues(pdb_path)
+        if ss_residues:
+            if verbose:
+                n_prot_in_ss = sum(1 for r in ca_residues if r.resnum in ss_residues)
+                logging.info(
+                    f"PDB HELIX/SHEET records: {n_prot_in_ss} CA residues in SS "
+                    f"out of {len(ca_residues)} total"
+                )
+        else:
+            logging.warning(
+                "No HELIX/SHEET records found in PDB; falling back to DSSP."
+            )
+            _use_pdb_ss = False
+
+    if not _use_pdb_ss:
+        from MDAnalysis.analysis.dssp import DSSP
+        ss_codes = DSSP(u).run().results.dssp[0]  # shape (n_residues,)
+        ss_residues = {
+            res.resnum
+            for res, code in zip(ca_residues, ss_codes)
+            if code in ('H', 'E')
+        }
+        if verbose:
+            logging.info(
+                f"DSSP: {len(ss_residues)} residues in secondary structure "
+                f"(H/E) out of {len(ca_residues)} total"
+            )
+
+    # --- 2. Load all ligand heavy-atom positions from SDF files ---
+    sdf_files = sorted(glob(os.path.join(sdf_dir, "*.sdf")))
+    if not sdf_files:
+        raise FileNotFoundError(f"No SDF files found in {sdf_dir}")
+
+    all_lig_positions = []
+    n_loaded = 0
+    for sdf_path in sdf_files:
+        for mol in Chem.SDMolSupplier(sdf_path, removeHs=True):
+            if mol is None:
+                continue
+            all_lig_positions.append(mol.GetConformer().GetPositions())
+            n_loaded += 1
+
+    if not all_lig_positions:
+        raise ValueError("No valid molecules could be loaded from the SDF files.")
+
+    lig_positions = np.vstack(all_lig_positions)   # (N_heavy_atoms, 3)
+    ligand_com = lig_positions.mean(axis=0)
+
+    if verbose:
+        logging.info(
+            f"Loaded {n_loaded} ligands from {len(sdf_files)} SDF files "
+            f"({len(lig_positions)} heavy atoms total)"
+        )
+
+    # --- 3. Find pocket CA atoms within cutoff of any ligand heavy atom ---
+    ca_positions = protein_ca.positions   # (n_CA, 3)
+    tree = KDTree(lig_positions)
+    hits = tree.query_ball_point(ca_positions, r=cutoff)
+    contacted_mask = np.array([len(h) > 0 for h in hits])
+
+    # --- 4. Filter to residues near the ligand COM ---
+    # SS residues: within max_pocket_radius.
+    # Loop residues (when use_pdb_ss): within the tighter cutoff distance so
+    # that flexible loops contacted only by ligand tails are excluded.
+    dist_to_com = np.linalg.norm(ca_positions - ligand_com, axis=1)
+    if _use_pdb_ss:
+        radius_mask = np.array([
+            d <= (max_pocket_radius if res.resnum in ss_residues else cutoff)
+            for res, d in zip(ca_residues, dist_to_com)
+        ])
+    else:
+        radius_mask = dist_to_com <= max_pocket_radius
+    final_mask = contacted_mask & radius_mask
+
+    contacted_resids = [
+        res.resnum
+        for res, keep in zip(ca_residues, final_mask)
+        if keep
+    ]
+    if not contacted_resids:
+        raise ValueError(
+            f"No protein CA atoms found within {cutoff} Å of any ligand "
+            f"and {max_pocket_radius} Å of the ligand COM. "
+            "Try increasing cutoff or max_pocket_radius."
+        )
+
+    n_filtered = int(contacted_mask.sum()) - len(contacted_resids)
+    if verbose and n_filtered:
+        logging.info(
+            f"Filtered out {n_filtered} residues beyond "
+            f"{max_pocket_radius} Å (SS) / {cutoff} Å (loops) of the ligand COM"
+        )
+
+    # --- 5. Sort: secondary structure first, then ascending residue number ---
+    contacted_resids.sort(key=lambda r: (r not in ss_residues, r))
+
+    n_ss = sum(1 for r in contacted_resids if r in ss_residues)
+    if verbose:
+        logging.info(
+            f"Pocket residues: {len(contacted_resids)} total, "
+            f"{n_ss} in secondary structure"
+        )
+        logging.info(f"  SS residues  : {[r for r in contacted_resids if r in ss_residues]}")
+        logging.info(f"  Loop residues: {[r for r in contacted_resids if r not in ss_residues]}")
+
+    # --- 6. Build MDAnalysis selection string ---
+    resid_str = " ".join(str(r) for r in contacted_resids)
+    selection = f"(resid {resid_str}) and name CA"
+
+    # --- 6. Write QC output if requested ---
+    if out_dir is not None:
+        os.makedirs(out_dir, exist_ok=True)
+
+        # PyMOL selection string for pocket residues (resi uses '+' as separator)
+        resi_sel = "+".join(str(r) for r in contacted_resids)
+
+        def _fmt_pos(v: np.ndarray) -> str:
+            return f"[{v[0]:.3f}, {v[1]:.3f}, {v[2]:.3f}]"
+
+        # Build PML that loads only the receptor and creates selections/
+        # pseudoatoms within PyMOL's own coordinate frame — avoids any
+        # misalignment that arises from loading separate MDAnalysis-written
+        # PDB files (which carry a triclinic CRYST1 that can shift coords).
+        # pocket_com is derived from pocket_sel directly so PyMOL computes it.
+        pml_lines = [
+            "reinitialize",
+            f"load {os.path.abspath(pdb_path)}, receptor",
+            "hide everything",
+            "show cartoon, receptor",
+            "color slate, receptor",
+            # Pocket CA residues selected directly from the loaded receptor
+            f"select pocket_sel, receptor and resi {resi_sel} and name CA",
+            "show sticks, pocket_sel",
+            "color orange, pocket_sel",
+            # Ligand ensemble COM (from Python) and pocket COM derived from selection
+            f"pseudoatom ligands_com, pos={_fmt_pos(ligand_com)}",
+            "pseudoatom pocket_com, selection=pocket_sel",
+            "show spheres, ligands_com",
+            "show spheres, pocket_com",
+            "color green, ligands_com",
+            "color red,   pocket_com",
+            f"set sphere_scale, {com_sphere_radius}",
+            "set stick_radius, 0.2",
+            "set cartoon_transparency, 0.3",
+            "zoom ligands_com, 20",
+            "bg_color white",
+        ]
+        Path(os.path.join(out_dir, "com_comparison.pml")).write_text("\n".join(pml_lines))
+
+        if verbose:
+            logging.info(f"QC files written to {out_dir}/")
+            logging.info(f"  Ligand ensemble COM : {ligand_com.round(3)}")
+
+    return selection
+
+
 def reduce_to_murcko_scaffold(u, lig_resname: str, img_name: str = None):
     """
     Reduce ligand atoms to their Murcko scaffold representation.
