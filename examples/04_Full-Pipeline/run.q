@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -e 3ptb.err
 #SBATCH -o 3ptb.out
-#SBATCH --gres=gpu#:rtxa6000:1
+##SBATCH --gres=gpu#:rtxa6000:1
 #SBATCH --time=1-0
 #SBATCH --partition=alphafold,forli,forli-pro
 #SBATCH --exclude=nodea0110,nodea0111

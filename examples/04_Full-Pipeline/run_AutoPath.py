@@ -88,8 +88,8 @@ def main():
                     sMD_dx_per_move=0.001, # nms
 
                     sMD_run_analysis=True,
-                    sMD_clust_selection=f'resid {" ".join(map(str, pocket_residues))} and name CA',
-                    cluster_across_speeds=True,
+                    # sMD_clust_selection=f'resid {" ".join(map(str, pocket_residues))} and name CA',
+                    # cluster_across_speeds=True,
 
                     extract_milestones=False,
                     n_milestones=5,
