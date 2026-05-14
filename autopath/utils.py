@@ -87,7 +87,7 @@ def load_model(filename):
         model = pickle.load(file)
     return model
 
-def align_trajectory(
+def align_trajectory_pytraj(
     prmtop_file: str = None,
     traj_file: Union[str, list] = None,
     stride: int = None,
@@ -96,6 +96,7 @@ def align_trajectory(
     out_fname: str = None,
 ) -> None:
 
+    """THis is kinda deprecated since we are now using mdtraj for trajectory processing, but keeping here for now in case we want to add back in some pytraj-specific processing down the line."""
     import pytraj as pt
 
     ptraj = pt.iterload(traj_file, prmtop_file, stride=stride)
@@ -1843,56 +1844,121 @@ def assign_bondOrders(mol: Chem.Mol=None, template_smiles: str=None):
     return new_mol
 
 
-def write_pocket_pymol_pml(
+def write_pocket_pymol(
     u: mda.Universe,
     out_dir: str,
     protein_selection: str = "protein",
     ligand_selection: str = "resname UNK",
     pocket_selection: str = "same residue as protein and (around 4 resname UNK) and (not name H*)",
-    show_surface: bool = True,
+    show_surface: bool = False,
     ligand_color: str = "yellow",
     pocket_color: str = "orange",
     protein_color: str = "slate",
     com_color: str = "red",
     com_sphere_radius: float = 0.5,
+    output_format: str = "pse",
 ) -> None:
-    """Write PDBs and a PyMOL .pml script to visualize protein, ligand, pocket, and pocket COM sphere."""
+    """Visualize protein, ligand, pocket, and pocket COM in PyMOL.
+
+    Args:
+        output_format: ``"pse"`` saves a portable self-contained session;
+            ``"pml"`` writes a script + auxiliary PDB files next to it.
+    """
+    if output_format not in ("pse", "pml"):
+        raise ValueError(f"output_format must be 'pse' or 'pml', got '{output_format}'")
 
     os.makedirs(out_dir, exist_ok=True)
-
-    protein_pdb = os.path.join(out_dir, "pocket_prote.pdb")
-    ligand_pdb = os.path.join(out_dir, "pocket_lig.pdb")
-    out_pml_path = os.path.join(out_dir, "pocket_view.pml")
+    out_dir = Path(out_dir)
 
     protein_atoms = u.select_atoms(protein_selection)
     ligand_atoms = u.select_atoms(ligand_selection)
     pocket_atoms = u.select_atoms(pocket_selection)
-
-    with mda.Writer(protein_pdb, u.atoms.n_atoms) as w:
-        w.write(protein_atoms)
-    with mda.Writer(ligand_pdb, u.atoms.n_atoms) as w:
-        w.write(ligand_atoms)
-    
-    pocket_pdb = os.path.join(out_dir, "pocket_definition.pdb")
-    with mda.Writer(pocket_pdb, u.atoms.n_atoms) as w:
-        w.write(pocket_atoms)
-
-    # Calculate center of mass of pocket atoms
     pocket_com = pocket_atoms.center_of_mass()
-    
-    # Write a PDB file with a single pseudoatom at the COM position
-    com_pdb = os.path.join(out_dir, "pocket_com.pdb")
-    with open(com_pdb, "w") as f:
-        f.write("REMARK Pocket center of mass\n")
-        f.write(f"ATOM      1  COM COM SYS A   1    {pocket_com[0]:8.3f}{pocket_com[1]:8.3f}{pocket_com[2]:8.3f}  1.00  0.00           C\n")
-        f.write("END\n")
+
+    # COM pseudoatom written as a one-line PDB regardless of format
+    com_pdb_content = (
+        "REMARK Pocket center of mass\n"
+        f"ATOM      1  COM COM SYS A   1    "
+        f"{pocket_com[0]:8.3f}{pocket_com[1]:8.3f}{pocket_com[2]:8.3f}"
+        "  1.00  0.00           C\n"
+        "END\n"
+    )
+
+    # ------------------------------------------------------------------ #
+    # PSE branch                                                           #
+    # ------------------------------------------------------------------ #
+    if output_format == "pse":
+        try:
+            import pymol2
+        except ImportError:
+            raise ImportError("pymol2 is required. Install open-source PyMOL into your environment.")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir = Path(tmpdir)
+            protein_pdb = str(tmpdir / "protein.pdb")
+            ligand_pdb = str(tmpdir / "ligand.pdb")
+            pocket_pdb = str(tmpdir / "pocket.pdb")
+            com_pdb = str(tmpdir / "pocket_com.pdb")
+
+            with mda.Writer(protein_pdb, protein_atoms.n_atoms) as w:
+                w.write(protein_atoms)
+            with mda.Writer(ligand_pdb, ligand_atoms.n_atoms) as w:
+                w.write(ligand_atoms)
+            with mda.Writer(pocket_pdb, pocket_atoms.n_atoms) as w:
+                w.write(pocket_atoms)
+            Path(com_pdb).write_text(com_pdb_content)
+
+            pse_path = str(out_dir / "pocket_view.pse")
+            with pymol2.PyMOL() as pymol:
+                cmd = pymol.cmd
+                cmd.bg_color("white")
+                cmd.load(protein_pdb, "protein")
+                cmd.load(ligand_pdb, "ligand")
+                cmd.load(pocket_pdb, "pocket")
+                cmd.load(com_pdb, "pocket_com")
+                cmd.hide("everything")
+                cmd.show("cartoon", "protein")
+                cmd.show("sticks", "ligand")
+                cmd.show("sticks", "pocket")
+                cmd.show("spheres", "pocket_com")
+                cmd.color(protein_color, "protein")
+                cmd.color(ligand_color, "ligand")
+                cmd.color(pocket_color, "pocket")
+                cmd.color(com_color, "pocket_com")
+                cmd.set("sphere_scale", com_sphere_radius)
+                cmd.set("stick_radius", 0.2)
+                cmd.set("cartoon_transparency", 0.2)
+                if show_surface:
+                    cmd.show("surface", "protein")
+                    cmd.color("gray70", "protein")
+                    cmd.set("transparency", 0.35, "protein")
+                cmd.zoom("ligand", 12)
+                cmd.save(pse_path)
+
+        return None
+
+    # ------------------------------------------------------------------ #
+    # PML branch                                                           #
+    # ------------------------------------------------------------------ #
+    protein_pdb = str(out_dir / "pocket_protein.pdb")
+    ligand_pdb = str(out_dir / "pocket_lig.pdb")
+    pocket_pdb = str(out_dir / "pocket_definition.pdb")
+    com_pdb = str(out_dir / "pocket_com.pdb")
+
+    with mda.Writer(protein_pdb, protein_atoms.n_atoms) as w:
+        w.write(protein_atoms)
+    with mda.Writer(ligand_pdb, ligand_atoms.n_atoms) as w:
+        w.write(ligand_atoms)
+    with mda.Writer(pocket_pdb, pocket_atoms.n_atoms) as w:
+        w.write(pocket_atoms)
+    Path(com_pdb).write_text(com_pdb_content)
 
     lines = [
         "reinitialize",
-        f"load {protein_pdb}, protein",
-        f"load {ligand_pdb}, ligand",
-        f"load {pocket_pdb}, pocket",
-        f"load {com_pdb}, pocket_com",
+        f"load {os.path.basename(protein_pdb)}, protein",
+        f"load {os.path.basename(ligand_pdb)}, ligand",
+        f"load {os.path.basename(pocket_pdb)}, pocket",
+        f"load {os.path.basename(com_pdb)}, pocket_com",
         "hide everything",
         "show cartoon, protein",
         "show sticks, ligand",
@@ -1902,13 +1968,12 @@ def write_pocket_pymol_pml(
         f"color {ligand_color}, ligand",
         f"color {pocket_color}, pocket",
         f"color {com_color}, pocket_com",
-        "set sphere_scale, " + str(com_sphere_radius),
+        f"set sphere_scale, {com_sphere_radius}",
         "set stick_radius, 0.2",
         "set cartoon_transparency, 0.2",
         "zoom ligand, 12",
         "bg_color white",
     ]
-
     if show_surface:
         lines.extend([
             "show surface, protein",
@@ -1916,6 +1981,5 @@ def write_pocket_pymol_pml(
             "set transparency, 0.35, protein",
         ])
 
-    Path(out_pml_path).write_text("\n".join(lines))
-
+    (out_dir / "pocket_view.pml").write_text("\n".join(lines))
     return None
