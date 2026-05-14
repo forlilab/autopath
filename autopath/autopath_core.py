@@ -310,6 +310,7 @@ class AutoPath:
         ##################################### Steered MD simulations #################################
         ##############################################################################################
         MERGE_CLUSTERING_FEATURES = True
+        CONVERGENCE_MIN_REPS = 5  # minimum replicas before checking convergence
         
         # sMD_collision_frequency = 1  # ps^-1
         # sMD_outdir = f"{sys_name}/sMD_{lig_anchor_mode}_{sMD_timestep}ps_{sMD_collision_frequency}ps_200stm"
@@ -384,7 +385,7 @@ class AutoPath:
                             logger.warning(f"Reached maximum number of replicas ({self.sMD_max_replicas}) for speed {speed} nm/ps without convergence. Stopping.")
                             break
                         
-                        if len(log_files) >= 5:  # need at least 5 replicas to assess convergence
+                        if len(log_files) >= CONVERGENCE_MIN_REPS:
                             
                             # loads the sMD data
                             smdanalysis = SMDAnalysis(sysname=sys_name, path_model='dtw', estimators=['cumulant'],
@@ -397,25 +398,34 @@ class AutoPath:
                             # check convergence for this speed
                             conv_df, traces_df = smdanalysis.check_convergence(
                                 logs=log_files, speeds=[speed],
+                                min_replicas=CONVERGENCE_MIN_REPS,
                                 # group_A=f"resname {ligand_resname} and not name H*",
                                 # group_B=self.sMD_clust_selection
                             )
                             
-                            conv_df.to_csv(f"{sMD_analysis_outdir}/sMD_conv_v{speed}_metrics.csv", index=False)
-                            traces_df.to_csv(f"{sMD_analysis_outdir}/sMD_conv_v{speed}_traces.csv", index=False)
+                            # conv_df is empty when replicas == min_replicas (first PMF comparison
+                            # needs one more replica); skip writing/plotting until data is available
+                            if conv_df.empty:
+                                logger.info(f"Not enough replicas yet for convergence comparison at speed {speed} nm/ps.")
+                            else:
+                                conv_df.to_csv(f"{sMD_analysis_outdir}/sMD_conv_v{speed}_metrics.csv", index=False)
+                                traces_df.to_csv(f"{sMD_analysis_outdir}/sMD_conv_v{speed}_traces.csv", index=False)
 
-                            # Plot convergence results
-                            conv_traces = glob(f"{sMD_analysis_outdir}/sMD_conv_*_traces.csv")
-                            conv_metrics = glob(f"{sMD_analysis_outdir}/sMD_conv_*_metrics.csv")
+                                # Plot convergence results
+                                conv_traces = glob(f"{sMD_analysis_outdir}/sMD_conv_*_traces.csv")
+                                conv_metrics = glob(f"{sMD_analysis_outdir}/sMD_conv_*_metrics.csv")
 
-                            plot_convergence_traces(conv_traces, outdir=sMD_analysis_outdir)
-                            plot_convergence_metrics(conv_metrics, outdir=sMD_analysis_outdir)
-                            
-                            # Check convergence. Two last replicas must be converged
-                            CONVERGED = conv_df['converged'].iloc[-2] and conv_df['converged'].iloc[-1]
-                            if CONVERGED:
-                                logger.warning(f"sMD pulling for speed {speed} nm/ps CONVERGED after {current_replica} replicas.")
-                                continue # continue to next speed
+                                plot_convergence_traces(conv_traces, outdir=sMD_analysis_outdir)
+                                plot_convergence_metrics(conv_metrics, outdir=sMD_analysis_outdir)
+
+                                # Check convergence. Two last replicas must be converged
+                                if len(conv_df) >= 2:
+                                    CONVERGED = conv_df['converged'].iloc[-2] and conv_df['converged'].iloc[-1]
+                                else:
+                                    logger.info(f"Only {len(conv_df)} convergence comparison available for speed {speed} nm/ps; need 2 to declare convergence.")
+                                if CONVERGED:
+                                    logger.warning(f"sMD pulling for speed {speed} nm/ps CONVERGED after {current_replica} replicas.")
+                                    continue # continue to next speed
 
                         # Run the next replica if not converged
                         try:
