@@ -3,11 +3,10 @@ import logging
 import argparse
 
 import MDAnalysis as mda
-import mdtraj as md
 
 from autopath import MetadynamicsMD
 from autopath.cv import com_cv
-from autopath.utils import load_system, calculate_com_distance
+from autopath.utils import load_system, calculate_com_distance, wrap_align_save_traj
 from autopath.utils import setup_logging
 
 from openmm.app import PDBFile
@@ -114,16 +113,7 @@ def main():
         ####################### Post-processing ######################
         ### Wrap, align and save the clean trajectory
         traj_fname = f"{sys_name}/WTmetaD_COM/WTMetaD_{rep_id}.dcd"
-        traj = md.load(traj_fname, top=prmtop_fname)
-        traj = traj.center_coordinates()
-        traj = traj.image_molecules()
-        try: # if there's no protein
-            backbone = traj.topology.select("backbone")
-            traj = traj.superpose(traj[0], atom_indices=backbone)
-        except Exception as e:
-            logger.warning(f"Superposition failed: {e}. Proceeding without superposition.")
-        traj.save(traj_fname.replace(".dcd", "_aligned.dcd"))
-        os.remove(traj_fname) # remove the unaligned trajectory to save space
+        wrap_align_save_traj(traj_fname, prmtop_fname)
 
     return
 

@@ -111,6 +111,28 @@ def align_trajectory(
     return
 
 
+def wrap_align_save_traj(traj_files, topology, remove_original=True):
+    import mdtraj as md
+    if isinstance(traj_files, str):
+        traj_files = [traj_files]
+    aligned_paths = []
+    for traj_file in traj_files:
+        traj = md.load(traj_file, top=topology)
+        traj = traj.center_coordinates()
+        traj = traj.image_molecules()
+        try:
+            backbone = traj.topology.select("backbone")
+            traj = traj.superpose(traj[0], atom_indices=backbone)
+        except Exception as e:
+            logging.warning(f"Superposition failed for {traj_file}: {e}. Proceeding without superposition.")
+        out_path = traj_file.replace(".dcd", "_aligned.dcd")
+        traj.save(out_path)
+        if remove_original:
+            os.remove(traj_file)
+        aligned_paths.append(out_path)
+    return aligned_paths
+
+
 def fetch_smiles(ligand_name: str) -> str:
     """Gets SMILES string for a given ligand in the CCD
 

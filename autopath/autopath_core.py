@@ -233,16 +233,7 @@ class AutoPath:
             equilibrated_system = equilibration.run(solvated_system_pdb, run_id=sys_name)
         
             #Wrap, align and save the clean trajectory
-            traj = md.load(equilibrated_traj, top=solvated_system_pdb)
-            traj = traj.center_coordinates()
-            traj = traj.image_molecules()
-            try: # if there's no protein
-                backbone = traj.topology.select("backbone")
-                traj = traj.superpose(traj[0], atom_indices=backbone)
-            except Exception as e:
-                logger.warning(f"Superposition failed: {e}. Proceeding without superposition.")
-            traj.save(equilibrated_traj.replace(".dcd", "_aligned.dcd"))
-            os.remove(equilibrated_traj)
+            wrap_align_save_traj(equilibrated_traj, solvated_system_pdb)
 
         ##############################################################################################
         ############################# Post-equilibration Analysis ####################################
@@ -375,7 +366,7 @@ class AutoPath:
                                 dx_per_move=self.sMD_dx_per_move,  # nm, this is the displacement per move
                                 sMD_spring_cte=sMD_spring_cte,
                                 pulling_direction=self.sMD_pulling_dir,
-                                save_freq=None, # will use steps_per_move
+                                save_freq=5, # this multiplies steps_per_move
                             )
                         except Exception as e:
                             logger.error(f"Error during sMD pulling for speed {speed} nm/ps, replica {i+1}: {e}")
@@ -434,7 +425,7 @@ class AutoPath:
                                 dx_per_move=self.sMD_dx_per_move,  # nm, this is the displacement per move
                                 sMD_spring_cte=sMD_spring_cte,
                                 pulling_direction=self.sMD_pulling_dir,
-                                save_freq=None, # will use steps_per_move
+                                save_freq=5, # this multiplies steps_per_move
                             )
                         except Exception as e:
                             logger.error(f"Error during sMD pulling for speed {speed} nm/ps, replica {current_replica}: {e}")
@@ -444,17 +435,7 @@ class AutoPath:
         sMD_trajs = glob(f"{sMD_traj_outdir}/sMD_replica-*_*_*.dcd")
         sMD_trajs = [f for f in sMD_trajs if "aligned" not in f]  # only process unaligned trajectories
         logger.info(f"Found {len(sMD_trajs)} sMD trajectories to align.")        
-        for traj_file in sMD_trajs:
-            traj = md.load(traj_file, top=solvated_system_pdb)
-            traj = traj.center_coordinates()
-            traj = traj.image_molecules()
-            try:
-                backbone = traj.topology.select("backbone")
-                traj = traj.superpose(traj[0], atom_indices=backbone)
-            except Exception as e:
-                logger.warning(f"Superposition failed: {e}. Proceeding without superposition.")
-            traj.save(traj_file.replace(".dcd", "_aligned.dcd")) #overwrite
-            os.remove(traj_file) #remove original        
+        wrap_align_save_traj(sMD_trajs, solvated_system_pdb)
                                 
         ##############################################################################################
         ######################################### sMD Analysis #######################################
@@ -781,17 +762,7 @@ class AutoPath:
         WTMetaD_trajs = glob(f"{sys_name}/metadynamics/trajectory_metadynamics_milestone_*_frame_*.dcd")
         WTMetaD_trajs = [f for f in WTMetaD_trajs if "aligned" not in f]  # only process unaligned trajectories
 
-        for traj_file in WTMetaD_trajs:
-            traj = md.load(traj_file, top=solvated_system_pdb)
-            traj = traj.center_coordinates()
-            traj = traj.image_molecules()
-            try: # if there's no protein
-                backbone = traj.topology.select("backbone")
-                traj = traj.superpose(traj[0], atom_indices=backbone)
-            except Exception as e:
-                logger.warning(f"Superposition failed: {e}. Proceeding without superposition.")
-            traj.save(traj_file.replace(".dcd", "_aligned.dcd")) #overwrite
-            os.remove(traj_file) #remove original
+        wrap_align_save_traj(WTMetaD_trajs, solvated_system_pdb)
 
         simulation_time = time.monotonic() - start_time
         logger.info(f"Finished AutoPath simulation in {simulation_time/60:.2f} min.")
