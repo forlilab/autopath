@@ -295,7 +295,7 @@ class AutoPath:
             logger.info(f"Ligand anchor atom indices are: {', '.join(map(str, ligand_atoms_indices))}")
             # write out the protein/ligand/pocket PDBs and PyMOL session
             try:
-                write_pocket_pymol_pml(
+                write_pocket_pymol(
                     u=u_eq,
                     out_dir=sys_name,
                     protein_selection="protein",

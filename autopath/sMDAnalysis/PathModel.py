@@ -14,7 +14,7 @@ from sklearn.metrics import silhouette_score
 from sklearn.decomposition import PCA
 
 from .SMDData import SMDData
-from .Diagnostics import make_unbinding_paths_pml
+from .Diagnostics import make_unbinding_paths_visualization
 from abc import ABC, abstractmethod
 
 import logging
@@ -334,7 +334,7 @@ class DTWPathModel(PathModel):
             
             if paths_dict:
                 try:
-                    make_unbinding_paths_pml(
+                    make_unbinding_paths_visualization(
                         paths=paths_dict,
                         reference_pdb=reference_pdb,
                         ligand_select=ligand_select,

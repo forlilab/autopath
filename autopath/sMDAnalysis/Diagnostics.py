@@ -553,82 +553,178 @@ def plot_extrapolated_param(df: pd.DataFrame = None,
     plt.close()
 
     return
-    
-def make_unbinding_paths_pml( 
+
+def make_unbinding_paths_visualization(
     paths: Dict[str, List[Tuple[str, str]]],
     reference_pdb: str,
     ligand_select: str,
     outdir: str = "unbinding_paths",
     align_sel: str = "protein and backbone",
     grid_spacing: float = 0.5,
-    cartoon_color: str = "palecyan",
+    cartoon_color: str = "grey90",
     sample_stride: int = 2,
-    pocket_select: str = None
+    pocket_select: str = None,
+    n_lig_conformations: int = 20,
+    output_format: str = "pse",
 ) -> str:
-    """Generate ligand-path density maps and a PyMOL .pml that uses only relative paths."""
-            
+    """Generate ligand-path density maps as a PyMOL session or script.
+
+    Args:
+        output_format: ``"pse"`` saves a portable, self-contained session file;
+            ``"pml"`` writes a script + auxiliary .dx files next to it.
+    """
+    if output_format not in ("pse", "pml"):
+        raise ValueError(f"output_format must be 'pse' or 'pml', got '{output_format}'")
+
     level = 0.000002
-    surface_transparency = 0.35
+    surface_transparency = 0.45
     cartoon_transparency = 0.25
-    
+    stick_transparency = 0.25
+
     os.makedirs(outdir, exist_ok=True)
     outdir = Path(outdir)
-    protein_pdb = reference_pdb
-    ligand_sel = ligand_select
-    # Copy the reference PDB into OUTDIR so the .pml can run anywhere
-    prot_copy = outdir / os.path.basename(protein_pdb)
-    shutil.copy2(protein_pdb, prot_copy)
-
-    protein_abs = str(prot_copy.resolve())
+    protein_abs = str(Path(reference_pdb).resolve())
     u_ref = mda.Universe(protein_abs)
 
     default_palette = ["violetpurple", "marine", "forest", "deepsalmon", "gold", "tv_red", "tv_blue"]
     path_colors = {name: default_palette[i % len(default_palette)] for i, name in enumerate(paths)}
 
-    dx_files_rel = {}
+    # ------------------------------------------------------------------ #
+    # Shared: compute density maps and extract ligand conformations        #
+    # ------------------------------------------------------------------ #
+    import tempfile
+    tmpdir_obj = tempfile.TemporaryDirectory()
+    tmpdir = Path(tmpdir_obj.name)
+
+    dx_files: Dict[str, str] = {}
+    lig_pdb_files: Dict[str, str] = {}
+
     for path_name, traj_list in paths.items():
-        # Only use the first (medoid) trajectory for each path
         if not traj_list:
             logger.warning(f"No trajectories found for path {path_name}")
             continue
-        
-        top, traj = traj_list[0]  # Use only the medoid trajectory
-        
-        # if not aligned, align to reference
+
+        top, traj = traj_list[0]
         u = mda.Universe(top, traj)
         align.AlignTraj(u, u_ref, select=align_sel, in_memory=True).run()
 
-        lig = u.select_atoms(ligand_sel)
+        lig = u.select_atoms(ligand_select)
         if lig.n_atoms == 0:
-            raise ValueError(f"No atoms found for '{ligand_sel}' in {traj}.")
+            raise ValueError(f"No atoms found for '{ligand_select}' in {traj}.")
 
         da = density.DensityAnalysis(lig, delta=grid_spacing, padding=25.0)
         da.run(step=sample_stride)
-        dens_sum = da.results.density
+        dens = da.results.density
+        dens.grid = gaussian_filter(dens.grid, sigma=2.0)
 
-        # Smooth the density
-        dens_sum.grid = gaussian_filter(dens_sum.grid, sigma=2.0)
-        
-        dx_path = str((outdir / f"{path_name}_density.dx").resolve())
-        dens_sum.export(dx_path)
-        dx_files_rel[path_name] = dx_path
+        # For PML the .dx files are placed in outdir (referenced by the script).
+        # For PSE they go to the temp dir and are cleaned up after saving.
+        dx_dest = outdir if output_format == "pml" else tmpdir
+        dx_path = str(dx_dest / f"{path_name}_density.dx")
+        dens.export(dx_path)
+        dx_files[path_name] = dx_path
 
-    # dx_05 = np.quantile(dens_sum.grid, 0.05)
-    # print(f"0.05 quantile of last path density: {dx_05}")
-    
-    pocket_resids = []
+        n_frames = len(u.trajectory)
+        if n_lig_conformations >= n_frames:
+            frame_indices = list(range(n_frames))
+        else:
+            frame_indices = [int(i * n_frames / n_lig_conformations) for i in range(n_lig_conformations)]
+
+        lig_pdb = str(tmpdir / f"{path_name}_lig.pdb")
+        with mda.Writer(lig_pdb, multiframe=True, n_atoms=lig.n_atoms) as W:
+            for idx in frame_indices:
+                u.trajectory[idx]
+                W.write(lig)
+        lig_pdb_files[path_name] = lig_pdb
+
+    pocket_resids: List[int] = []
     if pocket_select is not None:
-        # show pocket atoms in the .pml if a selection is provided and valid in the reference PDB
         pocket = u_ref.select_atoms(pocket_select)
         if pocket.n_atoms == 0:
             raise ValueError(f"No atoms found for pocket selection '{pocket_select}' in reference PDB.")
         pocket_resids = sorted(set(pocket.resids))
         logger.info(f"Found pocket residues: {pocket_resids}")
-    
-    # Write the .pml using ONLY filenames (relative to outdir)
-    pml_path = os.path.join(outdir, "unbinding_paths.pml")
+
+    # ------------------------------------------------------------------ #
+    # PSE branch: build session via PyMOL Python API                      #
+    # ------------------------------------------------------------------ #
+    if output_format == "pse":
+        try:
+            import pymol2
+        except ImportError:
+            raise ImportError("pymol2 is required. Install open-source PyMOL into your environment.")
+
+        out_path = str(outdir / "unbinding_paths.pse")
+
+        with pymol2.PyMOL() as pymol:
+            cmd = pymol.cmd
+            cmd.bg_color("white")
+            cmd.set("antialias", 2)
+            cmd.set("specular", 0.2)
+            cmd.set("ray_shadow", 0)
+            cmd.set("ray_opaque_background", 0)
+            cmd.set("cartoon_transparency", cartoon_transparency)
+
+            cmd.load(protein_abs, "prot")
+            cmd.hide("everything", "prot")
+            cmd.show("cartoon", "prot")
+            cmd.color(cartoon_color, "prot")
+
+            if pocket_resids:
+                resi_str = "+".join(map(str, pocket_resids))
+                cmd.select("pocket", f"resi {resi_str} and prot")
+                cmd.show("sticks", "pocket")
+                cmd.color("orange", "pocket")
+
+            for path_name in dx_files:
+                col = path_colors[path_name]
+                map_obj = f"map_{path_name}"
+                surf_obj = f"surf_{path_name}"
+                lig_obj = f"lig_{path_name}"
+
+                cmd.load(dx_files[path_name], map_obj)
+                cmd.do(f"map_double {map_obj}")
+                cmd.isosurface(surf_obj, map_obj, level)
+                cmd.color(col, surf_obj)
+                cmd.set("transparency", surface_transparency, surf_obj)
+                cmd.set("two_sided_lighting", 1, surf_obj)
+                cmd.hide("everything", map_obj)
+
+                cmd.load(lig_pdb_files[path_name], lig_obj)
+                cmd.hide("everything", lig_obj)
+                cmd.show("sticks", lig_obj)
+                cmd.color(col, lig_obj)
+                cmd.set("stick_transparency", stick_transparency, lig_obj)
+
+            if cmd.count_atoms(f"({ligand_select}) and prot") > 0:
+                cmd.create("lig_ref", f"({ligand_select}) and prot")
+                cmd.hide("everything", "lig_ref")
+                cmd.show("sticks", "lig_ref")
+                cmd.color("yellow", "lig_ref")
+
+            cmd.zoom("prot", 10.0)
+            cmd.save(out_path)
+
+        tmpdir_obj.cleanup()
+        return out_path
+
+    # ------------------------------------------------------------------ #
+    # PML branch: write a script; .dx files already in outdir             #
+    # ------------------------------------------------------------------ #
+    # Copy the ligand PDB conformations into outdir so the .pml can reference them
+    for path_name, lig_pdb in lig_pdb_files.items():
+        dest = str(outdir / f"{path_name}_lig.pdb")
+        shutil.copy2(lig_pdb, dest)
+        lig_pdb_files[path_name] = dest
+
+    # Copy the reference PDB into outdir for portability
+    prot_copy = outdir / os.path.basename(reference_pdb)
+    shutil.copy2(reference_pdb, prot_copy)
+
+    tmpdir_obj.cleanup()
+
+    pml_path = str(outdir / "unbinding_paths.pml")
     with open(pml_path, "w") as pml:
-        pml.write("# Relative-path PyMOL visualization for ligand unbinding paths\n")
         pml.write("reinitialize\n")
         pml.write("bg_color white\n")
         pml.write("set ray_opaque_background, 0\n")
@@ -636,35 +732,39 @@ def make_unbinding_paths_pml(
         pml.write("set specular, 0.2\n")
         pml.write("set ray_shadow, off\n")
         pml.write(f"set cartoon_transparency, {cartoon_transparency:.2f}\n")
-        pml.write(f"load {protein_abs}, prot\n")
+        pml.write(f"load {os.path.basename(str(prot_copy))}, prot\n")
         pml.write("hide everything, prot\n")
         pml.write("show cartoon, prot\n")
         pml.write(f"color {cartoon_color}, prot\n")
-        
+
         if pocket_resids:
             pml.write(f"select pocket, resi {'+'.join(map(str, pocket_resids))} and prot\n")
             pml.write("show sticks, pocket\n")
             pml.write("color orange, pocket\n")
-                
-        for path_name, dx_filename in dx_files_rel.items():
+
+        for path_name, dx_path in dx_files.items():
+            col = path_colors[path_name]
             map_obj = f"map_{path_name}"
             surf_obj = f"surf_{path_name}"
-            col = path_colors[path_name]
-            pml.write(f"load {dx_filename}, {map_obj}\n")
-            pml.write(f'map_double {map_obj}\n')
+            lig_obj = f"lig_{path_name}"
+            pml.write(f"load {os.path.basename(dx_path)}, {map_obj}\n")
+            pml.write(f"map_double {map_obj}\n")
             pml.write(f"isosurface {surf_obj}, {map_obj}, {level}\n")
             pml.write(f"color {col}, {surf_obj}\n")
             pml.write(f"set transparency, {surface_transparency:.2f}, {surf_obj}\n")
             pml.write(f"set two_sided_lighting, on, {surf_obj}\n")
+            pml.write(f"load {os.path.basename(lig_pdb_files[path_name])}, {lig_obj}\n")
+            pml.write(f"hide everything, {lig_obj}\n")
+            pml.write(f"show sticks, {lig_obj}\n")
+            pml.write(f"color {col}, {lig_obj}\n")
+            pml.write(f"set stick_transparency, {stick_transparency:.2f}, {lig_obj}\n")
 
-        pml.write(f"select lig_ref, ({ligand_sel}) and prot\n")
-        pml.write("if sele count lig_ref > 0:\n")
-        pml.write("    create lig, lig_ref\n")
-        # pml.write("    show stick, lig\n")
-        pml.write("    show sphere, lig\n")
-        pml.write("    color yellow, lig\n")
-        pml.write("    set sphere_transparency, 0.9, lig\n")
-        pml.write("orient lig\n")
+        pml.write(f"select lig_ref_sel, ({ligand_select}) and prot\n")
+        pml.write("if cmd.count_atoms('lig_ref_sel') > 0:\n")
+        pml.write("    create lig_ref, lig_ref_sel\n")
+        pml.write("    hide everything, lig_ref\n")
+        pml.write("    show sticks, lig_ref\n")
+        pml.write("    color yellow, lig_ref\n")
         pml.write("zoom prot, 10.0\n")
 
-    return str(pml_path)
+    return pml_path
