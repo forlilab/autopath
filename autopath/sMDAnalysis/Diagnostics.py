@@ -289,7 +289,11 @@ def plot_convergence_traces(smd_conv_traces:list[str], outdir: str):
     # load all data
     all_data = []
     for f in smd_conv_traces:
-        df = pd.read_csv(f)
+        try:
+            df = pd.read_csv(f)
+        except pd.errors.EmptyDataError:
+            logger.warning(f"Skipping empty traces file: {f}")
+            continue
         all_data.append(df)
 
     traces_df = pd.concat(all_data, ignore_index=True)
@@ -366,7 +370,11 @@ def plot_convergence_metrics(smd_conv_metrics: list[str], outdir: str):
     # load all data
     all_data = []
     for f in smd_conv_metrics:
-        df = pd.read_csv(f)
+        try:
+            df = pd.read_csv(f)
+        except pd.errors.EmptyDataError:
+            logger.warning(f"Skipping empty metrics file: {f}")
+            continue
         all_data.append(df)
 
     metrics_df = pd.concat(all_data, ignore_index=True)
