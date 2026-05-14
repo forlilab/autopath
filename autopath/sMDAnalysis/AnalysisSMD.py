@@ -262,9 +262,10 @@ class SMDAnalysis:
         estimator_name: str = 'cumulant',
         group_A: str = None,
         group_B: str = None,
-        min_replicas: int = 3,
+        min_replicas: int = 5,
         tol_rmsd: float = 3.0,     # kJ/mol
-        tol_barrier: float = 2.0,  # kJ/mol
+        tol_barrier: float = 3.0,  # kJ/mol
+        trim_fraction: float = 0.25,     # fraction of PMF to trim from the end (noisy region)
         min_common_points: int = 5,
         return_gmm_diagnostics: bool = False,
     ):
@@ -336,7 +337,7 @@ class SMDAnalysis:
                 outdir=self.outdir,
             )
             path_mappings = clusterer.fit_transform(feat_df,
-                                                    r_range=0.75
+                                                    r_range=1-trim_fraction,  # use only the first (1-trim_fraction)% of frames for clustering to avoid noisy end states
             )
                                                     
             smd.raw_data['path'] = smd.raw_data['trajname'].map(path_mappings)
@@ -453,7 +454,6 @@ class SMDAnalysis:
                 yNm1 = prev_pmf.loc[common_r].values
                 
                 # trim last chunk of the PMF as it is noisy
-                trim_fraction = 0.2
                 trim_points = max(1, int(len(common_r) * trim_fraction))
                 yN = yN[:-trim_points]
                 yNm1 = yNm1[:-trim_points]
