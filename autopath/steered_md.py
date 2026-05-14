@@ -85,7 +85,7 @@ class SteeredMD:
                     
         add_reporters(simulation, self.out_dir, f"sMD_{run_id}",
             total_steps=self.sMD_moves*self.steps_per_move, # total steps 
-            logperiod=self.save_freq, # steps
+            logperiod=self.save_freq*self.steps_per_move, # steps
             verbose=0 #verbose level
         )
 
@@ -198,7 +198,7 @@ class SteeredMD:
         checkpoint_file: str = None,
         pdb_file: str = None,
         pulling_direction: str = "forward",
-        save_freq: int = None # in steps, for writing DCD. If None, will be set to steps_per_move
+        save_freq: int = 1 # for writing DCD. this multiplies steps_per_move.
 
     ):
         """Main method to run steered MD in both directions (forward and backward)."""
@@ -235,9 +235,7 @@ class SteeredMD:
 
         self.sMD_moves = int(math.ceil(self.max_displacement / dx_per_move))
         
-        self.save_freq = save_freq  # In steps, for writing DCD
-        if self.save_freq is None:
-            self.save_freq = self.steps_per_move
+        self.save_freq = save_freq  # In spm, for writing DCD
             
         ########################################################################################        
         logger.info("#"*80)
@@ -248,7 +246,7 @@ class SteeredMD:
         logger.info(f"steps_per_move: {self.steps_per_move} steps")
         logger.info(f"Time per move: {self.steps_per_move * self.timestep.value_in_unit(openmmunit.picoseconds):.3f} ps")
         logger.info(f"Total sMD moves: {self.sMD_moves}")
-        logger.info(f'Saving DCD every {self.save_freq} steps')
+        logger.info(f'Saving DCD every {self.save_freq*self.steps_per_move} steps')
         logger.info("#"*80)
         ########################################################################################
         
