@@ -606,7 +606,14 @@ def make_unbinding_paths_visualization(
 
         top, traj = traj_list[0]
         u = mda.Universe(top, traj)
-        align.AlignTraj(u, u_ref, select=align_sel, in_memory=True).run()
+        if u_ref.select_atoms(align_sel).n_atoms > 0:
+            align.AlignTraj(u, u_ref, select=align_sel, in_memory=True).run()
+        else:
+            logger.warning(
+                f"Alignment selection '{align_sel}' matched 0 atoms in reference PDB "
+                f"(membrane/no-protein system?). Skipping re-alignment — trajectories "
+                f"are assumed to be pre-aligned."
+            )
 
         lig = u.select_atoms(ligand_select)
         if lig.n_atoms == 0:
