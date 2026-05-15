@@ -44,9 +44,13 @@ class SteeredMD:
         use_GReweighting: bool = False,
         out_dir: str = None,
         platform: str = "fastest",
+        dx_per_move: float = 0.001,        # nm — RC grid spacing (held constant across speeds)
+        max_displacement: float = 5.0,     # nm — total RC range
+        sMD_spring_cte: float = 10000,     # kJ/mol/nm^2
+        save_freq: int = 5,                # writes DCD every save_freq*steps_per_move
         verbose: int = 0,
     ):
-        
+
         self.system = system
         self.topology = topology
         self.out_dir = out_dir
@@ -73,6 +77,29 @@ class SteeredMD:
                 logger.info("Using Girsanov reweighting for steered MD.")
 
         self.platform = select_platform(platform)
+
+        # Sweep-fixed parameters: identical for every replica/speed in a sweep,
+        # so they live on the instance rather than on .run().
+        self.max_displacement = float(max_displacement)                                                 # nm
+        self.dx_per_move = float(dx_per_move) * openmmunit.nanometers                                   # Quantity
+        self.sMD_spring_cte = float(sMD_spring_cte) * openmmunit.kilojoules_per_mole / openmmunit.nanometer**2
+        self.save_freq = int(save_freq)
+        self.sMD_moves = int(math.ceil(self.max_displacement / float(dx_per_move)))
+
+        # Thermal fluctuation of the harmonic restraint: sigma = sqrt(kT/k).
+        # If dx_per_move is comparable to sigma the protocol stops looking smooth.
+        kB_kJ_per_mol_K = 0.0083144621
+        T_K = self.temperature.value_in_unit(openmmunit.kelvin)
+        k_spring = self.sMD_spring_cte.value_in_unit(
+            openmmunit.kilojoules_per_mole / openmmunit.nanometer**2
+        )
+        self.sigma_thermal = math.sqrt(kB_kJ_per_mol_K * T_K / k_spring)  # nm
+        if float(dx_per_move) > 0.5 * self.sigma_thermal:
+            logger.warning(
+                f"dx_per_move ({dx_per_move:.4g} nm) exceeds 0.5*sigma_thermal "
+                f"({0.5*self.sigma_thermal:.4g} nm) for k={k_spring:.1f} kJ/mol/nm^2, T={T_K:.1f} K. "
+                f"Consider a stiffer spring or smaller dx_per_move."
+            )
 
         return None
 
@@ -119,12 +146,7 @@ class SteeredMD:
                 r_before = self.com_dist.getValue(simulation.context, allowReinitialization=False)
                 time_before = simulation.context.getState().getTime().value_in_unit(openmmunit.picoseconds)
                 U_pre_old = self.com_force.getValue(simulation.context, allowReinitialization=False)
-                # m_eff_dalton = self.com_dist.getEffectiveMass(simulation.context).value_in_unit(openmmunit.dalton)
-                
-                # r_before_theoretical = initial_r0 + (i)*self.dx_per_move if direction == "forward" else initial_r0 - (i)*self.dx_per_move
-                
-                # print(f"sMD {run_id} {direction} - Step {i+1}/{self.sMD_moves}: r_before={r_before_nm:.4f} nm (theoretical: {r_before_theoretical.value_in_unit(openmmunit.nanometers):.4f} nm)")
-                # Compute new r_end
+
                 if direction == "backward":
                     r_target = initial_r0 - (i+1)*self.dx_per_move
                     if r_target.value_in_unit(openmmunit.nanometers) <= 0.0:
@@ -136,26 +158,14 @@ class SteeredMD:
                 simulation.context.setParameter("r0_smd", r_target)
 
                 delta = r_before - r_target
-                
-                # delta_theoretical = r_before_theoretical - r_target
-                # print(f"  Target r: {r_target.value_in_unit(openmmunit.nanometers):.4f} nm, delta: {delta.value_in_unit(openmmunit.nanometers):.4f} nm (theoretical delta: {delta_theoretical.value_in_unit(openmmunit.nanometers):.4f} nm)")
-                
                 force = - self.sMD_spring_cte * delta # F = -k(x - x0) Kj/mol/nm
-                
+
                 # get the potential energy of the spring from the COM CV
                 U_cvpack = self.com_force.getValue(simulation.context, allowReinitialization=False) # kJ/mols
                 dW_protocol = U_cvpack - U_pre_old
-                # sigma = np.sqrt((2*U_cvpack/self.sMD_spring_cte).value_in_unit(openmmunit.nanometers**2))
-                # print(f'delta: {delta.value_in_unit(openmmunit.nanometers):.4f} nm, sigma: {sigma:.4f} nm')
-                
-                # increment the work -v do not use (dist_after - dist_before), use the expected displacement dx_per_move
-                # Usually prefer the real displacement and integrate the force over it after.
 
-                # run for steps_per_move
                 simulation.step(self.steps_per_move)
 
-                # actual distance after
-                # if self.verbose > 0:
                 r_after_nm = self.com_dist.getValue(simulation.context, allowReinitialization=False).value_in_unit(openmmunit.nanometers)
 
                 #log everything
@@ -177,11 +187,9 @@ class SteeredMD:
                             break
                     else:
                         print(f"Step {i+1}/{self.sMD_moves}: r_target={r_target_nm:.2f} nm, r_before={r_before_nm:.2f} nm, r_after={r_after_nm:.2f} nm")
-                        # if (r_target_nm - r_before_nm) > 0.1:
                         if r_before_nm < 0.05:
                             f.write(f"{i},{time_before},{r_target_nm},{r_before_nm},{r_after_nm},{nc_now},{force_kjmnm},{U_cvpack_kjm},{dW_protocol_kjm},{m_eff_dalton}\n")
                             logger.warning(f"Stopping backward pulling at step {i} with r_target={r_target_nm:.2f} nm and r_before={r_before_nm:.2f} nm.")
-                            # logger.warning(f"Stopping backward pulling at step {i} because r_after={r_after_nm:.2f} nm.")
                             break
                 f.write(f"{i},{time_before},{r_target_nm},{r_before_nm},{r_after_nm},{nc_now},{force_kjmnm},{U_cvpack_kjm},{dW_protocol_kjm},{m_eff_dalton}\n")
                 
@@ -193,19 +201,19 @@ class SteeredMD:
     
 
     def run(self,
-        max_displacement: float = 5.0,  # nm
-        dx_per_move: float = 0.001,  # nm
-        pulling_speed: float = 0.001,  # nm/ps equi 1 nm/ns 1 m/s
-        sMD_spring_cte: int = 10000, # kJ/mol/nm^2
+        pulling_speed: float = 0.001,           # nm/ps — varies per replica/call
+        pulling_direction: str = "forward",
         run_id: str = None,
         checkpoint_file: str = None,
         pdb_file: str = None,
-        pulling_direction: str = "forward",
-        save_freq: int = 1 # for writing DCD. this multiplies steps_per_move.
-
     ):
-        """Main method to run steered MD in both directions (forward and backward)."""
-        
+        """Run one steered MD replica at the requested speed.
+
+        Sweep-fixed parameters (dx_per_move, max_displacement, sMD_spring_cte,
+        save_freq) are set in __init__. Only the speed-dependent bookkeeping
+        (steps_per_move, realized_speed) is computed here.
+        """
+
         if pulling_direction not in ["forward", "backward"]:
             raise ValueError("pulling_direction must be either 'forward' or 'backward'.")
 
@@ -218,37 +226,38 @@ class SteeredMD:
 
         simulation_start_time = time.monotonic()
 
-        self.max_displacement = max_displacement  # nm
-        self.sMD_spring_cte = sMD_spring_cte * openmmunit.kilojoules_per_mole / openmmunit.nanometer**2
-        # params = self.compute_smd_params(
-        #                                 dx_per_move=dx_per_move,
-        #                                 steps_per_move=steps_per_move,
-        #                                 pulling_speed=pulling_speed,
-        #                                 max_displacement=max_displacement,
-        #                                 max_time=max_time
-        #                                 )
+        # Speed-dependent derivation. dx_per_move and sMD_moves are set in __init__
+        # (RC grid is held constant across speeds so the analysis-side protocol
+        # grid is identical between replicas of different speeds).
+        dt_ps = self.timestep.value_in_unit(openmmunit.picoseconds)
+        dx_nm = self.dx_per_move.value_in_unit(openmmunit.nanometers)
+        pulling_speed = float(pulling_speed)
+        steps_per_move_float = dx_nm / pulling_speed / dt_ps
+        self.steps_per_move = max(1, int(round(steps_per_move_float)))
+        realized_speed = dx_nm / (self.steps_per_move * dt_ps)
 
-        # self.sMD_moves = params['sMD_moves']
-        # self.steps_per_move = params['steps_per_move']
-        # self.dx_per_move = params['dx_per_move'] * openmmunit.nanometers   # Quantity with units
-        
-        # self.sMD_moves = params['sMD_moves']
-        self.dx_per_move = dx_per_move * openmmunit.nanometers   # Quantity with units
-        self.steps_per_move = max(1, int(round(dx_per_move / pulling_speed / self.timestep.value_in_unit(openmmunit.picoseconds))))
+        if steps_per_move_float < 1.5:
+            logger.warning(
+                f"steps_per_move clipped to 1 (requested {steps_per_move_float:.3f}). "
+                f"Speed {pulling_speed:g} nm/ps is too fast for dx_per_move={dx_nm:g} nm "
+                f"and dt={dt_ps:g} ps; realized speed will be {realized_speed:g} nm/ps."
+            )
+        elif abs(realized_speed - pulling_speed) / pulling_speed > 0.05:
+            logger.warning(
+                f"Realized speed {realized_speed:.5g} nm/ps differs from "
+                f"requested {pulling_speed:.5g} nm/ps by >5% due to rounding of "
+                f"steps_per_move ({steps_per_move_float:.3f} -> {self.steps_per_move})."
+            )
 
-        self.sMD_moves = int(math.ceil(self.max_displacement / dx_per_move))
-        
-        self.save_freq = save_freq  # In spm, for writing DCD
-            
-        ########################################################################################        
+        ########################################################################################
         logger.info("#"*80)
         logger.info(f"Steered MD parameters for {run_id}:")
         logger.info(f"Pulling direction: {pulling_direction}")
-        logger.info(f"Pulling speed: {pulling_speed} nm/ps")
-        logger.info(f"dx_per_move: {self.dx_per_move.value_in_unit(openmmunit.nanometers):.4f} nm")
+        logger.info(f"Pulling speed: {pulling_speed} nm/ps (realized: {realized_speed:.5g} nm/ps)")
+        logger.info(f"dx_per_move: {dx_nm:.4f} nm (sigma_thermal: {self.sigma_thermal:.4f} nm)")
         logger.info(f"steps_per_move: {self.steps_per_move} steps")
-        logger.info(f"Time per move: {self.steps_per_move * self.timestep.value_in_unit(openmmunit.picoseconds):.3f} ps")
-        logger.info(f"Total sMD moves: {self.sMD_moves}")
+        logger.info(f"Time per move: {self.steps_per_move * dt_ps:.3f} ps")
+        logger.info(f"Max displacement: {self.max_displacement:.3f} nm, total sMD moves: {self.sMD_moves}")
         logger.info(f'Saving DCD every {self.save_freq*self.steps_per_move} steps')
         logger.info("#"*80)
         ########################################################################################
@@ -387,105 +396,6 @@ class SteeredMD:
         logger.info(f"Finished {pulling_direction} sMD simulation in {simulation_time/60:.2f} min.")
 
         return run_id
-
-    # @staticmethod
-    # def guess_steps_per_move(v_nm_per_ps,
-    #                         dt_ps=0.004,
-    #                         k_spring=1000,   # kJ/mol/nm**2
-    #                         T_K=300,
-    #                         Rmax=0.3,
-    #                         verbose=True
-    #                         ):
-    #     """This funcion calculates the number of steps per move for sMD based on the velocity,
-    #     It assumes a harmonic potential and calculates the thermal fluctuation of the CV.
-    #     Then uses the Rmax relation with is the maximum displacement per move relative to that sigma.
-    #     If steps_per_move jump is much smaller than sigma, the atoms cannot tell that 
-    #     the restraint was moved in discrete steps, they see an effectively 
-    #     continuous constant-velocity bias, which is the idea"""
-
-    #     kB = 0.0083144621          # kJ/mol/K
-    #     sigma = (kB*T_K/k_spring)**0.5
-    #     t_move_ps = Rmax * sigma / v_nm_per_ps
-    #     steps_per_move = max(1, min(1000, int(round(t_move_ps / dt_ps))))
-
-    #     if verbose:
-    #         print(f"Guessing steps_per_move for sMD with parameters:")
-    #         print(f'Pulling speed = {v_nm_per_ps:.4f} nm/ps')
-    #         print(f'Timestep = {dt_ps:.4f} ps')
-    #         print(f"Thermal fluctuation sigma = {sigma:.3f} nm")
-    #         print(f"Displacement per move = {Rmax*sigma:.6f} nm")
-    #         print(f"Time per move = {t_move_ps:.2f} ps")
-    #         print(f"steps_per_move = {steps_per_move}")
-
-    #     return steps_per_move
-
-    # def compute_smd_params(self, 
-    #                         dx_per_move: float, # nm
-    #                         steps_per_move: int, # 50
-    #                         pulling_speed: float, # nm / ps
-    #                         max_displacement: float = 3.0, # nm
-    #                         max_time: float = 2000, # ps
-    #                         ) -> dict:
-    #     """
-    #     Returns:
-    #         {
-    #             'sMD_time': float (ps),
-    #             'sMD_moves': int,
-    #             'dx_per_move': Quantity (nm),
-    #             'sMD_steps': int,
-    #         }
-    #     """
-
-    #     timestep_ps = self.timestep.value_in_unit(openmmunit.picoseconds)  # ps
-    #     if dx_per_move is None:
-    #         if steps_per_move is None:
-    #             steps_per_move = SteeredMD.guess_steps_per_move(
-    #                 v_nm_per_ps=pulling_speed,
-    #                 dt_ps=timestep_ps,
-    #                 k_spring=self.sMD_spring_cte.value_in_unit(openmmunit.kilojoules_per_mole/openmmunit.nanometer**2),  # kJ/mol/nm^2
-    #                 T_K=self.temperature.value_in_unit(openmmunit.kelvin),  # Kelvin
-    #                 Rmax=0.5,  # nm
-    #             )
-
-    #         time_per_move = steps_per_move * timestep_ps     # ps
-    #         dx_per_move = pulling_speed * time_per_move
-
-    #     else:
-    #         time_per_move = dx_per_move / pulling_speed  # ps
-    #         steps_per_move = int(round(time_per_move / timestep_ps))  # steps per move
-
-    #     if max_displacement is None and max_time is None:
-    #         raise ValueError("Either max_displacement or max_time must be provided.")
-    #     if max_displacement is None and max_time is not None:
-    #         sMD_moves = math.ceil(max_time / time_per_move)  # number of moves
-    #         max_displacement = sMD_moves * dx_per_move  # nm
-    #     elif max_displacement is not None and max_time is None:
-    #         sMD_moves = math.ceil(max_displacement / dx_per_move)  # number of moves
-    #         max_time = sMD_moves * time_per_move  # ps
-    #     else:
-    #         sMD_moves = math.ceil(min(max_displacement / dx_per_move, max_time / time_per_move))
-    #         max_displacement = sMD_moves * dx_per_move  # nm
-    #         max_time = sMD_moves * time_per_move  # ps
-
-    #     sMD_steps = sMD_moves * steps_per_move
-    #     sMD_time = sMD_steps * timestep_ps      # ps
-
-    #     logger.info(f"Max displacement: {max_displacement} nm")
-    #     logger.info(f"Pulling speed: {pulling_speed:.4f} nm/ps")
-    #     logger.info(f"Steps per move: {steps_per_move} steps")
-    #     logger.info(f"Time per move: {steps_per_move * timestep_ps:.3f} ps")
-    #     logger.info(f"Displacement per move: {dx_per_move} nm")
-    #     logger.info(f"Total sMD time: {sMD_time:.2f} ps, Moves: {sMD_moves}, Total steps: {sMD_steps}")
-
-    #     print(f"Steered MD parameters: sMD_time={sMD_time:.2f} ps, sMD_steps_per_move={steps_per_move}, sMD_steps={sMD_steps}, dx_per_move={dx_per_move:.4f} nm, pulling_speed={pulling_speed:.4f} nm/ps, max_displacement={max_displacement:.2f} nm")
-
-    #     return {
-    #         'sMD_time': sMD_time,
-    #         'sMD_moves': sMD_moves,
-    #         'dx_per_move': dx_per_move,
-    #         'steps_per_move': steps_per_move,
-    #         'sMD_steps': sMD_steps,
-    #     }
 
     @staticmethod
     def adapt_speed_from_meff(m_eff_dalton, dx_target_nm=0.01, gammaL_ps=2.0,
