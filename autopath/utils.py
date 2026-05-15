@@ -806,14 +806,15 @@ def save_amber_files(
 
 def select_platform(platform_name: str = None, device_index: str = "0"):
 
-    if platform_name == None or platform_name == "fastest":
+    platform_name = platform_name.upper() if platform_name is not None else None
+    if platform_name == None or platform_name == "FASTEST":
         platform_name = get_fastest_platform().getName()
 
     try:
         platform = Platform.getPlatformByName(platform_name)
         logging.info(f"Using {platform_name} platform.")
 
-        if platform_name in ["OpenCL"]:
+        if platform_name in ["OPENCL"]:
             platform.setPropertyDefaultValue("Precision", "mixed")
             platform.setPropertyDefaultValue("DeviceIndex", device_index)
         if platform_name in ["CUDA"]:
