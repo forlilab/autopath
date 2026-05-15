@@ -310,7 +310,7 @@ class AutoPath:
         ##################################### Steered MD simulations #################################
         ##############################################################################################
         MERGE_CLUSTERING_FEATURES = True
-        CONVERGENCE_MIN_REPS = 5  # minimum replicas before checking convergence
+        CONVERGENCE_MIN_REPS = 3  # minimum replicas before checking convergence
         
         # sMD_collision_frequency = 1  # ps^-1
         # sMD_outdir = f"{sys_name}/sMD_{lig_anchor_mode}_{sMD_timestep}ps_{sMD_collision_frequency}ps_200stm"
@@ -346,7 +346,10 @@ class AutoPath:
                 timestep=self.timestep,
                 temperature=self.temperature,
                 out_dir=sMD_traj_outdir,
-                platform=self.platform
+                platform=self.platform,
+                dx_per_move=self.sMD_dx_per_move,
+                sMD_spring_cte=sMD_spring_cte,
+                save_freq=5,
             )
 
             for speed, reps in self.sMD_pulling_speeds.items():
@@ -364,10 +367,7 @@ class AutoPath:
                             sMD.run(
                                 checkpoint_file=equilibrated_chk,
                                 pulling_speed=speed,  # nm/ps
-                                dx_per_move=self.sMD_dx_per_move,  # nm, this is the displacement per move
-                                sMD_spring_cte=sMD_spring_cte,
                                 pulling_direction=self.sMD_pulling_dir,
-                                save_freq=5, # this multiplies steps_per_move
                             )
                         except Exception as e:
                             logger.error(f"Error during sMD pulling for speed {speed} nm/ps, replica {i+1}: {e}")
@@ -432,10 +432,7 @@ class AutoPath:
                             sMD.run(
                                 checkpoint_file=equilibrated_chk,
                                 pulling_speed=speed,  # nm/ps
-                                dx_per_move=self.sMD_dx_per_move,  # nm, this is the displacement per move
-                                sMD_spring_cte=sMD_spring_cte,
                                 pulling_direction=self.sMD_pulling_dir,
-                                save_freq=5, # this multiplies steps_per_move
                             )
                         except Exception as e:
                             logger.error(f"Error during sMD pulling for speed {speed} nm/ps, replica {current_replica}: {e}")
@@ -451,6 +448,13 @@ class AutoPath:
         ######################################### sMD Analysis #######################################
         ##############################################################################################        
         
+        from autopath.sMDAnalysis.LigandFeatures import LigandTrajectoryFeatures
+        lig_features = LigandTrajectoryFeatures(
+            lig_resname=ligand_resname,
+            sdf_file=ligand_file,
+            features=['rog'],
+            stride=1,
+        )
         sMD_trajs = glob(f"{sMD_traj_outdir}/sMD_replica-*_*_*_aligned.dcd")
 
         if self.sMD_run_analysis:
@@ -485,6 +489,7 @@ class AutoPath:
                                        group_B=self.sMD_clust_selection,
                                        merge_features=MERGE_CLUSTERING_FEATURES,
                                        cluster_across_speeds=self.cluster_across_speeds,
+                                       trajectory_features=[lig_features]
                                     #    r_range=(0, 1.75)
                                        )
 

@@ -81,14 +81,14 @@ def main():
         restart_velocities=True,
         autostop_freq=50,
         out_dir=f"{sys_name}/sMD",
+        dx_per_move=DX_PER_MOVE,
+        max_displacement=2.5,
+        sMD_spring_cte=sMD_spring_cte,
     )
 
     for rep_idx in range(1, N_REPS+1):
         rep_id = sMD.run(
-                max_displacement=2.5, #nm 
-                dx_per_move=DX_PER_MOVE, #nm
                 pulling_speed=SPEED, #nm/ps
-                sMD_spring_cte=sMD_spring_cte,
                 checkpoint_file=checkpoint,
                 pulling_direction=DIRECTION,
                 )
