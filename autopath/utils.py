@@ -811,13 +811,14 @@ def select_platform(platform_name: str = None, device_index: str = "0"):
         platform_name = get_fastest_platform().getName()
 
     try:
-        platform = Platform.getPlatformByName(platform_name)
         logging.info(f"Using {platform_name} platform.")
 
         if platform_name in ["OPENCL"]:
+            platform = Platform.getPlatformByName('OpenCL')
             platform.setPropertyDefaultValue("Precision", "mixed")
             platform.setPropertyDefaultValue("DeviceIndex", device_index)
         if platform_name in ["CUDA"]:
+            platform = Platform.getPlatformByName('CUDA')
             platform.setPropertyDefaultValue("DeterministicForces", "false")
             platform.setPropertyDefaultValue("CudaPrecision", "mixed")
             platform.setPropertyDefaultValue("CudaDeviceIndex", device_index)
