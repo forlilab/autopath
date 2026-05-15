@@ -579,7 +579,19 @@ class FrictionEstimator(BaseEstimator):
             wdiss = g[self.w_col].to_numpy(dtype=float)
             speed = float(g['speed'].iloc[0])
 
-            gamma = self._compute_gamma_derivative(r, wdiss, speed)
+            # For backward pulling r_coord decreases with step, so after sorting by
+            # r_coord the step index is reversed: the small-r end (center) comes first
+            # and carries the largest accumulated Wdiss. This makes dWdiss/dr negative,
+            # which would give a negative gamma. The correct formula for backward pulling
+            # is γ = -dWdiss/dr / v (sign flip because dr < 0 during the pull).
+            # Detect direction: if step at r_min > step at r_max, it's backward.
+            if 'step' in g.columns:
+                is_backward = float(g.iloc[0]['step']) > float(g.iloc[-1]['step'])
+            else:
+                is_backward = wdiss[0] > wdiss[-1]
+            direction_sign = -1.0 if is_backward else 1.0
+
+            gamma = self._compute_gamma_derivative(r, wdiss, speed) * direction_sign
             gamma_int = self._cumulative_integral(r, gamma)
 
             out = g[['step', 'r_coord', 'speed']].copy() if 'step' in g.columns else g[['r_coord', 'speed']].copy()
