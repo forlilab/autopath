@@ -112,7 +112,7 @@ def align_trajectory_pytraj(
     return
 
 
-def wrap_align_save_traj(traj_files, topology, remove_original=True):
+def wrap_align_save_traj(traj_files, topology, remove_original=True, is_membrane=False):
     import mdtraj as md
     if isinstance(traj_files, str):
         traj_files = [traj_files]
@@ -120,12 +120,16 @@ def wrap_align_save_traj(traj_files, topology, remove_original=True):
     for traj_file in traj_files:
         traj = md.load(traj_file, top=topology)
         traj = traj.center_coordinates()
-        traj = traj.image_molecules()
-        try:
-            backbone = traj.topology.select("backbone")
-            traj = traj.superpose(traj[0], atom_indices=backbone)
-        except Exception as e:
-            logging.warning(f"Superposition failed for {traj_file}: {e}. Proceeding without superposition.")
+        # image_molecules is prohibitively slow for membrane systems (hundreds of lipids,
+        # thousands of atoms); centering is sufficient for sMD/metadynamics analysis.
+        if not is_membrane:
+            traj = traj.image_molecules(make_whole=True)
+        backbone = traj.topology.select("backbone")
+        if len(backbone) > 0:
+            try:
+                traj = traj.superpose(traj[0], atom_indices=backbone)
+            except Exception as e:
+                logging.warning(f"Superposition failed for {traj_file}: {e}. Proceeding without superposition.")
         out_path = traj_file.replace(".dcd", "_aligned.dcd")
         traj.save(out_path)
         if remove_original:

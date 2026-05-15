@@ -233,7 +233,7 @@ class AutoPath:
             equilibrated_system = equilibration.run(solvated_system_pdb, run_id=sys_name)
         
             #Wrap, align and save the clean trajectory
-            wrap_align_save_traj(equilibrated_traj, solvated_system_pdb)
+            wrap_align_save_traj(equilibrated_traj, solvated_system_pdb, is_membrane=self.is_membrane)
 
         ##############################################################################################
         ############################# Post-equilibration Analysis ####################################
@@ -445,7 +445,7 @@ class AutoPath:
         sMD_trajs = glob(f"{sMD_traj_outdir}/sMD_replica-*_*_*.dcd")
         sMD_trajs = [f for f in sMD_trajs if "aligned" not in f]  # only process unaligned trajectories
         logger.info(f"Found {len(sMD_trajs)} sMD trajectories to align.")        
-        wrap_align_save_traj(sMD_trajs, solvated_system_pdb)
+        wrap_align_save_traj(sMD_trajs, solvated_system_pdb, is_membrane=self.is_membrane)
                                 
         ##############################################################################################
         ######################################### sMD Analysis #######################################
@@ -772,7 +772,7 @@ class AutoPath:
         WTMetaD_trajs = glob(f"{sys_name}/metadynamics/trajectory_metadynamics_milestone_*_frame_*.dcd")
         WTMetaD_trajs = [f for f in WTMetaD_trajs if "aligned" not in f]  # only process unaligned trajectories
 
-        wrap_align_save_traj(WTMetaD_trajs, solvated_system_pdb)
+        wrap_align_save_traj(WTMetaD_trajs, solvated_system_pdb, is_membrane=self.is_membrane)
 
         simulation_time = time.monotonic() - start_time
         logger.info(f"Finished AutoPath simulation in {simulation_time/60:.2f} min.")
