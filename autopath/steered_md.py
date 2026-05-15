@@ -127,6 +127,9 @@ class SteeredMD:
                 # Compute new r_end
                 if direction == "backward":
                     r_target = initial_r0 - (i+1)*self.dx_per_move
+                    if r_target.value_in_unit(openmmunit.nanometers) <= 0.0:
+                        logger.warning(f"Stopping backward pulling: r_target reached 0 at move {i}.")
+                        break
                 else:
                     r_target = initial_r0 + (i+1)*self.dx_per_move
 
