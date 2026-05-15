@@ -149,7 +149,7 @@ class SMDAnalysis:
         # fit path model and assign paths to trajectories
         path_mappings = self.path_model.fit_transform(
             feat_df,
-            r_range=0.75,  # use only the first 75% of frames for clustering to avoid noisy end states
+            # r_range=0.75,  # use only the first 75% of frames for clustering to avoid noisy end states
             reference_pdb=self.reference_pdb,
             ligand_select=self.ligand_select,
             trajectory_files=trajectory_files,
@@ -726,7 +726,9 @@ class SMDAnalysis:
             shift = log_integrand.max()
             integrand = np.zeros_like(dG)
             integrand[mask] = np.exp(log_integrand - shift)
-            Zk = np.trapz(integrand, x) * np.exp(shift)
+            # abs() handles backward pulling where r_coord decreases with step,
+            # causing trapz to return a negative value for a non-negative integrand.
+            Zk = abs(np.trapz(integrand, x)) * np.exp(shift)
             p_eq_raw = p_neq[path] * Zk
             if not np.isfinite(p_eq_raw) or p_eq_raw < 0.0:
                 p_eq_raw = 0.0
