@@ -554,6 +554,58 @@ def plot_extrapolated_param(df: pd.DataFrame = None,
 
     return
 
+def _build_friction_grid(dens, friction_profile: pd.Series, center_pos_nm: np.ndarray):
+    """Build a volumetric friction map on the same grid as a density object.
+
+    For each voxel, computes Euclidean distance from *center_pos_nm* (the
+    membrane anchor, e.g. DUM atom) and looks up Gamma(r) from the friction
+    profile via linear interpolation.  Values are clipped at 0 (negative
+    Gamma arises from noise, not physics).
+
+    Parameters
+    ----------
+    dens : gridData.Grid
+        Density object whose grid geometry (origin, delta, shape) is reused.
+    friction_profile : pd.Series
+        Index = r_coord (nm), values = Gamma (kJ·ps/mol/nm²).
+    center_pos_nm : (3,) array
+        3-D position of the membrane center anchor in **nm**.
+
+    Returns
+    -------
+    gridData.Grid
+        Friction map on the same voxel grid as *dens*.
+    """
+    from scipy.interpolate import interp1d
+    import gridData
+
+    r_vals = friction_profile.index.to_numpy(dtype=float)
+    g_vals = np.clip(friction_profile.to_numpy(dtype=float), 0, None)
+    order = np.argsort(r_vals)
+    r_vals, g_vals = r_vals[order], g_vals[order]
+
+    gamma_interp = interp1d(
+        r_vals, g_vals, kind="linear",
+        bounds_error=False,
+        fill_value=(g_vals[0], g_vals[-1]),
+    )
+
+    shape = dens.grid.shape
+    origin_A = np.asarray(dens.origin)   # Å
+    delta_A  = np.asarray(dens.delta)    # Å / voxel
+
+    ix, iy, iz = np.mgrid[0:shape[0], 0:shape[1], 0:shape[2]]
+    x = origin_A[0] + ix * delta_A[0]
+    y = origin_A[1] + iy * delta_A[1]
+    z = origin_A[2] + iz * delta_A[2]
+
+    center_A = center_pos_nm * 10.0      # nm → Å
+    r_nm = np.sqrt((x - center_A[0])**2 + (y - center_A[1])**2 + (z - center_A[2])**2) / 10.0
+
+    gamma_grid = gamma_interp(r_nm)
+    return gridData.Grid(gamma_grid, origin=dens.origin, delta=dens.delta)
+
+
 def make_unbinding_paths_visualization(
     paths: Dict[str, List[Tuple[str, str]]],
     reference_pdb: str,
@@ -566,12 +618,24 @@ def make_unbinding_paths_visualization(
     pocket_select: str = None,
     n_lig_conformations: int = 20,
     output_format: str = "pse",
+    friction_csv: str = None,
+    friction_estimator: str = "cumulant",
+    friction_center_select: str = "resname DUM",
 ) -> str:
     """Generate ligand-path density maps as a PyMOL session or script.
 
     Args:
         output_format: ``"pse"`` saves a portable, self-contained session file;
             ``"pml"`` writes a script + auxiliary .dx files next to it.
+        friction_csv: Path to ``friction.csv`` produced by
+            :class:`~autopath.sMDAnalysis.Estimators.FrictionEstimator`.
+            When provided, the isosurfaces are coloured by local friction
+            Γ(r) as a blue (low) → white → red (high) gradient.
+        friction_estimator: Which estimator row to use from *friction_csv*
+            (``"cumulant"`` or ``"jarzynski"``).  Default ``"cumulant"``.
+        friction_center_select: MDAnalysis selection for the membrane-centre
+            anchor atom used to compute voxel–centre distances.
+            Default ``"resname DUM"``.
     """
     if output_format not in ("pse", "pml"):
         raise ValueError(f"output_format must be 'pse' or 'pml', got '{output_format}'")
@@ -586,6 +650,41 @@ def make_unbinding_paths_visualization(
     protein_abs = str(Path(reference_pdb).resolve())
     u_ref = mda.Universe(protein_abs)
 
+    # ---------------------------------------------------------------------- #
+    # Load friction profile (optional)                                         #
+    # ---------------------------------------------------------------------- #
+    friction_profile: Optional[pd.Series] = None
+    friction_center_nm: Optional[np.ndarray] = None
+    if friction_csv is not None:
+        try:
+            fdf = pd.read_csv(friction_csv)
+            fdf = fdf[(fdf["method"] == "derivative") & (fdf["estimator"] == friction_estimator)]
+            if fdf.empty:
+                logger.warning(
+                    f"No derivative/{friction_estimator} rows in {friction_csv}. "
+                    "Friction colouring disabled."
+                )
+            else:
+                fdf = fdf.sort_values("r_coord")
+                friction_profile = pd.Series(
+                    fdf["Gamma"].to_numpy(), index=fdf["r_coord"].to_numpy()
+                )
+                center_ag = u_ref.select_atoms(friction_center_select)
+                if center_ag.n_atoms == 0:
+                    logger.warning(
+                        f"Friction centre selection '{friction_center_select}' found 0 atoms. "
+                        "Friction colouring disabled."
+                    )
+                    friction_profile = None
+                else:
+                    friction_center_nm = center_ag.center_of_geometry() / 10.0  # Å → nm
+                    logger.info(
+                        f"Friction colouring enabled ({friction_estimator}). "
+                        f"Centre: {friction_center_nm} nm"
+                    )
+        except Exception as exc:
+            logger.warning(f"Could not load friction data from {friction_csv}: {exc}. Skipping.")
+
     default_palette = ["violetpurple", "marine", "forest", "deepsalmon", "gold", "tv_red", "tv_blue"]
     path_colors = {name: default_palette[i % len(default_palette)] for i, name in enumerate(paths)}
 
@@ -597,6 +696,7 @@ def make_unbinding_paths_visualization(
     tmpdir = Path(tmpdir_obj.name)
 
     dx_files: Dict[str, str] = {}
+    friction_dx_files: Dict[str, str] = {}
     lig_pdb_files: Dict[str, str] = {}
 
     for path_name, traj_list in paths.items():
@@ -631,6 +731,16 @@ def make_unbinding_paths_visualization(
         dens.export(dx_path)
         dx_files[path_name] = dx_path
 
+        # Build friction volumetric map on the same grid as the density
+        if friction_profile is not None and friction_center_nm is not None:
+            try:
+                fric_grid = _build_friction_grid(dens, friction_profile, friction_center_nm)
+                fric_dx_path = str(dx_dest / f"{path_name}_friction.dx")
+                fric_grid.export(fric_dx_path)
+                friction_dx_files[path_name] = fric_dx_path
+            except Exception as exc:
+                logger.warning(f"Could not build friction grid for {path_name}: {exc}")
+
         n_frames = len(u.trajectory)
         if n_lig_conformations >= n_frames:
             frame_indices = list(range(n_frames))
@@ -643,6 +753,24 @@ def make_unbinding_paths_visualization(
                 u.trajectory[idx]
                 W.write(lig)
         lig_pdb_files[path_name] = lig_pdb
+
+    # Determine friction colour range from all paths combined (use 5th–95th percentile)
+    friction_ramp_vals: Optional[List[float]] = None
+    if friction_dx_files:
+        all_gamma: List[float] = []
+        for path_name in friction_dx_files:
+            fdf = pd.read_csv(friction_csv)
+            fdf = fdf[(fdf["method"] == "derivative") & (fdf["estimator"] == friction_estimator)]
+            all_gamma.extend(np.clip(fdf["Gamma"].to_numpy(), 0, None).tolist())
+        if all_gamma:
+            g_lo  = float(np.percentile(all_gamma, 5))
+            g_mid = float(np.percentile(all_gamma, 60))
+            g_hi  = float(np.percentile(all_gamma, 95))
+            friction_ramp_vals = [g_lo, g_mid, g_hi]
+            logger.info(
+                f"Friction ramp: low={g_lo:.0f}, mid={g_mid:.0f}, "
+                f"high={g_hi:.0f} kJ·ps/mol/nm²"
+            )
 
     pocket_resids: List[int] = []
     if pocket_select is not None:
@@ -683,19 +811,51 @@ def make_unbinding_paths_visualization(
                 cmd.show("sticks", "pocket")
                 cmd.color("orange", "pocket")
 
+            # Build shared friction ramp (one ramp covers all paths)
+            use_friction_coloring = bool(friction_dx_files and friction_ramp_vals)
+            if use_friction_coloring:
+                g_lo, g_mid, g_hi = friction_ramp_vals
+                # Load one friction map (they all share the same Gamma(r) function;
+                # we use path-0's map for the ramp calibration, then reload per path)
+                first_path = next(iter(friction_dx_files))
+                cmd.load(friction_dx_files[first_path], "friction_ramp_ref")
+                cmd.do("map_double friction_ramp_ref")
+                cmd.ramp_new(
+                    "friction_ramp", "friction_ramp_ref",
+                    [g_lo, g_mid, g_hi],
+                    ["blue", "white", "red"],
+                )
+                cmd.hide("everything", "friction_ramp_ref")
+
             for path_name in dx_files:
                 col = path_colors[path_name]
-                map_obj = f"map_{path_name}"
+                map_obj  = f"map_{path_name}"
                 surf_obj = f"surf_{path_name}"
-                lig_obj = f"lig_{path_name}"
+                lig_obj  = f"lig_{path_name}"
 
                 cmd.load(dx_files[path_name], map_obj)
                 cmd.do(f"map_double {map_obj}")
                 cmd.isosurface(surf_obj, map_obj, level)
-                cmd.color(col, surf_obj)
                 cmd.set("transparency", surface_transparency, surf_obj)
                 cmd.set("two_sided_lighting", 1, surf_obj)
                 cmd.hide("everything", map_obj)
+
+                if use_friction_coloring and path_name in friction_dx_files:
+                    # Load this path's friction map and redefine the ramp against it,
+                    # then colour the surface.  Using per-path maps ensures the ramp
+                    # samples the correct spatial region for this isosurface.
+                    fric_obj = f"fric_{path_name}"
+                    cmd.load(friction_dx_files[path_name], fric_obj)
+                    cmd.do(f"map_double {fric_obj}")
+                    cmd.ramp_new(
+                        f"ramp_{path_name}", fric_obj,
+                        [g_lo, g_mid, g_hi],
+                        ["blue", "white", "red"],
+                    )
+                    cmd.color(f"ramp_{path_name}", surf_obj)
+                    cmd.hide("everything", fric_obj)
+                else:
+                    cmd.color(col, surf_obj)
 
                 cmd.load(lig_pdb_files[path_name], lig_obj)
                 cmd.hide("everything", lig_obj)
@@ -749,17 +909,36 @@ def make_unbinding_paths_visualization(
             pml.write("show sticks, pocket\n")
             pml.write("color orange, pocket\n")
 
+        use_friction_coloring = bool(friction_dx_files and friction_ramp_vals)
+
         for path_name, dx_path in dx_files.items():
             col = path_colors[path_name]
-            map_obj = f"map_{path_name}"
+            map_obj  = f"map_{path_name}"
             surf_obj = f"surf_{path_name}"
-            lig_obj = f"lig_{path_name}"
+            lig_obj  = f"lig_{path_name}"
             pml.write(f"load {os.path.basename(dx_path)}, {map_obj}\n")
             pml.write(f"map_double {map_obj}\n")
             pml.write(f"isosurface {surf_obj}, {map_obj}, {level}\n")
-            pml.write(f"color {col}, {surf_obj}\n")
             pml.write(f"set transparency, {surface_transparency:.2f}, {surf_obj}\n")
             pml.write(f"set two_sided_lighting, on, {surf_obj}\n")
+
+            if use_friction_coloring and path_name in friction_dx_files:
+                g_lo, g_mid, g_hi = friction_ramp_vals
+                fric_obj  = f"fric_{path_name}"
+                ramp_name = f"ramp_{path_name}"
+                fric_base = os.path.basename(friction_dx_files[path_name])
+                pml.write(f"load {fric_base}, {fric_obj}\n")
+                pml.write(f"map_double {fric_obj}\n")
+                pml.write(
+                    f"ramp_new {ramp_name}, {fric_obj}, "
+                    f"[{g_lo:.2f}, {g_mid:.2f}, {g_hi:.2f}], "
+                    f"[blue, white, red]\n"
+                )
+                pml.write(f"color {ramp_name}, {surf_obj}\n")
+                pml.write(f"hide everything, {fric_obj}\n")
+            else:
+                pml.write(f"color {col}, {surf_obj}\n")
+
             pml.write(f"load {os.path.basename(lig_pdb_files[path_name])}, {lig_obj}\n")
             pml.write(f"hide everything, {lig_obj}\n")
             pml.write(f"show sticks, {lig_obj}\n")

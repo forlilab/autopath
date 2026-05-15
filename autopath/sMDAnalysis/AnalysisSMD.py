@@ -25,6 +25,7 @@ from autopath.sMDAnalysis.Diagnostics import (
     plot_profile,
     plot_friction,
     plot_extrapolated_param,
+    make_unbinding_paths_visualization,
 )
 
 logger = logging.getLogger("autopath.sMDAnalysis")
@@ -230,6 +231,30 @@ class SMDAnalysis:
 
         friction_df = pd.concat(friction_deriv_results + friction_regress_results, ignore_index=True)
         friction_df.to_csv(os.path.join(self.outdir, 'friction.csv'), index=False)
+
+        # Regenerate the unbinding-paths PSE with friction colouring now that friction.csv is ready.
+        # path_model.fit_transform ran earlier (before friction was computed) so the first PSE has
+        # no friction overlay. We rebuild paths_dict from medoid_to_path and overwrite that PSE.
+        if hasattr(self.path_model, 'medoid_to_path') and self.path_model.medoid_to_path:
+            try:
+                friction_csv_path = os.path.join(self.outdir, 'friction.csv')
+                _paths_dict: dict = {}
+                for medoid_name, path_id in self.path_model.medoid_to_path.items():
+                    if path_id not in _paths_dict:
+                        _paths_dict[path_id] = []
+                    if medoid_name in trajectory_files:
+                        _paths_dict[path_id].append(trajectory_files[medoid_name])
+                if _paths_dict:
+                    make_unbinding_paths_visualization(
+                        paths=_paths_dict,
+                        reference_pdb=self.reference_pdb,
+                        ligand_select=self.ligand_select,
+                        outdir=os.path.join(self.path_model.outdir, "unbinding_paths"),
+                        friction_csv=friction_csv_path,
+                    )
+                    logger.info("Friction-coloured unbinding paths PSE regenerated.")
+            except Exception as _exc:
+                logger.warning(f"Could not regenerate friction-coloured PSE: {_exc}")
 
         if self.do_plots:
             for estimator in self.estimators:
