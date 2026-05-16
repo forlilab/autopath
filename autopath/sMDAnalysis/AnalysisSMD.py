@@ -104,6 +104,7 @@ class SMDAnalysis:
             trim_low_support_results: bool = True,
             trim_min_support_ratio: float = 0.9,
             cluster_across_speeds: bool = False,
+            trajectory_features: list | None = None,
             ) -> SMDData:
 
         if self.reference_pdb is None:
@@ -128,15 +129,27 @@ class SMDAnalysis:
         if dist_feat_df is not None and cluster_across_speeds:
             logger.warning("Clustering using all speeds together on trace features. Those depend on speed, so this may lead to suboptimal clustering. Consider setting cluster_across_speeds=False or using only distance features for clustering.")
 
-        if group_A is not None and group_B is not None and merge_features:
-            feat_df = SMDData.build_merged_features(
-                trace_df=traces_feat_df,
-                geom_df=dist_feat_df,
-            )
-            logger.info('Clustering will be performed using merged (trace + distance) features')
-        elif group_A is not None and group_B is not None:
-            feat_df = dist_feat_df
-            logger.info('Clustering will be performed using distance features only')
+        # Compute ligand trajectory features (e.g. RoG) once — used for both
+        # clustering and CSV output to avoid redundant trajectory reads.
+        ligand_feat_dfs = []
+        if trajectory_features:
+            for feat_calc in trajectory_features:
+                lf = feat_calc.compute(sMDDdata.traj_files, self.reference_pdb)
+                if not lf.empty:
+                    ligand_feat_dfs.append(lf)
+
+        # Assemble clustering feature DataFrame — merge all available sources.
+        all_feat_dfs = [traces_feat_df]
+        if dist_feat_df is not None and merge_features:
+            all_feat_dfs.append(dist_feat_df)
+        for lf in ligand_feat_dfs:
+            all_feat_dfs.append(lf)
+
+        if len(all_feat_dfs) > 1:
+            feat_df = SMDData.merge_feature_sets(*all_feat_dfs)
+            _feat_cols = [c for c in feat_df.columns
+                          if c not in ('trajname', 'speed', 'step', 'time')]
+            logger.info(f'Clustering features: {_feat_cols}')
         else:
             feat_df = traces_feat_df
             logger.info('Clustering will be performed using trace features only')
@@ -275,6 +288,25 @@ class SMDAnalysis:
                     param=pcol,
                     outfname=os.path.join(self.outdir, f'{pcol}_extrapolated.svg'),
                 )
+
+        # Merge trajectory-derived features into raw_data so they appear in the CSV.
+        # ligand_feat_dfs was populated early (before clustering) and is reused here
+        # to avoid redundant trajectory reads.
+        _BASE_COLS = {
+            "step", "time", "r_target", "r_before", "r_after", "NC",
+            "force", "U_cvpack", "dW_protocol", "m_eff",
+            "trajname", "speed", "repid", "work", "lag", "r_coord", "path",
+            "n_samples", "support_frac", "support_ok", "n_ref",
+        }
+        if ligand_feat_dfs:
+            for lf in ligand_feat_dfs:
+                sMDDdata.raw_data = SMDData.merge_feature_sets(sMDDdata.raw_data, lf)
+            new_cols = [c for c in sMDDdata.raw_data.columns if c not in _BASE_COLS]
+            if new_cols:
+                sMDDdata.raw_data[new_cols].describe().to_csv(
+                    os.path.join(self.outdir, "trajectory_features_summary.csv")
+                )
+                logger.info(f"Trajectory features written to CSV: {new_cols}")
 
         sMDDdata.raw_data.to_csv(f'{self.outdir}/sMD_processed_data.csv', index=False)
 

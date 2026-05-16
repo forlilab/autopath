@@ -452,7 +452,7 @@ class AutoPath:
         lig_features = LigandTrajectoryFeatures(
             lig_resname=ligand_resname,
             sdf_file=ligand_file,
-            features=['rog'],
+            features=['rog', 'rdkit_3d'],
             stride=1,
         )
         sMD_trajs = glob(f"{sMD_traj_outdir}/sMD_replica-*_*_*_aligned.dcd")
