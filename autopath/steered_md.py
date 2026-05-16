@@ -93,7 +93,7 @@ class SteeredMD:
         out_dir: str = None,
         platform: str = "fastest",
         dx_per_move: float = 0.001,        # nm — RC grid spacing (held constant across speeds)
-        max_displacement: float = 5.0,     # nm — total RC range
+        max_displacement: float = 3.5,     # nm — total RC range
         sMD_spring_cte: float = 10000,     # kJ/mol/nm^2
         save_freq: int = 5,                # writes DCD every save_freq*steps_per_move
         verbose: int = 0,
