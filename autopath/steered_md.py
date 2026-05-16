@@ -25,8 +25,56 @@ except ImportError:
     logger.warning("Please install openmmtools to use Girsanov reweighting.")
     
 class SteeredMD:
-    """
-    A class to perform steered molecular dynamics, pulling a ligand out of its binding pocket
+    """Steered molecular dynamics: pull a ligand along a COM-COM reaction
+    coordinate using a moving harmonic restraint.
+
+    Parameter design
+    ----------------
+    Three orthogonal knobs control a sweep:
+
+    - ``max_displacement`` (nm): total RC range to traverse.
+    - ``pulling_speed`` (nm/ps): physical pulling rate — varied across
+      replicas in the sweep (passed to :meth:`run`).
+    - ``dx_per_move`` (nm): RC grid spacing — how far the spring center
+      r0 advances per Python-side update. Held fixed across the sweep.
+
+    From these, the runtime derives::
+
+        steps_per_move = round(dx_per_move / (pulling_speed * dt))
+        sMD_moves      = max_displacement / dx_per_move
+        total MD steps = max_displacement / (pulling_speed * dt)
+
+    Note the total MD step count does **not** depend on ``dx_per_move``.
+    ``dx_per_move`` is purely an *analysis-grid / log-resolution* knob: it
+    controls how many rows are written to ``sMD_{run_id}.dat`` and the
+    DCD frame cadence, but does not change the physics. Holding it
+    constant across the sweep gives every speed the same protocol grid,
+    which is what :class:`SMDAnalysis` expects when comparing speeds.
+
+    Choosing ``dx_per_move``
+    ------------------------
+    Upper bound — keep it small vs. the thermal sigma of the spring,
+    ``sigma_thermal = sqrt(kT/k)``. A rule of thumb is
+    ``dx_per_move <= sigma_thermal / 10`` so the system sees an
+    effectively continuous bias rather than discrete jumps. The
+    constructor logs the ratio and warns if ``dx_per_move > 0.5 * sigma``.
+
+    Lower bound — at the fastest sweep speed you don't want
+    ``steps_per_move`` to clip; keep
+    ``dx_per_move >= ~2 * v_max * dt`` (typically ~1e-4 nm with default
+    timestep). Going smaller buys nothing physical and only inflates the
+    .dat row count and per-move Python overhead. :meth:`run` warns when
+    ``steps_per_move`` rounds below 1.5 or when the realized speed
+    differs from the requested speed by more than 5%.
+
+    Choosing ``sMD_spring_cte``
+    ---------------------------
+    Stiffer springs give tighter tracking but smaller ``sigma_thermal``,
+    which in turn tightens the upper bound on ``dx_per_move`` (and
+    eventually the lower bound on ``steps_per_move``). For a typical
+    ligand the per-atom convention ``k = N_ha * k_per_atom`` (used in
+    :mod:`autopath_core`) keeps the thermal sigma roughly invariant to
+    ligand size.
     """
 
     def __init__(
@@ -94,6 +142,11 @@ class SteeredMD:
             openmmunit.kilojoules_per_mole / openmmunit.nanometer**2
         )
         self.sigma_thermal = math.sqrt(kB_kJ_per_mol_K * T_K / k_spring)  # nm
+        sigma_over_dx = self.sigma_thermal / float(dx_per_move)
+        logger.info(
+            f"sMD spring: k={k_spring:.1f} kJ/mol/nm^2, sigma_thermal={self.sigma_thermal:.4f} nm, "
+            f"dx_per_move={float(dx_per_move):.4g} nm (sigma/dx={sigma_over_dx:.1f}; rule of thumb >= 10)."
+        )
         if float(dx_per_move) > 0.5 * self.sigma_thermal:
             logger.warning(
                 f"dx_per_move ({dx_per_move:.4g} nm) exceeds 0.5*sigma_thermal "
