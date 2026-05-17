@@ -291,6 +291,17 @@ class DTWPathModel(PathModel):
                 self.plot_distance_matrix(distmatrix)
                 self.plot_elbow(scores, K)
 
+                # Build plot-space feature names — geom features are PCA-reduced
+                # so their names become geom_PC1, geom_PC2, …
+                if geom_idx and other_idx and self.n_geom_pcs is not None:
+                    n_pcs = min(self.n_geom_pcs, len(geom_idx))
+                    plot_feature_names = (
+                        [f"geom_PC{k+1}" for k in range(n_pcs)]
+                        + [feature_cols[i] for i in other_idx]
+                    )
+                else:
+                    plot_feature_names = feature_cols
+
                 if cluster_fraction is not None:
                     # Rebuild scaled vectors over the full trajectories for plotting
                     vectors_full = [
@@ -316,6 +327,7 @@ class DTWPathModel(PathModel):
                     feature_df=speed_df_for_plot,
                     path_mapping_dic=path_mapping_dic,
                     vectors_stacked_scaled=vectors_plot,
+                    feature_names=plot_feature_names,
                 )
 
         # Generate unbinding paths visualization if trajectories and reference PDB are available
@@ -386,73 +398,69 @@ class DTWPathModel(PathModel):
         plt.close()
         return
         
-    def plot_clusters_PCA(self, 
-                          feature_df: pd.DataFrame=None,
-                          path_mapping_dic: dict=None,
-                          vectors_stacked_scaled: list=None,
+    def plot_clusters_PCA(self,
+                          feature_df: pd.DataFrame = None,
+                          path_mapping_dic: dict = None,
+                          vectors_stacked_scaled: list = None,
+                          feature_names: list = None,
                           ):
-        
 
         feature_df['path'] = feature_df['trajname'].map(path_mapping_dic)
-        
-        # generate PCA plot of the clustered paths
-        # Get the minimum number of frames across all trajectories
-        min_len = min(arr.shape[0] for arr in vectors_stacked_scaled)
 
-        # Trim all arrays to this length, required for PCA
+        min_len = min(arr.shape[0] for arr in vectors_stacked_scaled)
         vectors_trimmed = [arr[:min_len, :] for arr in vectors_stacked_scaled]
-        X = np.vstack(vectors_trimmed)   # shape (N_traj * min_len, d)
+        X = np.vstack(vectors_trimmed)   # (N_traj * min_len, d)
 
         pca = PCA(n_components=2)
         X_pca = pca.fit_transform(X)
 
-        # figure out trajectory order matching vectors_stacked_scaled
-        # groupby preserves the order of appearance of trajname in feature_df,
-        # which is what cluster_time_series used when building vectors_stacked_scaled
         traj_order = [name for name, _ in feature_df.groupby('trajname')]
-        n_traj = len(traj_order)
-        assert n_traj == len(vectors_trimmed), "traj_order and vectors_stacked_scaled misaligned"
+        assert len(traj_order) == len(vectors_trimmed), "traj_order and vectors_stacked_scaled misaligned"
 
-        plt.figure(figsize=(6, 5))
-        sns.scatterplot(x=X_pca[:, 0], y=X_pca[:, 1],
-                        alpha=0.75, color='lightgray', s=50, linewidth=0)
+        has_loadings = feature_names is not None
+        fig, axes = plt.subplots(1, 2 if has_loadings else 1,
+                                 figsize=(12, 5) if has_loadings else (6, 5))
+        ax_scatter = axes[0] if has_loadings else axes
 
-        # color palette by path label
-        n_paths = len(set(path_mapping_dic.values()))
-        # palette = sns.color_palette("tab10", n_colors=n_paths)
+        ax_scatter.scatter(X_pca[:, 0], X_pca[:, 1],
+                           alpha=0.75, color='lightgray', s=50, linewidth=0)
 
-        # overlay medoid trajectories, colored by path
         used_labels = set()
         for i, trajname in enumerate(traj_order):
             if trajname not in self.medoid_names:
                 continue
-
             start = i * min_len
-            end = start + min_len
+            end   = start + min_len
             path_label = path_mapping_dic[trajname]
-            # color = palette[path_label]
-
-            label = f'{str(path_label).split("_")[0]}'
-            # label = f'path-{path_label}'#_{trajname}'
-
-            # avoid duplicate legend entries
-            if path_label in used_labels:
-                label = None
-            else:
-                used_labels.add(path_label)
-
-            plt.scatter(X_pca[start:end, 0],
-                        X_pca[start:end, 1],
-                        s=20, alpha=0.9,
-                        label=label)
+            label = f'{str(path_label).split("_")[0]}' if path_label not in used_labels else None
+            used_labels.add(path_label)
+            ax_scatter.scatter(X_pca[start:end, 0], X_pca[start:end, 1],
+                               s=20, alpha=0.9, label=label)
 
         if used_labels:
-            plt.legend(frameon=False)
+            ax_scatter.legend(frameon=False)
+        ax_scatter.set_xlabel(f"PC1 ({pca.explained_variance_ratio_[0]*100:.1f}%)")
+        ax_scatter.set_ylabel(f"PC2 ({pca.explained_variance_ratio_[1]*100:.1f}%)")
+        ax_scatter.set_title(f"PCA space - speed={self.speed_name} nm/ps")
 
-        plt.xlabel(f"PC1 ({pca.explained_variance_ratio_[0]*100:.1f}%)")
-        plt.ylabel(f"PC2 ({pca.explained_variance_ratio_[1]*100:.1f}%)")
-        plt.title(f"PCA space - speed={self.speed_name} nm/ps")
+        # ── Feature loadings panel ─────────────────────────────────────────
+        if has_loadings:
+            ax_load = axes[1]
+            n_feats = len(feature_names)
+            y = np.arange(n_feats)
+            w = 0.35
+            ax_load.barh(y + w / 2, pca.components_[0], w,
+                         label=f"PC1 ({pca.explained_variance_ratio_[0]*100:.1f}%)")
+            ax_load.barh(y - w / 2, pca.components_[1], w,
+                         label=f"PC2 ({pca.explained_variance_ratio_[1]*100:.1f}%)")
+            ax_load.set_yticks(y)
+            ax_load.set_yticklabels(feature_names)
+            ax_load.axvline(0, color='black', lw=0.8)
+            ax_load.set_xlabel("Loading (standardised units)")
+            ax_load.set_title("Feature contributions to PCs")
+            ax_load.legend(frameon=False)
+
         plt.tight_layout()
-        plt.savefig(os.path.join(self.outdir, f"cluster_pca_v{self.speed_name}.png"))
+        plt.savefig(os.path.join(self.outdir, f"cluster_pca_v{self.speed_name}.png"), dpi=150)
         plt.close()
         return
