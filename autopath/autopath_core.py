@@ -71,7 +71,7 @@ class AutoPath:
         sMD_outdir: str = "sMD",
         sMD_pulling_dir: str = "forward",  # "forward" or "backward"
         sMD_pulling_speeds: dict = {0.005:None, 0.0025:None, 0.001:None},  # nm/ps
-        sMD_max_pulling_dist: float = 3.0,  # nm
+        sMD_max_pulling_dist: float = 3.5,  # nm
         sMD_time: int = None,  # ns
         sMD_steps_per_move: int = None,
         sMD_dx_per_move: float = 0.001,  # nm, this is the displacement per move
@@ -81,6 +81,7 @@ class AutoPath:
         sMD_max_replicas: int = 50,  # max replicas per speed in convergence mode
         sMD_run_analysis: bool = True,
         sMD_clust_selection:str = None,
+        sMD_features: list | None = None,
         cluster_across_speeds: bool = False,
         extract_milestones: bool = True,
         milestone_mode: str = "all_medoids",  # "per_path" or "all_medoids"
@@ -131,6 +132,7 @@ class AutoPath:
         self.sMD_max_replicas = sMD_max_replicas
         self.sMD_run_analysis = sMD_run_analysis
         self.sMD_clust_selection = sMD_clust_selection
+        self.sMD_features = sMD_features
         self.cluster_across_speeds = cluster_across_speeds
         # Milestones
         self.extract_milestones = extract_milestones
@@ -448,13 +450,6 @@ class AutoPath:
         ######################################### sMD Analysis #######################################
         ##############################################################################################        
         
-        from autopath.sMDAnalysis.LigandFeatures import LigandTrajectoryFeatures
-        lig_features = LigandTrajectoryFeatures(
-            lig_resname=ligand_resname,
-            sdf_file=ligand_file,
-            features=['rog', 'rdkit_3d'],
-            stride=1,
-        )
         sMD_trajs = glob(f"{sMD_traj_outdir}/sMD_replica-*_*_*_aligned.dcd")
 
         if self.sMD_run_analysis:
@@ -489,7 +484,8 @@ class AutoPath:
                                        group_B=self.sMD_clust_selection,
                                        merge_features=MERGE_CLUSTERING_FEATURES,
                                        cluster_across_speeds=self.cluster_across_speeds,
-                                       trajectory_features=[lig_features]
+                                       features=self.sMD_features,
+                                       ligand_sdf=ligand_file,
                                     #    r_range=(0, 1.75)
                                        )
 

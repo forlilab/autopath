@@ -1,5 +1,5 @@
 import logging
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 import pandas as pd
@@ -10,23 +10,35 @@ from .SMDData import SMDData
 
 logger = logging.getLogger("autopath.sMDAnalysis.LigandFeatures")
 
-SUPPORTED_FEATURES = {"rog", "rdkit_3d"}
 
 # Per-frame RDKit 3D shape descriptors. All are mass-weighted (PMI-based) or
 # purely geometric, so they are invariant under permutation of same-element
 # atoms — element-level matching between SDF and trajectory selection is
 # sufficient to guarantee correctness. PMI1/2/3 are deliberately omitted:
-# they are absolute-scale (Å^2·Da) and redundant with the mass-weighted
+# absolute-scale (Å^2·Da) and redundant with the mass-weighted
 # RadiusOfGyration once the shape ratios above are kept.
-RDKIT_3D_COLUMNS = (
-    "lig_asphericity",
-    "lig_eccentricity",
-    "lig_inertial_shape",
-    "lig_npr1",
-    "lig_npr2",
-    "lig_spherocity",
-    "lig_pbf",
-)
+def _rdkit_feature_fns() -> dict[str, Callable]:
+    """Build the name → descriptor-callable map lazily to avoid top-level
+    RDKit imports (the class only needs RDKit when an rdkit feature is
+    actually requested)."""
+    from rdkit.Chem import Descriptors3D, rdMolDescriptors
+    return {
+        "asphericity":    Descriptors3D.Asphericity,
+        "eccentricity":   Descriptors3D.Eccentricity,
+        "inertial_shape": Descriptors3D.InertialShapeFactor,
+        "npr1":           Descriptors3D.NPR1,
+        "npr2":           Descriptors3D.NPR2,
+        "spherocity":     Descriptors3D.SpherocityIndex,
+        "pbf":            rdMolDescriptors.CalcPBF,
+    }
+
+
+RDKIT_FEATURE_NAMES = frozenset({
+    "asphericity", "eccentricity", "inertial_shape",
+    "npr1", "npr2", "spherocity", "pbf",
+})
+
+SUPPORTED_FEATURES = frozenset({"rog"}) | RDKIT_FEATURE_NAMES
 
 
 class LigandTrajectoryFeatures:
@@ -50,22 +62,24 @@ class LigandTrajectoryFeatures:
         whose conformer is mutated per frame.  Also used by
         :meth:`rdkit_descriptors_from_sdf` for topology-only descriptors.
     features : sequence of str
-        Per-frame features to compute.  Currently supported:
+        Per-frame features to compute. Each name maps 1:1 to one output
+        column ``lig_<name>``. Supported names:
 
-        - ``"rog"``: radius of gyration (mass-weighted COM, *uniform*-weighted
-          spread). Differs from RDKit's mass-weighted ``RadiusOfGyration``;
-          kept for backward compatibility.
-        - ``"rdkit_3d"``: scale-invariant 3D shape descriptors from
-          :mod:`rdkit.Chem.Descriptors3D` (Asphericity, Eccentricity,
-          InertialShapeFactor, NPR1, NPR2, SpherocityIndex) plus
-          ``CalcPBF``. Emits the columns in :data:`RDKIT_3D_COLUMNS`.
+        - ``"rog"``: radius of gyration (mass-weighted COM, mass-weighted
+          spread). Matches the convention used by RDKit's
+          ``Descriptors3D.RadiusOfGyration``.
+        - RDKit 3D shape descriptors (any subset): ``"asphericity"``,
+          ``"eccentricity"``, ``"inertial_shape"``, ``"npr1"``, ``"npr2"``,
+          ``"spherocity"``, ``"pbf"``. Any of these requires ``sdf_file``.
+
+        ``rog`` alone does not require an SDF.
     stride : int
         Sample every `stride`-th trajectory frame (default 2).
 
     Notes
     -----
-    For ``"rdkit_3d"`` the SDF and the MDAnalysis selection must agree on
-    heavy-atom **element order**. The class validates this at the start
+    For RDKit descriptors the SDF and the MDAnalysis selection must agree
+    on heavy-atom **element order**. The class validates this at the start
     of :meth:`compute` and raises on mismatch.
     """
 
@@ -73,19 +87,25 @@ class LigandTrajectoryFeatures:
         self,
         lig_resname: str = "UNK",
         sdf_file: Optional[str] = None,
-        features: tuple = ("rog",),
+        features: list | tuple = ("rog",),
         stride: int = 2,
     ):
+        features = list(features)
         unknown = set(features) - SUPPORTED_FEATURES
         if unknown:
             raise ValueError(
-                f"Unsupported features: {unknown}. Supported: {SUPPORTED_FEATURES}"
+                f"Unsupported features: {sorted(unknown)}. "
+                f"Supported: {sorted(SUPPORTED_FEATURES)}"
             )
-        if "rdkit_3d" in features and sdf_file is None:
-            raise ValueError("rdkit_3d feature requires sdf_file to be provided.")
+        rdkit_requested = [f for f in features if f in RDKIT_FEATURE_NAMES]
+        if rdkit_requested and sdf_file is None:
+            raise ValueError(
+                f"RDKit features {rdkit_requested} require sdf_file to be provided."
+            )
         self.lig_resname = lig_resname
         self.sdf_file = sdf_file
-        self.features = list(features)
+        self.features = features
+        self._rdkit_features = rdkit_requested
         self.stride = stride
 
     # ------------------------------------------------------------------
@@ -105,12 +125,18 @@ class LigandTrajectoryFeatures:
         sel = f"resname {self.lig_resname} and not name H*"
         all_rows = []
 
-        # Build the RDKit template once per compute() call (heavy-atoms only).
-        # Element-order validation happens lazily against the first universe.
+        # Build the RDKit template and descriptor-function map once per
+        # compute() call (heavy-atoms only). Element-order validation happens
+        # lazily against the first universe.
         rdkit_template = None
+        rdkit_fns: dict[str, Callable] = {}
         rdkit_validated = False
-        if "rdkit_3d" in self.features:
+        if self._rdkit_features:
             rdkit_template = self._load_rdkit_template(self.sdf_file)
+            all_fns = _rdkit_feature_fns()
+            rdkit_fns = {name: all_fns[name] for name in self._rdkit_features}
+
+        compute_rog = "rog" in self.features
 
         for traj in tqdm.tqdm(traj_files, desc="Computing ligand features"):
             try:
@@ -140,10 +166,12 @@ class LigandTrajectoryFeatures:
                     "speed": speed,
                     "time": float(getattr(ts, "time", ts.frame)),
                 }
-                if "rog" in self.features:
+                if compute_rog:
                     row["lig_rog"] = self._compute_rog(lig)
-                if rdkit_template is not None:
-                    row.update(self._compute_rdkit_3d(lig, rdkit_template))
+                if rdkit_fns:
+                    self._set_template_coords(rdkit_template, lig)
+                    for name, fn in rdkit_fns.items():
+                        row[f"lig_{name}"] = round(float(fn(rdkit_template)), 4)
                 all_rows.append(row)
 
         if not all_rows:
@@ -258,25 +286,14 @@ class LigandTrajectoryFeatures:
             )
 
     @staticmethod
-    def _compute_rdkit_3d(lig_atoms, mol_template) -> dict:
-        """Inject Å coordinates into the template's conformer and compute descriptors.
+    def _set_template_coords(mol_template, lig_atoms) -> None:
+        """Inject Å coordinates from the MDA selection into the template conformer.
 
         Both MDAnalysis.positions and RDKit Point3D are in Å; no conversion.
-        Returns one entry per column in :data:`RDKIT_3D_COLUMNS`.
+        Called once per frame before evaluating any descriptor.
         """
-        from rdkit.Chem import Descriptors3D, rdMolDescriptors
         from rdkit.Geometry import Point3D
 
         conf = mol_template.GetConformer()
         for i, xyz in enumerate(lig_atoms.positions):
             conf.SetAtomPosition(i, Point3D(float(xyz[0]), float(xyz[1]), float(xyz[2])))
-
-        return {
-            "lig_asphericity":    round(Descriptors3D.Asphericity(mol_template), 4),
-            "lig_eccentricity":   round(Descriptors3D.Eccentricity(mol_template), 4),
-            "lig_inertial_shape": round(Descriptors3D.InertialShapeFactor(mol_template), 4),
-            "lig_npr1":           round(Descriptors3D.NPR1(mol_template), 4),
-            "lig_npr2":           round(Descriptors3D.NPR2(mol_template), 4),
-            "lig_spherocity":     round(Descriptors3D.SpherocityIndex(mol_template), 4),
-            "lig_pbf":            round(rdMolDescriptors.CalcPBF(mol_template), 4),
-        }

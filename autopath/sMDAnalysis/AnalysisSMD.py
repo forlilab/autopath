@@ -27,8 +27,33 @@ from autopath.sMDAnalysis.Diagnostics import (
     plot_extrapolated_param,
     make_unbinding_paths_visualization,
 )
+from autopath.sMDAnalysis.LigandFeatures import (
+    LigandTrajectoryFeatures,
+    SUPPORTED_FEATURES as LIGAND_FEATURE_POOL,
+)
 
 logger = logging.getLogger("autopath.sMDAnalysis")
+
+# Trace-feature names that exist on SMDData.raw_data after __init__:
+# the .dat columns (force, U_cvpack, dW_protocol, m_eff, r_before, r_after)
+# plus 'lag' (computed in SMDData.__init__) and 'work' (added by
+# integrate_force_dx). 'NC' is contact-related and forward-pull-specific,
+# so deliberately excluded.
+TRACE_FEATURE_POOL = frozenset({
+    "lag", "work",
+    "r_before", "r_after",
+    "force", "U_cvpack", "dW_protocol", "m_eff",
+})
+
+# Default features for clustering when the caller passes features=None.
+# Preserves the historical behavior (3 trace + 8 ligand columns).
+_DEFAULT_TRACE_FEATURES = ("lag", "work", "r_before")
+DEFAULT_FEATURES = list(_DEFAULT_TRACE_FEATURES) + sorted(LIGAND_FEATURE_POOL)
+
+assert TRACE_FEATURE_POOL.isdisjoint(LIGAND_FEATURE_POOL), (
+    "TRACE_FEATURE_POOL and LIGAND_FEATURE_POOL must be disjoint; got overlap: "
+    f"{sorted(TRACE_FEATURE_POOL & LIGAND_FEATURE_POOL)}"
+)
 
 class SMDAnalysis:
     def __init__(self,
@@ -56,6 +81,22 @@ class SMDAnalysis:
 
         return None
     
+    @staticmethod
+    def _ligand_resname_from_select(ligand_select: str | None) -> str:
+        """Extract the residue name from an MDAnalysis-style selection string.
+
+        Accepts strings like ``"resname UNK"`` or ``"resname UNK and not name H*"``
+        and returns ``"UNK"``. Falls back to ``"UNK"`` if the selection is
+        missing or doesn't follow the expected pattern.
+        """
+        if not ligand_select:
+            return "UNK"
+        toks = ligand_select.split()
+        for i, t in enumerate(toks):
+            if t.lower() == "resname" and i + 1 < len(toks):
+                return toks[i + 1]
+        return "UNK"
+
     def _setup_estimators(self, estimators: Union[list[BaseEstimator], list[str]]):
         estimator_map = {
             'jarzynski': JarzynskiEstimator(),
@@ -104,8 +145,26 @@ class SMDAnalysis:
             trim_low_support_results: bool = True,
             trim_min_support_ratio: float = 0.9,
             cluster_across_speeds: bool = False,
-            trajectory_features: list | None = None,
+            features: list[str] | None = None,
+            ligand_sdf: str | None = None,
             ) -> SMDData:
+        """
+        Parameters
+        ----------
+        features : list[str] | None
+            Flat list of clustering feature names to compute. Each name must
+            be in ``TRACE_FEATURE_POOL`` (e.g. ``"work"``, ``"lag"``,
+            ``"r_before"``, ``"force"``, ``"U_cvpack"``, ``"dW_protocol"``,
+            ``"m_eff"``, ``"r_after"``) or in ``LIGAND_FEATURE_POOL`` (e.g.
+            ``"rog"``, ``"asphericity"``, ``"npr1"``, …). Pocket distances
+            are still controlled by ``group_A``/``group_B``, not this list.
+            If ``None`` (default), uses :data:`DEFAULT_FEATURES`
+            (``['lag','work','r_before']`` + all 8 ligand columns) —
+            bit-for-bit matches the historical behavior.
+        ligand_sdf : str | None
+            Path to an SDF with the ligand and correct bond orders.
+            Required if any RDKit feature is in ``features``.
+        """
 
         if self.reference_pdb is None:
             self.reference_pdb = sMDDdata.reference_pdb
@@ -114,8 +173,33 @@ class SMDAnalysis:
         if r_range is not None:
             sMDDdata.filter_by_r_range(r_range, sMDDdata.r_column)
 
-        traces_feat_df = sMDDdata.get_trace_features(
-            features=['lag','work','r_before'], # names tracesV2
+        # Resolve & validate the flat feature list.
+        if features is None:
+            features = list(DEFAULT_FEATURES)
+        unknown = set(features) - TRACE_FEATURE_POOL - LIGAND_FEATURE_POOL
+        if unknown:
+            raise ValueError(
+                f"Unsupported feature name(s): {sorted(unknown)}.\n"
+                f"  Trace pool:  {sorted(TRACE_FEATURE_POOL)}\n"
+                f"  Ligand pool: {sorted(LIGAND_FEATURE_POOL)}"
+            )
+        # Partition while preserving caller order.
+        trace_feats  = [f for f in features if f in TRACE_FEATURE_POOL]
+        ligand_feats = [f for f in features if f in LIGAND_FEATURE_POOL]
+
+        if not trace_feats:
+            logger.warning(
+                "No trace features requested; clustering will rely on ligand "
+                "and/or pocket-distance features only."
+            )
+            # get_trace_features still emits the four index columns
+            # (trajname/speed/step/time) — needed for merge_feature_sets.
+            traces_feat_df = sMDDdata.get_trace_features(features=[])
+        else:
+            traces_feat_df = sMDDdata.get_trace_features(features=trace_feats)
+        logger.info(
+            f"Trace features: {trace_feats or '(none — index columns only)'}; "
+            f"DataFrame columns: {list(traces_feat_df.columns)}"
         )
 
         dist_feat_df = None
@@ -129,14 +213,21 @@ class SMDAnalysis:
         if dist_feat_df is not None and cluster_across_speeds:
             logger.warning("Clustering using all speeds together on trace features. Those depend on speed, so this may lead to suboptimal clustering. Consider setting cluster_across_speeds=False or using only distance features for clustering.")
 
-        # Compute ligand trajectory features (e.g. RoG) once — used for both
-        # clustering and CSV output to avoid redundant trajectory reads.
+        # Compute ligand trajectory features (RoG and/or RDKit 3D shape
+        # descriptors) once — used for both clustering and CSV output to
+        # avoid redundant trajectory reads.
         ligand_feat_dfs = []
-        if trajectory_features:
-            for feat_calc in trajectory_features:
-                lf = feat_calc.compute(sMDDdata.traj_files, self.reference_pdb)
-                if not lf.empty:
-                    ligand_feat_dfs.append(lf)
+        if ligand_feats:
+            ligand_resname = self._ligand_resname_from_select(self.ligand_select)
+            lig_calc = LigandTrajectoryFeatures(
+                lig_resname=ligand_resname,
+                sdf_file=ligand_sdf,
+                features=ligand_feats,
+                stride=1,
+            )
+            lf = lig_calc.compute(sMDDdata.traj_files, self.reference_pdb)
+            if not lf.empty:
+                ligand_feat_dfs.append(lf)
 
         # Assemble clustering feature DataFrame — merge all available sources.
         all_feat_dfs = [traces_feat_df]
