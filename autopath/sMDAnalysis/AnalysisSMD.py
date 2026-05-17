@@ -5,6 +5,8 @@ from glob import glob
 from typing import Optional, Union
 from collections import defaultdict
 import logging
+from scipy.ndimage import gaussian_filter1d
+from scipy.signal import find_peaks
 
 from autopath.sMDAnalysis import SMDData
 from autopath.sMDAnalysis.Estimators import BaseEstimator, FrictionEstimator
@@ -46,9 +48,16 @@ TRACE_FEATURE_POOL = frozenset({
 })
 
 # Default features for clustering when the caller passes features=None.
-# Preserves the historical behavior (3 trace + 8 ligand columns).
+# Trace features capture reaction-coordinate progress and energetics, which
+# is what distinguishes genuinely different unbinding routes. Shape features
+# (npr1, npr2, pbf) are optional — useful only when trajectories are known
+# to diverge spatially AND ligand conformation varies across those routes.
+# Including shape by default tends to dominate DTW clustering when all
+# trajectories are kinematically similar (e.g. all autostop at the same
+# barrier), causing paths to split on conformation rather than exit route.
 _DEFAULT_TRACE_FEATURES = ("lag", "work", "r_before")
-DEFAULT_FEATURES = list(_DEFAULT_TRACE_FEATURES) + sorted(LIGAND_FEATURE_POOL)
+_DEFAULT_SHAPE_FEATURES  = ("npr1", "npr2", "pbf")
+DEFAULT_FEATURES = list(_DEFAULT_TRACE_FEATURES)
 
 assert TRACE_FEATURE_POOL.isdisjoint(LIGAND_FEATURE_POOL), (
     "TRACE_FEATURE_POOL and LIGAND_FEATURE_POOL must be disjoint; got overlap: "
@@ -159,8 +168,8 @@ class SMDAnalysis:
             ``"rog"``, ``"asphericity"``, ``"npr1"``, …). Pocket distances
             are still controlled by ``group_A``/``group_B``, not this list.
             If ``None`` (default), uses :data:`DEFAULT_FEATURES`
-            (``['lag','work','r_before']`` + all 8 ligand columns) —
-            bit-for-bit matches the historical behavior.
+            (``['lag','work','r_before']``). To add shape descriptors pass
+            e.g. ``features=['lag','work','r_before','npr1','npr2','pbf']``.
         ligand_sdf : str | None
             Path to an SDF with the ligand and correct bond orders.
             Required if any RDKit feature is in ``features``.
@@ -254,7 +263,6 @@ class SMDAnalysis:
         # fit path model and assign paths to trajectories
         path_mappings = self.path_model.fit_transform(
             feat_df,
-            # r_range=0.75,  # use only the first 75% of frames for clustering to avoid noisy end states
             reference_pdb=self.reference_pdb,
             ligand_select=self.ligand_select,
             trajectory_files=trajectory_files,
@@ -411,9 +419,11 @@ class SMDAnalysis:
         group_A: str = None,
         group_B: str = None,
         min_replicas: int = 5,
-        tol_rmsd: float = 3.0,     # kJ/mol
+        trace_min_replicas: int = 3,  # start building PMF traces before convergence checking begins
+        tol_rmsd: float = 4.0,     # kJ/mol
         tol_barrier: float = 3.0,  # kJ/mol
-        trim_fraction: float = 0.25,     # fraction of PMF to trim from the end (noisy region)
+        tol_r_ts: float = 0.1,     # nm — 1 Å change in TS position
+        trim_fraction: float = 0.1,      # drop steps where fewer than (1-trim_fraction) of replicas contributed; 0=no trimming
         min_common_points: int = 5,
         return_gmm_diagnostics: bool = False,
     ):
@@ -476,8 +486,7 @@ class SMDAnalysis:
             if group_A is not None and group_B is not None:
                 feat_df = smd.calculate_pocket_distances(group_A=group_A, group_B=group_B)
             else:
-                # feat_df = smd.get_trace_features(features=['work', 'force', 'lag', 'r_before', 'r_after'])
-                feat_df = smd.get_trace_features(features=['work', 'lag', 'r_before']) # tracesV2
+                feat_df = smd.get_trace_features(features=['work', 'lag', 'r_before'])
                 
             clusterer = DTWPathModel(
                 seed=self.seed,
@@ -506,6 +515,8 @@ class SMDAnalysis:
             rows = []
             pmf_records = []
             prev_pmf = None
+            prev_barrier_height = None
+            prev_r_ts = None
 
             for k, trajname in enumerate(traj_order, start=1):
                 traj_df = traj_data_map.get(trajname)
@@ -530,9 +541,11 @@ class SMDAnalysis:
                     stats['sum_exp'] += np.exp(-smd.beta * work)
                     running_samples[key].append(work)
 
-                if k < min_replicas:
+                # Stage 1: skip entirely below trace threshold
+                if k < trace_min_replicas:
                     continue
 
+                # Stage 2: compute PMF for all k >= trace_min_replicas
                 results_df = self._results_from_running_stats(
                     running_stats=running_stats,
                     running_samples=running_samples,
@@ -556,16 +569,16 @@ class SMDAnalysis:
                     path_traj_counts=path_traj_counts,
                     value_col=value_col,
                     beta=smd.beta,
+                    trim_fraction=trim_fraction,
                 )
 
                 if pmf_k.empty:
                     prev_pmf = pmf_k
                     continue
 
-                # store PMF trace
+                # always store PMF trace (from trace_min_replicas onwards)
                 for step, val in pmf_k.items():
                     r_coord = protocol_grid.loc[step]
-                    
                     pmf_records.append({
                         "step": step,
                         "r_coord": r_coord,
@@ -576,13 +589,46 @@ class SMDAnalysis:
                         "value": val,
                     })
 
-                # first PMF: initialize
-                if prev_pmf is None:
+                # Stage 3: skip convergence comparison below min_replicas
+                # (keep prev_pmf and prev barrier/r_ts updated so the first comparison
+                # at min_replicas has a full prior state to compare against)
+                if k < min_replicas:
                     prev_pmf = pmf_k
+                    prev_barrier_height, prev_r_ts = self._compute_barrier_rts(pmf_k, smd.beta, protocol_grid)
                     continue
 
-                #compare PMF(k) vs PMF(k-1)
+                # === convergence comparison (k >= min_replicas) ===
+
+                barrier_height, r_ts = self._compute_barrier_rts(pmf_k, smd.beta, protocol_grid)
+
+                # first PMF eligible for comparison: initialize
+                # (fires when trace_min_replicas == min_replicas, i.e. standard fallback)
+                if prev_pmf is None or prev_pmf.empty:
+                    prev_pmf = pmf_k
+                    prev_barrier_height = barrier_height
+                    prev_r_ts = r_ts
+                    continue
+
+                # compare PMF(k) vs PMF(k-1)
                 common_r = pmf_k.index.intersection(prev_pmf.index)
+
+                # NaN-aware barrier/r_ts deltas between consecutive estimates:
+                # - both NaN: no peak in either → criterion waived (True)
+                # - one NaN: peak appeared/disappeared → not converged (inf)
+                # - both finite: normal absolute difference
+                if np.isnan(barrier_height) and np.isnan(prev_barrier_height):
+                    barrier_delta = np.nan
+                elif np.isnan(barrier_height) or np.isnan(prev_barrier_height):
+                    barrier_delta = np.inf
+                else:
+                    barrier_delta = abs(barrier_height - prev_barrier_height)
+
+                if np.isnan(r_ts) and np.isnan(prev_r_ts):
+                    r_ts_delta = np.nan
+                elif np.isnan(r_ts) or np.isnan(prev_r_ts):
+                    r_ts_delta = np.inf
+                else:
+                    r_ts_delta = abs(r_ts - prev_r_ts)
 
                 if len(common_r) < min_common_points:
                     rows.append({
@@ -590,29 +636,61 @@ class SMDAnalysis:
                         "path": "mixture",
                         "n_replicas": k,
                         f"{main_quantity}-rmsd": np.nan,
-                        f"{main_quantity}-deltaMax": np.nan,
+                        "barrier_delta": barrier_delta,
+                        "r_ts_delta": r_ts_delta,
+                        "barrier_height": barrier_height,
+                        "r_ts": r_ts,
                         "converged": False,
                         "reason": "insufficient_overlap",
                         "n_common_points": len(common_r),
                     })
                     prev_pmf = pmf_k
+                    prev_barrier_height = barrier_height
+                    prev_r_ts = r_ts
+                    continue
+
+                # Trim to well-supported steps: keep only steps where the fraction
+                # of replicas that reached that step >= (1 - trim_fraction).
+                # This is adaptive — low-coverage tails (noisy region) are excluded
+                # automatically regardless of where they fall in the r range.
+                # Set trim_fraction=0.0 to use the full range (e.g. membrane pulls).
+                if trim_fraction > 0.0 and not results_df.empty and 'n_samples' in results_df.columns:
+                    step_support = results_df.groupby('step')['n_samples'].max()
+                    n_ref = float(step_support.max())
+                    if n_ref > 0:
+                        supported_steps = step_support[
+                            step_support / n_ref >= (1.0 - trim_fraction)
+                        ].index
+                        common_r = common_r[common_r.isin(supported_steps)]
+
+                if len(common_r) < min_common_points:
+                    rows.append({
+                        "speed": speed,
+                        "path": "mixture",
+                        "n_replicas": k,
+                        f"{main_quantity}-rmsd": np.nan,
+                        "barrier_delta": barrier_delta,
+                        "r_ts_delta": r_ts_delta,
+                        "barrier_height": barrier_height,
+                        "r_ts": r_ts,
+                        "converged": False,
+                        "reason": "insufficient_support",
+                        "n_common_points": len(common_r),
+                    })
+                    prev_pmf = pmf_k
+                    prev_barrier_height = barrier_height
+                    prev_r_ts = r_ts
                     continue
 
                 yN = pmf_k.loc[common_r].values
                 yNm1 = prev_pmf.loc[common_r].values
-                
-                # trim last chunk of the PMF as it is noisy
-                trim_points = max(1, int(len(common_r) * trim_fraction))
-                yN = yN[:-trim_points]
-                yNm1 = yNm1[:-trim_points]
-                # print(f'Trimmed points: {trim_points}, remaining points: {len(yN)}')
-                
+
                 pmf_rmsd = np.sqrt(np.mean((yN - yNm1) ** 2))
-                delta_barrier = abs(yN.max() - yNm1.max())
 
                 converged = (
                     (pmf_rmsd < tol_rmsd) and
-                    (delta_barrier < tol_barrier)
+                    (np.isnan(barrier_delta) or barrier_delta < tol_barrier) and
+                    (np.isnan(r_ts_delta)    or r_ts_delta   < tol_r_ts)
                 )
 
                 rows.append({
@@ -620,14 +698,19 @@ class SMDAnalysis:
                     "path": "mixture",
                     "n_replicas": k,
                     f"{main_quantity}-rmsd": pmf_rmsd,
-                    f"{main_quantity}-deltaMax": delta_barrier,
+                    "barrier_delta": barrier_delta,
+                    "r_ts_delta": r_ts_delta,
+                    "barrier_height": barrier_height,
+                    "r_ts": r_ts,
                     "converged": converged,
                     "decision_quantity": main_quantity,
                     "n_common_points": len(common_r),
                 })
 
-                # overwrite previous PMF (incremental logic)
+                # overwrite previous state (incremental logic)
                 prev_pmf = pmf_k
+                prev_barrier_height = barrier_height
+                prev_r_ts = r_ts
 
             conv_df = pd.DataFrame(rows)
             convergence_all_speeds.append(conv_df)
@@ -696,11 +779,36 @@ class SMDAnalysis:
         return pd.DataFrame(rows)
 
     @staticmethod
+    def _compute_barrier_rts(
+        pmf_k: pd.Series,
+        beta: float,
+        protocol_grid: pd.Series,
+    ):
+        """Return (barrier_height_kJ, r_ts_nm) from smoothed PMF peak detection.
+
+        Uses a light Gaussian smooth + scipy find_peaks with a 1-kT prominence
+        threshold to locate genuine barriers rather than noise spikes or the
+        trivial end-of-PMF maximum when the curve is still rising.
+
+        Returns (np.nan, np.nan) if no peak found (PMF still rising / no barrier).
+        """
+        vals = pmf_k.values.astype(float)
+        smoothed = gaussian_filter1d(vals, sigma=5)
+        kT = 1.0 / beta  # kJ/mol (~2.5 at 300 K)
+        peak_idxs, peak_props = find_peaks(smoothed, prominence=kT)
+        if len(peak_idxs) > 0:
+            best = int(peak_idxs[np.argmax(peak_props['prominences'])])
+            r_ts_step = pmf_k.index[best]
+            return float(smoothed[best] - smoothed[0]), float(protocol_grid.loc[r_ts_step])
+        return np.nan, np.nan
+
+    @staticmethod
     def _weighted_series_from_results(
         results_df: pd.DataFrame,
         path_traj_counts: dict,
         value_col: str,
         beta: float,
+        trim_fraction: float = 0.0,
     ) -> pd.Series:
         if results_df.empty or value_col not in results_df.columns:
             return pd.Series(dtype=float)
@@ -717,6 +825,14 @@ class SMDAnalysis:
         path_last = results_df.groupby('path')['step'].max()
         max_common_step = path_last.min()
         grid_steps = sorted(results_df.loc[results_df['step'] <= max_common_step, 'step'].unique())
+
+        # trim low-support tail — mirrors trim_results_by_n_samples_support used in run()
+        if trim_fraction > 0.0 and 'n_samples' in results_df.columns:
+            step_support = results_df.groupby('step')['n_samples'].max()
+            n_ref = float(step_support.max())
+            if n_ref > 0:
+                supported = step_support[step_support / n_ref >= (1.0 - trim_fraction)].index
+                grid_steps = [s for s in grid_steps if s in supported]
 
         out = {}
         for step in grid_steps:

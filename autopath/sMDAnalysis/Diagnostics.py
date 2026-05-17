@@ -357,7 +357,7 @@ def plot_convergence_traces(smd_conv_traces:list[str], outdir: str):
 
     return
 
-def plot_convergence_metrics(smd_conv_metrics: list[str], outdir: str):
+def plot_convergence_metrics(smd_conv_metrics: list[str], outdir: str, tolerances: dict = None):
     """
     Plot convergence metrics in a single combined figure.
     One subplot column per metric, one color per speed.
@@ -377,8 +377,12 @@ def plot_convergence_metrics(smd_conv_metrics: list[str], outdir: str):
             continue
         all_data.append(df)
 
+    if not all_data:
+        logger.warning("No convergence metrics data available for plotting.")
+        return
+
     metrics_df = pd.concat(all_data, ignore_index=True)
-    
+
     if metrics_df.empty:
         logger.warning("No data available for convergence metrics plotting.")
         return
@@ -388,7 +392,7 @@ def plot_convergence_metrics(smd_conv_metrics: list[str], outdir: str):
     # metrics to plot
     metrics = [
         c for c in metrics_df.columns
-        if c not in ['speed', 'path', 'n_replicas', 'converged', 'decision_quantity', 'n_common_points']
+        if c not in ['speed', 'path', 'n_replicas', 'converged', 'decision_quantity', 'n_common_points', 'reason']
     ]
 
     if len(metrics) == 0:
@@ -397,9 +401,9 @@ def plot_convergence_metrics(smd_conv_metrics: list[str], outdir: str):
 
     speeds = sorted(metrics_df['speed'].unique())
 
-    # color map for speeds
-    cmap = cm.get_cmap("tab10")
-    speed_colors = {s: cmap(i % cmap.N) for i, s in enumerate(speeds)}
+    # use the fivethirtyeight color cycle (applied at module level)
+    color_list = [c['color'] for c in plt.rcParams['axes.prop_cycle']]
+    speed_colors = {s: color_list[i % len(color_list)] for i, s in enumerate(speeds)}
 
     fig, axes = plt.subplots(
         1, len(metrics),
@@ -444,14 +448,21 @@ def plot_convergence_metrics(smd_conv_metrics: list[str], outdir: str):
                 label=f"speed {speed} nm/ps",
             )
 
-        speed_handles = [
+        legend_handles = [
             Line2D([0], [0], color=speed_colors[s], marker='o', lw=2, label=f"speed {s}")
             for s in speeds
         ]
-        ax.legend(handles=speed_handles, loc="best")
+        if tolerances and metric in tolerances:
+            tol_val = tolerances[metric]
+            ax.axhline(tol_val, color='gray', linestyle='--', linewidth=1.5, alpha=0.8)
+            legend_handles.append(
+                Line2D([0], [0], color='gray', linestyle='--', lw=1.5, label=f"tol = {tol_val}")
+            )
+        ax.legend(handles=legend_handles, loc="best")
         ax.set_title(metric, fontsize=16)
         ax.set_xlabel("Number of replicas")
         ax.set_ylabel(metric)
+        ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
         ax.grid(True)
 
     plt.tight_layout()#rect=[0, 0, 1, 0.95])
