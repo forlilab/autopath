@@ -41,7 +41,6 @@
         "sMD_dx_per_move": 0.001,
         "sMD_spring_cte": 50,
         "sMD_ligand_anchor_mode": "lig_ha",
-        "sMD_autostop_freq": 50,
         "sMD_run_analysis": true,
         "sMD_clust_selection": null
     },

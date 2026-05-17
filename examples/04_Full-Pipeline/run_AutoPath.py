@@ -84,7 +84,6 @@ def main():
                                         0.0010:5, # nm/ps equivalent to 1.0 m/s nm/ns
                                         },
 
-                    sMD_autostop_freq=250, #moves
                     sMD_dx_per_move=0.001, # nms
 
                     sMD_run_analysis=True,

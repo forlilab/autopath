@@ -48,7 +48,6 @@ class Config(object):
         sMD_dx_per_move: float = 0.001,  # nm
         sMD_spring_cte: float = None,  # KJ/mol/nm2
         sMD_ligand_anchor_mode: str = "lig_ha",
-        sMD_autostop_freq: int = 50,
         sMD_max_replicas: int = 50,
         sMD_run_analysis: bool = True,
         sMD_clust_selection: str = None,
@@ -104,7 +103,6 @@ class Config(object):
         self.sMD_dx_per_move = sMD_dx_per_move
         self.sMD_spring_cte = sMD_spring_cte  # KJ/mol/nm2
         self.sMD_ligand_anchor_mode = sMD_ligand_anchor_mode
-        self.sMD_autostop_freq = sMD_autostop_freq
         self.sMD_max_replicas = sMD_max_replicas
         self.sMD_run_analysis = sMD_run_analysis
         self.sMD_clust_selection = sMD_clust_selection
@@ -176,7 +174,6 @@ class Config(object):
         # Backward compatibility with old config keys
         legacy_map = {
             "equilibration_scheme": "protocol_fname",
-            "sMD_autostop": "sMD_autostop_freq",
         }
         for old_key, new_key in legacy_map.items():
             if old_key in flattened_config and new_key not in flattened_config:

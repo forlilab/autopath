@@ -79,7 +79,6 @@ def main():
         groupB_atoms=pocket_atoms_idx,
         restrained_atoms=None,
         restart_velocities=True,
-        autostop_freq=50,
         out_dir=f"{sys_name}/sMD",
         dx_per_move=DX_PER_MOVE,
         max_displacement=2.5,

@@ -88,9 +88,8 @@ class SteeredMD:
         restart_velocities: bool = False,
         timestep: float = 0.004, #  # 4 fs timestep
         temperature: float = 300,
-        autostop_freq: int = None,      # check NC every N moves; None = disabled
-        autostop_lag_sigma: float = 4.0,  # stop when lag > N × sigma_thermal for autostop_lag_window consecutive moves
-        autostop_lag_window: int = 15,    # consecutive moves above lag threshold to confirm detachment
+        autostop_lag_sigma: float = 3.0,  # stop when lag > N × sigma_thermal for autostop_lag_window consecutive moves
+        autostop_lag_window: int = 10,    # consecutive moves above lag threshold to confirm detachment
         autostop_backward: bool = False,  # apply lag criterion to backward pulls (risky for membrane barriers)
         use_NVT: bool = False,  # Use NVT ensemble
         use_GReweighting: bool = False,
@@ -116,7 +115,6 @@ class SteeredMD:
         self.restart_velocities = restart_velocities
 
         self.verbose = verbose
-        self.autostop_freq       = autostop_freq
         self.autostop_lag_sigma  = float(autostop_lag_sigma)
         self.autostop_lag_window = int(autostop_lag_window)
         self.autostop_backward   = bool(autostop_backward)
@@ -189,36 +187,17 @@ class SteeredMD:
         logger.info(f"Initial COM distance: {initial_r0}")
         simulation.context.setParameter("r0_smd", initial_r0)
 
-        # ── Autostop state ────────────────────────────────────────────────────
-        # Two complementary criteria are evaluated every move:
-        #
-        # 1. LAG criterion (primary):
-        #    lag_nm = r_target − r_after  (how far the spring has outrun the ligand)
-        #    When bound, lag ~ O(sigma_thermal). After detachment, lag grows by
-        #    dx_per_move each move.  A sliding window of consecutive moves all above
-        #    autostop_lag_sigma × sigma_thermal fires the stop.
-        #
-        # 2. NC criterion (secondary, evaluated every autostop_freq moves):
-        #    Smoothed number-of-contacts drops below 10 % of the initial value
-        #    (or absolute < 0.5).  Used as a confirmation and independent fallback.
-        #
-        # Both criteria must fire independently — either alone is sufficient to stop.
+        # ── Autostop state ─────────────────────────────────────────────────────
+        # LAG criterion (every move):
+        #   lag_nm = r_target − r_after  (how far the spring has outrun the ligand)
+        #   When bound, lag ~ O(sigma_thermal). After detachment, lag grows by
+        #   dx_per_move each move. A sliding window of consecutive moves all above
+        #   autostop_lag_sigma × sigma_thermal fires the stop.
         _lag_buf: deque[float] = deque(maxlen=self.autostop_lag_window)
-        _nc_cache: float = 0.0       # most-recent NC value; written every row
-        _nc_initial: float | None = None
-        _nc_history: list[float] = []  # smoothing buffer for NC
-
-        if self.autostop_freq is not None and direction == "forward":
-            _nc_cache = self.nc_cv.getValue(
-                simulation.context, allowReinitialization=False
-            ).value_in_unit(openmmunit.dimensionless)
-            _nc_initial = _nc_cache
-            logger.info(f"Autostop NC initial value: {_nc_initial:.2f}")
-
         lag_stop_threshold = self.autostop_lag_sigma * self.sigma_thermal
 
         with open(f"{self.out_dir}/sMD_{run_id}.dat", "w") as f:
-            f.write("step,time,r_target,r_before,r_after,NC,force,U_cvpack,dW_protocol,lag_nm\n")
+            f.write("step,time,r_target,r_before,r_after,force,U_cvpack,dW_protocol,lag_nm\n")
 
             # Loop over the number of moves
             for i in range(self.sMD_moves):
@@ -253,68 +232,41 @@ class SteeredMD:
                 dW_protocol_kjm  = dW_protocol.value_in_unit(openmmunit.kilojoules_per_mole)
                 lag_nm           = r_target_nm - r_after_nm
 
-                # ── Lag criterion (every move, both directions) ────────────
-                if self.autostop_freq is not None:
-                    _lag_buf.append(lag_nm)
-                    if len(_lag_buf) == self.autostop_lag_window:
-                        if direction == "forward" and all(l > lag_stop_threshold for l in _lag_buf):
-                            f.write(f"{i},{time_before},{r_target_nm},{r_before_nm},"
-                                    f"{r_after_nm},{_nc_cache:.3f},{force_kjmnm},"
-                                    f"{U_cvpack_kjm},{dW_protocol_kjm},{lag_nm:.5f}\n")
-                            logger.warning(
-                                f"[Autostop/lag] Stopping at move {i}: lag={lag_nm:.4f} nm "
-                                f"exceeded {self.autostop_lag_sigma}×σ_thermal={lag_stop_threshold:.4f} nm "
-                                f"for {self.autostop_lag_window} consecutive moves."
-                            )
-                            break
-                        elif direction == "backward" and self.autostop_backward and all(l < -lag_stop_threshold for l in _lag_buf):
-                            f.write(f"{i},{time_before},{r_target_nm},{r_before_nm},"
-                                    f"{r_after_nm},{_nc_cache:.3f},{force_kjmnm},"
-                                    f"{U_cvpack_kjm},{dW_protocol_kjm},{lag_nm:.5f}\n")
-                            logger.warning(
-                                f"[Autostop/lag] Stopping backward pull at move {i}: lag={lag_nm:.4f} nm "
-                                f"below -{self.autostop_lag_sigma}×σ_thermal={-lag_stop_threshold:.4f} nm "
-                                f"for {self.autostop_lag_window} consecutive moves (ligand not following spring)."
-                            )
-                            break
-
-                # ── NC criterion (every autostop_freq moves) ───────────────
-                if self.autostop_freq is not None and i % self.autostop_freq == 0:
-                    if direction == "forward":
-                        _nc_cache = self.nc_cv.getValue(
-                            simulation.context, allowReinitialization=False
-                        ).value_in_unit(openmmunit.dimensionless)
-                        _nc_history.append(_nc_cache)
-                        nc_window = _nc_history[-self.autostop_lag_window:]
-                        smoothed_nc = sum(nc_window) / len(nc_window)
-                        nc_threshold = max(0.5, (_nc_initial or 1.0) * 0.1)
-                        print(
-                            f"Move {i+1}/{self.sMD_moves}: r={r_after_nm:.3f} nm  "
-                            f"lag={lag_nm:.4f} nm  NC={_nc_cache:.2f} (smooth={smoothed_nc:.2f})"
+                # ── Lag criterion (every move) ─────────────────────────────
+                _lag_buf.append(lag_nm)
+                if len(_lag_buf) == self.autostop_lag_window:
+                    if direction == "forward" and all(l > lag_stop_threshold for l in _lag_buf):
+                        f.write(f"{i},{time_before},{r_target_nm},{r_before_nm},"
+                                f"{r_after_nm},{force_kjmnm},"
+                                f"{U_cvpack_kjm},{dW_protocol_kjm},{lag_nm:.5f}\n")
+                        logger.warning(
+                            f"[Autostop/lag] Stopping at move {i}: lag={lag_nm:.4f} nm "
+                            f"exceeded {self.autostop_lag_sigma}×σ_thermal={lag_stop_threshold:.4f} nm "
+                            f"for {self.autostop_lag_window} consecutive moves."
                         )
-                        if smoothed_nc < nc_threshold:
-                            f.write(f"{i},{time_before},{r_target_nm},{r_before_nm},"
-                                    f"{r_after_nm},{_nc_cache:.3f},{force_kjmnm},"
-                                    f"{U_cvpack_kjm},{dW_protocol_kjm},{lag_nm:.5f}\n")
-                            logger.warning(
-                                f"[Autostop/NC] Stopping at move {i}: "
-                                f"smoothed NC={smoothed_nc:.2f} < threshold={nc_threshold:.2f}."
-                            )
-                            break
+                        break
+                    elif direction == "backward" and self.autostop_backward and all(l < -lag_stop_threshold for l in _lag_buf):
+                        f.write(f"{i},{time_before},{r_target_nm},{r_before_nm},"
+                                f"{r_after_nm},{force_kjmnm},"
+                                f"{U_cvpack_kjm},{dW_protocol_kjm},{lag_nm:.5f}\n")
+                        logger.warning(
+                            f"[Autostop/lag] Stopping backward pull at move {i}: lag={lag_nm:.4f} nm "
+                            f"below -{self.autostop_lag_sigma}×σ_thermal={-lag_stop_threshold:.4f} nm "
+                            f"for {self.autostop_lag_window} consecutive moves (ligand not following spring)."
+                        )
+                        break
+
+                # ── Progress reporting ─────────────────────────────────────
+                if i % self.save_freq == 0:
+                    if self.verbose > 0 and self.subset_protein_HA is not None:
+                        pos_nm = simulation.context.getState(getPositions=True).getPositions(asNumpy=True) / openmmunit.nanometers
+                        nc = self._compute_nc(pos_nm)
+                        print(f"Move {i+1}/{self.sMD_moves}: r={r_after_nm:.3f} nm  lag={lag_nm:.4f} nm  NC={nc:.2f}")
                     else:
-                        print(f"Move {i+1}/{self.sMD_moves}: r={r_after_nm:.3f} nm")
-                        if r_before_nm < 0.05:
-                            f.write(f"{i},{time_before},{r_target_nm},{r_before_nm},"
-                                    f"{r_after_nm},{_nc_cache:.3f},{force_kjmnm},"
-                                    f"{U_cvpack_kjm},{dW_protocol_kjm},{lag_nm:.5f}\n")
-                            logger.warning(
-                                f"[Autostop/backward] Stopping at move {i}: "
-                                f"r_target={r_target_nm:.3f} nm, r_before={r_before_nm:.3f} nm."
-                            )
-                            break
+                        print(f"Move {i+1}/{self.sMD_moves}: r={r_after_nm:.3f} nm  lag={lag_nm:.4f} nm")
 
                 f.write(f"{i},{time_before},{r_target_nm},{r_before_nm},"
-                        f"{r_after_nm},{_nc_cache:.3f},{force_kjmnm},"
+                        f"{r_after_nm},{force_kjmnm},"
                         f"{U_cvpack_kjm},{dW_protocol_kjm},{lag_nm:.5f}\n")
                 
         # Save final positions
@@ -442,20 +394,11 @@ class SteeredMD:
         # system.setDefaultPeriodicBoxVectors(*PDBFile(pdb_file).topology.getPeriodicBoxVectors())
         # simulation.context.reinitialize(preserveState=True)
         
-        # Get the subset of protein atoms close to the ligand
-        subset_protein_HA, subset_protein_residues = self._get_pocket_atoms(simulation, cutoff=0.5)
-        if self.autostop_freq is not None and pulling_direction == "forward":
-            forces = {f.getName(): f for f in system.getForces()}
-            self.nc_cv = cvpack.NumberOfContacts(
-                self.groupA_atoms,
-                subset_protein_HA,
-                forces["NonbondedForce"],
-                stepFunction="1/(1+x^6)",
-                # stepFunction="step(1-x)",
-                thresholdDistance=0.4*openmmunit.nanometers,  # nm
-            )
-            self.nc_cv.setForceGroup(19)  # Use a separate force group for the CV
-            system.addForce(self.nc_cv)
+        # Pocket atoms are only needed for verbose NC monitoring
+        if self.verbose > 0:
+            self.subset_protein_HA, _ = self._get_pocket_atoms(simulation, cutoff=0.5)
+        else:
+            self.subset_protein_HA = None
 
         # Reset velocities to temperature. Check https://github.com/openmm/openmm/pull/259
         if self.restart_velocities:
@@ -528,17 +471,16 @@ class SteeredMD:
         v = dx_target_nm * gammaL_ps / m_eff_dalton  # in nm/ps
         return min(max(v, v_min), v_max)
     
+    def _compute_nc(self, positions_nm, threshold_nm=0.4):
+        """Compute number of contacts via switching function 1/(1+(d/threshold)^6) using positions only."""
+        lig_pos = positions_nm[self.groupA_atoms]
+        pocket_pos = positions_nm[self.subset_protein_HA]
+        d = np.linalg.norm(lig_pos[:, np.newaxis, :] - pocket_pos[np.newaxis, :, :], axis=2)
+        x = d / threshold_nm
+        return float(np.sum(1.0 / (1.0 + x**6)))
+
     def _get_pocket_atoms(self, simulation, cutoff=0.6):
-        """ Get a subset of protein heavy atoms within cutoff nm of the ligand heavy atoms.
-        This is used to define the pocket for contact calculations and autostopping.
-
-        Args:
-            simulation (_type_): 
-            cutoff (float, optional): Defaults to 0.6.
-
-        Returns:
-            _type_: subset_protein_HA, subset_protein_residues
-        """
+        """Get a subset of protein heavy atoms within cutoff nm of the ligand (used for verbose NC monitoring)."""
 
         protein_atoms = [atom for atom in self.topology.atoms() if atom.residue.name not in ["HOH", "WAT", "SOL", "NA", "CL", "K","MG", 'UNK']]
         protein_HA = [atom.index for atom in protein_atoms if atom.element.symbol != "H"]  # Exclude hydrogens

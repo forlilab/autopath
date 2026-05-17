@@ -77,7 +77,6 @@ class AutoPath:
         sMD_dx_per_move: float = 0.001,  # nm, this is the displacement per move
         sMD_spring_cte: float = None,  # KJ/mol/nm2
         sMD_ligand_anchor_mode: str = 'lig_ha',
-        sMD_autostop_freq: int = 50, #moves
         sMD_max_replicas: int = 50,  # max replicas per speed in convergence mode
         sMD_run_analysis: bool = True,
         sMD_clust_selection:str = None,
@@ -128,7 +127,6 @@ class AutoPath:
         self.sMD_dx_per_move = sMD_dx_per_move
         self.sMD_spring_cte = sMD_spring_cte
         self.sMD_ligand_anchor_mode = sMD_ligand_anchor_mode
-        self.sMD_autostop_freq = sMD_autostop_freq
         self.sMD_max_replicas = sMD_max_replicas
         self.sMD_run_analysis = sMD_run_analysis
         self.sMD_clust_selection = sMD_clust_selection
@@ -344,7 +342,6 @@ class AutoPath:
                 groupA_atoms=ligand_atoms_indices,
                 groupB_atoms=pocket_atom_indices,
                 restart_velocities=True,
-                autostop_freq=self.sMD_autostop_freq,
                 timestep=self.timestep,
                 temperature=self.temperature,
                 out_dir=sMD_traj_outdir,

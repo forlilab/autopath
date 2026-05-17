@@ -89,7 +89,6 @@ def main():
         sMD_dx_per_move=config.sMD_dx_per_move,
         sMD_spring_cte=config.sMD_spring_cte,
         sMD_ligand_anchor_mode=config.sMD_ligand_anchor_mode,
-        sMD_autostop_freq=config.sMD_autostop_freq,
         sMD_run_analysis=config.sMD_run_analysis,
         sMD_clust_selection=config.sMD_clust_selection,
         # Milestones
