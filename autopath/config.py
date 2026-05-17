@@ -43,6 +43,12 @@ class Config(object):
         sMD_pulling_dir: str = "forward",  # "forward" or "backward"
         sMD_pulling_speeds: dict = {0.001: None, 0.002: None, 0.003: None},
         sMD_max_pulling_dist: float = 2.0,  # nm
+        sMD_max_r_offset: float = 3.0,
+        sMD_autostop_nc: bool = False,
+        sMD_autostop_nc_threshold: float = 1.0,
+        sMD_autostop_lag_sigma: float = 5.0,
+        sMD_autostop_lag_window: int = 20,
+        sMD_autostop_min_displacement: float = 0.5,
         sMD_time: int = None,  # ns
         sMD_steps_per_move: int = None,
         sMD_dx_per_move: float = 0.001,  # nm
@@ -98,6 +104,12 @@ class Config(object):
         self.sMD_pulling_dir = sMD_pulling_dir
         self.sMD_pulling_speeds = sMD_pulling_speeds
         self.sMD_max_pulling_dist = sMD_max_pulling_dist
+        self.sMD_max_r_offset = sMD_max_r_offset
+        self.sMD_autostop_nc = sMD_autostop_nc
+        self.sMD_autostop_nc_threshold = sMD_autostop_nc_threshold
+        self.sMD_autostop_lag_sigma = sMD_autostop_lag_sigma
+        self.sMD_autostop_lag_window = sMD_autostop_lag_window
+        self.sMD_autostop_min_displacement = sMD_autostop_min_displacement
         self.sMD_time = sMD_time  # ns
         self.sMD_steps_per_move = sMD_steps_per_move
         self.sMD_dx_per_move = sMD_dx_per_move

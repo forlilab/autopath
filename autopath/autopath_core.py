@@ -72,6 +72,12 @@ class AutoPath:
         sMD_pulling_dir: str = "forward",  # "forward" or "backward"
         sMD_pulling_speeds: dict = {0.005:None, 0.0025:None, 0.001:None},  # nm/ps
         sMD_max_pulling_dist: float = 3.5,  # nm
+        sMD_max_r_offset: float = 3.0,    # max displacement offset (nm): cap pull at r0 + offset nm (also capped at half-box - 0.5 nm)
+        sMD_autostop_nc: bool = False,
+        sMD_autostop_nc_threshold: float = 1.0,
+        sMD_autostop_lag_sigma: float = 5.0,
+        sMD_autostop_lag_window: int = 20,
+        sMD_autostop_min_displacement: float = 0.5,
         sMD_time: int = None,  # ns
         sMD_steps_per_move: int = None,
         sMD_dx_per_move: float = 0.001,  # nm, this is the displacement per move
@@ -121,6 +127,12 @@ class AutoPath:
         self.sMD_outdir = sMD_outdir
         self.sMD_pulling_dir = sMD_pulling_dir
         self.sMD_max_pulling_dist = sMD_max_pulling_dist
+        self.sMD_max_r_offset = sMD_max_r_offset
+        self.sMD_autostop_nc = sMD_autostop_nc
+        self.sMD_autostop_nc_threshold = sMD_autostop_nc_threshold
+        self.sMD_autostop_lag_sigma = sMD_autostop_lag_sigma
+        self.sMD_autostop_lag_window = sMD_autostop_lag_window
+        self.sMD_autostop_min_displacement = sMD_autostop_min_displacement
         self.sMD_time = sMD_time
         self.sMD_pulling_speeds = sMD_pulling_speeds
         self.sMD_steps_per_move = sMD_steps_per_move
@@ -310,7 +322,12 @@ class AutoPath:
         ##################################### Steered MD simulations #################################
         ##############################################################################################
         MERGE_CLUSTERING_FEATURES = True
-        CONVERGENCE_MIN_REPS = 3  # minimum replicas before checking convergence
+        CONVERGENCE_MIN_REPS = 5  # minimum replicas before checking convergence
+        CONVERGENCE_TOLERANCES = {
+            "dG_weighted-rmsd": 4.0,  # kJ/mol — must match tol_rmsd in check_convergence()
+            "barrier_delta":    3.0,  # kJ/mol — must match tol_barrier
+            "r_ts_delta":       0.1,  # nm     — must match tol_r_ts
+        }
         
         # sMD_collision_frequency = 1  # ps^-1
         # sMD_outdir = f"{sys_name}/sMD_{lig_anchor_mode}_{sMD_timestep}ps_{sMD_collision_frequency}ps_200stm"
@@ -347,7 +364,14 @@ class AutoPath:
                 out_dir=sMD_traj_outdir,
                 platform=self.platform,
                 dx_per_move=self.sMD_dx_per_move,
+                max_displacement=self.sMD_max_pulling_dist,
                 sMD_spring_cte=sMD_spring_cte,
+                sMD_max_r_offset=self.sMD_max_r_offset,
+                autostop_nc=self.sMD_autostop_nc,
+                autostop_nc_threshold=self.sMD_autostop_nc_threshold,
+                autostop_lag_sigma=self.sMD_autostop_lag_sigma,
+                autostop_lag_window=self.sMD_autostop_lag_window,
+                autostop_min_displacement=self.sMD_autostop_min_displacement,
                 save_freq=5,
             )
 
@@ -398,8 +422,6 @@ class AutoPath:
                             conv_df, traces_df = smdanalysis.check_convergence(
                                 logs=log_files, speeds=[speed],
                                 min_replicas=CONVERGENCE_MIN_REPS,
-                                # group_A=f"resname {ligand_resname} and not name H*",
-                                # group_B=self.sMD_clust_selection
                             )
                             
                             # conv_df is empty when replicas == min_replicas (first PMF comparison
@@ -415,7 +437,7 @@ class AutoPath:
                                 conv_metrics = glob(f"{sMD_analysis_outdir}/sMD_conv_*_metrics.csv")
 
                                 plot_convergence_traces(conv_traces, outdir=sMD_analysis_outdir)
-                                plot_convergence_metrics(conv_metrics, outdir=sMD_analysis_outdir)
+                                plot_convergence_metrics(conv_metrics, outdir=sMD_analysis_outdir, tolerances=CONVERGENCE_TOLERANCES)
 
                                 # Check convergence. Two last replicas must be converged
                                 if len(conv_df) >= 2:
@@ -500,7 +522,7 @@ class AutoPath:
             smd_conv_traces = glob(f"{sMD_analysis_outdir}/sMD_conv_vALL_traces.csv")
             plot_convergence_traces(smd_conv_traces, outdir=sMD_analysis_outdir)
             smd_conv_metrics = glob(f"{sMD_analysis_outdir}/sMD_conv_vALL_metrics.csv")
-            plot_convergence_metrics(smd_conv_metrics, outdir=sMD_analysis_outdir)
+            plot_convergence_metrics(smd_conv_metrics, outdir=sMD_analysis_outdir, tolerances=CONVERGENCE_TOLERANCES)
 
         ##############################################################################################
         ###################################### Extract Milestones ####################################

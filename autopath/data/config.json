@@ -36,6 +36,12 @@
             "0.001": 3
         },
         "sMD_max_pulling_dist": 2.0,
+        "sMD_max_r_offset": 3.0,
+        "sMD_autostop_nc": false,
+        "sMD_autostop_nc_threshold": 1.0,
+        "sMD_autostop_lag_sigma": 5.0,
+        "sMD_autostop_lag_window": 20,
+        "sMD_autostop_min_displacement": 0.5,
         "sMD_time": null,
         "sMD_steps_per_move": null,
         "sMD_dx_per_move": 0.001,
