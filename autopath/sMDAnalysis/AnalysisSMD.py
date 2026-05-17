@@ -793,7 +793,7 @@ class SMDAnalysis:
         Returns (np.nan, np.nan) if no peak found (PMF still rising / no barrier).
         """
         vals = pmf_k.values.astype(float)
-        smoothed = gaussian_filter1d(vals, sigma=5)
+        smoothed = gaussian_filter1d(vals, sigma=2)
         kT = 1.0 / beta  # kJ/mol (~2.5 at 300 K)
         peak_idxs, peak_props = find_peaks(smoothed, prominence=kT)
         if len(peak_idxs) > 0:

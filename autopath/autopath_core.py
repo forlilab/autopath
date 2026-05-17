@@ -18,6 +18,7 @@ from openmm.unit import *
 
 # AutoPath imports
 from autopath.utils import *
+from autopath.pdb_preprocessor import PDBPreprocessor
 from autopath.ap_PLIP import plot_atomic_property, calculate_ligand_rmsf, calculate_contact_frequency
 from autopath.analysis import *
 from autopath import (
@@ -168,7 +169,7 @@ class AutoPath:
 
         # Process the input PDB
         if do_fix_pdb:
-            protein_pdb = fix_pdb(pdbfile=pdb_path, 
+            protein_pdb = PDBPreprocessor(pdb_path).fix(
                                   cap_termini=False,
                                   keep_heterogens=True, pH=7.4)
             self.protein_file = pdb_path.replace(".pdb", "_fixed.pdb")

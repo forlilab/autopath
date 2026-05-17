@@ -7,7 +7,8 @@ import mdtraj as md
 
 from autopath import SystemPreparation, Equilibration
 from autopath.ap_PLIP import plot_atomic_property, calculate_ligand_rmsf
-from autopath.utils import fix_pdb, save_pdb, load_system, setup_logging, compute_rmsd
+from autopath.utils import save_pdb, load_system, setup_logging, compute_rmsd
+from autopath.pdb_preprocessor import PDBPreprocessor
 from openmm.app import PDBFile
 
 def cmd_lineparser():
@@ -109,7 +110,7 @@ def main():
     if not args.fixpdb:
         fixed_receptor = receptor
     else:
-        fixed_receptor = fix_pdb(pdbfile=receptor, 
+        fixed_receptor = PDBPreprocessor(receptor).fix(
                             replace_nonstandard_residues=True,
                             ignore_terminal_missing_residues=True,
                             keep_heterogens=True,
