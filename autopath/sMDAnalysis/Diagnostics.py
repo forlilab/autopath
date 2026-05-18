@@ -644,9 +644,11 @@ def make_unbinding_paths_visualization(
             Γ(r) as a blue (low) → white → red (high) gradient.
         friction_estimator: Which estimator row to use from *friction_csv*
             (``"cumulant"`` or ``"jarzynski"``).  Default ``"cumulant"``.
-        friction_center_select: MDAnalysis selection for the membrane-centre
-            anchor atom used to compute voxel–centre distances.
-            Default ``"resname DUM"``.
+        friction_center_select: MDAnalysis selection for the CV reference
+            anchor used to map voxel distances to r_coord values.
+            Default ``"resname DUM"`` (membrane-pull convention).  If this
+            selection matches 0 atoms and *pocket_select* is provided, the
+            pocket COM is used as fallback (pocket-unbinding convention).
     """
     if output_format not in ("pse", "pml"):
         raise ValueError(f"output_format must be 'pse' or 'pml', got '{output_format}'")
@@ -682,13 +684,29 @@ def make_unbinding_paths_visualization(
                 )
                 center_ag = u_ref.select_atoms(friction_center_select)
                 if center_ag.n_atoms == 0:
-                    logger.warning(
-                        f"Friction centre selection '{friction_center_select}' found 0 atoms. "
-                        "Friction colouring disabled."
-                    )
-                    friction_profile = None
+                    if pocket_select is not None:
+                        pocket_ag = u_ref.select_atoms(pocket_select)
+                        if pocket_ag.n_atoms > 0:
+                            logger.info(
+                                f"Friction centre selection '{friction_center_select}' found 0 atoms. "
+                                "Falling back to pocket_select COM as friction anchor."
+                            )
+                            friction_center_nm = pocket_ag.center_of_geometry() / 10.0  # Å → nm
+                        else:
+                            logger.warning(
+                                f"Friction centre selection '{friction_center_select}' found 0 atoms "
+                                "and pocket_select also found 0 atoms. Friction colouring disabled."
+                            )
+                            friction_profile = None
+                    else:
+                        logger.warning(
+                            f"Friction centre selection '{friction_center_select}' found 0 atoms "
+                            "and no pocket_select provided. Friction colouring disabled."
+                        )
+                        friction_profile = None
                 else:
                     friction_center_nm = center_ag.center_of_geometry() / 10.0  # Å → nm
+                if friction_center_nm is not None:
                     logger.info(
                         f"Friction colouring enabled ({friction_estimator}). "
                         f"Centre: {friction_center_nm} nm"
