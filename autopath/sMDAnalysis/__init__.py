@@ -6,9 +6,6 @@ from .LigandFeatures import LigandTrajectoryFeatures
 from .Estimators import (
     JarzynskiEstimator,
     CumulantEstimator,
-    JarzynskiGMMEstimator,
-    CumulantGMMEstimator,
-    CumulantGMMComponentwiseEstimator,
 )
 __all__ = [
             "SMDData",
@@ -18,7 +15,4 @@ __all__ = [
             "LigandTrajectoryFeatures",
             "JarzynskiEstimator",
             "CumulantEstimator",
-            "JarzynskiGMMEstimator",
-            "CumulantGMMEstimator",
-            "CumulantGMMComponentwiseEstimator",
         ]

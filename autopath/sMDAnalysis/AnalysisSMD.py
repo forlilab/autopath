@@ -14,13 +14,12 @@ from autopath.sMDAnalysis.PathModel import DTWPathModel, NullPathModel, PathMode
 from autopath.sMDAnalysis.Estimators import (
     JarzynskiEstimator,
     CumulantEstimator,
-    JarzynskiGMMEstimator,
-    CumulantGMMEstimator,
-    CumulantGMMComponentwiseEstimator,
+    KramersEstimator,
     ESTIMATOR_REGISTRY,
     trim_results_by_n_samples_support,
     calculate_weighted_pmf,
     extrapolate_to_v0,
+    _find_pmf_peak,
 )
 from autopath.sMDAnalysis.Diagnostics import (
     plot_work_profiles,
@@ -75,6 +74,14 @@ class SMDAnalysis:
         reference_pdb: Optional[str] = None,
         ligand_select: Optional[str] = 'resname UNK',
         seed: int = 42,
+        # --- filtering / weighting thresholds (all visible at construction time) ---
+        filter_low_support: bool = True,
+        min_support_ratio: float = 0.9,
+        min_samples_per_step: int = 5,
+        min_replicas_per_path: int = 5,
+        min_path_steps_ratio: float = 0.6,
+        max_frac_neg_dG_first_half: float = 0.25,
+        min_speeds_for_extrapolation: int = 2,
     ):
         self.sysname = sysname
         self.seed = seed
@@ -83,8 +90,15 @@ class SMDAnalysis:
         self.reference_pdb = reference_pdb
         self.ligand_select = ligand_select
         self.outdir = outdir
+        self.filter_low_support = filter_low_support
+        self.min_support_ratio = min_support_ratio
+        self.min_samples_per_step = min_samples_per_step
+        self.min_replicas_per_path = min_replicas_per_path
+        self.min_path_steps_ratio = min_path_steps_ratio
+        self.max_frac_neg_dG_first_half = max_frac_neg_dG_first_half
+        self.min_speeds_for_extrapolation = min_speeds_for_extrapolation
         os.makedirs(outdir, exist_ok=True)
-        
+
         self._setup_path_model(path_model)
         self._setup_estimators(estimators)
 
@@ -110,9 +124,6 @@ class SMDAnalysis:
         estimator_map = {
             'jarzynski': JarzynskiEstimator(),
             'cumulant': CumulantEstimator(),
-            'jarzynski_gmm': JarzynskiGMMEstimator(),
-            'cumulant_gmm': CumulantGMMEstimator(),
-            'cumulant_gmm_componentwise': CumulantGMMComponentwiseEstimator(),
         }
         self.estimators = []
         for est in estimators:
@@ -151,8 +162,6 @@ class SMDAnalysis:
             group_A: str = None,
             group_B: str = None,
             merge_features: bool = True,
-            trim_low_support_results: bool = True,
-            trim_min_support_ratio: float = 0.9,
             cluster_across_speeds: bool = False,
             features: list[str] | None = None,
             ligand_sdf: str | None = None,
@@ -273,11 +282,11 @@ class SMDAnalysis:
         sMDDdata.raw_data['path'] = sMDDdata.raw_data['trajname'].map(path_mappings)
 
         # trim (speed, path) groups with insufficient sample support for reliable estimation
-        if trim_low_support_results:
+        if self.filter_low_support:
             sMDDdata.raw_data = trim_results_by_n_samples_support(
                 sMDDdata.raw_data,
-                min_samples=3,
-                min_support_ratio=trim_min_support_ratio,
+                min_samples=self.min_samples_per_step,
+                min_support_ratio=self.min_support_ratio,
             )
         
         # fit estimators sequentially (some may rely on the path assignments, so do this before any path filtering)
@@ -286,7 +295,7 @@ class SMDAnalysis:
             sMDDdata = estimator.fit_transform(sMDDdata)
 
         
-        sMDDdata = self._path_filtering(sMDDdata, min_replicas=3)
+        sMDDdata = self._path_filtering(sMDDdata)
 
         if sMDDdata.results.empty:
             raise RuntimeError(
@@ -325,7 +334,8 @@ class SMDAnalysis:
             if self.mixture_pmfs['speed'].nunique() < 2:
                 logger.warning(f"Not enough speeds to perform v=0 extrapolation for '{pcol}'. Skipping.")
                 continue
-            v0_df = extrapolate_to_v0(self.mixture_pmfs, param=pcol)
+            v0_df = extrapolate_to_v0(self.mixture_pmfs, param=pcol,
+                                       min_speeds=self.min_speeds_for_extrapolation)
             if not v0_df.empty:
                 weighted_pmf_v0[pcol] = v0_df
                 v0_df.to_csv(f'{self.outdir}/{pcol}_extrapolated.csv', index=False)
@@ -343,6 +353,36 @@ class SMDAnalysis:
 
         friction_df = pd.concat(friction_deriv_results + friction_regress_results, ignore_index=True)
         friction_df.to_csv(os.path.join(self.outdir, 'friction.csv'), index=False)
+
+        # --- Kramers / Pontryagin MFPT k_off ---
+        _dG_v0 = weighted_pmf_v0.get('dG')   # v→0 extrapolated PMF (None if single speed)
+        _kramers = KramersEstimator(temperature=self.temperature)
+        try:
+            _koff_df = _kramers.compute(
+                mixture_pmfs=self.mixture_pmfs,
+                friction_df=friction_df,
+                dG_extrapolated=_dG_v0,
+            )
+            if not _koff_df.empty:
+                _koff_df.to_csv(os.path.join(self.outdir, 'koff_kramers.csv'), index=False)
+                logger.info(f"[Kramers] koff_kramers.csv written ({len(_koff_df)} rows)")
+        except Exception as _exc:
+            logger.warning(f"[Kramers] k_off estimation skipped: {_exc}")
+
+        # --- per-path k_off (diagnostic) ---
+        try:
+            _koff_per_path = _kramers.compute_per_path(
+                per_path_results=sMDDdata.results,
+                friction_df=friction_df,
+                weights_by_estimator=weights_by_estimator,
+            )
+            if not _koff_per_path.empty:
+                _koff_per_path.to_csv(
+                    os.path.join(self.outdir, 'koff_per_path.csv'), index=False
+                )
+                logger.info(f"[Kramers/per-path] koff_per_path.csv written ({len(_koff_per_path)} rows)")
+        except Exception as _exc:
+            logger.warning(f"[Kramers/per-path] skipped: {_exc}")
 
         # Regenerate the unbinding-paths PSE with friction colouring now that friction.csv is ready.
         # path_model.fit_transform ran earlier (before friction was computed) so the first PSE has
@@ -426,7 +466,6 @@ class SMDAnalysis:
         tol_r_ts: float = 0.1,     # nm — 1 Å change in TS position
         trim_fraction: float = 0.1,      # drop steps where fewer than (1-trim_fraction) of replicas contributed; 0=no trimming
         min_common_points: int = 5,
-        return_gmm_diagnostics: bool = False,
     ):
         """
         Sequential convergence check for a single pulling speed using
@@ -445,9 +484,6 @@ class SMDAnalysis:
         allowed_estimators = {
             'jarzynski',
             'cumulant',
-            'jarzynski_gmm',
-            'cumulant_gmm',
-            'cumulant_gmm_componentwise',
         }
         if estimator_name not in allowed_estimators:
             raise ValueError(
@@ -460,8 +496,7 @@ class SMDAnalysis:
 
         convergence_all_speeds = []
         traces_all_speeds = []
-        gmm_diag_all_speeds = []
-        
+
         for speed in speeds:
             
             #filter logs by speed
@@ -556,15 +591,6 @@ class SMDAnalysis:
                     beta=smd.beta,
                 )
 
-                if not results_df.empty and {'gmm_n_components', 'gmm_bic'}.issubset(results_df.columns):
-                    gmm_diag_k = results_df[['step', 'r_coord', 'path', 'gmm_n_components', 'gmm_bic']].copy()
-                    gmm_diag_k['speed'] = speed
-                    gmm_diag_k['n_replicas'] = k
-                    gmm_diag_k['estimator'] = estimator_name
-                    gmm_diag_k = gmm_diag_k.dropna(subset=['gmm_n_components'], how='any')
-                    if not gmm_diag_k.empty:
-                        gmm_diag_all_speeds.append(gmm_diag_k)
-
                 pmf_k = self._weighted_series_from_results(
                     results_df=results_df,
                     path_traj_counts=path_traj_counts,
@@ -595,12 +621,12 @@ class SMDAnalysis:
                 # at min_replicas has a full prior state to compare against)
                 if k < min_replicas:
                     prev_pmf = pmf_k
-                    prev_barrier_height, prev_r_ts = self._compute_barrier_rts(pmf_k, smd.beta/2, protocol_grid)
+                    prev_barrier_height, prev_r_ts = self._compute_barrier_rts(pmf_k, 1.0/smd.beta, protocol_grid)
                     continue
 
                 # === convergence comparison (k >= min_replicas) ===
 
-                barrier_height, r_ts = self._compute_barrier_rts(pmf_k, smd.beta/2, protocol_grid)
+                barrier_height, r_ts = self._compute_barrier_rts(pmf_k, 1.0/smd.beta, protocol_grid)
 
                 # first PMF eligible for comparison: initialize
                 # (fires when trace_min_replicas == min_replicas, i.e. standard fallback)
@@ -720,13 +746,6 @@ class SMDAnalysis:
             
         convergence_all_speeds = pd.concat(convergence_all_speeds, ignore_index=True) if convergence_all_speeds else pd.DataFrame()
         traces_all_speeds = pd.concat(traces_all_speeds, ignore_index=True) if traces_all_speeds else pd.DataFrame()
-        gmm_diag_df = pd.concat(gmm_diag_all_speeds, ignore_index=True) if gmm_diag_all_speeds else pd.DataFrame()
-
-        # keep diagnostics accessible after the call
-        self.convergence_gmm_diagnostics = gmm_diag_df
-
-        if return_gmm_diagnostics:
-            return convergence_all_speeds, traces_all_speeds, gmm_diag_df
 
         return convergence_all_speeds, traces_all_speeds
 
@@ -770,8 +789,6 @@ class SMDAnalysis:
                 'Wdiss': result['Wdiss'],
                 'dG': result['dG'],
                 'r_coord': protocol_grid.loc[step],
-                'gmm_n_components': result.get('gmm_n_components', np.nan),
-                'gmm_bic': result.get('gmm_bic', np.nan),
             })
 
         if not rows:
@@ -782,26 +799,21 @@ class SMDAnalysis:
     @staticmethod
     def _compute_barrier_rts(
         pmf_k: pd.Series,
-        beta: float,
+        kBT: float,
         protocol_grid: pd.Series,
     ):
         """Return (barrier_height_kJ, r_ts_nm) from smoothed PMF peak detection.
 
-        Uses a light Gaussian smooth + scipy find_peaks with a 1-kT prominence
-        threshold to locate genuine barriers rather than noise spikes or the
-        trivial end-of-PMF maximum when the curve is still rising.
-
+        Delegates to ``_find_pmf_peak`` (shared with ``KramersEstimator.detect_ts``).
         Returns (np.nan, np.nan) if no peak found (PMF still rising / no barrier).
         """
-        vals = pmf_k.values.astype(float)
-        smoothed = gaussian_filter1d(vals, sigma=2)
-        kT = 1.0 / beta  # kJ/mol (~2.5 at 300 K)
-        peak_idxs, peak_props = find_peaks(smoothed, prominence=kT)
-        if len(peak_idxs) > 0:
-            best = int(peak_idxs[np.argmax(peak_props['prominences'])])
-            r_ts_step = pmf_k.index[best]
-            return float(smoothed[best] - smoothed[0]), float(protocol_grid.loc[r_ts_step])
-        return np.nan, np.nan
+        steps = pmf_k.index.to_numpy()
+        r = np.array([float(protocol_grid.loc[s]) for s in steps], dtype=float)
+        dG = pmf_k.values.astype(float)
+        r_ts, barrier = _find_pmf_peak(r, dG, kBT)
+        if r_ts is None:
+            return np.nan, np.nan
+        return barrier, r_ts
 
     @staticmethod
     def _weighted_series_from_results(
@@ -822,7 +834,8 @@ class SMDAnalysis:
         if not p_eq:
             return pd.Series(dtype=float)
 
-        # common support over paths (same criterion used in calculate_weighted_pmf)
+        # Restrict to the shortest path's extent so all convergence traces
+        # are compared over the same r-range at every replica count.
         path_last = results_df.groupby('path')['step'].max()
         max_common_step = path_last.min()
         grid_steps = sorted(results_df.loc[results_df['step'] <= max_common_step, 'step'].unique())
@@ -867,6 +880,7 @@ class SMDAnalysis:
         final p_eq weight so the user can audit which paths the cumulant
         estimator is struggling with.
         """
+        max_steps_per_speed = sMDDdata.results.groupby('speed')['step'].max().to_dict()
         rows = []
         for est in self.estimators:
             df_est = sMDDdata.results[sMDDdata.results['estimator'] == est.name]
@@ -877,6 +891,16 @@ class SMDAnalysis:
                 if dG.size == 0:
                     continue
                 n_neg = int((dG < 0).sum())
+
+                r_vals = gpath_sorted['r_coord'].dropna().to_numpy(dtype=float)
+                r_mid = (r_vals.min() + r_vals.max()) / 2
+                dG_first = gpath_sorted.loc[gpath_sorted['r_coord'] <= r_mid, 'dG'].dropna()
+                dG_second = gpath_sorted.loc[gpath_sorted['r_coord'] > r_mid, 'dG'].dropna()
+
+                last_step = int(gpath_sorted['step'].max())
+                last_row = gpath_sorted[gpath_sorted['step'] == last_step]
+                global_max = max_steps_per_speed.get(speed, last_step)
+
                 rows.append({
                     'estimator': est.name,
                     'speed': speed,
@@ -885,8 +909,14 @@ class SMDAnalysis:
                     'n_steps': int(dG.size),
                     'n_neg_dG': n_neg,
                     'frac_neg_dG': n_neg / dG.size,
+                    'frac_neg_dG_first_half': float((dG_first < 0).mean()) if len(dG_first) > 0 else float('nan'),
+                    'frac_neg_dG_second_half': float((dG_second < 0).mean()) if len(dG_second) > 0 else float('nan'),
+                    'dG_peak': float(dG.max()),
                     'dG_min': float(dG.min()),
                     'dG_final': float(dG[-1]),
+                    'Wmean_final': float(last_row['Wmean'].iloc[0]) if not last_row.empty else float('nan'),
+                    'Wdiss_final': float(last_row['Wdiss'].iloc[0]) if not last_row.empty else float('nan'),
+                    'n_steps_ratio': float(last_step / global_max) if global_max > 0 else float('nan'),
                     'p_eq': float(weights.get(speed, {}).get(path, 0.0)),
                 })
         if rows:
@@ -894,42 +924,93 @@ class SMDAnalysis:
                 f'{self.outdir}/path_quality.csv', index=False
             )
 
-    def _path_filtering(
-        self,
-        sMDDdata: SMDData,
-        min_replicas: int = 3,
-    ) -> SMDData:
-        """Drop (speed, path) groups with fewer than ``min_replicas`` trajectories.
+    def _path_filtering(self, sMDDdata: SMDData) -> SMDData:
+        """Drop (speed, path) groups that are under-sampled or prematurely terminated.
+
+        Three passes, controlled by instance attributes:
+
+        Pass 1 — replica count (``self.min_replicas_per_path``): drop paths
+        with fewer than that many trajectories.
+
+        Pass 2 — step ratio (``self.min_path_steps_ratio``): drop paths whose
+        ``n_steps < ratio × max_steps_at_that_speed``.  A ratio of 0 disables
+        this filter.  This catches clusters formed by trajectories that hit an
+        early stopping condition (e.g. premature unbinding at high speed),
+
+        Pass 3 — binding-well quality (``self.max_frac_neg_dG_first_half``):
+        drop paths where the fraction of negative-dG bins in the **first half**
+        of the r-range exceeds the threshold.  These paths have a corrupted
+        binding-well profile that the p_eq downweighting mechanism cannot fully
+        correct.  Paths where negativity is confined to the second half are kept:
+        the TS lies in the first half and p_eq is naturally suppressed by the
+        negative-bin exclusion in ``_compute_p_eq``.  Set to ≤ 0 to disable.
+        which would otherwise impose a hard floor on the weighted PMF.
 
         Applied after estimator fitting and before p_eq computation and PMF
-        construction.  Negative-dG bins are excluded from the p_eq integrand
-        by :meth:`compute_p_eq`; per-(speed, path) quality details are
-        written to ``path_quality.csv``.  Also logs a per-speed replica
-        imbalance warning when the ratio of max/min replica counts exceeds 3.
+        construction.  Also logs a per-speed replica imbalance warning when
+        the ratio of max/min replica counts exceeds 3.
         """
+        def _drop_keys(keys):
+            for speed, path in keys:
+                sMDDdata.results = sMDDdata.results.drop(
+                    sMDDdata.results[
+                        (sMDDdata.results['speed'] == speed) &
+                        (sMDDdata.results['path'] == path)
+                    ].index
+                )
+                sMDDdata.raw_data = sMDDdata.raw_data.drop(
+                    sMDDdata.raw_data[
+                        (sMDDdata.raw_data['speed'] == speed) &
+                        (sMDDdata.raw_data['path'] == path)
+                    ].index
+                )
+
+        # --- pass 1: minimum replica count ---
         keys_to_drop: list[tuple[float, str]] = []
         for (speed, path), group in sMDDdata.results.groupby(['speed', 'path']):
             n_replicas = int(group['n_samples'].median())
-            if n_replicas < min_replicas:
+            if n_replicas < self.min_replicas_per_path:
                 logger.warning(
                     f"Excluding path '{path}' at speed={speed} nm/ps: "
-                    f"only {n_replicas} replicas < {min_replicas}"
+                    f"only {n_replicas} replicas < {self.min_replicas_per_path}"
                 )
                 keys_to_drop.append((speed, path))
+        _drop_keys(keys_to_drop)
 
-        for speed, path in keys_to_drop:
-            sMDDdata.results = sMDDdata.results.drop(
-                sMDDdata.results[
-                    (sMDDdata.results['speed'] == speed) &
-                    (sMDDdata.results['path'] == path)
-                ].index
-            )
-            sMDDdata.raw_data = sMDDdata.raw_data.drop(
-                sMDDdata.raw_data[
-                    (sMDDdata.raw_data['speed'] == speed) &
-                    (sMDDdata.raw_data['path'] == path)
-                ].index
-            )
+        # --- pass 2: minimum step ratio (premature-termination filter) ---
+        if self.min_path_steps_ratio > 0 and not sMDDdata.results.empty:
+            keys_to_drop = []
+            for speed, grp in sMDDdata.results.groupby('speed'):
+                path_max_step = grp.groupby('path')['step'].max()
+                threshold = float(path_max_step.max()) * self.min_path_steps_ratio
+                for path, n_steps in path_max_step.items():
+                    if n_steps < threshold:
+                        logger.warning(
+                            f"Excluding path '{path}' at speed={speed} nm/ps: "
+                            f"n_steps={n_steps:.0f} < {self.min_path_steps_ratio:.0%} × "
+                            f"{path_max_step.max():.0f} (premature termination)"
+                        )
+                        keys_to_drop.append((speed, path))
+            _drop_keys(keys_to_drop)
+
+        # --- pass 3: corrupted binding-well filter ---
+        if self.max_frac_neg_dG_first_half > 0 and not sMDDdata.results.empty:
+            keys_to_drop = []
+            for (speed, path), grp in sMDDdata.results.groupby(['speed', 'path']):
+                sorted_grp = grp.sort_values('r_coord')
+                mid = len(sorted_grp) // 2
+                first_half_dG = sorted_grp['dG'].iloc[:mid]
+                valid = first_half_dG.dropna()
+                if valid.empty:
+                    continue
+                frac = float((valid < 0).sum() / len(valid))
+                if frac > self.max_frac_neg_dG_first_half:
+                    logger.info(
+                        f"[filter/pass3] dropping path '{path}' at speed={speed} nm/ps: "
+                        f"frac_neg_dG_first_half={frac:.2f} > {self.max_frac_neg_dG_first_half}"
+                    )
+                    keys_to_drop.append((speed, path))
+            _drop_keys(keys_to_drop)
 
         # Replica balance report per speed
         for speed, gspeed in sMDDdata.results.groupby('speed'):
