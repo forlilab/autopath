@@ -363,6 +363,7 @@ class SMDAnalysis:
                         ligand_select=self.ligand_select,
                         outdir=os.path.join(self.path_model.outdir, "unbinding_paths"),
                         friction_csv=friction_csv_path,
+                        pocket_select=group_B,
                     )
                     logger.info("Friction-coloured unbinding paths PSE regenerated.")
             except Exception as _exc:
@@ -594,12 +595,12 @@ class SMDAnalysis:
                 # at min_replicas has a full prior state to compare against)
                 if k < min_replicas:
                     prev_pmf = pmf_k
-                    prev_barrier_height, prev_r_ts = self._compute_barrier_rts(pmf_k, smd.beta, protocol_grid)
+                    prev_barrier_height, prev_r_ts = self._compute_barrier_rts(pmf_k, smd.beta/2, protocol_grid)
                     continue
 
                 # === convergence comparison (k >= min_replicas) ===
 
-                barrier_height, r_ts = self._compute_barrier_rts(pmf_k, smd.beta, protocol_grid)
+                barrier_height, r_ts = self._compute_barrier_rts(pmf_k, smd.beta/2, protocol_grid)
 
                 # first PMF eligible for comparison: initialize
                 # (fires when trace_min_replicas == min_replicas, i.e. standard fallback)

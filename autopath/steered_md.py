@@ -89,7 +89,7 @@ class SteeredMD:
         timestep: float = 0.004, #  # 4 fs timestep
         temperature: float = 300,
         autostop_lag_sigma: float = 5.0,  # stop when lag > N × sigma_thermal for autostop_lag_window consecutive moves
-        autostop_lag_window: int = 20,    # consecutive moves above lag threshold to confirm detachment
+        autostop_lag_window: int = 25,    # consecutive moves above lag threshold to confirm detachment
         autostop_backward: bool = False,  # apply lag criterion to backward pulls (risky for membrane barriers)
         autostop_nc: bool = False,        # stop when NC drops below autostop_nc_threshold (ligand detached)
         autostop_nc_threshold: float = 1.0,

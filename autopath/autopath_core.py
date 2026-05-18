@@ -77,7 +77,7 @@ class AutoPath:
         sMD_autostop_nc: bool = False,
         sMD_autostop_nc_threshold: float = 1.0,
         sMD_autostop_lag_sigma: float = 5.0,
-        sMD_autostop_lag_window: int = 20,
+        sMD_autostop_lag_window: int = 25,
         sMD_autostop_min_displacement: float = 0.5,
         sMD_time: int = None,  # ns
         sMD_steps_per_move: int = None,
