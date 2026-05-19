@@ -664,7 +664,15 @@ class AutoPath:
                             # 4:{'height': 0.2, 'width': 0.07},
                             # 5:{'height': 0.1, 'width': 0.08}
                             }
-
+        if self.mMD_use_funnel_potential:
+            if self.mMD_preseed_bias:
+                mMD_out_dir = f"{sys_name}/metadynamics_funnel_preseed"
+            else:
+                mMD_out_dir = f"{sys_name}/metadynamics_funnel"
+        else:
+            mMD_out_dir = f"{sys_name}/metadynamics"
+        os.makedirs(mMD_out_dir, exist_ok=True)
+            
         if self.run_metadynamics:
             min_com = 0.0
             max_com = 3.0
@@ -711,9 +719,6 @@ class AutoPath:
             # Done before any walker starts so all walkers load the preseed via _syncWithDisk().
             if self.mMD_preseed_bias:
                 try:
-                    metad_outdir = f"{sys_name}/metadynamics"
-                    os.makedirs(metad_outdir, exist_ok=True)
-
                     # Compute milestone COM distances (same formula as in pathCV_cv factory)
                     _pocket_masses = np.array([
                         base_system.getParticleMass(i).value_in_unit(dalton)
@@ -761,7 +766,7 @@ class AutoPath:
                 is_membrane=self.is_membrane,
                 timestep=self.timestep,
                 temp=self.temperature,
-                out_dir=f"{sys_name}/metadynamics",
+                out_dir=mMD_out_dir,
                 platform=self.platform
             )
 
@@ -834,11 +839,10 @@ class AutoPath:
 
                         # Persist funnel parameters so they can be reloaded for
                         # post-hoc PMF correction or funnel visualisation
-                        metad_outdir = f"{sys_name}/metadynamics"
-                        os.makedirs(metad_outdir, exist_ok=True)
+
                         save_funnel_params(
                             funnel_params,
-                            os.path.join(metad_outdir, "funnel_params"),
+                            os.path.join(mMD_out_dir, "funnel_params"),
                         )
 
                         # Write debug PSE showing funnel geometry
@@ -905,7 +909,7 @@ class AutoPath:
                     continue
                  
         # Load and align the WTMetaD trajectories
-        WTMetaD_trajs = glob(f"{sys_name}/metadynamics/trajectory_metadynamics_milestone_*_frame_*.dcd")
+        WTMetaD_trajs = glob(f"{mMD_out_dir}/trajectory_metadynamics_milestone_*_frame_*.dcd")
         WTMetaD_trajs = [f for f in WTMetaD_trajs if "aligned" not in f]  # only process unaligned trajectories
 
         wrap_align_save_traj(WTMetaD_trajs, solvated_system_pdb, is_membrane=self.is_membrane)
