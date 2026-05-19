@@ -353,7 +353,7 @@ def _find_pmf_peak(
     kBT: float,
     *,
     smooth: str = 'savgol',
-    smooth_window: int = 7,
+    smooth_window: int = 5,
     smooth_polyorder: int = 3,
     prominence_factor: float = 0.5,
 ) -> tuple[float | None, float | None]:
@@ -963,7 +963,7 @@ ESTIMATOR_REGISTRY: dict[str, type[BaseEstimator]] = {
 def trim_results_by_n_samples_support(
     results: pd.DataFrame,
     min_samples: int = 3,
-    min_support_ratio: float = 0.9,
+    min_support_ratio: float = 1.0,
     keep_prefix: bool = True,
     add_support_columns: bool = True,
 ) -> pd.DataFrame:
@@ -983,6 +983,8 @@ def trim_results_by_n_samples_support(
         Absolute minimum number of replicas required at a point.
     min_support_ratio : float
         Relative support threshold, defined as ``n_samples / n_ref``.
+        Default 1.0 trims at the first step where any replica stops (e.g.
+        autostop), eliminating survivorship bias in the cumulant estimator.
     keep_prefix : bool
         If True, keep the contiguous prefix up to first failing point.
         If False, keep all points that pass support criteria.
@@ -1115,13 +1117,12 @@ def calculate_weighted_pmf(
             if not speed_weights:
                 continue
 
-            # Extend the grid to the longest path; paths that end earlier
-            # simply drop out of the weighted average at their last step.
-            # The denominator (np.sum(w_per_col[col])) renormalises the
-            # active-path weights at each step, so no hard floor is imposed
-            # and no discontinuity appears when a short path terminates.
+            # Restrict the grid to the shortest path's last step so that all
+            # paths contribute at every step. Without this, when a shorter path
+            # terminates the p_eq renormalization denominator changes abruptly,
+            # producing a visible discontinuity in the weighted PMF.
             path_last = speedg.groupby("path")[grid_col].max()
-            max_grid_step = path_last.max()
+            max_grid_step = path_last.min()
             grid_vals = sorted(speedg.loc[speedg[grid_col] <= max_grid_step, grid_col].dropna().unique())
             
             rows = []
@@ -1318,6 +1319,19 @@ def extrapolate_to_v0(
     v0_df = pd.DataFrame(out_rows)
     if not v0_df.empty:
         v0_df = v0_df.sort_values(['estimator', 'step']).reset_index(drop=True)
+        # Strip leading/trailing steps where not all available speeds contributed.
+        # Edge rows with n_speeds == min_speeds have R²=1.0 trivially (zero degrees
+        # of freedom) and produce unconstrained intercept spikes.
+        trimmed = []
+        for _est, eg in v0_df.groupby('estimator', sort=False):
+            eg = eg.sort_values('step').reset_index(drop=True)
+            max_n = int(eg['n_speeds'].max())
+            full_support = eg.index[eg['n_speeds'] >= max_n]
+            if len(full_support) > 0:
+                trimmed.append(eg.loc[full_support[0]:full_support[-1]])
+            else:
+                trimmed.append(eg)
+        v0_df = pd.concat(trimmed).sort_values(['estimator', 'step']).reset_index(drop=True)
     else:
         logger.error("No valid data for extrapolation to v=0. Returning empty DataFrame.")
     return v0_df

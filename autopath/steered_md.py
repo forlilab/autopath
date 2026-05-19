@@ -89,7 +89,7 @@ class SteeredMD:
         timestep: float = 0.004, #  # 4 fs timestep
         temperature: float = 300,
         autostop_lag_sigma: float = 5.0,  # stop when lag > N × sigma_thermal for autostop_lag_window consecutive moves
-        autostop_lag_window: int = 25,    # consecutive moves above lag threshold to confirm detachment
+        autostop_lag_window: int = 30,    # consecutive moves above lag threshold to confirm detachment
         autostop_backward: bool = False,  # apply lag criterion to backward pulls (risky for membrane barriers)
         autostop_nc: bool = False,        # stop when NC drops below autostop_nc_threshold (ligand detached)
         autostop_nc_threshold: float = 1.0,
@@ -278,6 +278,7 @@ class SteeredMD:
                 if self.autostop_nc and nc is not None and nc < self.autostop_nc_threshold:
                     _buf.append(_row)
                     f.write(''.join(_buf))
+                    _buf.clear()
                     logger.warning(
                         f"[Autostop/NC] Stopping at move {i}: NC={nc:.2f} "
                         f"< threshold={self.autostop_nc_threshold:.2f}"
@@ -293,6 +294,7 @@ class SteeredMD:
                     if autostop_ready and direction == "forward" and all(l > lag_stop_threshold for l in _lag_buf):
                         _buf.append(_row)
                         f.write(''.join(_buf))
+                        _buf.clear()
                         logger.warning(
                             f"[Autostop/lag] Stopping at move {i}: lag={lag_nm:.4f} nm "
                             f"exceeded {self.autostop_lag_sigma}×σ_thermal={lag_stop_threshold:.4f} nm "
@@ -303,6 +305,7 @@ class SteeredMD:
                     elif autostop_ready and direction == "backward" and self.autostop_backward and all(l < -lag_stop_threshold for l in _lag_buf):
                         _buf.append(_row)
                         f.write(''.join(_buf))
+                        _buf.clear()
                         logger.warning(
                             f"[Autostop/lag] Stopping backward pull at move {i}: lag={lag_nm:.4f} nm "
                             f"below -{self.autostop_lag_sigma}×σ_thermal={-lag_stop_threshold:.4f} nm "

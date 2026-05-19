@@ -158,6 +158,7 @@ def plot_profile(df: pd.DataFrame,
                  outdir: str = 'analysis',
                  prefix: str = '',
                  mask_negative_dG: bool = False,
+                 sharey: bool = True,
                  ):
     """Plot a single quantity vs reaction coordinate, faceted by speed.
 
@@ -202,7 +203,7 @@ def plot_profile(df: pd.DataFrame,
 
     g = sns.FacetGrid(
         df, col=col, row=row, hue=hue,
-        sharey=True, sharex=True,
+        sharey=sharey, sharex=True,
         height=4.0, aspect=1,
         margin_titles=True,
     )
@@ -262,6 +263,7 @@ def plot_friction(df: pd.DataFrame,
             ylabel='Γ (kJ·ps/mol/nm²)',
             outdir=outdir,
             prefix=f'_{method}',
+            sharey=False
         )
         # Integrated friction (regression only)
         if 'Gamma_integrated' in mdf.columns and mdf['Gamma_integrated'].notna().any():
@@ -273,6 +275,7 @@ def plot_friction(df: pd.DataFrame,
                 ylabel='∫Γ dr (kJ·ps/mol/nm)',
                 outdir=outdir,
                 prefix=f'_{method}',
+                sharey=False,   # each speed has its own scale — low-speed Γ dominates if shared
             )
     return
 
@@ -621,7 +624,7 @@ def make_unbinding_paths_visualization(
     paths: Dict[str, List[Tuple[str, str]]],
     reference_pdb: str,
     ligand_select: str,
-    outdir: str = "unbinding_paths",
+    outdir: str = "path_analysis",
     align_sel: str = "protein and backbone",
     grid_spacing: float = 0.5,
     cartoon_color: str = "grey90",

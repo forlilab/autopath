@@ -76,7 +76,7 @@ class SMDAnalysis:
         seed: int = 42,
         # --- filtering / weighting thresholds (all visible at construction time) ---
         filter_low_support: bool = True,
-        min_support_ratio: float = 0.9,
+        min_support_ratio: float = 1.0,
         min_samples_per_step: int = 5,
         min_replicas_per_path: int = 5,
         min_path_steps_ratio: float = 0.6,
@@ -98,7 +98,8 @@ class SMDAnalysis:
         self.max_frac_neg_dG_first_half = max_frac_neg_dG_first_half
         self.min_speeds_for_extrapolation = min_speeds_for_extrapolation
         os.makedirs(outdir, exist_ok=True)
-
+        os.makedirs(os.path.join(outdir, "path_analysis"), exist_ok=True)
+    
         self._setup_path_model(path_model)
         self._setup_estimators(estimators)
 
@@ -401,7 +402,7 @@ class SMDAnalysis:
                         paths=_paths_dict,
                         reference_pdb=self.reference_pdb,
                         ligand_select=self.ligand_select,
-                        outdir=os.path.join(self.path_model.outdir, "unbinding_paths"),
+                        outdir=os.path.join(self.path_model.outdir, "path_analysis"),
                         friction_csv=friction_csv_path,
                         pocket_select=group_B,
                     )
@@ -812,7 +813,10 @@ class SMDAnalysis:
         dG = pmf_k.values.astype(float)
         r_ts, barrier = _find_pmf_peak(r, dG, kBT)
         if r_ts is None:
-            return np.nan, np.nan
+            # No prominent peak — fall back to the position and height of max(dG),
+            # consistent with KramersEstimator's r_coord.max() fallback.
+            best = int(np.nanargmax(dG))
+            return float(dG[best] - dG[0]), float(r[best])
         return barrier, r_ts
 
     @staticmethod

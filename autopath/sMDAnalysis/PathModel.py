@@ -57,7 +57,7 @@ class DTWPathModel(PathModel):
     def __init__(self,
                  seed: int = 42,
                  do_plots: bool = True,
-                 outdir: str = 'clustering_results',
+                 outdir: str = 'path_analysis',
                  n_geom_pcs: int | None = 2,
                  geom_feature_prefix: str = 'dist_',
                  ):
@@ -350,7 +350,7 @@ class DTWPathModel(PathModel):
                         paths=paths_dict,
                         reference_pdb=reference_pdb,
                         ligand_select=ligand_select,
-                        outdir=os.path.join(self.outdir, "unbinding_paths"),
+                        outdir=os.path.join(self.outdir, "path_analysis"),
                         pocket_select=pocket_select
                     )
                     logger.info(f"Unbinding paths visualization generated in {self.outdir}")
@@ -367,7 +367,7 @@ class DTWPathModel(PathModel):
             "medoid_names": self.all_medoid_names,
             "medoid_to_path": self.medoid_to_path,
         }
-        medoid_info_path = os.path.join(self.outdir, "medoid_info.json")
+        medoid_info_path = os.path.join(self.outdir, "path_analysis", "medoid_info.json")
         with open(medoid_info_path, "w") as f:
             json.dump(medoid_info, f, indent=2)
         logger.info(f"Saved medoid info to {medoid_info_path}")
@@ -379,7 +379,7 @@ class DTWPathModel(PathModel):
         sns.heatmap(distmatrix, cmap='viridis')
         plt.title('DTW Distance Matrix');         plt.xlabel('Trajectories')
         plt.ylabel('Trajectories')
-        plt.savefig(os.path.join(self.outdir, f'cluster_dtw_heatmap_v{self.speed_name}.png'))
+        plt.savefig(os.path.join(self.outdir, "path_analysis", f'cluster_dtw_heatmap_v{self.speed_name}.png'))
         plt.tight_layout()
         plt.close()
         return
@@ -394,7 +394,7 @@ class DTWPathModel(PathModel):
         plt.ylabel("Silhouette score" if self._use_silhouette else "Score")
         plt.xticks(K_values)
         plt.tight_layout()
-        plt.savefig(os.path.join(self.outdir, f"cluster_elbowplot_v{self.speed_name}.png"))
+        plt.savefig(os.path.join(self.outdir, "path_analysis", f"cluster_elbowplot_v{self.speed_name}.png"))
         plt.close()
         return
         
@@ -461,6 +461,6 @@ class DTWPathModel(PathModel):
             ax_load.legend(frameon=False)
 
         plt.tight_layout()
-        plt.savefig(os.path.join(self.outdir, f"cluster_pca_v{self.speed_name}.png"), dpi=150)
+        plt.savefig(os.path.join(self.outdir, "path_analysis", f"cluster_pca_v{self.speed_name}.png"), dpi=150)
         plt.close()
         return
