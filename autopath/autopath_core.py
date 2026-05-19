@@ -32,6 +32,7 @@ from autopath.cv import com_cv, pathCV_cv
 from autopath.customForces import (
     generate_funnel_parameters_from_trajectory,
     create_funnel_force_from_trajectory_analysis,
+    save_funnel_params
 )
 from autopath.sMDAnalysis import SMDData, SMDAnalysis
 from autopath.sMDAnalysis.PathModel import DTWPathModel
@@ -96,11 +97,12 @@ class AutoPath:
         relax_steps: int = 25000,
         run_metadynamics: bool = True,
         mMD_use_funnel_potential: bool = False,
-        mMD_bias_factor: int = 10,
+        mMD_bias_factor: int = 15,
         mMD_bias_frequency: int = 2,  # ps
         mMD_hill_height: float = 1.2,  # kJ/mol approx 0.5KT
         mMD_hill_width: float = 0.05,
-        mMD_time: int = 10,  # ns
+        mMD_time: int = 5,  # ns
+        mMD_multiple_walker: bool = False,
     ):
         # General
         self.pocket_selection = pocket_selection
@@ -159,6 +161,7 @@ class AutoPath:
         self.mMD_hill_height = mMD_hill_height
         self.mMD_hill_width = mMD_hill_width
         self.mMD_time = mMD_time
+        self.mMD_multiple_walker = mMD_multiple_walker
         # VS mode
         self.equilibration_checkpoint = False
         self.pulling_checkpoint = False
@@ -724,8 +727,8 @@ class AutoPath:
             if self.mMD_use_funnel_potential:
                 logger.info("Generating funnel potential from sMD trajectories...")
                 try:
-                    # Collect all sMD trajectories
-                    smd_trajs = glob(f"{sMD_traj_outdir}/*.dcd")
+                    # Collect aligned forward-direction sMD trajectories only
+                    smd_trajs = glob(f"{sMD_traj_outdir}/*_{self.sMD_pulling_dir}_aligned.dcd")
                     
                     if not smd_trajs:
                         logger.warning("No sMD trajectories found. Skipping funnel potential generation.")
@@ -741,19 +744,43 @@ class AutoPath:
                             guest_selection="resname UNK",
                             use_pca=True,
                             percentile_z=95.0,
-                            percentile_r_cyl=90.0,
+                            R_cylinder_ang=2.0,
                             percentile_r_funnel=85.0,
-                            alpha_cone_degrees=35.0,
+                            alpha_cone_degrees=20.0,
                             verbose=True,
                         )
                         
                         # Create funnel force from parameters
                         funnel_force = create_funnel_force_from_trajectory_analysis(funnel_params)
                         logger.info("Funnel potential successfully generated from trajectories")
+
+                        # Persist funnel parameters so they can be reloaded for
+                        # post-hoc PMF correction or funnel visualisation
+                        metad_outdir = f"{sys_name}/metadynamics"
+                        os.makedirs(metad_outdir, exist_ok=True)
+                        save_funnel_params(
+                            funnel_params,
+                            os.path.join(metad_outdir, "funnel_params"),
+                        )
+
+                        # Write debug PSE showing funnel geometry
+                        try:
+                            write_funnel_pymol(
+                                funnel_params=funnel_params,
+                                reference_pdb=solvated_system_pdb,
+                                milestone_files=milestones,
+                                outdir=sys_name,
+                                ligand_resname=ligand_resname,
+                            )
+                        except Exception as viz_e:
+                            logger.warning(f"Funnel visualization failed (non-fatal): {viz_e}")
+
                 except Exception as e:
                     logger.error(f"Error generating funnel potential: {e}")
                     logger.warning("Continuing without funnel potential")
                     funnel_force = None
+
+            first_milestone_chk = None  # set after first milestone is relaxed; reused in single-walker mode
 
             for milestone in milestones:
                 milestone_name = os.path.basename(milestone).split('.')[0]
@@ -772,18 +799,28 @@ class AutoPath:
                     except Exception as e:
                         logger.error(f"Error relaxing {milestone_name}: {e}")
                         continue
-                
+
+                # Track the first relaxed checkpoint for single-walker mode
+                if first_milestone_chk is None:
+                    first_milestone_chk = milestone_chk
+
+                # Multiple-walker: each walker starts from its own relaxed checkpoint.
+                # Single-walker: all walkers start from the first milestone (bound state) checkpoint.
+                chk_to_use = milestone_chk if self.mMD_multiple_walker else first_milestone_chk
+
                 logger.info(f"Running WTMetaD for milestone {milestone_name}")
                 try:
+                    # print('nothing here yet')
                     WTMetaD.run(
-                        checkpoint_file=milestone_chk,
+                        checkpoint_file=chk_to_use,
                         system=milestone_system,
                         run_id=milestone_name,
                         cv_specs=[path_cv],
                         mMD_time=self.mMD_time, #ns
                         bias_factor=self.mMD_bias_factor,
                         biasFrequency=self.mMD_bias_frequency, #ps
-                        funnel_force=funnel_force
+                        funnel_force=funnel_force,
+                        funnel_params=funnel_params if funnel_force is not None else None,
                     )
                 except Exception as e:
                     logger.error(f"Error during WTMetaD for {milestone_name}: {e}")
