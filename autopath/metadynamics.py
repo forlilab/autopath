@@ -17,8 +17,10 @@ from autopath.analysis import (
     plot_bias,
     plot_colvar,
     plot_FE,
+    plot_FE_rw,
     plot_FE_2D,
     plot_colvar_2D,
+    correct_fe_for_funnel,
 )
 
 try:
@@ -92,6 +94,7 @@ class MetadynamicsMD:
         biasFrequency: int = 2,
         saveFrequency: int = 50,
         funnel_force: Force = None,
+        funnel_params: dict = None,
     ) -> str:
 
         start_time = time.monotonic()
@@ -235,7 +238,28 @@ class MetadynamicsMD:
             colvar_array = np.append(colvar_array, [current_cvs], axis=0)
 
         np.save(os.path.join(self.out_dir, f"COLVAR_{run_id}.npy"), colvar_array)
-        np.save(os.path.join(self.out_dir, f"FE_{run_id}.npy"), meta.getFreeEnergy())
+        fe_path = os.path.join(self.out_dir, f"FE_{run_id}.npy")
+        np.save(fe_path, meta.getFreeEnergy())
+
+        # Apply funnel standard-state correction if funnel was used
+        if funnel_params is not None:
+            try:
+                temp_K = self.temperature.value_in_unit(openmmunit.kelvin)
+                result = correct_fe_for_funnel(
+                    fe_path,
+                    funnel_params,
+                    temperature=temp_K,
+                )
+                rw_path = os.path.join(self.out_dir, f"FE_{run_id}_rw.npy")
+                np.save(rw_path, result["fe_corrected"])
+                logging.info(
+                    f"[{run_id}] ΔG_sim={result['dG_bind_sim_kj_mol']:.2f} kJ/mol  "
+                    f"correction={result['correction_kj_mol']:.2f} kJ/mol  "
+                    f"ΔG°_b={result['dG_bind_std_kj_mol']:.2f} kJ/mol  "
+                    f"pKd={result['pKd']:.2f}"
+                )
+            except Exception as e:
+                logging.warning(f"Funnel standard-state correction failed for {run_id}: {e}")
 
         # Create plots
         if len(resolved) == 1:
@@ -243,6 +267,8 @@ class MetadynamicsMD:
             plot_colvar(self.out_dir, s.name)
             plot_bias(self.out_dir, s.grid_min, s.grid_max, s.grid_points, s.name)
             plot_FE(self.out_dir, s.grid_min, s.grid_max, s.grid_points, s.name)
+            if funnel_params is not None:
+                plot_FE_rw(self.out_dir, s.grid_min, s.grid_max, s.grid_points, s.name)
         else:
             a, b = resolved[0], resolved[1]
             plot_colvar_2D(self.out_dir, a.name, b.name)
