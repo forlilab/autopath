@@ -2,6 +2,7 @@
 import os
 import json
 import time
+import numpy as np
 import pandas as pd
 import warnings
 # import shutil
@@ -103,6 +104,9 @@ class AutoPath:
         mMD_hill_width: float = 0.05,
         mMD_time: int = 5,  # ns
         mMD_multiple_walker: bool = False,
+        mMD_preseed_bias: bool = False,
+        mMD_preseed_speed: float = None,
+        mMD_funnel_host_selection: str | None = None,
     ):
         # General
         self.pocket_selection = pocket_selection
@@ -162,6 +166,9 @@ class AutoPath:
         self.mMD_hill_width = mMD_hill_width
         self.mMD_time = mMD_time
         self.mMD_multiple_walker = mMD_multiple_walker
+        self.mMD_preseed_bias = mMD_preseed_bias
+        self.mMD_preseed_speed = mMD_preseed_speed
+        self.mMD_funnel_host_selection = mMD_funnel_host_selection
         # VS mode
         self.equilibration_checkpoint = False
         self.pulling_checkpoint = False
@@ -692,13 +699,49 @@ class AutoPath:
                 grid_max=1.0,
                 hill_width=self.mMD_hill_width,
                 sigma='auto', # related to distance between milestones
-                #sigma approz half the mean milestone spacing
+                #sigma approz min milestone spacings
             )
-            # when you first run, check the logged line 
-            # PathCV milestone COM distances (nm): [...]. 
-            # If adjacent milestones differ by more than 3 × sigma = 0.3 nm, 
-            # the Gaussian kernels won't overlap well and you'll want to increase sigma. 
+            # when you first run, check the logged line
+            # PathCV milestone COM distances (nm): [...].
+            # If adjacent milestones differ by more than 3 × sigma = 0.3 nm,
+            # the Gaussian kernels won't overlap well and you'll want to increase sigma.
             # If they're closer than 0.5 × sigma = 0.05 nm, decrease it.
+
+            # Pre-seed the metadynamics bias surface from the sMD PMF (optional).
+            # Done before any walker starts so all walkers load the preseed via _syncWithDisk().
+            if self.mMD_preseed_bias:
+                try:
+                    metad_outdir = f"{sys_name}/metadynamics"
+                    os.makedirs(metad_outdir, exist_ok=True)
+
+                    # Compute milestone COM distances (same formula as in pathCV_cv factory)
+                    _pocket_masses = np.array([
+                        base_system.getParticleMass(i).value_in_unit(dalton)
+                        for i in pocket_atom_indices
+                    ])
+                    _ligand_masses = np.array([
+                        base_system.getParticleMass(i).value_in_unit(dalton)
+                        for i in ligand_atoms_indices
+                    ])
+                    _milestone_com_dists = []
+                    for _m_pdb in milestones:
+                        _pos = np.array(PDBFile(_m_pdb).positions.value_in_unit(nanometers))
+                        _p_com = np.average(_pos[pocket_atom_indices], axis=0, weights=_pocket_masses)
+                        _l_com = np.average(_pos[ligand_atoms_indices], axis=0, weights=_ligand_masses)
+                        _milestone_com_dists.append(float(np.linalg.norm(_l_com - _p_com)))
+
+                    write_metad_preseed(
+                        smd_analysis_outdir=sMD_analysis_outdir,
+                        milestone_com_distances=_milestone_com_dists,
+                        bias_dir=metad_outdir,
+                        gamma=self.mMD_bias_factor,
+                        temperature=self.temperature,
+                        speed=self.mMD_preseed_speed,
+                        alpha=0.05
+                    )
+                except Exception as _preseed_err:
+                    logger.error(f"Preseed bias failed (non-fatal, continuing without preseed): {_preseed_err}")
+
             milestone_relax = RelaxMD(
                 topology=topology,
                 ligand_atoms=ligand_atoms_full_indices, # use all atoms
@@ -737,16 +780,51 @@ class AutoPath:
                         universe = mda.Universe(solvated_system_pdb, smd_trajs)
                         logger.info(f"Loaded {len(universe.trajectory)} frames total")
                         
-                        # Generate funnel parameters from trajectories
+                        # Determine funnel host selection.
+                        # The funnel axis must pass through the binding site so the
+                        # bound-state ligand is inside the cone (r_xy ≈ 0).
+                        # pocket_selection is intentionally wide (whole-helix CAs for sMD
+                        # stability) and its COM sits far from the pocket — do NOT reuse it
+                        # here.  Default: CA atoms of residues contacting the ligand in
+                        # the equilibrated structure, derived automatically.
+                        if self.mMD_funnel_host_selection is not None:
+                            funnel_host_sel = self.mMD_funnel_host_selection
+                            logger.info(f"Using user-specified funnel host selection: {funnel_host_sel}")
+                        else:
+                            u_ref = mda.Universe(equilibrated_pdb)
+                            contact_ca = u_ref.select_atoms(
+                                f"protein and name CA and same residue as "
+                                f"(around 6 resname {ligand_resname})"
+                            )
+                            if len(contact_ca) == 0:
+                                logger.warning(
+                                    "No protein CA found within 6 Å of ligand in the "
+                                    "equilibrated structure. Falling back to pocket_selection "
+                                    "for funnel host — the funnel may be misaligned."
+                                )
+                                funnel_host_sel = f"index {' '.join(map(str, pocket_atom_indices))}"
+                            else:
+                                contact_resids = sorted(set(contact_ca.resids))
+                                funnel_host_sel = (
+                                    f"protein and name CA and resid "
+                                    f"{' '.join(map(str, contact_resids))}"
+                                )
+                                logger.info(
+                                    f"Auto-derived funnel host: {len(contact_ca)} CA atoms of "
+                                    f"residues within 6 Å of ligand (resids: "
+                                    f"{contact_resids[:5]}{'...' if len(contact_resids) > 5 else ''}). "
+                                    f"Pass mMD_funnel_host_selection= to override."
+                                )
+
                         funnel_params = generate_funnel_parameters_from_trajectory(
                             universe,
-                            host_selection="protein",
-                            guest_selection="resname UNK",
+                            host_selection=funnel_host_sel,
+                            guest_selection=f"resname {ligand_resname}",
                             use_pca=True,
-                            percentile_z=95.0,
-                            R_cylinder_ang=2.0,
-                            percentile_r_funnel=85.0,
-                            alpha_cone_degrees=20.0,
+                            percentile_z=99.0,
+                            R_cylinder_ang=1.5,
+                            percentile_r_funnel=75.0,
+                            alpha_cone_degrees=25.0,
                             verbose=True,
                         )
                         
