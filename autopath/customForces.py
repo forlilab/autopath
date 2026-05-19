@@ -276,10 +276,10 @@ def generate_funnel_parameters_from_trajectory(
     / openmmunit.angstrom**2,
     use_pca: bool = True,
     percentile_z: float = 95.0,
-    percentile_r_cyl: float = 90.0,
+    R_cylinder_ang: float = 2.0,
     percentile_r_funnel: float = 85.0,
-    alpha_cone_degrees: float = 35.0,
-    stride: int = 3,
+    alpha_cone_degrees: float = 25.0,
+    stride: int = 2,
     verbose: bool = True,
 ) -> Dict:
     """
@@ -306,12 +306,16 @@ def generate_funnel_parameters_from_trajectory(
         with largest COM displacement (default: True)
     percentile_z : float
         Percentile of Z-displacement to use for z_cc parameter (0-100, default: 95)
-    percentile_r_cyl : float
-        Percentile of radial displacement for inner cylinder radius (default: 90)
+    R_cylinder_ang : float
+        Cylinder radius in Å for the unbound-state restraint (default: 2.0).
+        Limongelli 2013 recommends 1–3 Å.  This is a design parameter and must
+        NOT be derived from sMD radial distances, which reflect bound-state lateral
+        displacement (typically 7–10 Å) and have nothing to do with the unbound
+        cylindrical constraint.
     percentile_r_funnel : float
-        Percentile of radial displacement at bound state for funnel (default: 85)
+        Percentile of radial displacement at bound state, used only for logging (default: 85)
     alpha_cone_degrees : float
-        Cone half-angle in degrees (default: 35.0)
+        Cone half-angle in degrees (default: 25.0)
     verbose : bool
         Print diagnostic information (default: True)
     
@@ -408,27 +412,31 @@ def generate_funnel_parameters_from_trajectory(
     radial_distances = np.array(radial_distances)
     z_distances = np.array(z_distances)
     
-    # Calculate funnel parameters based on percentiles
+    # z_cc: percentile of axial distances — how far the ligand travels along the axis
     z_cc = np.percentile(z_distances, percentile_z)
-    R_cylinder = np.percentile(radial_distances, percentile_r_cyl)
-    R_funnel_bound = np.percentile(radial_distances[:10], percentile_r_funnel)  # Use first 10% as bound state
-    
-    # Ensure sensible values
-    z_cc = max(z_cc, 5.0)  # Minimum 5 Angstroms
-    R_cylinder = max(R_cylinder, 5.0)  # Minimum 5 Angstroms
-    R_funnel_bound = min(R_funnel_bound, R_cylinder * 0.8)  # Should be smaller than cylinder
-    
+    z_cc = max(z_cc, 5.0)  # minimum 5 Å
+
+    # R_cylinder is a design parameter, not derived from radial distances.
+    # The sMD radial distances (typically 7–10 Å) reflect the lateral displacement
+    # of the bound ligand from the unbinding axis and are NOT a suitable source for
+    # R_cylinder.  R_cylinder confines the *unbound* ligand near the axis; Limongelli
+    # 2013 recommends 1–3 Å.
+    R_cylinder = float(R_cylinder_ang)
+
+    # R_funnel_bound is logged for context only; it is not stored in the returned dict
+    n_bound = max(10, int(0.1 * trajectory_length))
+    R_funnel_bound = np.percentile(radial_distances[:n_bound], percentile_r_funnel)
+
     # Convert to OpenMM units
     z_cc_quantity = z_cc * openmmunit.angstrom
     R_cylinder_quantity = R_cylinder * openmmunit.angstrom
-    R_funnel_bound_quantity = R_funnel_bound * openmmunit.angstrom
     alpha_quantity = alpha_cone_degrees * openmmunit.degrees
-    
+
     if verbose:
         logger.info(f"Unbinding axis: {unbinding_axis}")
         logger.info(f"Z-crossing point (z_cc): {z_cc:.2f} Å")
-        logger.info(f"Cylinder radius (R_cylinder): {R_cylinder:.2f} Å")
-        logger.info(f"Funnel radius at bound state: {R_funnel_bound:.2f} Å")
+        logger.info(f"Cylinder radius (R_cylinder): {R_cylinder:.2f} Å  (design parameter, Limongelli 2013: 1–3 Å)")
+        logger.info(f"Bound-state radial spread (informational): {R_funnel_bound:.2f} Å")
         logger.info(f"Cone angle (alpha): {alpha_cone_degrees}°")
         logger.info(f"Radial distances - min: {radial_distances.min():.2f}, max: {radial_distances.max():.2f}, mean: {radial_distances.mean():.2f} Å")
         logger.info(f"Axial distances - min: {z_distances.min():.2f}, max: {z_distances.max():.2f}, mean: {z_distances.mean():.2f} Å")
@@ -453,6 +461,92 @@ def generate_funnel_parameters_from_trajectory(
     }
     
     return results
+
+
+def save_funnel_params(params_dict: Dict, filepath: str) -> None:
+    """Serialise a funnel_params dict returned by generate_funnel_parameters_from_trajectory.
+
+    Saves a single .npz file that can be reloaded with load_funnel_params() for
+    post-hoc PMF correction or funnel visualisation.
+
+    Geometric scalars are stored in their natural units:
+        z_cc         → angstroms
+        R_cylinder   → angstroms
+        alpha        → degrees
+        k_xy         → kcal/mol/Å²
+
+    Trajectory arrays (angstroms) and metadata are stored as-is.
+    """
+    np.savez(
+        filepath,
+        # geometric parameters
+        z_cc_ang=np.array(
+            params_dict["z_cc"].value_in_unit(openmmunit.angstrom)
+        ),
+        R_cylinder_ang=np.array(
+            params_dict["R_cylinder"].value_in_unit(openmmunit.angstrom)
+        ),
+        alpha_deg=np.array(
+            params_dict["alpha"].value_in_unit(openmmunit.degrees)
+        ),
+        k_xy_kcal_per_mol_per_ang2=np.array(
+            params_dict["k_xy"].value_in_unit(
+                openmmunit.kilocalorie_per_mole / openmmunit.angstrom**2
+            )
+        ),
+        # unbinding axis (unit vector)
+        unbinding_axis=np.array(params_dict["unbinding_axis"]),
+        # atom index groups
+        host_index=np.array(params_dict["host_index"]),
+        guest_index=np.array(params_dict["guest_index"]),
+        # trajectory arrays (Å)
+        com_trajectory=np.array(params_dict["com_trajectory"]),
+        host_com_trajectory=np.array(params_dict["host_com_trajectory"]),
+        guest_com_trajectory=np.array(params_dict["guest_com_trajectory"]),
+        radial_distances=np.array(params_dict["radial_distances"]),
+        axial_distances=np.array(params_dict["axial_distances"]),
+        # metadata
+        force_group=np.array(params_dict["force_group"]),
+        trajectory_length=np.array(params_dict["trajectory_length"]),
+    )
+    logger.info(f"Funnel parameters saved to {filepath}.npz")
+
+
+def load_funnel_params(filepath: str) -> Dict:
+    """Load a funnel_params dict previously saved by save_funnel_params().
+
+    The returned dict has the same structure as the one produced by
+    generate_funnel_parameters_from_trajectory(), including OpenMM Quantities
+    for the geometric parameters, so it can be passed directly to
+    create_funnel_force_from_trajectory_analysis() or correct_fe_for_funnel().
+
+    Parameters
+    ----------
+    filepath : str
+        Path to the .npz file (with or without the .npz extension).
+    """
+    data = np.load(filepath if filepath.endswith(".npz") else filepath + ".npz")
+    return {
+        "z_cc": float(data["z_cc_ang"]) * openmmunit.angstrom,
+        "R_cylinder": float(data["R_cylinder_ang"]) * openmmunit.angstrom,
+        "alpha": float(data["alpha_deg"]) * openmmunit.degrees,
+        "k_xy": (
+            float(data["k_xy_kcal_per_mol_per_ang2"])
+            * openmmunit.kilocalorie_per_mole
+            / openmmunit.angstrom**2
+        ),
+        "unbinding_axis": data["unbinding_axis"],
+        "host_index": list(data["host_index"]),
+        "guest_index": list(data["guest_index"]),
+        "com_trajectory": data["com_trajectory"],
+        "host_com_trajectory": data["host_com_trajectory"],
+        "guest_com_trajectory": data["guest_com_trajectory"],
+        "radial_distances": data["radial_distances"],
+        "axial_distances": data["axial_distances"],
+        "force_group": int(data["force_group"]),
+        "force_name": "k_funnel_trajectory",
+        "trajectory_length": int(data["trajectory_length"]),
+    }
 
 
 def create_funnel_force_from_trajectory_analysis(
@@ -488,8 +582,12 @@ def create_funnel_force_from_trajectory_analysis(
     R_cylinder = params_dict["R_cylinder"]
     force_group = params_dict.get("force_group", 10)
     force_name = params_dict.get("force_name", "k_funnel_trajectory")
-    
-    # Create the funnel force
+    unbinding_axis = params_dict["unbinding_axis"]  # unit vector (3,)
+
+    # Create the funnel force.
+    # r_z and r_xy are computed relative to the PCA-derived unbinding axis so that the
+    # funnel geometry matches the parameters (z_cc, R_cylinder) which were derived in that
+    # frame.  nx,ny,nz are the components of the unit vector along the unbinding direction.
     funnel = CustomCentroidBondForce(
         2,
         "U_funnel + U_cylinder;"
@@ -498,18 +596,22 @@ def create_funnel_force_from_trajectory_analysis(
         "Wall_funnel = 0.5 * k_xy * (r_xy - R_funnel)^2;"
         "Wall_cylinder = 0.5 * k_xy * (r_xy - R_cylinder)^2;"
         "R_funnel = (z_cc-abs(r_z))*tan(alpha) + R_cylinder;"
-        "r_xy = sqrt((x2 - x1)^2 + (y2 - y1)^2);"
-        "r_z = z2 - z1;",
+        "r_xy = sqrt(max(0, r2 - r_z*r_z));"
+        "r_z = nx*(x2-x1) + ny*(y2-y1) + nz*(z2-z1);"
+        "r2 = (x2-x1)^2 + (y2-y1)^2 + (z2-z1)^2;",
     )
-    
+
     funnel.setUsesPeriodicBoundaryConditions(False)
     funnel.setForceGroup(force_group)
-    
+
     # Add parameters
     funnel.addGlobalParameter("k_xy", k_xy)
     funnel.addGlobalParameter("z_cc", z_cc)
     funnel.addGlobalParameter("alpha", alpha)
     funnel.addGlobalParameter("R_cylinder", R_cylinder)
+    funnel.addGlobalParameter("nx", float(unbinding_axis[0]))
+    funnel.addGlobalParameter("ny", float(unbinding_axis[1]))
+    funnel.addGlobalParameter("nz", float(unbinding_axis[2]))
     
     # Add host and guest indices
     g1 = funnel.addGroup(host_index, [1.0 for i in range(len(host_index))])
