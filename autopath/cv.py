@@ -257,9 +257,11 @@ def pathCV_cv(
         logger.info(f"PathCV milestone COM distances (nm): {milestones_array.flatten().tolist()}")
         
         if sigma == 'auto':
-            # ~half the mean milestone spacing
-            sigma = 0.5 * np.mean(np.diff(milestones_array.flatten()))
-            logger.info(f"Auto-tuned sigma for PathCV: {sigma:.4f}")
+            # Half the minimum spacing — guarantees kernels overlap at the closest pair
+            # without over-smoothing at larger gaps.  mean-based sigma under-covers
+            # the largest gap when milestone spacings are uneven.
+            sigma = 0.5 * np.min(np.diff(milestones_array.flatten()))
+            logger.info(f"Auto-tuned sigma for PathCV: {sigma:.4f} nm (0.5 × min milestone spacing)")
         
         cv_com_bias = cvpack.CentroidFunction(
             "sqrt(distance(g1,g2)^2)",
