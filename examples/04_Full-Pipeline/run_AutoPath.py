@@ -55,8 +55,10 @@ def main():
     # Setup logging
     logger = setup_logging(f"{sys_name}/autopath.log", log_level="INFO")
     
-    pocket_residues = [134, 135, 136, 137, 138, 139, 140, 157, 158, 159, 160, 161,
-                       162, 180, 181, 182, 183, 211, 212, 213, 214, 215, 226, 227, 228, 229]
+    pocket_residues = [180, 181, 182, 183, 226, 227, 228, 229, 230, 204, 205, 206, 
+                       207, 208, 209, 210, 211, 212, 213, 214, 215, 196, 197, 198, 
+                       199, 200, 201, 133, 134, 135, 136, 137, 138, 139, 140, 156, 
+                       157, 158, 159, 160, 161, 162]
     pocket_selection = f'resid {" ".join(map(str, pocket_residues))} and name CA'
     
     ap = AutoPath(pdb_path=receptor,
@@ -74,31 +76,34 @@ def main():
                     run_equilibration=False,
                     protocol_fname=protocol,
 
-                    run_sMDpulling=False,
+                    run_sMDpulling=True,
                     sMD_outdir='sMD',
-                    sMD_ligand_anchor_mode='lig_com',
+                    sMD_ligand_anchor_mode='murcko',
                     sMD_max_replicas = 50,
                     sMD_pulling_speeds={
-                                        0.010:15, # nm/ps equivalent to 10.0 m/s nm/ns
-                                        0.0050:10, # nm/ps equivalent to 5.0 m/s nm/ns
-                                        0.0010:5, # nm/ps equivalent to 1.0 m/s nm/ns
+                                        0.010:None, # nm/ps equivalent to 10.0 m/s nm/ns
+                                        0.0050:None, # nm/ps equivalent to 5.0 m/s nm/ns
+                                        0.0010:None, # nm/ps equivalent to 1.0 m/s nm/ns
                                         },
 
-                    sMD_dx_per_move=0.001, # nms
+                    sMD_dx_per_move=0.001, # nm
 
                     sMD_run_analysis=True,
-                    # sMD_clust_selection=f'resid {" ".join(map(str, pocket_residues))} and name CA',
                     # cluster_across_speeds=True,
 
-                    extract_milestones=False,
-                    n_milestones=5,
-
-                    run_metadynamics=False,
-                    mMD_time=2,
+                    extract_milestones=True,
+                    n_milestones=3,
+                    
+                    run_metadynamics=True,
+                    mMD_use_funnel_potential=True,
+                    mMD_preseed_bias=True,
+                    # mMD_multiple_walkers=True,
+                    
+                    mMD_time=2, # ns
                     mMD_bias_frequency=2,
                     mMD_hill_width=0.05,
                     mMD_hill_height=1.2,
-                    mMD_bias_factor=12
+                    mMD_bias_factor=15
                 )
     ap.run(ligand_file=ligand)
 
