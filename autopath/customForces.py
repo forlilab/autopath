@@ -397,7 +397,14 @@ def generate_funnel_parameters_from_trajectory(
         # Use axis with largest displacement
         guest_displacement = guest_coms[-1] - guest_coms[0]
         unbinding_axis = guest_displacement / np.linalg.norm(guest_displacement)
-    
+
+    # Ensure the axis points from the bound state (frame 0) toward the unbound state
+    # (last frame). np.linalg.eigh returns eigenvectors with arbitrary sign, so the
+    # PCA branch may produce an inward-pointing axis, inverting z_cc and the visualization.
+    _net = guest_coms[-1] - guest_coms[0]
+    if np.dot(unbinding_axis, _net) < 0:
+        unbinding_axis = -unbinding_axis
+
     # Project displacements onto unbinding axis
     relative_positions = guest_coms - host_coms
     z_distances = np.dot(relative_positions, unbinding_axis)
@@ -436,8 +443,8 @@ def generate_funnel_parameters_from_trajectory(
     # A funnel cone that excludes the natural unbinding path will apply wall forces
     # throughout metadynamics, distorting the FE and creating boundary artifacts.
     R_funnel_per_frame = np.where(
-        z_distances < z_cc,
-        (z_cc - z_distances) * np.tan(np.radians(alpha_cone_degrees)) + R_cylinder,
+        np.abs(z_distances) < z_cc,
+        (z_cc - np.abs(z_distances)) * np.tan(np.radians(alpha_cone_degrees)) + R_cylinder,
         R_cylinder,
     )
     frac_inside = float(np.mean(radial_distances <= R_funnel_per_frame))
