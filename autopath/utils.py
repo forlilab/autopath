@@ -2,6 +2,8 @@ import os
 import shutil
 import logging
 import tempfile
+
+logger = logging.getLogger("autopath")
 import numpy as np
 import pandas as pd
 from sys import stdout, exit
@@ -1439,3 +1441,256 @@ def write_pocket_pymol(
 
     (out_dir / "pocket_view.pml").write_text("\n".join(lines))
     return None
+
+
+# ---------------------------------------------------------------------------
+# Funnel visualization helpers
+# ---------------------------------------------------------------------------
+
+def _perp_basis(axis: np.ndarray):
+    """Return two unit vectors spanning the plane perpendicular to *axis*."""
+    axis = axis / np.linalg.norm(axis)
+    ref = np.array([1.0, 0.0, 0.0]) if abs(axis[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    e1 = np.cross(axis, ref)
+    e1 /= np.linalg.norm(e1)
+    e2 = np.cross(axis, e1)
+    return e1, e2
+
+
+def _funnel_cgo(
+    center: np.ndarray,
+    axis: np.ndarray,
+    z_cc: float,
+    R_cylinder: float,
+    alpha_deg: float,
+    n_z: int = 15,
+    n_pts: int = 24,
+    extension: float = 5.0,
+    z_offset: float = 0.0,
+) -> list:
+    """Build a PyMOL CGO wireframe for the funnel boundary (all lengths in Å).
+
+    ``center`` is the visual anchor (typically the bound-state ligand COM).
+    ``z_offset`` is the axial distance from the force anchor (protein COM) to
+    ``center``, so that ring radii match the force expression exactly:
+    R = R_cylinder + max(0, z_cc - (z_offset + z_visual)) * tan(alpha_deg).
+    Rings are drawn from z=0 (at ``center``) outward to the cylinder end.
+    """
+    from pymol.cgo import BEGIN, LINES, END, VERTEX, COLOR, LINEWIDTH
+
+    center = np.array(center, dtype=float)
+    axis = np.array(axis, dtype=float)
+    axis /= np.linalg.norm(axis)
+    alpha_rad = np.deg2rad(alpha_deg)
+    e1, e2 = _perp_basis(axis)
+
+    # z_cc in visual coords: where the cone transitions to the cylinder
+    z_cc_visual = z_cc - z_offset
+
+    def make_ring(z_level: float, radius: float) -> list:
+        rc = center + z_level * axis
+        angles = np.linspace(0, 2 * np.pi, n_pts, endpoint=False)
+        return [rc + radius * (np.cos(a) * e1 + np.sin(a) * e2) for a in angles]
+
+    # Cone section (0 → z_cc_visual) + three cylinder levels beyond
+    z_cone = np.linspace(0.0, max(z_cc_visual, 0.0), n_z)
+    z_cyl = [z_cc_visual + extension * t for t in (0.33, 0.67, 1.0)]
+    z_all = list(z_cone) + z_cyl
+
+    rings = []
+    for z in z_all:
+        r = R_cylinder + max(0.0, (z_cc_visual - z)) * np.tan(alpha_rad)
+        rings.append(make_ring(z, r))
+
+    # Latitudinal rings
+    cgo = [LINEWIDTH, 1.5, COLOR, 0.0, 0.85, 0.9, BEGIN, LINES]
+    for pts in rings:
+        for i in range(n_pts):
+            p1, p2 = pts[i], pts[(i + 1) % n_pts]
+            cgo += [VERTEX, float(p1[0]), float(p1[1]), float(p1[2]),
+                    VERTEX, float(p2[0]), float(p2[1]), float(p2[2])]
+    cgo.append(END)
+
+    # Meridional lines (every n_pts//8 angular index)
+    step = max(1, n_pts // 8)
+    cgo += [BEGIN, LINES]
+    for k in range(0, n_pts, step):
+        for i in range(len(rings) - 1):
+            p1, p2 = rings[i][k], rings[i + 1][k]
+            cgo += [VERTEX, float(p1[0]), float(p1[1]), float(p1[2]),
+                    VERTEX, float(p2[0]), float(p2[1]), float(p2[2])]
+    cgo.append(END)
+
+    return cgo
+
+
+def write_funnel_pymol(
+    funnel_params: dict,
+    reference_pdb: str,
+    milestone_files: list,
+    outdir: str,
+    protein_selection: str = "protein",
+    ligand_resname: str = "UNK",
+    output_format: str = "pse",
+) -> str:
+    """Create a standalone PyMOL PSE visualising the funnel potential geometry.
+
+    Shows the protein (cartoon), the funnel boundary (CGO wireframe) oriented along the
+    PCA-derived unbinding axis, an arrow for the axis, one sphere per milestone at the
+    ligand COM, and the sMD COM trajectory as dots coloured blue→red by progress.
+
+    Args:
+        funnel_params: Dict returned by
+            :func:`~autopath.customForces.generate_funnel_parameters_from_trajectory`.
+        reference_pdb: Path to the solvated system PDB (for protein context).
+        milestone_files: Ordered list of milestone PDB paths.
+        outdir: Directory where ``funnel_visualization.pse`` is written.
+        protein_selection: PyMOL/MDAnalysis selection string for the protein.
+        ligand_resname: Residue name of the ligand (used to locate atoms in milestone PDBs).
+        output_format: Only ``"pse"`` is supported; kept for API consistency.
+
+    Returns:
+        Absolute path of the written PSE file.
+    """
+    try:
+        import pymol2
+    except ImportError:
+        raise ImportError("pymol2 is required for funnel visualization.")
+
+    from pymol.cgo import COLOR, SPHERE, CYLINDER, CONE
+
+    os.makedirs(outdir, exist_ok=True)
+    outdir = Path(outdir)
+
+    # --- Unpack funnel parameters ---
+    z_cc = funnel_params["z_cc"].value_in_unit(openmmunit.angstrom)
+    R_cylinder = funnel_params["R_cylinder"].value_in_unit(openmmunit.angstrom)
+    alpha_deg = funnel_params["alpha"].value_in_unit(openmmunit.degrees)
+    unbinding_axis = np.array(funnel_params["unbinding_axis"], dtype=float)
+    unbinding_axis /= np.linalg.norm(unbinding_axis)
+    com_traj = funnel_params["com_trajectory"].astype(float)   # relative Å (guest - host)
+    extension = 5.0  # extra cylinder length for context
+
+    # --- Re-anchor to the reference PDB coordinate frame ---
+    # com_traj is a relative (frame-independent) quantity, so it can be re-anchored
+    # to coordinates derived from the reference PDB.
+    u_ref_anchor = mda.Universe(str(Path(reference_pdb).resolve()))
+    prot_anchor = u_ref_anchor.select_atoms(protein_selection)
+    prot_com_pdb = prot_anchor.center_of_mass()  # needed for milestone/traj dots
+
+    # Visual center: bound-state ligand COM so the funnel is centred on the pocket.
+    # z_offset is the axial distance from the force anchor (protein COM) to that
+    # center, used inside _funnel_cgo to compute ring radii that match the force.
+    lig_anchor = u_ref_anchor.select_atoms(f"resname {ligand_resname} and not name H*")
+    if len(lig_anchor) > 0:
+        funnel_center = lig_anchor.center_of_mass()
+        z_offset = float(np.dot(funnel_center - prot_com_pdb, unbinding_axis))
+    else:
+        funnel_center = prot_com_pdb
+        z_offset = 0.0
+    z_offset = max(z_offset, 0.0)
+
+    # --- CGO objects ---
+    funnel_cgo = _funnel_cgo(
+        funnel_center, unbinding_axis, z_cc, R_cylinder, alpha_deg,
+        extension=extension, z_offset=z_offset,
+    )
+
+    # Unbinding axis arrow: from funnel_center (pocket) outward to cylinder end
+    z_cc_visual = z_cc - z_offset
+    arrow_mid = (funnel_center + z_cc_visual * unbinding_axis).tolist()
+    arrow_end = (funnel_center + (z_cc_visual + extension + 2.0) * unbinding_axis).tolist()
+    axis_cgo = [
+        CYLINDER,
+        *funnel_center.tolist(), *arrow_mid,
+        0.25, 0.0, 0.8, 0.0, 0.0, 0.8, 0.0,
+        CONE,
+        *arrow_mid, *arrow_end,
+        0.6, 0.0, 0.0, 0.8, 0.0, 0.0, 0.8, 0.0, 1.0, 1.0,
+    ]
+
+    # Milestone spheres — use relative lig-protein COM from each milestone PDB so
+    # they are also correctly placed in the reference PDB frame.
+    ms_colors = [(1.0, 0.5, 0.0), (0.9, 0.9, 0.0), (0.4, 0.8, 0.4),
+                 (0.2, 0.6, 1.0), (0.8, 0.3, 0.8)]
+    ms_cgo = []
+    for i, ms_file in enumerate(milestone_files):
+        try:
+            u_ms = mda.Universe(ms_file)
+            lig = u_ms.select_atoms(f"resname {ligand_resname} and not name H*")
+            if len(lig) == 0:
+                lig = u_ms.select_atoms(
+                    "not (protein or resname HOH SOL WAT or name NA CL K MG)")
+            if len(lig) == 0:
+                continue
+            prot_ms = u_ms.select_atoms(protein_selection)
+            if len(prot_ms) == 0:
+                continue
+            # Relative position of ligand COM w.r.t. protein COM in milestone frame,
+            # re-anchored to the protein COM in the reference PDB frame.
+            rel = lig.center_of_mass() - prot_ms.center_of_mass()
+            abs_pos = prot_com_pdb + rel
+            r, g, b = ms_colors[i % len(ms_colors)]
+            ms_cgo += [COLOR, r, g, b,
+                       SPHERE, float(abs_pos[0]), float(abs_pos[1]), float(abs_pos[2]), 1.8]
+        except Exception as exc:
+            logger.warning(f"Could not load milestone {ms_file}: {exc}")
+            continue
+
+    # sMD COM trajectory — every 10th frame, blue (start) → red (end).
+    # com_traj is relative (guest - host), re-anchored to the protein COM in the
+    # reference PDB frame (prot_com_pdb), NOT funnel_center (ligand COM).
+    abs_positions = com_traj + prot_com_pdb
+    sampled = abs_positions[::10]
+    n_samp = max(1, len(sampled) - 1)
+    traj_cgo = []
+    for k, pos in enumerate(sampled):
+        t = k / n_samp
+        traj_cgo += [COLOR, float(t), 0.0, float(1.0 - t),
+                     SPHERE, float(pos[0]), float(pos[1]), float(pos[2]), 0.25]
+
+    pse_path = str(outdir / "funnel_visualization.pse")
+
+    # Extract protein atoms to a temp PDB so PyMOL's show/color/set can reference
+    # it by the object name "protein" rather than by a selection keyword (which fails
+    # in headless pymol2 mode).  Mirrors the pattern in write_pocket_pymol().
+    import tempfile as _tempfile
+    u_ref = mda.Universe(str(Path(reference_pdb).resolve()))
+    prot_atoms = u_ref.select_atoms(protein_selection)
+
+    with _tempfile.TemporaryDirectory() as tmpdir:
+        prot_pdb = os.path.join(tmpdir, "protein.pdb")
+        with mda.Writer(prot_pdb, prot_atoms.n_atoms) as w:
+            w.write(prot_atoms)
+
+        with pymol2.PyMOL() as pymol:
+            c = pymol.cmd
+            c.bg_color("white")
+            c.set("antialias", 2)
+
+            # Protein — load from temp PDB so object name == "protein"
+            c.load(prot_pdb, "protein")
+            c.hide("everything", "protein")
+            c.show("cartoon", "protein")
+            c.color("grey90", "protein")
+            c.set("cartoon_transparency", 0.25, "protein")
+
+            # Funnel boundary wireframe
+            c.load_cgo(funnel_cgo, "funnel_boundary")
+
+            # Unbinding axis arrow
+            c.load_cgo(axis_cgo, "unbinding_axis")
+
+            # Milestone spheres
+            if ms_cgo:
+                c.load_cgo(ms_cgo, "milestones")
+
+            # sMD COM trajectory dots
+            if traj_cgo:
+                c.load_cgo(traj_cgo, "smd_com_traj")
+
+            c.zoom("all", 5)
+            c.save(pse_path)
+
+    logger.info(f"Funnel visualization saved: {pse_path}")
+    return pse_path
