@@ -1503,7 +1503,7 @@ def _funnel_cgo(
         rings.append(make_ring(z, r))
 
     # Latitudinal rings
-    cgo = [LINEWIDTH, 1.5, COLOR, 0.0, 0.85, 0.9, BEGIN, LINES]
+    cgo = [LINEWIDTH, 1.5, COLOR, 0.35, 0.35, 0.35, BEGIN, LINES]
     for pts in rings:
         for i in range(n_pts):
             p1, p2 = pts[i], pts[(i + 1) % n_pts]
@@ -1572,22 +1572,37 @@ def write_funnel_pymol(
     extension = 5.0  # extra cylinder length for context
 
     # --- Re-anchor to the reference PDB coordinate frame ---
-    # com_traj is a relative (frame-independent) quantity, so it can be re-anchored
-    # to coordinates derived from the reference PDB.
+    # com_traj is a relative quantity (guest_com − host_com) computed during
+    # generate_funnel_parameters_from_trajectory.  To place it in the reference
+    # PDB frame we must add the HOST COM from that PDB — the same atoms used to
+    # define the funnel force, stored in funnel_params["host_index"].
+    # Using the full-protein COM as the anchor (old behaviour) is WRONG when the
+    # host selection is a subset of the protein (e.g. pocket CAs): the two COMs
+    # differ by several Å, causing the sMD dots and the funnel cone to appear
+    # offset from each other in the visualisation.
     u_ref_anchor = mda.Universe(str(Path(reference_pdb).resolve()))
     prot_anchor = u_ref_anchor.select_atoms(protein_selection)
-    prot_com_pdb = prot_anchor.center_of_mass()  # needed for milestone/traj dots
+    prot_com_pdb = prot_anchor.center_of_mass()  # kept for milestone fallback only
 
-    # Visual center: bound-state ligand COM so the funnel is centred on the pocket.
-    # z_offset is the axial distance from the force anchor (protein COM) to that
-    # center, used inside _funnel_cgo to compute ring radii that match the force.
-    lig_anchor = u_ref_anchor.select_atoms(f"resname {ligand_resname} and not name H*")
-    if len(lig_anchor) > 0:
-        funnel_center = lig_anchor.center_of_mass()
-        z_offset = float(np.dot(funnel_center - prot_com_pdb, unbinding_axis))
+    host_indices = list(funnel_params.get("host_index", []))
+    if host_indices:
+        host_anchor = u_ref_anchor.select_atoms(
+            f"index {' '.join(map(str, host_indices))}"
+        )
+        host_com_ref = (
+            host_anchor.center_of_mass()
+            if len(host_anchor) > 0
+            else prot_com_pdb
+        )
     else:
-        funnel_center = prot_com_pdb
-        z_offset = 0.0
+        host_com_ref = prot_com_pdb
+
+    # Funnel center: initial ligand COM in the reference frame.
+    # com_traj[0] is the bound-state ligand position relative to the host COM,
+    # so host_com_ref + com_traj[0] places it correctly in reference-PDB space.
+    # This guarantees that the first sMD dot and the funnel tip are co-located.
+    funnel_center = host_com_ref + com_traj[0]
+    z_offset = float(np.dot(com_traj[0], unbinding_axis))
     z_offset = max(z_offset, 0.0)
 
     # --- CGO objects ---
@@ -1609,11 +1624,12 @@ def write_funnel_pymol(
         0.6, 0.0, 0.0, 0.8, 0.0, 0.0, 0.8, 0.0, 1.0, 1.0,
     ]
 
-    # Milestone spheres — use relative lig-protein COM from each milestone PDB so
-    # they are also correctly placed in the reference PDB frame.
-    ms_colors = [(1.0, 0.5, 0.0), (0.9, 0.9, 0.0), (0.4, 0.8, 0.4),
-                 (0.2, 0.6, 1.0), (0.8, 0.3, 0.8)]
-    ms_cgo = []
+    import colorsys
+    n_ms = len(milestone_files)
+    # ms_data: list of (obj_name, lig_atomgroup, positions_in_ref_frame, (r,g,b))
+    # Positions are pre-translated so that writing them to a PDB and loading into
+    # PyMOL places the ligand correctly in the reference-PDB coordinate frame.
+    ms_data = []
     for i, ms_file in enumerate(milestone_files):
         try:
             u_ms = mda.Universe(ms_file)
@@ -1623,24 +1639,28 @@ def write_funnel_pymol(
                     "not (protein or resname HOH SOL WAT or name NA CL K MG)")
             if len(lig) == 0:
                 continue
-            prot_ms = u_ms.select_atoms(protein_selection)
-            if len(prot_ms) == 0:
+            if host_indices:
+                host_ms = u_ms.select_atoms(
+                    f"index {' '.join(map(str, host_indices))}"
+                )
+            if not host_indices or len(host_ms) == 0:
+                host_ms = u_ms.select_atoms(protein_selection)
+            if len(host_ms) == 0:
                 continue
-            # Relative position of ligand COM w.r.t. protein COM in milestone frame,
-            # re-anchored to the protein COM in the reference PDB frame.
-            rel = lig.center_of_mass() - prot_ms.center_of_mass()
-            abs_pos = prot_com_pdb + rel
-            r, g, b = ms_colors[i % len(ms_colors)]
-            ms_cgo += [COLOR, r, g, b,
-                       SPHERE, float(abs_pos[0]), float(abs_pos[1]), float(abs_pos[2]), 1.8]
+            # Translate ligand into the reference PDB coordinate frame.
+            lig_pos_ref = lig.positions - host_ms.center_of_mass() + host_com_ref
+            # Rainbow: blue (bound, i=0) → red (unbound, i=n_ms-1)
+            t = i / max(n_ms - 1, 1)
+            rgb = colorsys.hsv_to_rgb(2 / 3 * (1.0 - t), 1.0, 1.0)
+            ms_data.append((f"milestone_{i}", lig, lig_pos_ref, rgb))
         except Exception as exc:
             logger.warning(f"Could not load milestone {ms_file}: {exc}")
             continue
 
     # sMD COM trajectory — every 10th frame, blue (start) → red (end).
-    # com_traj is relative (guest - host), re-anchored to the protein COM in the
-    # reference PDB frame (prot_com_pdb), NOT funnel_center (ligand COM).
-    abs_positions = com_traj + prot_com_pdb
+    # com_traj is relative (guest − host), re-anchored to the host COM in the
+    # reference PDB frame so that abs_positions[0] == funnel_center exactly.
+    abs_positions = com_traj + host_com_ref
     sampled = abs_positions[::10]
     n_samp = max(1, len(sampled) - 1)
     traj_cgo = []
@@ -1663,6 +1683,15 @@ def write_funnel_pymol(
         with mda.Writer(prot_pdb, prot_atoms.n_atoms) as w:
             w.write(prot_atoms)
 
+        # Write milestone ligand PDBs (translated to reference frame) into tempdir
+        ms_pdb_data = []
+        for obj_name, lig_ag, lig_pos_ref, rgb in ms_data:
+            ms_pdb = os.path.join(tmpdir, f"{obj_name}.pdb")
+            lig_ag.positions = lig_pos_ref
+            with mda.Writer(ms_pdb, lig_ag.n_atoms) as w:
+                w.write(lig_ag)
+            ms_pdb_data.append((obj_name, ms_pdb, rgb))
+
         with pymol2.PyMOL() as pymol:
             c = pymol.cmd
             c.bg_color("white")
@@ -1681,9 +1710,15 @@ def write_funnel_pymol(
             # Unbinding axis arrow
             c.load_cgo(axis_cgo, "unbinding_axis")
 
-            # Milestone spheres
-            if ms_cgo:
-                c.load_cgo(ms_cgo, "milestones")
+            # Milestone ligands — sticks, rainbow blue (bound) → red (unbound)
+            for obj_name, ms_pdb, (r, g, b) in ms_pdb_data:
+                c.load(ms_pdb, obj_name)
+                c.show("sticks", obj_name)
+                c.hide("lines", obj_name)
+                color_name = f"ms_col_{obj_name}"
+                c.set_color(color_name, [float(r), float(g), float(b)])
+                c.color(color_name, obj_name)
+                c.set("stick_radius", 0.15, obj_name)
 
             # sMD COM trajectory dots
             if traj_cgo:

@@ -432,6 +432,25 @@ def generate_funnel_parameters_from_trajectory(
     R_cylinder_quantity = R_cylinder * openmmunit.angstrom
     alpha_quantity = alpha_cone_degrees * openmmunit.degrees
 
+    # Validate that the funnel actually encloses the sMD trajectory.
+    # A funnel cone that excludes the natural unbinding path will apply wall forces
+    # throughout metadynamics, distorting the FE and creating boundary artifacts.
+    R_funnel_per_frame = np.where(
+        z_distances < z_cc,
+        (z_cc - z_distances) * np.tan(np.radians(alpha_cone_degrees)) + R_cylinder,
+        R_cylinder,
+    )
+    frac_inside = float(np.mean(radial_distances <= R_funnel_per_frame))
+    if frac_inside < 0.7:
+        logger.warning(
+            f"Only {100 * frac_inside:.1f}% of sMD frames are inside the funnel cone "
+            f"(threshold: 70%). The funnel is likely misaligned with the unbinding path. "
+            "Recommendation: pass pocket atoms as host_selection instead of 'protein' so "
+            "the funnel axis passes through the binding site."
+        )
+    else:
+        logger.info(f"Funnel coverage: {100 * frac_inside:.1f}% of sMD frames inside cone.")
+
     if verbose:
         logger.info(f"Unbinding axis: {unbinding_axis}")
         logger.info(f"Z-crossing point (z_cc): {z_cc:.2f} Å")
