@@ -48,7 +48,7 @@ class AutoPath:
         VS_mode: bool = False,
         pdb_path: str = None,
         do_fix_pdb: bool = True,
-        pocket_selection: str = "same residue as protein and (around 4 resname UNK) and (not name H*)",
+        pocket_selection: str = None,
         temperature: float = 300,
         random_state: int = 42,
         platform: str = 'fastest',  # or 'CUDA', 'OpenCL', 'CPU'
@@ -188,7 +188,7 @@ class AutoPath:
         else:
             self.protein_file = pdb_path
 
-    def run(self, ligand_file: str = None, ligand_resname: str = "UNK"):
+    def run(self, ligand_file: str = None, ligand_selection: str = "resname UNK"):
 
         start_time = time.monotonic()
 
@@ -263,28 +263,32 @@ class AutoPath:
         ############################# Post-equilibration Analysis ####################################
         ##############################################################################################
         
+        _lig_sel_ha = f"({ligand_selection}) and not name H*"
+
         equilibrated_traj = equilibrated_traj.replace(".dcd", "_aligned.dcd")
         if os.path.exists(equilibrated_traj):
             u_eq = mda.Universe(equilibrated_pdb, equilibrated_traj, in_memory=True)
+            is_peptide = u_eq.select_atoms(ligand_selection).n_residues > 1
             lig_mol = None
             try:
                 rmsd = compute_rmsd(u_eq, u_eq,
-                                    alig_select="backbone", 
-                                    groupselections={"ligand":f"resname {ligand_resname} and not name H*", 
+                                    alig_select="backbone",
+                                    groupselections={"ligand": _lig_sel_ha,
                                                     "protein":'protein and not name H*'},
                                     plots_outdir=f"{sys_name}/equilibration"
                                     )
                 rmsd.to_csv(f"{sys_name}/equilibration/{sys_name}_rmsd.csv", index=False)
-                _contact_freq = calculate_contact_frequency(u_eq, ligand_resname)
-                _rmsf = calculate_ligand_rmsf(u_eq, ligand_resname)
-                lig_mol = Chem.SDMolSupplier(ligand_file)[0] #Avoid chemiperception problems
-                plot_atomic_property(u_eq, _rmsf, lig_resname=ligand_resname,
-                                     outname=f"{sys_name}/equilibration/{sys_name}_RMSF.svg",
-                                     ref_mol=lig_mol)
-                plot_atomic_property(u_eq, _contact_freq, lig_resname=ligand_resname,
-                                     outname=f"{sys_name}/equilibration/{sys_name}_contact_freq.svg",
-                                     ref_mol=lig_mol, color='r')
-                lig_ha_eq = u_eq.select_atoms(f'resname {ligand_resname} and not name H*')
+                _contact_freq = calculate_contact_frequency(u_eq, ligand_selection)
+                _rmsf = calculate_ligand_rmsf(u_eq, ligand_selection)
+                if not is_peptide and ligand_file is not None:
+                    lig_mol = Chem.SDMolSupplier(ligand_file)[0] #Avoid chemiperception problems
+                    plot_atomic_property(u_eq, _rmsf, lig_resname=ligand_selection,
+                                         outname=f"{sys_name}/equilibration/{sys_name}_RMSF.svg",
+                                         ref_mol=lig_mol)
+                    plot_atomic_property(u_eq, _contact_freq, lig_resname=ligand_selection,
+                                         outname=f"{sys_name}/equilibration/{sys_name}_contact_freq.svg",
+                                         ref_mol=lig_mol, color='r')
+                lig_ha_eq = u_eq.select_atoms(_lig_sel_ha)
                 pd.DataFrame({
                     'atom_name':    [a.name for a in lig_ha_eq.atoms],
                     'element':      [a.element for a in lig_ha_eq.atoms],
@@ -294,7 +298,7 @@ class AutoPath:
             except Exception as e:
                 logger.error(f"Error computing RMSD/RMSF: {e}")
                 pass
-            
+
             # Equilibration VS checkpoint
             # if self.equilibration_checkpoint:
             #     final_rmsd = lig_rmsd_equilibration[-1:].values
@@ -304,14 +308,17 @@ class AutoPath:
             # ligand_atoms = u_eq.select_atoms(f'index {" ".join(map(str, ligand_atoms_indices))}')
             # final_com = calculate_com_distance(u_eq, ligand_atoms, pocket_atoms, wrap=False)[-1] /10 # convert to nm
             # logger.info(f"COM distance after equilibration is: {final_com:.2f} nm")
-            
-            pocket_atom_indices = get_pocket_atoms_idxs(u_eq, self.pocket_selection)
+
+            if self.pocket_selection is not None:
+                pocket_atom_indices = get_pocket_atoms_idxs(u_eq, self.pocket_selection)
+            else:
+                pocket_atom_indices = get_pocket_atoms_idxs(u_eq, ligand_selection=_lig_sel_ha)
             pocket_atoms = u_eq.select_atoms(f'index {" ".join(map(str, pocket_atom_indices))}')
             pocket_residues = [f"{atom.resname}_{atom.resid}" for atom in pocket_atoms]
             logger.info(f"Pocket residues are: {', '.join(set(pocket_residues))}")
-            
-            ligand_total_hatoms = [a.index for a in u_eq.select_atoms(f'resname {ligand_resname} and not name H*')]
-            ligand_atoms_indices = get_ligand_anchor_atoms(u_eq, ligand_resname,
+
+            ligand_total_hatoms = [a.index for a in u_eq.select_atoms(_lig_sel_ha)]
+            ligand_atoms_indices = get_ligand_anchor_atoms(u_eq, ligand_selection,
                                                         mode=self.sMD_ligand_anchor_mode,
                                                         n_atoms=5,
                                                         out_dir=sys_name,
@@ -323,7 +330,7 @@ class AutoPath:
                     u=u_eq,
                     out_dir=sys_name,
                     protein_selection="protein",
-                    ligand_selection=f"resname {ligand_resname}",
+                    ligand_selection=ligand_selection,
                     pocket_selection=self.pocket_selection,
                 )
             except Exception as e:
@@ -404,7 +411,7 @@ class AutoPath:
                                                     do_plots=False, seed=self.random_state,
                                                     temperature=self.temperature,
                                                     outdir=sMD_analysis_outdir,
-                                                    ligand_select=f"resname {ligand_resname} and not name H*",
+                                                    ligand_select=_lig_sel_ha,
                                                     )
 
                             # check convergence for this speed
@@ -502,7 +509,7 @@ class AutoPath:
                                     estimators=['cumulant', 'jarzynski'],
                                     do_plots=True, seed=self.random_state,
                                     temperature=self.temperature,
-                                    ligand_select=f"resname {ligand_resname} and not name H*",
+                                    ligand_select=_lig_sel_ha,
                                     outdir=sMD_analysis_outdir,
                                     filter_low_support=True,
                                     min_samples_per_step=5,
@@ -514,7 +521,7 @@ class AutoPath:
                                     )
 
             smd_data = smdanalysis.run(smd_data,
-                                       group_A=f"resname {ligand_resname} and not name H*",
+                                       group_A=_lig_sel_ha,
                                        group_B=self.sMD_clust_selection,
                                        merge_features=MERGE_CLUSTERING_FEATURES,
                                        cluster_across_speeds=self.cluster_across_speeds,
@@ -528,7 +535,7 @@ class AutoPath:
 
             # check convergence regardless of speed and autopstop
             conv_df, traces_df = smdanalysis.check_convergence(logs=logs,
-                group_A=f"resname {ligand_resname} and not name H*",
+                group_A=_lig_sel_ha,
                 group_B=self.sMD_clust_selection
             )
             conv_df.to_csv(f"{sMD_analysis_outdir}/sMD_conv_vALL_metrics.csv", index=False)
@@ -557,10 +564,10 @@ class AutoPath:
         if self.extract_milestones or self.run_metadynamics:
             # Resolve ligand_atoms_full_indices for downstream use (metadynamics, relax)
             u_sMD = mda.Universe(solvated_system_pdb, sMD_trajs)
-            ligand_atoms_full = u_sMD.select_atoms(f'resname {ligand_resname} and not name H*')
+            ligand_atoms_full = u_sMD.select_atoms(_lig_sel_ha)
             ligand_atoms_full_indices = [atom.index for atom in ligand_atoms_full]
 
-            ligand_sel = f"resname {ligand_resname} and not name H*"
+            ligand_sel = _lig_sel_ha
             pocket_sel = f'index {" ".join(map(str, pocket_atom_indices))}'
 
         if self.extract_milestones:
@@ -809,7 +816,7 @@ class AutoPath:
                             u_ref = mda.Universe(equilibrated_pdb)
                             contact_ca = u_ref.select_atoms(
                                 f"protein and name CA and same residue as "
-                                f"(around 6 resname {ligand_resname})"
+                                f"(around 6 ({ligand_selection}))"
                             )
                             if len(contact_ca) == 0:
                                 logger.warning(
@@ -834,7 +841,7 @@ class AutoPath:
                         funnel_params = generate_funnel_parameters_from_trajectory(
                             universe,
                             host_selection=funnel_host_sel,
-                            guest_selection=f"resname {ligand_resname}",
+                            guest_selection=ligand_selection,
                             percentile_z=65.0,
                             R_cylinder_ang=2.0, # Angstroms; radius of cylindrical part of funnel
                             # z_cc_ang=5, # this overrides the default automatic z_cc calculation (floor is 5A)
@@ -861,7 +868,7 @@ class AutoPath:
                                 reference_pdb=solvated_system_pdb,
                                 milestone_files=milestones,
                                 outdir=mMD_out_dir,
-                                ligand_resname=ligand_resname,
+                                ligand_selection=ligand_selection,
                             )
                         except Exception as viz_e:
                             logger.warning(f"Funnel visualization failed (non-fatal): {viz_e}")

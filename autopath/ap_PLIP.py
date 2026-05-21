@@ -56,8 +56,8 @@ class ProteinLigandAnalyzer:
             Topology file (PDB, PRMTOP, PSF, etc.)
         trajs : list of str
             List of trajectory files (each considered a separate replica)
-        ligand_resname : str
-            Residue name for the ligand (default "UNK")
+        ligand_mda_selection : str
+            MDAnalysis selection string for the ligand (default "resname UNK")
         selection : str or None
             Residue selection string (MDAnalysis-style). If None, LIE uses all residues.
         """
@@ -977,23 +977,23 @@ def _replace_line(lines: list,
             break
     return lines
 
-def calculate_contact_frequency(u, ligand_resname: str, pocket_cutoff: float = 5.0, contact_cutoff: float = 3.5) -> np.ndarray:
+def calculate_contact_frequency(u, ligand_selection: str, pocket_cutoff: float = 5.0, contact_cutoff: float = 3.5) -> np.ndarray:
     """Return per-atom contact frequency (fraction of frames) for ligand heavy atoms within contact_cutoff of pocket atoms."""
-    lig_ha = u.select_atoms(f'resname {ligand_resname} and not name H*')
+    lig_ha = u.select_atoms(f'({ligand_selection}) and not name H*')
     u.trajectory[0]
-    pocket = u.select_atoms(f'protein and not name H* and around {pocket_cutoff} resname {ligand_resname}')
+    pocket = u.select_atoms(f'protein and not name H* and around {pocket_cutoff} ({ligand_selection})')
     contact_counts = np.zeros(len(lig_ha))
     for ts in u.trajectory:
         dmat = distance_array(lig_ha.positions, pocket.positions)
         contact_counts += (dmat < contact_cutoff).any(axis=1)
     return contact_counts / len(u.trajectory)
 
-def calculate_ligand_rmsf(u, lig_resname: str = 'UNK') -> np.ndarray:
+def calculate_ligand_rmsf(u, ligand_selection: str = 'resname UNK') -> np.ndarray:
     """Return RMSF values for ligand heavy atoms."""
-    lig_ha = u.select_atoms(f'resname {lig_resname} and not name H*')
+    lig_ha = u.select_atoms(f'({ligand_selection}) and not name H*')
     return RMSF(atomgroup=lig_ha).run().rmsf
 
-def plot_atomic_property(u, weights: np.ndarray, lig_resname: str = 'UNK',
+def plot_atomic_property(u, weights: np.ndarray, lig_resname: str = 'resname UNK',
                          outname: str = 'property.png', ref_mol=None,
                          color=None, colormap=None) -> None:
     """Plot a per-atom scalar property on the ligand 2D structure and save as image.
@@ -1020,7 +1020,7 @@ def plot_atomic_property(u, weights: np.ndarray, lig_resname: str = 'UNK',
         probe_mol = Chem.RemoveHs(ref_mol)
         AllChem.Compute2DCoords(probe_mol)
     else:
-        lig_full = u.select_atoms(f'resname {lig_resname}')
+        lig_full = u.select_atoms(lig_resname)
         probe_mol = lig_full.convert_to('RDKIT', NoImplicit=False)
         probe_mol.Compute2DCoords()
         probe_mol = Chem.RemoveHs(probe_mol)

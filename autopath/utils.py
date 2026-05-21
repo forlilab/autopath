@@ -693,7 +693,7 @@ def generate_smd_pocket_selection(
     return selection
 
 
-def reduce_to_murcko_scaffold(u, lig_resname: str, img_name: str = None):
+def reduce_to_murcko_scaffold(u, lig_selection: str, img_name: str = None):
     """
     Reduce ligand atoms to their Murcko scaffold representation.
 
@@ -704,9 +704,9 @@ def reduce_to_murcko_scaffold(u, lig_resname: str, img_name: str = None):
     mol : RDKit Mol object (with Hs removed and 2D coords)
     """
     if img_name is None:
-        img_name = f"ligand_{lig_resname}_murcko.png"
+        img_name = f"ligand_murcko.png"
 
-    ligand_all = u.select_atoms(f"resname {lig_resname}")
+    ligand_all = u.select_atoms(lig_selection)
     mol = ligand_all.convert_to('RDKIT')
     sel_atoms = mol.GetAtoms()
 
@@ -714,18 +714,18 @@ def reduce_to_murcko_scaffold(u, lig_resname: str, img_name: str = None):
         murcko = MurckoScaffold.GetScaffoldForMol(mol)
         murcko_match = mol.GetSubstructMatch(murcko)
         murcko_atom_names = [sel_atoms[i].GetProp('_MDAnalysis_name') for i in murcko_match]
-        reduced_ligand = u.select_atoms(f'resname {lig_resname} and name {" ".join(murcko_atom_names)}')
+        reduced_ligand = u.select_atoms(f'({lig_selection}) and name {" ".join(murcko_atom_names)}')
 
         return reduced_ligand, murcko_match, mol
 
     except Exception as e:
         logging.warning(f"Could not extract Murcko scaffold: {e}")
-        return u.select_atoms(f'resname {lig_resname} and not name H*'), [], mol
+        return u.select_atoms(f'({lig_selection}) and not name H*'), [], mol
 
 def get_ligand_anchor_atoms(
     u,
-    lig_resname: str,
-    pocket_sel: str = "protein and around 5 resname UNK and not name H*",
+    lig_selection: str,
+    pocket_sel: str = None,
     mode: str = "murcko",
     frames: int = 100,
     n_atoms: int = 5,
@@ -750,26 +750,42 @@ def get_ligand_anchor_atoms(
         out_dir = "."
     os.makedirs(out_dir, exist_ok=True)
 
-    img_name = f"{out_dir}/pulling_{lig_resname}_{mode}.png"
+    import re
+    sel_slug = re.sub(r'[^\w]', '_', lig_selection)[:30]
+    img_name = f"{out_dir}/pulling_{sel_slug}_{mode}.png"
 
-    ligand_full = u.select_atoms(f"resname {lig_resname}")
-    ligand_ha = u.select_atoms(f"resname {lig_resname} and not name H*")
+    if pocket_sel is None:
+        pocket_sel = f"protein and around 5 ({lig_selection}) and not name H*"
+
+    ligand_full = u.select_atoms(lig_selection)
+    ligand_ha = u.select_atoms(f"({lig_selection}) and not name H*")
 
     if ligand_full.n_atoms == 0:
-        raise ValueError(f"No atoms found for ligand {lig_resname}.")
+        raise ValueError(f"No atoms found for ligand selection '{lig_selection}'.")
+
+    is_multi_residue = ligand_full.n_residues > 1
 
     # RDKit mol from full ligand (keep Hs so indexing matches MDAnalysis)
-    mol = ligand_full.convert_to("RDKIT")
+    mol = ligand_full.convert_to("RDKIT") if not is_multi_residue else None
 
     # make sure we are at the last frame
     u.trajectory[-1]
     pocket = u.select_atoms(pocket_sel)
     anchor = []
 
+    # Murcko is only valid for single-residue small molecules
+    if mode == "murcko" and is_multi_residue:
+        logging.warning(
+            f"Murcko scaffold mode is not supported for multi-residue ligand "
+            f"('{lig_selection}' spans {ligand_full.n_residues} residues). "
+            "Falling back to 'lig_ha'."
+        )
+        mode = "lig_ha"
+
     # optional Murcko reduction before anchor selection
-    if reduce_before:
+    if reduce_before and not is_multi_residue:
         ligand, highlight_rdk_indices, mol = reduce_to_murcko_scaffold(
-            u, lig_resname, img_name
+            u, lig_selection, img_name
         )
         # filter out H for pulling
         ligand = ligand.select_atoms("not name H*")
@@ -788,11 +804,14 @@ def get_ligand_anchor_atoms(
 
     elif mode == "murcko":
         ligand, anchor_indices, mol = reduce_to_murcko_scaffold(
-            u, lig_resname, img_name
+            u, lig_selection, img_name
         )
         # only heavy atoms for anchors
         ligand = ligand.select_atoms("not name H*")
         anchor = [a.index for a in ligand.atoms]
+
+    elif mode == "ca":
+        anchor = list(u.select_atoms(f"({lig_selection}) and name CA").indices)
 
     elif mode == "lig_com":
         com = ligand.center_of_mass()
@@ -836,8 +855,8 @@ def get_ligand_anchor_atoms(
     else:
         raise ValueError(f"Unknown mode '{mode}'")
 
-    # expand rings in RDKit space if requested
-    if expand_rings:
+    # expand rings in RDKit space if requested (single-residue small molecules only)
+    if expand_rings and not is_multi_residue and mol is not None:
         # map MDAnalysis atom index -> RDKit index
         idx_map = {a.index: i for i, a in enumerate(ligand_full.atoms)}
         rdk_anchor_indices = [idx_map[i] for i in anchor if i in idx_map]
@@ -864,27 +883,28 @@ def get_ligand_anchor_atoms(
         if verbose:
             print(f"[get_ligand_anchor_atoms] Expanded to include rings (heavy only): {expanded_mda_indices}")
 
-    # Draw 2D image
-    try:
-        if ref_mol is not None:
-            mol_draw = Chem.RemoveHs(ref_mol)
-            Chem.rdDepictor.Compute2DCoords(mol_draw)
-            # anchor MDA indices → position among heavy atoms → ref_mol atom index
-            ha_indices = list(ligand_ha.atoms.indices)
-            highlight_rdk_indices = [ha_indices.index(i) for i in anchor if i in ha_indices]
-        else:
-            idx_map = {a.index: i for i, a in enumerate(ligand_full.atoms)}
-            highlight_rdk_indices = [idx_map[i] for i in anchor if i in idx_map]
-            mol_draw = Chem.RemoveHs(mol)
-            Chem.rdDepictor.Compute2DCoords(mol_draw)
-        img = Chem.Draw.MolToImage(
-            mol_draw,
-            size=(300, 300),
-            highlightAtoms=highlight_rdk_indices,
-        )
-        img.save(img_name)
-    except Exception as e:
-        logging.warning(f"Could not generate 2D image with highlights: {e}")
+    # Draw 2D image (single-residue small molecules only)
+    if not is_multi_residue:
+        try:
+            if ref_mol is not None:
+                mol_draw = Chem.RemoveHs(ref_mol)
+                Chem.rdDepictor.Compute2DCoords(mol_draw)
+                # anchor MDA indices → position among heavy atoms → ref_mol atom index
+                ha_indices = list(ligand_ha.atoms.indices)
+                highlight_rdk_indices = [ha_indices.index(i) for i in anchor if i in ha_indices]
+            else:
+                idx_map = {a.index: i for i, a in enumerate(ligand_full.atoms)}
+                highlight_rdk_indices = [idx_map[i] for i in anchor if i in idx_map]
+                mol_draw = Chem.RemoveHs(mol)
+                Chem.rdDepictor.Compute2DCoords(mol_draw)
+            img = Chem.Draw.MolToImage(
+                mol_draw,
+                size=(300, 300),
+                highlightAtoms=highlight_rdk_indices,
+            )
+            img.save(img_name)
+        except Exception as e:
+            logging.warning(f"Could not generate 2D image with highlights: {e}")
         
     #ligand_ag = u.atoms[anchor]
     
@@ -1538,7 +1558,7 @@ def write_funnel_pymol(
     milestone_files: list,
     outdir: str,
     protein_selection: str = "protein",
-    ligand_resname: str = "UNK",
+    ligand_selection: str = "resname UNK",
     output_format: str = "pse",
 ) -> str:
     """Create a standalone PyMOL PSE visualising the funnel potential geometry.
@@ -1554,7 +1574,7 @@ def write_funnel_pymol(
         milestone_files: Ordered list of milestone PDB paths.
         outdir: Directory where ``funnel_visualization.pse`` is written.
         protein_selection: PyMOL/MDAnalysis selection string for the protein.
-        ligand_resname: Residue name of the ligand (used to locate atoms in milestone PDBs).
+        ligand_selection: MDAnalysis selection string for the ligand.
         output_format: Only ``"pse"`` is supported; kept for API consistency.
 
     Returns:
@@ -1644,7 +1664,7 @@ def write_funnel_pymol(
     for i, ms_file in enumerate(milestone_files):
         try:
             u_ms = mda.Universe(ms_file)
-            lig = u_ms.select_atoms(f"resname {ligand_resname} and not name H*")
+            lig = u_ms.select_atoms(f"({ligand_selection}) and not name H*")
             if len(lig) == 0:
                 lig = u_ms.select_atoms(
                     "not (protein or resname HOH SOL WAT or name NA CL K MG)")
