@@ -151,12 +151,15 @@ def plot_work_profiles(
 def plot_profile(df: pd.DataFrame,
                  value_col: str = 'dG',
                  hue: str | None = None,
+                 style: str | None = None,
                  row: str | None = None,
                  col: str = 'speed',
+                 col_order: list | None = None,
                  show_error_bands: bool = False,
                  ylabel: str | None = None,
                  outdir: str = 'analysis',
                  prefix: str = '',
+                 outfname: str | None = None,
                  mask_negative_dG: bool = False,
                  sharey: bool = True,
                  ):
@@ -169,13 +172,15 @@ def plot_profile(df: pd.DataFrame,
     value_col : str
         Column to plot on the y-axis (e.g. ``'dG'``, ``'Wdiss'``).
     hue : str or None
-        Column used for colour encoding.  If *None*, auto-detected:
-        ``'source_estimator'`` if present, else ``'estimator'``,
-        else no hue.
+        Column for colour encoding. Auto-detected from ``'estimator'`` if None.
+    style : str or None
+        Column for line-style encoding (e.g. ``'estimator'``).
     row : str or None
         Optional row facet variable (e.g. ``'path'``).
     col : str
         Column facet variable (default ``'speed'``).
+    col_order : list or None
+        Explicit ordering of column panels.
     show_error_bands : bool
         If True and a column named ``{value_col}_se`` exists,
         draw ±1 SE shading around each line.
@@ -184,7 +189,10 @@ def plot_profile(df: pd.DataFrame,
     outdir : str
         Directory for saved figures.
     prefix : str
-        Optional filename prefix.
+        Optional filename suffix added before the extension.
+    outfname : str or None
+        Full output path override; if given, ``outdir`` and ``prefix``
+        are ignored for the filename.
     """
     os.makedirs(outdir, exist_ok=True)
 
@@ -197,17 +205,21 @@ def plot_profile(df: pd.DataFrame,
         if 'estimator' in df.columns and df['estimator'].nunique() > 1:
             hue = 'estimator'
 
-    outfname = os.path.join(outdir, f"{value_col}{prefix}.svg")
+    if outfname is None:
+        outfname = os.path.join(outdir, f"{value_col}{prefix}.svg")
     se_col = f"{value_col}_se"
     has_se = show_error_bands and se_col in df.columns
 
+    # hue and style are handled by lineplot (not FacetGrid) so the legend
+    # automatically includes entries for both colour and line-style.
     g = sns.FacetGrid(
-        df, col=col, row=row, hue=hue,
+        df, col=col, col_order=col_order, row=row,
         sharey=sharey, sharex=True,
         height=4.0, aspect=1,
         margin_titles=True,
     )
-    g.map_dataframe(plt.plot, 'r_coord', value_col)
+    g.map_dataframe(sns.lineplot, x='r_coord', y=value_col,
+                    hue=hue, style=style, sort=True, errorbar=None)
 
     # Optional error bands
     if has_se:
@@ -228,9 +240,8 @@ def plot_profile(df: pd.DataFrame,
     y_label = ylabel if ylabel else value_col
     g.set_axis_labels('r_coord (nm)', y_label)
 
-    g.add_legend(title=hue.replace('_', ' ').title() if hue else '',
-                bbox_to_anchor=(1.01, 0.8), loc='upper left',
-                 )
+    if hue or style:
+        g.add_legend(bbox_to_anchor=(1.01, 0.8), loc='upper left')
 
     plt.tight_layout()
     plt.savefig(outfname, dpi=300, bbox_inches='tight')
@@ -245,38 +256,46 @@ def plot_friction(df: pd.DataFrame,
                   ):
     """Plot friction profiles from FrictionEstimator output.
 
-    Creates one figure per friction method (derivative / regression),
-    faceted by speed, coloured by estimator. Regression panels 
-    include ±1 SE error bands when available.
+    Produces two figures, each faceted by speed (actual speeds descending,
+    then v=0 extrapolation last) and coloured by method:
+      - Gamma_local.svg      : local friction Γ(r)
+      - Gamma_cumulative.svg : cumulative ∫Γ dr
     """
     if df is None or df.empty:
         logger.warning("No friction data to plot.")
         return
 
-    for method, mdf in df.groupby('method'):
-        # Local friction (both methods)
+    # Speed ordering: actual speeds fastest→slowest, then 0.0 (extrapolated) last
+    all_speeds = sorted(df['speed'].unique())
+    speed_order = sorted([s for s in all_speeds if s > 0], reverse=True) + \
+                  [s for s in all_speeds if s == 0]
+
+    # Plot 1: local Γ — both methods combined
+    plot_profile(
+        df,
+        value_col='Gamma',
+        hue='estimator',
+        col_order=speed_order,
+        show_error_bands=False,
+        ylabel='Γ (kJ·ps/mol/nm²)',
+        outdir=outdir,
+        outfname=os.path.join(outdir, 'Gamma_local.svg'),
+        sharey=False,
+    )
+
+    # Plot 2: cumulative Γ — both methods combined (where available)
+    if 'Gamma_integrated' in df.columns and df['Gamma_integrated'].notna().any():
         plot_profile(
-            mdf,
-            value_col='Gamma',
+            df,
+            value_col='Gamma_integrated',
             hue='estimator',
+            col_order=speed_order,
             show_error_bands=False,
-            ylabel='Γ (kJ·ps/mol/nm²)',
+            ylabel='∫Γ dr (kJ·ps/mol/nm)',
             outdir=outdir,
-            prefix=f'_{method}',
-            sharey=False
+            outfname=os.path.join(outdir, 'Gamma_cumulative.svg'),
+            sharey=False,
         )
-        # Integrated friction (regression only)
-        if 'Gamma_integrated' in mdf.columns and mdf['Gamma_integrated'].notna().any():
-            plot_profile(
-                mdf,
-                value_col='Gamma_integrated',
-                hue='estimator',
-                show_error_bands=False,
-                ylabel='∫Γ dr (kJ·ps/mol/nm)',
-                outdir=outdir,
-                prefix=f'_{method}',
-                sharey=False,   # each speed has its own scale — low-speed Γ dominates if shared
-            )
     return
 
 def plot_convergence_traces(smd_conv_traces:list[str], outdir: str):

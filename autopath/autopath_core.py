@@ -283,7 +283,7 @@ class AutoPath:
                                      ref_mol=lig_mol)
                 plot_atomic_property(u_eq, _contact_freq, lig_resname=ligand_resname,
                                      outname=f"{sys_name}/equilibration/{sys_name}_contact_freq.svg",
-                                     ref_mol=lig_mol)
+                                     ref_mol=lig_mol, color='r')
                 lig_ha_eq = u_eq.select_atoms(f'resname {ligand_resname} and not name H*')
                 pd.DataFrame({
                     'atom_name':    [a.name for a in lig_ha_eq.atoms],
