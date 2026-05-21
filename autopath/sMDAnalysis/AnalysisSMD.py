@@ -942,13 +942,15 @@ class SMDAnalysis:
         early stopping condition (e.g. premature unbinding at high speed),
 
         Pass 3 — binding-well quality (``self.max_frac_neg_dG_first_half``):
-        drop paths where the fraction of negative-dG bins in the **first half**
-        of the r-range exceeds the threshold.  These paths have a corrupted
-        binding-well profile that the p_eq downweighting mechanism cannot fully
-        correct.  Paths where negativity is confined to the second half are kept:
-        the TS lies in the first half and p_eq is naturally suppressed by the
-        negative-bin exclusion in ``_compute_p_eq``.  Set to ≤ 0 to disable.
-        which would otherwise impose a hard floor on the weighted PMF.
+        drop (speed, path, estimator) rows where the fraction of negative-dG
+        bins in the **first half** of the r-range exceeds the threshold.  The
+        check is performed per estimator so that a cumulant failure at slow
+        speed does not falsely condemn a valid jarzynski profile for the same
+        path.  If all estimators fail for a (speed, path), the path is also
+        removed from raw_data.  Paths where negativity is confined to the
+        second half are kept: the TS lies in the first half and p_eq is
+        naturally suppressed by the negative-bin exclusion in
+        ``_compute_p_eq``.  Set to ≤ 0 to disable.
 
         Applied after estimator fitting and before p_eq computation and PMF
         construction.  Also logs a per-speed replica imbalance warning when
@@ -968,6 +970,16 @@ class SMDAnalysis:
                         (sMDDdata.raw_data['path'] == path)
                     ].index
                 )
+
+        if sMDDdata.results is None or sMDDdata.results.empty \
+           or not {'speed', 'path', 'n_samples'}.issubset(sMDDdata.results.columns):
+            raise RuntimeError(
+                "No estimator results to filter — sMDDdata.results is empty. "
+                "This usually means trim_results_by_n_samples_support removed all "
+                "rows from raw_data before the estimators ran. Lower "
+                "min_samples_per_step / min_support_ratio (or run more replicas "
+                "per (speed, path) group) and try again."
+            )
 
         # --- pass 1: minimum replica count ---
         keys_to_drop: list[tuple[float, str]] = []
@@ -999,22 +1011,37 @@ class SMDAnalysis:
 
         # --- pass 3: corrupted binding-well filter ---
         if self.max_frac_neg_dG_first_half > 0 and not sMDDdata.results.empty:
-            keys_to_drop = []
-            for (speed, path), grp in sMDDdata.results.groupby(['speed', 'path']):
+            est_keys_to_drop = []  # (speed, path, estimator)
+            for (speed, path, estimator), grp in sMDDdata.results.groupby(
+                    ['speed', 'path', 'estimator']):
                 sorted_grp = grp.sort_values('r_coord')
                 mid = len(sorted_grp) // 2
-                first_half_dG = sorted_grp['dG'].iloc[:mid]
-                valid = first_half_dG.dropna()
+                valid = sorted_grp['dG'].iloc[:mid].dropna()
                 if valid.empty:
                     continue
                 frac = float((valid < 0).sum() / len(valid))
                 if frac > self.max_frac_neg_dG_first_half:
                     logger.info(
-                        f"[filter/pass3] dropping path '{path}' at speed={speed} nm/ps: "
+                        f"[filter/pass3] dropping {estimator} path '{path}' "
+                        f"at speed={speed} nm/ps: "
                         f"frac_neg_dG_first_half={frac:.2f} > {self.max_frac_neg_dG_first_half}"
                     )
-                    keys_to_drop.append((speed, path))
-            _drop_keys(keys_to_drop)
+                    est_keys_to_drop.append((speed, path, estimator))
+
+            if est_keys_to_drop:
+                # Remove per-estimator rows from results
+                for speed, path, estimator in est_keys_to_drop:
+                    sMDDdata.results = sMDDdata.results.drop(
+                        sMDDdata.results[
+                            (sMDDdata.results['speed'] == speed) &
+                            (sMDDdata.results['path'] == path) &
+                            (sMDDdata.results['estimator'] == estimator)
+                        ].index
+                    )
+                # Drop from raw_data any (speed, path) now absent from results entirely
+                touched_sp = {(s, p) for s, p, _ in est_keys_to_drop}
+                surviving_sp = set(zip(sMDDdata.results['speed'], sMDDdata.results['path']))
+                _drop_keys(touched_sp - surviving_sp)
 
         # Replica balance report per speed
         for speed, gspeed in sMDDdata.results.groupby('speed'):
