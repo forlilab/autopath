@@ -71,7 +71,7 @@ def main():
                     ionicStrength=0.15,
                     boxShape="dodecahedron",
 
-                    lig_ff='OPENFF',
+                    lig_ff='openff-2.3.0',
 
                     run_equilibration=True,
                     protocol_fname=protocol,

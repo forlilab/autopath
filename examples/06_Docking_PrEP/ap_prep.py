@@ -328,7 +328,7 @@ def main():
             out_dir=save_dir,
             boxShape="dodecahedron",
             padding=1.2,
-            lig_ff="espaloma",
+            lig_ff="espaloma-0.3.2",
             ionicStrength=0.15,
             is_membrane=False,
             lipid_type="POPC",

@@ -126,7 +126,7 @@ def main():
             boxShape="dodecahedron",
             padding=1.2,
             hydrogenMass=1.5,
-            lig_ff="openff",
+            lig_ff="openff-2.3.0",
             ionicStrength=0.15,
             ions=("Na+", "Cl-"),
             is_membrane=False,

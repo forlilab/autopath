@@ -40,7 +40,7 @@ class SystemPreparation:
             "amber14/tip3pfb.xml",
             "amber/tip3pfb_HFE_multivalent.xml",
         ],
-        lig_ff: str = "espaloma",
+        lig_ff: str = "openff-2.3.0",
         hydrogenMass: float = 1.5, # # in amu, 1.5 is the default in OpenMM
         boxShape: str = "dodecahedron",
         padding: float = 1.2,
@@ -52,13 +52,7 @@ class SystemPreparation:
         out_dir: str = "system",
     ) -> None:
 
-        if lig_ff.upper() in ["ESPALOMA", "OPENFF", "GAFF"]:
-            self.lig_ff = lig_ff.upper()
-        else:
-            logger.error(
-                f"Ligand forcefield must be one of Espaloma, OPENFF or GAFF"
-            )
-            exit(1)
+        self.lig_ff, self._lig_ff_family = self._parse_lig_ff(lig_ff)
 
         self.out_dir = out_dir
         os.makedirs(out_dir, exist_ok=True)
@@ -113,6 +107,36 @@ class SystemPreparation:
         self.nb_cutoff = 1.0 * openmmunit.nanometers
         self.switchDistance = 0.9 * openmmunit.nanometers
 
+    @staticmethod
+    def _parse_lig_ff(lig_ff: str) -> tuple[str, str]:
+        """Parse `lig_ff` into (full_name, family).
+
+        Accepts strings of the form ``<family>-<version>`` (e.g.
+        ``openff-2.3.0``, ``espaloma-0.3.2``, ``gaff-2.11``). The family
+        prefix selects the openmmforcefields template generator; the full
+        name (including version) is passed through to that generator.
+        """
+        family_aliases = {
+            "OPENFF": "OPENFF",
+            "SMIRNOFF": "OPENFF",
+            "ESPALOMA": "ESPALOMA",
+            "GAFF": "GAFF",
+        }
+        if not isinstance(lig_ff, str) or "-" not in lig_ff:
+            logger.error(
+                f"Ligand forcefield must include a version, e.g. 'openff-2.3.0', "
+                f"'espaloma-0.3.2', 'gaff-2.11'. Got: {lig_ff!r}"
+            )
+            exit(1)
+        family_prefix = lig_ff.split("-", 1)[0].upper()
+        if family_prefix not in family_aliases:
+            logger.error(
+                f"Unknown ligand forcefield family {family_prefix!r}. "
+                f"Supported: openff-*, espaloma-*, gaff-*."
+            )
+            exit(1)
+        return lig_ff, family_aliases[family_prefix]
+
     def _ligand_to_mol(self, lig_fname: str = None, lig_smiles: str = None, lig_from_xray: bool = False):
         """Load ligand SDF/PDB and transform to OpenMM molecule"""
 
@@ -159,30 +183,22 @@ class SystemPreparation:
 
     def _parametrize_ligand(self, ligand):
 
-        # if self.lig_ff == "OPENFF":
-        #     forcefield = toolkit.ForceField("openff-2.3.0.offxml")
-        #     interchange = forcefield.create_interchange(ligand.to_topology())
-        #     ligand_omm_topology = interchange.to_openmm_topology()
-        #     ligand_positions = interchange.positions.to_openmm()
-
-        #     return ligand_omm_topology, ligand_positions
-
-        if self.lig_ff == "ESPALOMA":
+        if self._lig_ff_family == "ESPALOMA":
             template_generator = EspalomaTemplateGenerator(
-                molecules=ligand, 
-                # template_generator_kwargs = {"reference_forcefield": "openff_unconstrained-2.2.1"}
-                # forcefield="espaloma-0.3.2"
+                molecules=ligand,
+                forcefield=self.lig_ff,
             )
-            
-        elif self.lig_ff == "OPENFF":
+
+        elif self._lig_ff_family == "OPENFF":
             template_generator = SMIRNOFFTemplateGenerator(
-                molecules=ligand, 
-                forcefield="openff-2.3.0"
+                molecules=ligand,
+                forcefield=self.lig_ff,
             )
-        
-        elif self.lig_ff == "GAFF":
+
+        elif self._lig_ff_family == "GAFF":
             template_generator = GAFFTemplateGenerator(
                 molecules=ligand,
+                forcefield=self.lig_ff,
             )
 
         # add the template generator to the ff

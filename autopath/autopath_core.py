@@ -60,7 +60,7 @@ class AutoPath:
         ],
         hydrogenMass: float = 1.5,  # amu
         timestep: float = 0.004,  # ps
-        lig_ff: str = "espaloma",
+        lig_ff: str = "openff-2.3.0",
         boxShape: str = "dodecahedron",
         padding: float = 1.2,
         ionicStrength: float = 0.15,
