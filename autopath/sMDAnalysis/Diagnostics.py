@@ -144,7 +144,7 @@ def plot_work_profiles(
     # plt.title(f'Work Profiles {title_suffix}', fontsize=16)
     plt.tight_layout()
     plt.savefig(outfile, bbox_inches='tight', dpi=300)
-    plt.show()
+    # plt.show()
     plt.close()
     return
 

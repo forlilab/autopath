@@ -64,8 +64,8 @@ def main():
     ap = AutoPath(pdb_path=receptor,
                     pocket_selection=pocket_selection,
 
-                    do_fix_pdb=False,
-                    run_preparation=False,
+                    do_fix_pdb=True,
+                    run_preparation=True,
                     padding=1.2,
                     hydrogenMass=1.5, 
                     ionicStrength=0.15,
@@ -73,7 +73,7 @@ def main():
 
                     lig_ff='OPENFF',
 
-                    run_equilibration=False,
+                    run_equilibration=True,
                     protocol_fname=protocol,
 
                     run_sMDpulling=True,
@@ -96,10 +96,10 @@ def main():
                     
                     run_metadynamics=True,
                     mMD_use_funnel_potential=True,
-                    mMD_preseed_bias=True,
-                    # mMD_multiple_walkers=True,
+                    # mMD_preseed_bias=False,
+                    mMD_multiple_walkers=True,
                     
-                    mMD_time=2, # ns
+                    mMD_time=5, # ns
                     mMD_bias_frequency=2,
                     mMD_hill_width=0.05,
                     mMD_hill_height=1.2,

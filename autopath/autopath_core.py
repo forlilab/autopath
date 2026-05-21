@@ -81,16 +81,18 @@ class AutoPath:
         sMD_autostop_lag_sigma: float = 5.0,
         sMD_autostop_lag_window: int = 25,
         sMD_autostop_min_displacement: float = 0.5,
+        sMD_convergence_min_reps: int = 5,
         sMD_time: int = None,  # ns
         sMD_steps_per_move: int = None,
         sMD_dx_per_move: float = 0.001,  # nm, this is the displacement per move
         sMD_spring_cte: float = None,  # KJ/mol/nm2
-        sMD_ligand_anchor_mode: str = 'lig_ha',
+        sMD_ligand_anchor_mode: str = 'murcko',
         sMD_max_replicas: int = 50,  # max replicas per speed in convergence mode
         sMD_run_analysis: bool = True,
         sMD_clust_selection:str = None,
         sMD_features: list | None = None,
         cluster_across_speeds: bool = False,
+        sMD_min_replicas_per_path: int = 5,
         extract_milestones: bool = True,
         milestone_mode: str = "all_medoids",  # "per_path" or "all_medoids"
         milestone_min_frame_separation: int = 0,
@@ -135,6 +137,7 @@ class AutoPath:
         self.sMD_pulling_dir = sMD_pulling_dir
         self.sMD_max_pulling_dist = sMD_max_pulling_dist
         self.sMD_max_r_offset = sMD_max_r_offset
+        self.sMD_convergence_min_reps = sMD_convergence_min_reps
         self.sMD_autostop_nc = sMD_autostop_nc
         self.sMD_autostop_nc_threshold = sMD_autostop_nc_threshold
         self.sMD_autostop_lag_sigma = sMD_autostop_lag_sigma
@@ -151,6 +154,7 @@ class AutoPath:
         self.sMD_clust_selection = sMD_clust_selection
         self.sMD_features = sMD_features
         self.cluster_across_speeds = cluster_across_speeds
+        self.sMD_min_replicas_per_path = sMD_min_replicas_per_path
         # Milestones
         self.extract_milestones = extract_milestones
         self.milestone_mode = milestone_mode
@@ -180,8 +184,9 @@ class AutoPath:
         # Process the input PDB
         if do_fix_pdb:
             protein_pdb = PDBPreprocessor(pdb_path).fix(
-                                  cap_termini=False,
-                                  keep_heterogens=True, pH=7.4)
+                                  cap_termini=True,
+                                  keep_heterogens=True, 
+                                  pH=7.4)
             self.protein_file = pdb_path.replace(".pdb", "_fixed.pdb")
             save_pdb(protein_pdb.topology, protein_pdb.positions, self.protein_file)
         else:
@@ -333,7 +338,6 @@ class AutoPath:
         ##################################### Steered MD simulations #################################
         ##############################################################################################
         MERGE_CLUSTERING_FEATURES = True
-        CONVERGENCE_MIN_REPS = 5  # minimum replicas before checking convergence
         CONVERGENCE_TOLERANCES = {
             "dG_weighted-rmsd": 4.0,  # kJ/mol — must match tol_rmsd in check_convergence()
             "barrier_delta":    3.0,  # kJ/mol — must match tol_barrier
@@ -419,7 +423,7 @@ class AutoPath:
                             logger.warning(f"Reached maximum number of replicas ({self.sMD_max_replicas}) for speed {speed} nm/ps without convergence. Stopping.")
                             break
                         
-                        if len(log_files) >= CONVERGENCE_MIN_REPS:
+                        if len(log_files) >= self.sMD_convergence_min_reps:
                             
                             # loads the sMD data
                             smdanalysis = SMDAnalysis(sysname=sys_name, path_model='dtw', estimators=['cumulant'],
@@ -432,7 +436,7 @@ class AutoPath:
                             # check convergence for this speed
                             conv_df, traces_df = smdanalysis.check_convergence(
                                 logs=log_files, speeds=[speed],
-                                min_replicas=CONVERGENCE_MIN_REPS,
+                                min_replicas=self.sMD_convergence_min_reps,
                             )
                             
                             # conv_df is empty when replicas == min_replicas (first PMF comparison
@@ -507,6 +511,13 @@ class AutoPath:
                                     temperature=self.temperature,
                                     ligand_select=f"resname {ligand_resname} and not name H*",
                                     outdir=sMD_analysis_outdir,
+                                    filter_low_support=True,
+                                    min_samples_per_step=5,
+                                    min_support_ratio=1.0,
+                                    min_replicas_per_path=self.sMD_min_replicas_per_path,
+                                    min_path_steps_ratio=0.6,
+                                    max_frac_neg_dG_first_half=0.25,
+                                    min_speeds_for_extrapolation=2,
                                     )
 
             smd_data = smdanalysis.run(smd_data,
