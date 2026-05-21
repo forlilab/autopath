@@ -222,7 +222,7 @@ def pathCV_cv(
     grid_max: float = 1.0,
     hill_width: float = 0.05,
     grid_points: int = 125,
-    sigma: Union [float, str] = 'auto',
+    sigma: Union[float, str] = 'auto',
 ) -> CVSpec:
     """Path-in-CV-space CV through milestones evaluated with COM distance (deferred: needs positions).
 
@@ -255,14 +255,14 @@ def pathCV_cv(
 
         milestones_array = np.array(milestones_array)
         logger.info(f"PathCV milestone COM distances (nm): {milestones_array.flatten().tolist()}")
-        
+
         if sigma == 'auto':
             # Half the minimum spacing — guarantees kernels overlap at the closest pair
             # without over-smoothing at larger gaps.  mean-based sigma under-covers
             # the largest gap when milestone spacings are uneven.
             sigma = 0.5 * np.min(np.diff(milestones_array.flatten()))
             logger.info(f"Auto-tuned sigma for PathCV: {sigma:.4f} nm (0.5 × min milestone spacing)")
-        
+
         cv_com_bias = cvpack.CentroidFunction(
             "sqrt(distance(g1,g2)^2)",
             openmmunit.nanometers,

@@ -1,4 +1,5 @@
 import os
+import logging
 import numpy as np
 import pandas as pd
 from glob import glob
@@ -10,20 +11,17 @@ style.use("fivethirtyeight")
 plt.rcParams["savefig.facecolor"] = 'white'
 plt.rcParams["savefig.edgecolor"] = 'white'
 plt.rcParams["axes.facecolor"] = 'white'
-# plt.rcParams["axes.edgecolor"] = 'black'
-
-from rdkit import Chem
-from rdkit.Chem.Draw import rdMolDraw2D, SimilarityMaps
-
-import MDAnalysis as mda
-from MDAnalysis.analysis.rms import RMSF
-
-import logging
-logger = logging.getLogger("autopath")
 
 from autopath.sMDAnalysis.Estimators import _find_pmf_peak
 
-def plot_colvar(out_dir:str=None, colvar_name:str=None):
+logger = logging.getLogger("autopath")
+
+
+# ---------------------------------------------------------------------------
+# Plotting helpers
+# ---------------------------------------------------------------------------
+
+def plot_colvar(out_dir: str = None, colvar_name: str = None):
     sys_name = out_dir.split("/")[0]
     files = glob(f"{out_dir}/COLVAR_*")
     data = []
@@ -47,7 +45,7 @@ def plot_colvar(out_dir:str=None, colvar_name:str=None):
     return
 
 
-def plot_bias(out_dir:str=None, x_min:float=None, x_max:float=None, grid_points:int=None, colvar_name:str=None):
+def plot_bias(out_dir: str = None, x_min: float = None, x_max: float = None, grid_points: int = None, colvar_name: str = None):
     sys_name = out_dir.split("/")[0]
     axis_values = np.linspace(x_min, x_max, grid_points)
     axis_values = [round(i, 2) for i in axis_values]
@@ -129,7 +127,7 @@ def plot_FE_rw(out_dir, x_min, x_max, grid_points, colvar_name):
 
     files = sorted(glob(f"{out_dir}/FE_*_rw.npy"))
     if not files:
-        return  # funnel not used or correction not applied yet
+        return
 
     data = []
     for f in files:
@@ -140,8 +138,6 @@ def plot_FE_rw(out_dir, x_min, x_max, grid_points, colvar_name):
         df["walker"] = walker_name
         data.append(df)
 
-    # ΔG°_b = min(FE_rw) of the last walker, where the unbound plateau is normalised to 0.
-    # min(FE_rw) is directly the standard-state binding free energy (Limongelli 2013).
     last_fe_kcal = np.load(files[-1]) * 0.239006
     dG_std_kcal = float(last_fe_kcal.min())
     dG_std_kj = dG_std_kcal * 4.184
@@ -165,7 +161,6 @@ def plot_FE_rw(out_dir, x_min, x_max, grid_points, colvar_name):
 def plot_FE_2D(
     out_dir, x_min, x_max, x_grid_points, xCV_name, y_min, y_max, y_grid_points, yCV_name
 ):
-
     sys_name = out_dir.split("/")[0]
 
     x_values = np.linspace(x_min, x_max, x_grid_points)
@@ -184,7 +179,7 @@ def plot_FE_2D(
 
         df.index, df.columns = y_values, x_values
 
-        sns.heatmap(df, cmap="Spectral")  # , vmin=0, vmax=-8)
+        sns.heatmap(df, cmap="Spectral")
         plt.title(f"Metadynamics - {sys_name} - {walker_name}", fontsize=12)
         plt.xlabel(xCV_name)
         plt.ylabel(yCV_name)
@@ -194,6 +189,7 @@ def plot_FE_2D(
         plt.close()
 
     return
+
 
 def plot_colvar_2D(out_dir, xCV_name, yCV_name):
     sys_name = out_dir.split("/")[0]
@@ -210,7 +206,8 @@ def plot_colvar_2D(out_dir, xCV_name, yCV_name):
     plt.figure(figsize=(10, 5))
     sns.lineplot(data, x=data.index, y=xCV_name, hue="walker")
     plt.legend(bbox_to_anchor=(1.1, 1.05), fontsize="12")
-    plt.xlabel('Step #'); plt.ylabel(xCV_name)
+    plt.xlabel('Step #')
+    plt.ylabel(xCV_name)
     plt.title(f'{xCV_name} vs. Step # - {sys_name}')
     plt.tight_layout()
     plt.savefig(f"{out_dir}/{sys_name}_{xCV_name}_COLVAR.png")
@@ -219,7 +216,8 @@ def plot_colvar_2D(out_dir, xCV_name, yCV_name):
     plt.figure(figsize=(10, 5))
     sns.lineplot(data, x=data.index, y=yCV_name, hue="walker")
     plt.legend(bbox_to_anchor=(1.1, 1.05), fontsize="12")
-    plt.xlabel('Step #'); plt.ylabel(yCV_name)
+    plt.xlabel('Step #')
+    plt.ylabel(yCV_name)
     plt.title(f'{yCV_name} vs. Step # - {sys_name}')
     plt.tight_layout()
     plt.savefig(f"{out_dir}/{sys_name}_{yCV_name}_COLVAR.png")
@@ -227,6 +225,10 @@ def plot_colvar_2D(out_dir, xCV_name, yCV_name):
 
     return
 
+
+# ---------------------------------------------------------------------------
+# Free energy correction
+# ---------------------------------------------------------------------------
 
 def correct_fe_for_funnel(
     fe_files: "str | list[str] | np.ndarray",
@@ -288,25 +290,17 @@ def correct_fe_for_funnel(
 
     kT = 8.314e-3 * temperature  # kJ/mol
 
-    # Accept raw array, single path, or list of paths.
-    # When multiple paths are given each file already contains the accumulated bias
-    # from all previous sequential walkers (shared biasDir), so the last file is the
-    # most converged estimate and is used for the correction.
     if isinstance(fe_files, np.ndarray):
         fe = fe_files.astype(float)
         n_files = 1
     else:
         if isinstance(fe_files, str):
             fe_files = [fe_files]
-        fe = np.load(fe_files[-1]).astype(float)   # last = most converged
+        fe = np.load(fe_files[-1]).astype(float)
         n_files = len(fe_files)
 
     cv = np.linspace(grid_min, grid_max, len(fe))
 
-    # Normalise: simulation unbound plateau → 0.
-    # Use the flattest window of n_plateau_points within the last 30% of the profile.
-    # A simple last-N average breaks when the grid boundary has a bias-accumulation
-    # spike, which would shift the entire profile.
     tail = fe[int(0.7 * len(fe)):]
     n = min(n_plateau_points, len(tail))
     if len(tail) > n:
@@ -316,9 +310,6 @@ def correct_fe_for_funnel(
     else:
         plateau_val = float(tail.mean())
 
-    # Guard: if the plateau is within ~10 kJ/mol of the global FE maximum, the unbound
-    # state was never sampled (no bias deposited there, so FE ≈ 0).  The normalization
-    # would be meaningless and ΔG would be the raw bias depth, not a binding free energy.
     fe_max = float(fe.max())
     unsampled_gap = fe_max - plateau_val
     if unsampled_gap < 10.0:
@@ -328,28 +319,23 @@ def correct_fe_for_funnel(
             "The walker did not reach the unbound end of the CV; ΔG would be meaningless."
         )
 
-    fe_norm = fe - plateau_val  # bound minimum → negative; unbound → ≈0
+    fe_norm = fe - plateau_val
 
-    # Simulation binding ΔG
     min_idx = int(np.argmin(fe_norm))
     dG_bind_sim = float(fe_norm[min_idx])
     cv_at_min = float(cv[min_idx])
 
-    # R_cylinder, z_cc, z_max: OpenMM Quantities → Å
     R_cyl_ang = float(funnel_params["R_cylinder"].value_in_unit(openmmunit.angstrom))
     z_cc_ang = float(funnel_params["z_cc"].value_in_unit(openmmunit.angstrom))
     z_max_ang = float(funnel_params["z_max"].value_in_unit(openmmunit.angstrom))
-    L_cyl_ang = z_max_ang - z_cc_ang  # cylinder length (Å)
+    L_cyl_ang = z_max_ang - z_cc_ang
 
-    # Standard-state correction (Limongelli 2013 Eq. 3)
-    # correction = kT * ln(V_cyl * C°)  where V_cyl = π R² L
     V_cyl = math.pi * R_cyl_ang ** 2 * L_cyl_ang  # Å³
-    correction = kT * math.log(V_cyl * C0_per_A3)  # kJ/mol; dimensionless argument
+    correction = kT * math.log(V_cyl * C0_per_A3)  # kJ/mol
 
-    # Corrected FE array: unbound plateau → |correction|; bound min → ΔG°_b
     fe_rw = fe_norm - correction
 
-    dG_bind_std = float(fe_rw.min())            # == dG_bind_sim - correction
+    dG_bind_std = float(fe_rw.min())
     pKd = -dG_bind_std / (kT * math.log(10))
 
     logger.info(
@@ -375,6 +361,10 @@ def correct_fe_for_funnel(
         "temperature_K": temperature,
     }
 
+
+# ---------------------------------------------------------------------------
+# sMD preseed
+# ---------------------------------------------------------------------------
 
 def write_metad_preseed(
     smd_analysis_outdir: str,
@@ -440,7 +430,6 @@ def write_metad_preseed(
     """
     os.makedirs(bias_dir, exist_ok=True)
 
-    # --- Load the PMF ---
     extrap_path = os.path.join(smd_analysis_outdir, 'dG_extrapolated.csv')
     mixture_path = os.path.join(smd_analysis_outdir, 'mixture_pmfs.csv')
 
@@ -465,7 +454,6 @@ def write_metad_preseed(
         pmf_df = pmf_df[pmf_df['speed'] == use_speed]
         speed_label = f"speed={use_speed}"
 
-    # Filter by estimator
     if 'estimator' in pmf_df.columns:
         if estimator in pmf_df['estimator'].values:
             pmf_df = pmf_df[pmf_df['estimator'] == estimator]
@@ -492,43 +480,29 @@ def write_metad_preseed(
             "Check the smd_analysis_outdir and parameters."
         )
 
-    r_pmf = pmf_df['r_coord'].values   # nm, COM distance
-    F_pmf = pmf_df['dG'].values        # kJ/mol; F(r_bound) ≈ 0, F(r_unbound) = ΔG_unbind
+    r_pmf = pmf_df['r_coord'].values
+    F_pmf = pmf_df['dG'].values
 
-    # --- Map r_coord → path CV progress s ---
-    milestone_com = np.array(sorted(milestone_com_distances))   # nm, ascending
+    milestone_com = np.array(sorted(milestone_com_distances))
     n_ms = len(milestone_com)
-    milestone_s = np.linspace(0.0, 1.0, n_ms)                  # s=0 bound, s=1 unbound
+    milestone_s = np.linspace(0.0, 1.0, n_ms)
 
     s_pmf = np.interp(r_pmf, milestone_com, milestone_s, left=0.0, right=1.0)
 
-    # Sort by s (monotonic after interp, but be safe)
     sort_idx = np.argsort(s_pmf)
     s_pmf = s_pmf[sort_idx]
     F_pmf = F_pmf[sort_idx]
 
-    # --- Interpolate PMF onto path CV grid ---
     s_grid = np.linspace(grid_min, grid_max, grid_points)
     F_grid = np.interp(s_grid, s_pmf, F_pmf, left=float(F_pmf[0]), right=float(F_pmf[-1]))
 
-    # --- Normalize: unbound end (s=1) → 0, bound end → −ΔG_unbind ---
-    dG_unbind = float(F_grid[-1])    # kJ/mol; > 0 if binding is favorable
-    F_meta = F_grid - dG_unbind      # F_meta(s=0) = −ΔG_unbind < 0; F_meta(s=1) = 0
+    dG_unbind = float(F_grid[-1])
+    F_meta = F_grid - dG_unbind
 
-    # --- Compute preseed bias ---
-    # WTMetaD converges to: V_bias(s) = −(γ−1)/γ × F_meta(s)
-    # Preseed = alpha fraction of that:
-    #   V_preseed(s=0) = alpha×(γ−1)/γ×ΔG_unbind  > 0  (pushes away from bound)
-    #   V_preseed(s=1) = 0
     wtf = (gamma - 1.0) / gamma
-    V_preseed = -alpha * wtf * F_meta   # kJ/mol, shape (grid_points,)
+    V_preseed = -alpha * wtf * F_meta
 
-    # Truncate preseed at the transition state: zero out the post-barrier region
-    # so metadynamics can discover the downhill side freely without preseed bias.
-    # If no peak is found the PMF amplitude cannot be trusted (likely dominated by
-    # dissipation from fast pulling, or a non-binder) — skip the preseed entirely
-    # rather than injecting a ramp that could create false positives.
-    kBT = 8.314e-3 * temperature  # kJ/mol
+    kBT = 8.314e-3 * temperature
     s_ts, barrier_kJ = _find_pmf_peak(s_grid, F_grid, kBT, prominence_factor=1.0)
     if s_ts is None:
         logger.warning(
@@ -553,12 +527,10 @@ def write_metad_preseed(
         f"(alpha={alpha}, gamma={gamma})"
     )
 
-    # --- Write preseed file ---
     out_path = os.path.join(bias_dir, 'bias_0_0.npy')
     np.save(out_path, V_preseed)
     logger.info(f"Preseed bias written → {out_path}")
 
-    # --- Plot the preseed so the shape can be inspected before running metadynamics ---
     try:
         plot_bias(
             out_dir=bias_dir,
@@ -572,3 +544,373 @@ def write_metad_preseed(
         logger.warning(f"Preseed bias plot failed (non-fatal): {_plot_err}")
 
     return out_path
+
+
+# ---------------------------------------------------------------------------
+# MetadynamicsAnalysis class
+# ---------------------------------------------------------------------------
+
+class MetadynamicsAnalysis:
+    """Post-run analysis for multi-walker WT-MetaD simulations.
+
+    Parameters
+    ----------
+    out_dir : str
+        Directory where MetadynamicsMD wrote its output files
+        (bias_*.npy, COLVAR_*.npy, FE_*.npy).
+    """
+
+    def __init__(self, out_dir: str) -> None:
+        self.out_dir = out_dir
+
+    # ── Static helpers ─────────────────────────────────────────────────────
+
+    @staticmethod
+    def load_bias_files(bias_dir: str) -> dict:
+        """Load all walker self-bias arrays from bias_dir.
+
+        Returns {walker_id (int): bias_array (np.ndarray, kJ/mol)}.
+        Only the latest snapshot for each walker is loaded (OpenMM
+        overwrites with a higher save-index at each sync interval).
+        """
+        import re
+        pattern = re.compile(r'bias_(\d+)_(\d+)\.npy')
+        latest = {}
+        for fname in sorted(os.listdir(bias_dir)):
+            m = pattern.match(fname)
+            if m:
+                wid, idx = int(m.group(1)), int(m.group(2))
+                if wid not in latest or idx > latest[wid][0]:
+                    latest[wid] = (idx, os.path.join(bias_dir, fname))
+        return {wid: np.load(fp) for wid, (_, fp) in latest.items()}
+
+    @staticmethod
+    def compute_fes(bias_arrays, temperature: float, bias_factor: float,
+                    grid_min: float = 0.0, grid_max: float = 1.0) -> tuple:
+        """Compute the WT-MetaD FES from a collection of bias arrays.
+
+        Uses the standard estimator:
+            FE(s) = -(gamma / (gamma − 1)) × V_total(s)
+        where V_total = sum of all provided arrays.  Pass a subset of
+        walkers' bias arrays to get a FES that excludes stuck walkers.
+
+        Parameters
+        ----------
+        bias_arrays : list/array of np.ndarray
+            Self-bias arrays in kJ/mol from load_bias_files().
+        temperature : float
+            Simulation temperature in K (not used in the formula but
+            kept for API completeness / future extensions).
+        bias_factor : float
+            WT-MetaD bias factor γ.
+        grid_min, grid_max : float
+            CV grid bounds — used only to build the returned axis.
+
+        Returns
+        -------
+        axis : np.ndarray   — CV values at each grid point
+        fes  : np.ndarray   — Free energy in kJ/mol
+        """
+        V = np.sum(np.stack(bias_arrays), axis=0)
+        gamma = float(bias_factor)
+        fes = -(gamma / (gamma - 1.0)) * V
+        axis = np.linspace(grid_min, grid_max, fes.shape[0])
+        return axis, fes
+
+    @staticmethod
+    def analyze_colvar_transitions(colvar_array: np.ndarray,
+                                    bound_threshold: float = 0.1,
+                                    unbound_threshold: float = 0.9) -> dict:
+        """Detect basin transitions in a 1D CV time series.
+
+        A bound→unbound transition is counted each time the CV rises above
+        unbound_threshold after having been below bound_threshold.  A round
+        trip additionally requires a return below bound_threshold.
+
+        Returns
+        -------
+        dict with keys:
+            n_transitions        — bound→unbound crossings
+            n_round_trips        — complete B→U→B cycles
+            first_transition_frame — frame index of first B→U crossing (-1 = never)
+            max_cv               — maximum CV value reached
+            frac_bound           — fraction of frames in bound basin
+            frac_unbound         — fraction of frames in unbound basin
+            reached_unbound      — bool: crossed unbound_threshold at least once
+        """
+        cv = colvar_array[:, 0] if np.ndim(colvar_array) > 1 else np.asarray(colvar_array)
+        n_trans, n_rt, first_frame = 0, 0, -1
+
+        # Determine starting basin.  A walker seeded from an unbound sMD
+        # milestone starts with CV≈1; we set in_unbound=True so that the
+        # first return to the bound state is correctly counted as a round trip.
+        in_unbound = cv[0] > unbound_threshold
+        in_bound   = cv[0] < bound_threshold
+
+        for i, v in enumerate(cv):
+            if not in_unbound and v > unbound_threshold:
+                n_trans += 1
+                if first_frame < 0:
+                    first_frame = i
+                in_bound   = False
+                in_unbound = True
+            elif in_unbound and v < bound_threshold:
+                n_rt += 1
+                in_unbound = False
+                in_bound   = True
+
+        started_unbound = bool(cv[0] > unbound_threshold)
+        return {
+            'n_transitions':          n_trans,
+            'n_round_trips':          n_rt,
+            'first_transition_frame': first_frame,
+            'max_cv':                 float(cv.max()),
+            'frac_bound':             float(np.mean(cv < bound_threshold)),
+            'frac_unbound':           float(np.mean(cv > unbound_threshold)),
+            'reached_unbound':        bool(cv.max() > unbound_threshold),
+            'started_unbound':        started_unbound,
+        }
+
+    @staticmethod
+    def bias_coverage(bias_array: np.ndarray, threshold_frac: float = 1e-3) -> float:
+        """Fraction of CV grid bins with non-negligible bias.
+
+        A stuck walker deposits hills only near CV=0, leaving most of the
+        grid at zero.  This metric is a proxy for convergence that can be
+        computed from bias files alone, without needing COLVAR data.
+        """
+        if bias_array.max() <= 0:
+            return 0.0
+        return float(np.mean(bias_array > threshold_frac * bias_array.max()))
+
+    # ── Instance methods ───────────────────────────────────────────────────
+
+    def select_converged_biases(self, min_coverage: float = 0.6) -> list:
+        """Return bias arrays from walkers that covered ≥ min_coverage of the CV grid.
+
+        Stuck walkers (deposited hills only in the bound basin) have low
+        grid coverage and are excluded.  This is the bias-file proxy for
+        the transition criterion when COLVAR data is not available.
+
+        Returns
+        -------
+        list of (walker_id, bias_array) tuples that passed the threshold.
+        """
+        biases = self.load_bias_files(self.out_dir)
+        selected = []
+        for wid, barr in sorted(biases.items()):
+            cov = self.bias_coverage(barr)
+            if cov >= min_coverage:
+                selected.append((wid, barr))
+            else:
+                logging.warning(
+                    f"Walker id={wid}: bias coverage {100*cov:.1f}% < "
+                    f"{100*min_coverage:.0f}% — likely stuck, excluded from converged set."
+                )
+        if not selected:
+            logging.warning("No walkers passed the coverage threshold — returning all biases.")
+            selected = list(sorted(biases.items()))
+        return selected
+
+    def diagnose(
+        self,
+        colvar_files: list,
+        temperature: float,
+        bias_factor: float,
+        grid_min: float = 0.0,
+        grid_max: float = 1.0,
+        cv_name: str = "PathCV_progress",
+        bound_threshold: float = 0.1,
+        unbound_threshold: float = 0.9,
+        coverage_threshold: float = 0.6,
+        out_prefix: str = None,
+    ) -> dict:
+        """Comprehensive multi-walker WT-MetaD diagnostic.
+
+        Produces a four-panel PNG figure (PLUMED-community style) and returns
+        a summary dict.  The four panels are:
+
+        1. CV time traces — each walker, annotated with transition counts.
+           Solid lines = reached unbound state; dashed = stuck.
+        2. Self-bias per walker — what each walker actually deposited on the
+           CV grid (only its own Gaussians, not the total).
+        3. Per-walker FES — FES computed from each walker's self-bias alone
+           (normalized min=0).  Reveals whether a single walker gives a
+           physically reasonable shape.
+        4. Combined vs converged-only FES — FES from all biases summed vs
+           FES from walkers that passed the coverage threshold, both
+           normalized to zero at the unbound plateau.  ΔG estimates are
+           annotated directly on the plot.
+
+        Parameters
+        ----------
+        colvar_files : list of str
+            Paths to COLVAR_*.npy files (one per walker).
+        temperature : float
+            Simulation temperature in K.
+        bias_factor : float
+            WT-MetaD bias factor γ.
+        grid_min, grid_max : float
+            CV grid bounds.
+        cv_name : str
+            Label for the CV axis.
+        bound_threshold, unbound_threshold : float
+            CV values defining bound and unbound basins.
+        coverage_threshold : float
+            Minimum grid coverage fraction to classify a walker as converged.
+        out_prefix : str, optional
+            Output filename prefix.  Defaults to <out_dir>/diagnosis.
+
+        Returns
+        -------
+        dict with keys:
+            walker_stats    — {run_id: analyze_colvar_transitions result}
+            fes_all_kcal    — FES from all walkers (kcal/mol, unbound=0)
+            fes_conv_kcal   — FES from coverage-filtered walkers (kcal/mol, unbound=0)
+            cv_axis         — grid axis
+            n_converged_cv  — walkers that reached unbound_threshold
+            n_walkers       — total walkers in colvar_files
+        """
+        import matplotlib.gridspec as gridspec
+
+        if out_prefix is None:
+            out_prefix = os.path.join(self.out_dir, "diagnosis")
+
+        all_biases = self.load_bias_files(self.out_dir)
+
+        walker_data = []
+        for colvar_path in sorted(colvar_files):
+            colvar = np.load(colvar_path)
+            run_id = os.path.splitext(os.path.basename(colvar_path))[0].replace('COLVAR_', '')
+            ts = self.analyze_colvar_transitions(colvar, bound_threshold, unbound_threshold)
+            walker_data.append((run_id, colvar, ts))
+
+        walker_stats = {run_id: ts for run_id, _, ts in walker_data}
+        n_converged_cv = sum(1 for ts in walker_stats.values() if ts['reached_unbound'])
+        converged_biases = self.select_converged_biases(coverage_threshold)
+
+        all_bias_list = list(all_biases.values())
+        axis, fes_all_kj = self.compute_fes(all_bias_list, temperature, bias_factor,
+                                              grid_min, grid_max)
+        n = len(axis)
+
+        def _norm_plateau(fes_kj):
+            plateau = fes_kj[int(0.85 * n):].mean()
+            return (fes_kj - plateau) * 0.239006  # kcal/mol, unbound≈0
+
+        fes_all_kcal = _norm_plateau(fes_all_kj)
+
+        fes_conv_kcal = None
+        if len(converged_biases) < len(all_biases):
+            _, fes_conv_kj = self.compute_fes(
+                [b for _, b in converged_biases], temperature, bias_factor, grid_min, grid_max
+            )
+            fes_conv_kcal = _norm_plateau(fes_conv_kj)
+
+        n_w = len(walker_data)
+        colors = plt.cm.tab10(np.linspace(0, 1, max(n_w, 1)))
+
+        fig = plt.figure(figsize=(14, 12))
+        gs = gridspec.GridSpec(3, 2, figure=fig, hspace=0.50, wspace=0.38)
+
+        # Panel 1 — CV traces
+        ax1 = fig.add_subplot(gs[0, :])
+        ax1.axhspan(0, bound_threshold, alpha=0.07, color='royalblue')
+        ax1.axhspan(unbound_threshold, 1.0, alpha=0.07, color='tomato')
+        ax1.axhline(bound_threshold,   color='royalblue', lw=0.7, ls='--', alpha=0.5)
+        ax1.axhline(unbound_threshold, color='tomato',    lw=0.7, ls='--', alpha=0.5)
+        for k, (run_id, colvar, ts) in enumerate(walker_data):
+            cv = colvar[:, 0] if np.ndim(colvar) > 1 else colvar
+            converged = ts['reached_unbound']
+            label = (f"{run_id}  T={ts['n_transitions']} RT={ts['n_round_trips']}"
+                     f"  max={ts['max_cv']:.3f}")
+            ax1.plot(np.arange(len(cv)), cv, color=colors[k],
+                      lw=1.8 if converged else 0.9,
+                      ls='-' if converged else '--',
+                      alpha=0.9 if converged else 0.6,
+                      label=label)
+        ax1.set_ylim(-0.05, 1.05)
+        ax1.set_xlabel("Frame #")
+        ax1.set_ylabel(cv_name)
+        ax1.set_title("CV traces  (T=transitions  RT=round-trips  |  solid=reached unbound  dashed=stuck)")
+        ax1.legend(fontsize=8, loc='upper left', framealpha=0.85)
+
+        # Panel 2 — Self-bias per walker
+        ax2 = fig.add_subplot(gs[1, 0])
+        for k, (wid, barr) in enumerate(sorted(all_biases.items())):
+            cov = self.bias_coverage(barr)
+            ax2.plot(axis, barr * 0.239006, color=colors[k % len(colors)], lw=1.5,
+                      label=f"id={wid}  cov={100*cov:.0f}%", alpha=0.85)
+        ax2.set_xlabel(cv_name)
+        ax2.set_ylabel("Self-bias (kcal/mol)")
+        ax2.set_title("Self-bias per walker\n(only this walker's Gaussians)")
+        ax2.legend(fontsize=8)
+
+        # Panel 3 — Per-walker FES from self-bias only
+        ax3 = fig.add_subplot(gs[1, 1])
+        for k, (wid, barr) in enumerate(sorted(all_biases.items())):
+            cov = self.bias_coverage(barr)
+            _, fes_s_kj = self.compute_fes([barr], temperature, bias_factor, grid_min, grid_max)
+            fes_s = fes_s_kj * 0.239006
+            fes_s -= fes_s.min()
+            ax3.plot(axis, fes_s, color=colors[k % len(colors)], lw=1.5,
+                      label=f"id={wid}  cov={100*cov:.0f}%", alpha=0.85)
+        ax3.set_xlabel(cv_name)
+        ax3.set_ylabel("FE from self-bias (kcal/mol, min=0)")
+        ax3.set_title("Per-walker FES\n(self-bias only — shape reflects individual sampling)")
+        ax3.legend(fontsize=8)
+
+        # Panel 4 — Combined vs converged-only FES
+        ax4 = fig.add_subplot(gs[2, :])
+        dG_all = float(fes_all_kcal.min())
+        ax4.plot(axis, fes_all_kcal, 'k-', lw=2.0,
+                  label=f"All walkers (n={len(all_biases)})  ΔG={dG_all:.1f} kcal/mol")
+        if fes_conv_kcal is not None:
+            dG_conv = float(fes_conv_kcal.min())
+            ax4.plot(axis, fes_conv_kcal, 'g--', lw=2.0,
+                      label=f"Coverage-filtered (n={len(converged_biases)})  ΔG={dG_conv:.1f} kcal/mol")
+        ax4.axhline(0, color='gray', lw=0.7, ls=':')
+        ax4.axvline(bound_threshold,   color='royalblue', lw=0.7, ls='--', alpha=0.4)
+        ax4.axvline(unbound_threshold, color='tomato',    lw=0.7, ls='--', alpha=0.4)
+        idx_min = int(np.argmin(fes_all_kcal))
+        ax4.annotate(f"ΔG={dG_all:.1f}", xy=(axis[idx_min], dG_all),
+                      xytext=(axis[idx_min] + 0.1, dG_all + 1.5), fontsize=9,
+                      arrowprops=dict(arrowstyle='->', lw=0.8))
+        ax4.set_xlabel(cv_name)
+        ax4.set_ylabel("ΔG (kcal/mol, unbound plateau = 0)")
+        ax4.set_title(
+            f"FES comparison — {n_converged_cv}/{n_w} walkers reached unbound state\n"
+            f"Use coverage-filtered FES when walkers are compartmentalized (Raiteri 2006)"
+        )
+        ax4.legend(fontsize=9)
+
+        plt.suptitle(
+            f"WT-MetaD Diagnosis — {os.path.basename(self.out_dir)}",
+            fontsize=12, fontweight='bold'
+        )
+        out_path = f"{out_prefix}_diagnosis.png"
+        plt.savefig(out_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        logging.info(f"Diagnostic plot saved to {out_path}")
+
+        logging.info("── Walker summary ──────────────────────────────────────")
+        for run_id, _, ts in walker_data:
+            status = "✓ converged" if ts['reached_unbound'] else "✗ stuck"
+            logging.info(
+                f"  {run_id}: {status}  T={ts['n_transitions']}  RT={ts['n_round_trips']}"
+                f"  max_CV={ts['max_cv']:.3f}"
+                f"  bound={100*ts['frac_bound']:.0f}%  unbound={100*ts['frac_unbound']:.0f}%"
+            )
+        logging.info(f"  ΔG(all walkers)     = {dG_all:.2f} kcal/mol")
+        if fes_conv_kcal is not None:
+            logging.info(f"  ΔG(coverage-filter) = {float(fes_conv_kcal.min()):.2f} kcal/mol")
+        logging.info("────────────────────────────────────────────────────────")
+
+        return {
+            'walker_stats':   walker_stats,
+            'fes_all_kcal':   fes_all_kcal,
+            'fes_conv_kcal':  fes_conv_kcal,
+            'cv_axis':        axis,
+            'n_converged_cv': n_converged_cv,
+            'n_walkers':      n_w,
+        }

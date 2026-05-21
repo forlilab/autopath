@@ -14,18 +14,20 @@ import importlib as _importlib
 
 def __getattr__(name):
     _lazy_imports = {
-        "Equilibration":   ".equilibration",
-        "SystemPreparation": ".preparation",
-        "SteeredMD":       ".steered_md",
-        "MetadynamicsMD":  ".metadynamics",
-        "RelaxMD":         ".relax_md",
-        "VanillaMD":       ".vanilla_md",
-        "CVSpec":          ".cv",
-        "sMDAnalysis":     ".sMDAnalysis",
+        "Equilibration":        ".equilibration",
+        "SystemPreparation":    ".preparation",
+        "SteeredMD":            ".steered_md",
+        "MetadynamicsMD":       ".metadynamics",
+        "MetadynamicsAnalysis": ".metadynamics",
+        "RelaxMD":              ".relax_md",
+        "VanillaMD":            ".vanilla_md",
+        "CVSpec":               ".metadynamics",
+        "sMDAnalysis":          ".sMDAnalysis",
+        "metadynamics":         ".metadynamics",
     }
     if name in _lazy_imports:
         module = _importlib.import_module(_lazy_imports[name], __name__)
-        if name == "sMDAnalysis":
+        if name in ("sMDAnalysis", "metadynamics"):
             return module
         return getattr(module, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
@@ -35,7 +37,9 @@ __all__ = [
     "SystemPreparation",
     "SteeredMD",
     "sMDAnalysis",
+    "metadynamics",
     "MetadynamicsMD",
+    "MetadynamicsAnalysis",
     "RelaxMD",
     "VanillaMD",
     "CVSpec",

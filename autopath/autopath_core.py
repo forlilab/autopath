@@ -21,7 +21,6 @@ from openmm.unit import *
 from autopath.utils import *
 from autopath.pdb_preprocessor import PDBPreprocessor
 from autopath.ap_PLIP import plot_atomic_property, calculate_ligand_rmsf, calculate_contact_frequency
-from autopath.analysis import *
 from autopath import (
     SystemPreparation,
     Equilibration,
@@ -29,11 +28,14 @@ from autopath import (
     RelaxMD,
     MetadynamicsMD,
 )
-from autopath.cv import com_cv, pathCV_cv
-from autopath.customForces import (
+from autopath.metadynamics import (
+    com_cv,
+    pathCV_cv,
+    write_metad_preseed,
     generate_funnel_parameters_from_trajectory,
     create_funnel_force_from_trajectory_analysis,
-    save_funnel_params
+    save_funnel_params,
+    write_funnel_pymol,
 )
 from autopath.sMDAnalysis import SMDData, SMDAnalysis
 from autopath.sMDAnalysis.PathModel import DTWPathModel

@@ -4,8 +4,7 @@ import argparse
 
 import MDAnalysis as mda
 
-from autopath import MetadynamicsMD
-from autopath.cv import com_cv
+from autopath.metadynamics import MetadynamicsMD, com_cv
 from autopath.utils import load_system, calculate_com_distance, wrap_align_save_traj
 from autopath.utils import setup_logging
 
