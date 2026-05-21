@@ -273,23 +273,26 @@ def save_amber_files(
 def select_platform(platform_name: str = None, device_index: str = "0"):
 
     platform_name = platform_name.upper() if platform_name is not None else None
-    if platform_name == None or platform_name == "FASTEST":
-        platform_name = get_fastest_platform().getName()
+    if platform_name is None or platform_name == "FASTEST":
+        platform_name = get_fastest_platform().getName().upper()
 
-    try:
-        logging.info(f"Using {platform_name} platform.")
+    logging.info(f"Using {platform_name} platform.")
 
-        if platform_name in ["OPENCL"]:
-            platform = Platform.getPlatformByName('OpenCL')
-            platform.setPropertyDefaultValue("Precision", "mixed")
-            platform.setPropertyDefaultValue("DeviceIndex", device_index)
-        if platform_name in ["CUDA"]:
-            platform = Platform.getPlatformByName('CUDA')
-            platform.setPropertyDefaultValue("DeterministicForces", "false")
-            platform.setPropertyDefaultValue("CudaPrecision", "mixed")
-            platform.setPropertyDefaultValue("CudaDeviceIndex", device_index)
-    except:
-        logging.error(f"Something went wrong trying to get {platform_name} platform.")
+    if platform_name == "OPENCL":
+        platform = Platform.getPlatformByName('OpenCL')
+        platform.setPropertyDefaultValue("Precision", "mixed")
+        platform.setPropertyDefaultValue("DeviceIndex", device_index)
+    elif platform_name == "CUDA":
+        platform = Platform.getPlatformByName('CUDA')
+        platform.setPropertyDefaultValue("DeterministicForces", "false")
+        platform.setPropertyDefaultValue("CudaPrecision", "mixed")
+        platform.setPropertyDefaultValue("CudaDeviceIndex", device_index)
+    elif platform_name == "CPU":
+        platform = Platform.getPlatformByName('CPU')
+    elif platform_name == "REFERENCE":
+        platform = Platform.getPlatformByName('Reference')
+    else:
+        raise ValueError(f"Unknown OpenMM platform: {platform_name}")
 
     return platform
 
