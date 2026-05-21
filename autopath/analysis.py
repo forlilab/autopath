@@ -140,12 +140,10 @@ def plot_FE_rw(out_dir, x_min, x_max, grid_points, colvar_name):
         df["walker"] = walker_name
         data.append(df)
 
-    # Best estimate from the last (most converged) walker
+    # ΔG°_b = min(FE_rw) of the last walker, where the unbound plateau is normalised to 0.
+    # min(FE_rw) is directly the standard-state binding free energy (Limongelli 2013).
     last_fe_kcal = np.load(files[-1]) * 0.239006
-    #TODO this can be improved by fitting the plateau and minimum to get a more robust estimate of the ΔG range, but this is a quick approximation
-    mindG_std_kcal = float(last_fe_kcal.min())
-    maxdG_std_kcal = float(last_fe_kcal.max())
-    dG_std_kcal = maxdG_std_kcal - mindG_std_kcal
+    dG_std_kcal = float(last_fe_kcal.min())
     dG_std_kj = dG_std_kcal * 4.184
     pKd = -dG_std_kj / (8.314e-3 * 298.15 * np.log(10))
 

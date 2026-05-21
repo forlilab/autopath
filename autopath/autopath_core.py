@@ -103,7 +103,7 @@ class AutoPath:
         mMD_hill_height: float = 1.2,  # kJ/mol approx 0.5KT
         mMD_hill_width: float = 0.05,
         mMD_time: int = 5,  # ns
-        mMD_multiple_walker: bool = False,
+        mMD_multiple_walkers: bool = True,
         mMD_preseed_bias: bool = False,
         mMD_preseed_speed: float = None,
         mMD_funnel_host_selection: str | None = None,
@@ -165,7 +165,7 @@ class AutoPath:
         self.mMD_hill_height = mMD_hill_height
         self.mMD_hill_width = mMD_hill_width
         self.mMD_time = mMD_time
-        self.mMD_multiple_walker = mMD_multiple_walker
+        self.mMD_multiple_walkers = mMD_multiple_walkers
         self.mMD_preseed_bias = mMD_preseed_bias
         self.mMD_preseed_speed = mMD_preseed_speed
         self.mMD_funnel_host_selection = mMD_funnel_host_selection
@@ -836,7 +836,7 @@ class AutoPath:
                             host_selection=funnel_host_sel,
                             guest_selection=f"resname {ligand_resname}",
                             percentile_z=65.0,
-                            R_cylinder_ang=1.5,
+                            R_cylinder_ang=2.0, # Angstroms; radius of cylindrical part of funnel
                             # z_cc_ang=5, # this overrides the default automatic z_cc calculation (floor is 5A)
                             alpha_cone_degrees=45.0,
                             verbose=True,
@@ -897,7 +897,7 @@ class AutoPath:
 
                 # Multiple-walker: each walker starts from its own relaxed checkpoint.
                 # Single-walker: all walkers start from the first milestone (bound state) checkpoint.
-                chk_to_use = milestone_chk if self.mMD_multiple_walker else first_milestone_chk
+                chk_to_use = milestone_chk if self.mMD_multiple_walkers else first_milestone_chk
 
                 logger.info(f"Running WTMetaD for milestone {milestone_name}")
                 try:
@@ -909,6 +909,7 @@ class AutoPath:
                         cv_specs=[path_cv],
                         mMD_time=self.mMD_time, #ns
                         bias_factor=self.mMD_bias_factor,
+                        hill_height=self.mMD_hill_height,
                         biasFrequency=self.mMD_bias_frequency, #ps
                         funnel_force=funnel_force,
                         funnel_params=funnel_params if funnel_force is not None else None,
