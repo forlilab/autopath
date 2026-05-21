@@ -41,7 +41,9 @@ from rdkit import Chem
 from rdkit.Chem.Draw import SimilarityMaps
 from rdkit.Chem.Scaffolds import MurckoScaffold
 
-from deeptime.clustering import RegularSpace, KMeans
+from deeptime.clustering import RegularSpace
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
 
 def setup_logging(logfile: str = 'autopath.log',
                   logname: str = "autopath",
@@ -287,12 +289,10 @@ def select_platform(platform_name: str = None, device_index: str = "0"):
         platform.setPropertyDefaultValue("DeterministicForces", "false")
         platform.setPropertyDefaultValue("CudaPrecision", "mixed")
         platform.setPropertyDefaultValue("CudaDeviceIndex", device_index)
-    elif platform_name == "CPU":
-        platform = Platform.getPlatformByName('CPU')
-    elif platform_name == "REFERENCE":
-        platform = Platform.getPlatformByName('Reference')
     else:
-        raise ValueError(f"Unknown OpenMM platform: {platform_name}")
+        # CPU, Reference, or any other valid OpenMM platform name
+        _name_map = {"CPU": "CPU", "REFERENCE": "Reference"}
+        platform = Platform.getPlatformByName(_name_map.get(platform_name, platform_name))
 
     return platform
 
@@ -1033,18 +1033,6 @@ def compute_rmsd(u,
 
     return rmsd_df
 
-def match_cluster_centroids(X:np.ndarray, centroids:np.ndarray, N:int=1):
-    """A function to find the N closest points to each centroid in the dataset X.
-    Centroids may not be real data points, so we need to find the closest real data points to them.
-    """
-    kdtree = KDTree(X)
-    closest_points = []
-    for centroid in centroids:
-        _, indices = kdtree.query(centroid, k=N)
-        closest_points.append(indices)
-
-    return closest_points
-
 
 def match_cluster_centroids_unique(X: np.ndarray,
                                    centroids: np.ndarray,
@@ -1135,68 +1123,115 @@ def compute_distance_features(u: mda.Universe,
     return np.array(all_dists)
 
 
-def extract_milestones(u: mda.Universe,
-                       X: np.ndarray,
-                       n_milestones: int = 5,
-                       min_dist: float = 10.0,
-                       out_dir: str = None,
-                       prefix: str = "milestone",
-                       min_frame_separation: int = 0,
-                       ) -> Tuple[np.ndarray, np.ndarray, list]:
+def _plot_pca_milestones(
+    X_pca: np.ndarray,
+    labels: np.ndarray,
+    milestone_frame_indices: list,
+    out_dir: str,
+    prefix: str,
+    pca: PCA,
+) -> None:
+    """Save a 2D PCA scatter plot coloured by cluster label with milestone frames annotated."""
+    n_clusters = int(labels.max()) + 1
+    palette = plt.cm.get_cmap("tab10", n_clusters)
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    for k in range(n_clusters):
+        mask = labels == k
+        ax.scatter(X_pca[mask, 0], X_pca[mask, 1],
+                   color=palette(k), s=10, alpha=0.5, label=f"milestone {k+1}")
+
+    for i, fi in enumerate(milestone_frame_indices):
+        ax.scatter(X_pca[fi, 0], X_pca[fi, 1],
+                   marker="*", s=300, color="black", zorder=5)
+        ax.annotate(f"M{i+1}", (X_pca[fi, 0], X_pca[fi, 1]),
+                    textcoords="offset points", xytext=(5, 5), fontsize=8)
+
+    ax.set_xlabel(f"PC1 ({pca.explained_variance_ratio_[0]*100:.1f}%)")
+    ax.set_ylabel(f"PC2 ({pca.explained_variance_ratio_[1]*100:.1f}%)")
+    ax.set_title("Milestone clustering")
+    ax.legend(fontsize=15)#, markerscale=1.5)
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, f"{prefix}_pca_clusters.png"), dpi=300)
+    plt.close()
+
+    return
+
+def extract_milestones(
+    u: mda.Universe,
+    X: np.ndarray,
+    n_milestones: int = 5,
+    out_dir: str = None,
+    prefix: str = "milestone",
+    min_frame_separation: int = 0,
+    pca_n_components: int = 2,
+    plot: bool = True,
+) -> Tuple[np.ndarray, np.ndarray, list]:
     """
-    Extract milestone frames from trajectory data using RegularSpace clustering
-    on a pre-computed feature matrix (e.g., pocket-ligand distances).
+    Extract milestone frames from sMD trajectory data.
+
+    Reduces the raw pairwise-distance feature matrix to 2D PCA space, then
+    applies RegularSpace clustering along PC1 (the dominant unbinding axis) to
+    obtain evenly-spaced milestones. A scatter plot of the PCA projection with
+    cluster labels and selected milestone frames is saved alongside the PDBs.
 
     Parameters
     ----------
     u : mda.Universe
         MDAnalysis Universe with trajectories loaded (used for writing PDBs).
     X : np.ndarray
-        Feature matrix of shape (n_frames, n_features), typically scaled by caller.
+        Feature matrix of shape (n_frames, n_features) from
+        ``compute_distance_features()``.
     n_milestones : int
-        Maximum number of milestones (max_centers for RegularSpace).
-    min_dist : float
-        Minimum distance between cluster centers (RegularSpace dmin).
+        Maximum number of milestones (RegularSpace max_centers).
     out_dir : str
-        Output directory for milestone PDB files.
+        Output directory for milestone PDB files and the PCA plot.
     prefix : str
         Prefix for milestone file names.
     min_frame_separation : int
-        Optional minimum separation between selected frame indices.
+        Minimum frame-index gap between selected milestone frames.
+    pca_n_components : int
+        Number of PCA components to keep for the projection (default 2).
+    plot : bool
+        If True and out_dir is provided, save a PCA cluster scatter plot.
 
     Returns
     -------
     labels : np.ndarray
-        Cluster assignment for each frame.
-    sorted_cluster_centers : np.ndarray
-        Cluster centers sorted by mean distance (ascending).
+        Cluster assignment for each frame (in PC1 space).
+    sorted_centers : np.ndarray
+        RegularSpace cluster centers sorted by PC1 value (bound → unbound).
     milestone_files : list[str]
         Paths to the written milestone PDB files.
     """
     if X.ndim != 2:
         raise ValueError("X must be a 2D array of shape (n_frames, n_features)")
 
-    # cluster_estimator = RegularSpace(dmin=min_dist, max_centers=n_milestones)
-    cluster_estimator = KMeans(n_clusters=n_milestones)
-    fitted_model = cluster_estimator.fit(X).fetch_model()
+    X_scaled = StandardScaler().fit_transform(X)
+    pca = PCA(n_components=pca_n_components)
+    X_pca = pca.fit_transform(X_scaled)
+    logger.info(
+        f"PCA: explained variance ratio = "
+        f"{[f'{v*100:.1f}%' for v in pca.explained_variance_ratio_]}"
+    )
 
-    cluster_centers = fitted_model.cluster_centers
-    labels = fitted_model.transform(X)
+    pc1 = X_pca[:, 0].reshape(-1, 1)
+    dmin = float((pc1.max() - pc1.min()) / n_milestones)
+    fitted_model = RegularSpace(dmin=dmin, max_centers=n_milestones).fit(pc1).fetch_model()
 
-    # sort by mean distance so milestone 1 = closest to pocket
-    mean_dists = cluster_centers.mean(axis=1)
-    sorted_indices = np.argsort(mean_dists)
-    sorted_cluster_centers = cluster_centers[sorted_indices]
+    cluster_centers = fitted_model.cluster_centers        # shape (k, 1)
+    labels = fitted_model.transform(pc1)
+    sorted_centers = cluster_centers[np.argsort(cluster_centers[:, 0])]
 
     closest_frames = match_cluster_centroids_unique(
-        X,
-        sorted_cluster_centers,
+        pc1,
+        sorted_centers,
         min_frame_separation=min_frame_separation,
     )
 
     os.makedirs(out_dir, exist_ok=True)
     milestone_files = []
-    u.trajectory[0]  # reset
+    u.trajectory[0]
     for i, frame_index in enumerate(closest_frames):
         frame_index = int(frame_index)
         u.trajectory[frame_index]
@@ -1204,45 +1239,14 @@ def extract_milestones(u: mda.Universe,
         with mda.Writer(fname, reindex=True) as W:
             W.write(u.atoms)
         milestone_files.append(fname)
-        logging.info(f"Wrote milestone {i+1} at frame {frame_index}: {fname}")
+        logger.info(f"Wrote milestone {i+1} at frame {frame_index}: {fname}")
 
-    return labels, sorted_cluster_centers, milestone_files
+    if plot and out_dir is not None:
+        _plot_pca_milestones(X_pca, labels, closest_frames, out_dir, prefix, pca)
+
+    return labels, sorted_centers, milestone_files
 
 
-def cluster_sMD_trajectories(u: mda.Universe, 
-                             X:np.ndarray, 
-                             n_clusters:int = 5, 
-                             min_dist:float = 2.0,
-                             out_dir:str = None
-                             ) -> Tuple[np.ndarray, np.ndarray]:
-    """Deprecated: use extract_milestones() instead."""
-    import warnings
-    warnings.warn(
-        "cluster_sMD_trajectories is deprecated, use extract_milestones() instead.",
-        DeprecationWarning, stacklevel=2,
-    )
-
-    # cluster_estimator = KMeans(n_clusters=5)
-    cluster_estimator = RegularSpace(dmin=min_dist, max_centers=n_clusters)
-    fitted_model = cluster_estimator.fit(X).fetch_model()
-    cluster_centers = fitted_model.cluster_centers
-    labels = fitted_model.transform(X)
-
-    # sort the array by the second column (COM distance) so milestone 0 is the closest
-    sorted_indices = np.argsort(cluster_centers[:, 1])
-    sorted_cluster_centers = cluster_centers[sorted_indices]
-    closest_frames = match_cluster_centroids(X, sorted_cluster_centers) 
-
-    # Write each representative frame to a PDB
-    u.trajectory[0]  # reset
-    for i, frame_index in enumerate(closest_frames):
-        u.trajectory[frame_index]
-        with mda.Writer(os.path.join(f"{out_dir}", 
-                                    f"milestone_{i+1}_frame_{frame_index}.pdb",
-                                    ), reindex=True) as W:
-            W.write(u.atoms)
-
-    return labels, sorted_cluster_centers
 
 def find_closest_points(
     out_dir, x_min, x_max, x_grid_points, x_name, 

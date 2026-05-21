@@ -553,7 +553,6 @@ class AutoPath:
         ##############################################################################################
 
         milestones_outdir = f"{sys_name}/milestones"
-        min_dist = 1.0 # minimum distance between clusters of milestones
         
         if self.extract_milestones or self.run_metadynamics:
             # Resolve ligand_atoms_full_indices for downstream use (metadynamics, relax)
@@ -641,7 +640,6 @@ class AutoPath:
                         labels, centers, ms_files = extract_milestones(
                             u_path, X_path,
                             n_milestones=self.n_milestones,
-                            min_dist=min_dist,
                             out_dir=path_outdir,
                             prefix=f"milestone_{path_id}",
                             min_frame_separation=self.milestone_min_frame_separation,
@@ -658,7 +656,6 @@ class AutoPath:
                 labels, sorted_cluster_centers, milestone_files = extract_milestones(
                     u_milestone, X_all,
                     n_milestones=self.n_milestones,
-                    min_dist=min_dist,
                     out_dir=milestones_outdir,
                     prefix="milestone",
                     min_frame_separation=self.milestone_min_frame_separation,
@@ -751,7 +748,7 @@ class AutoPath:
                     write_metad_preseed(
                         smd_analysis_outdir=sMD_analysis_outdir,
                         milestone_com_distances=_milestone_com_dists,
-                        bias_dir=metad_outdir,
+                        bias_dir=mMD_out_dir,
                         gamma=self.mMD_bias_factor,
                         temperature=self.temperature,
                         speed=self.mMD_preseed_speed,
@@ -762,7 +759,7 @@ class AutoPath:
 
             milestone_relax = RelaxMD(
                 topology=topology,
-                ligand_atoms=ligand_atoms_full_indices, # use all atoms
+                ligand_atoms=ligand_total_hatoms, # use all HA
                 pocket_atoms=pocket_atom_indices,
                 out_dir=milestones_outdir,
                 is_membrane=self.is_membrane,
@@ -773,7 +770,7 @@ class AutoPath:
 
             WTMetaD = MetadynamicsMD(
                 topology=topology,
-                ligand_atoms=ligand_atoms_indices,
+                ligand_atoms=ligand_atoms_indices, # use ligand anchor atoms for biasing
                 pocket_atoms=pocket_atom_indices,
                 restrained_atoms=None,
                 is_membrane=self.is_membrane,
@@ -838,7 +835,6 @@ class AutoPath:
                             universe,
                             host_selection=funnel_host_sel,
                             guest_selection=f"resname {ligand_resname}",
-                            use_pca=True,
                             percentile_z=99.0,
                             R_cylinder_ang=1.5,
                             percentile_r_funnel=75.0,
@@ -864,7 +860,7 @@ class AutoPath:
                                 funnel_params=funnel_params,
                                 reference_pdb=solvated_system_pdb,
                                 milestone_files=milestones,
-                                outdir=sys_name,
+                                outdir=mMD_out_dir,
                                 ligand_resname=ligand_resname,
                             )
                         except Exception as viz_e:
