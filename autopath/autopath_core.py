@@ -76,10 +76,8 @@ class AutoPath:
         sMD_pulling_speeds: dict = {0.005:5, 0.0025:5, 0.001:5},  # nm/ps; value = min reps (floor) if sMD_converge_speeds, else total reps
         sMD_max_pulling_dist: float = 3.5,  # nm
         sMD_max_r_offset: float = 3.0,    # max displacement offset (nm): cap pull at r0 + offset nm (also capped at half-box - 0.5 nm)
-        sMD_autostop_nc: bool = False,
-        sMD_autostop_nc_threshold: float = 1.0,
-        sMD_autostop_lag_sigma: float = 5.0,
-        sMD_autostop_lag_window: int = 25,
+        sMD_autostop_nc: float | None = 0.1,  # fraction of NC_initial; None disables
+        sMD_autostop_nc_window: int = 5,
         sMD_autostop_min_displacement: float = 0.5,
         sMD_converge_speeds: bool = True,
         sMD_time: int = None,  # ns
@@ -139,9 +137,7 @@ class AutoPath:
         self.sMD_max_r_offset = sMD_max_r_offset
         self.sMD_converge_speeds = sMD_converge_speeds
         self.sMD_autostop_nc = sMD_autostop_nc
-        self.sMD_autostop_nc_threshold = sMD_autostop_nc_threshold
-        self.sMD_autostop_lag_sigma = sMD_autostop_lag_sigma
-        self.sMD_autostop_lag_window = sMD_autostop_lag_window
+        self.sMD_autostop_nc_window = sMD_autostop_nc_window
         self.sMD_autostop_min_displacement = sMD_autostop_min_displacement
         self.sMD_time = sMD_time
         self.sMD_pulling_speeds = sMD_pulling_speeds
@@ -383,9 +379,7 @@ class AutoPath:
                 sMD_spring_cte=sMD_spring_cte,
                 sMD_max_r_offset=self.sMD_max_r_offset,
                 autostop_nc=self.sMD_autostop_nc,
-                autostop_nc_threshold=self.sMD_autostop_nc_threshold,
-                autostop_lag_sigma=self.sMD_autostop_lag_sigma,
-                autostop_lag_window=self.sMD_autostop_lag_window,
+                autostop_nc_window=self.sMD_autostop_nc_window,
                 autostop_min_displacement=self.sMD_autostop_min_displacement,
                 save_freq=5,
             )
