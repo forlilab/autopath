@@ -540,6 +540,15 @@ class AutoPath:
             conv_df.to_csv(f"{sMD_analysis_outdir}/sMD_conv_vALL_metrics.csv", index=False)
             traces_df.to_csv(f"{sMD_analysis_outdir}/sMD_conv_vALL_traces.csv", index=False)
 
+            # delete per-speed convergence files written during the convergence loop;
+            # vALL files contain all the same data
+            for _f in glob(f"{sMD_analysis_outdir}/sMD_conv_v*_metrics.csv"):
+                if not _f.endswith("vALL_metrics.csv"):
+                    os.remove(_f)
+            for _f in glob(f"{sMD_analysis_outdir}/sMD_conv_v*_traces.csv"):
+                if not _f.endswith("vALL_traces.csv"):
+                    os.remove(_f)
+
             smd_conv_traces = glob(f"{sMD_analysis_outdir}/sMD_conv_vALL_traces.csv")
             plot_convergence_traces(smd_conv_traces, outdir=sMD_analysis_outdir)
             smd_conv_metrics = glob(f"{sMD_analysis_outdir}/sMD_conv_vALL_metrics.csv")

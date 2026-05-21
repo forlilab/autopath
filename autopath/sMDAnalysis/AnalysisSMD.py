@@ -328,18 +328,29 @@ class SMDAnalysis:
                 "(e.g. no common support across paths at any speed)."
             )
 
-        self.mixture_pmfs.to_csv(f'{self.outdir}/mixture_pmfs.csv', index=False)
-
         weighted_pmf_v0 = {}
-        for pcol in ['dG', 'Wdiss']:
-            if self.mixture_pmfs['speed'].nunique() < 2:
-                logger.warning(f"Not enough speeds to perform v=0 extrapolation for '{pcol}'. Skipping.")
-                continue
-            v0_df = extrapolate_to_v0(self.mixture_pmfs, param=pcol,
-                                       min_speeds=self.min_speeds_for_extrapolation)
-            if not v0_df.empty:
-                weighted_pmf_v0[pcol] = v0_df
-                v0_df.to_csv(f'{self.outdir}/{pcol}_extrapolated.csv', index=False)
+        if self.mixture_pmfs['speed'].nunique() >= 2:
+            for pcol in ['dG', 'Wdiss']:
+                v0_df = extrapolate_to_v0(self.mixture_pmfs, param=pcol,
+                                           min_speeds=self.min_speeds_for_extrapolation)
+                if not v0_df.empty:
+                    weighted_pmf_v0[pcol] = v0_df
+        else:
+            logger.warning("Not enough speeds to perform v=0 extrapolation. Skipping.")
+
+        # Fold v=0 extrapolated rows into mixture_pmfs (speed=0.0 rows with stat columns).
+        # Rename R2 to {param}_R2 to distinguish dG vs Wdiss fit quality.
+        if weighted_pmf_v0:
+            _key = ['step', 'r_coord', 'estimator', 'speed']
+            _parts = [df.rename(columns={'R2': f'{pcol}_R2'})
+                      for pcol, df in weighted_pmf_v0.items()]
+            _v0 = _parts[0]
+            for _part in _parts[1:]:
+                _new = [c for c in _part.columns if c not in _v0.columns]
+                _v0 = _v0.merge(_part[_key + _new], on=_key, how='outer')
+            self.mixture_pmfs = pd.concat([self.mixture_pmfs, _v0], ignore_index=True)
+
+        self.mixture_pmfs.to_csv(f'{self.outdir}/mixture_pmfs.csv', index=False)
 
         friction_est = FrictionEstimator(use_spline=False)
         df = self.mixture_pmfs.copy()
@@ -832,8 +843,13 @@ class SMDAnalysis:
 
         # Restrict to the shortest path's extent so all convergence traces
         # are compared over the same r-range at every replica count.
+        # Singleton paths (one trajectory) from an outlier/short traj must not
+        # chop the extent of all other paths — use only multi-traj paths to
+        # determine the common step ceiling.
         path_last = results_df.groupby('path')['step'].max()
-        max_common_step = path_last.min()
+        multi_paths = {p for p, c in path_traj_counts.items() if c >= 2}
+        extent_series = path_last[path_last.index.isin(multi_paths)] if multi_paths else path_last
+        max_common_step = extent_series.min() if not extent_series.empty else path_last.min()
         grid_steps = sorted(results_df.loc[results_df['step'] <= max_common_step, 'step'].unique())
 
         # trim low-support tail — mirrors trim_results_by_n_samples_support used in run()
@@ -948,18 +964,22 @@ class SMDAnalysis:
         construction.  Also logs a per-speed replica imbalance warning when
         the ratio of max/min replica counts exceeds 3.
         """
-        def _drop_keys(keys):
+        sMDDdata.raw_data['path_ok'] = True
+
+        def _flag_raw(keys):
+            for speed, path in keys:
+                mask = (
+                    (sMDDdata.raw_data['speed'] == speed) &
+                    (sMDDdata.raw_data['path'] == path)
+                )
+                sMDDdata.raw_data.loc[mask, 'path_ok'] = False
+
+        def _drop_results(keys):
             for speed, path in keys:
                 sMDDdata.results = sMDDdata.results.drop(
                     sMDDdata.results[
                         (sMDDdata.results['speed'] == speed) &
                         (sMDDdata.results['path'] == path)
-                    ].index
-                )
-                sMDDdata.raw_data = sMDDdata.raw_data.drop(
-                    sMDDdata.raw_data[
-                        (sMDDdata.raw_data['speed'] == speed) &
-                        (sMDDdata.raw_data['path'] == path)
                     ].index
                 )
 
@@ -983,7 +1003,8 @@ class SMDAnalysis:
                     f"only {n_replicas} replicas < {self.min_replicas_per_path}"
                 )
                 keys_to_drop.append((speed, path))
-        _drop_keys(keys_to_drop)
+        _flag_raw(keys_to_drop)
+        _drop_results(keys_to_drop)
 
         # --- pass 2: minimum step ratio (premature-termination filter) ---
         if self.min_path_steps_ratio > 0 and not sMDDdata.results.empty:
@@ -999,7 +1020,8 @@ class SMDAnalysis:
                             f"{path_max_step.max():.0f} (premature termination)"
                         )
                         keys_to_drop.append((speed, path))
-            _drop_keys(keys_to_drop)
+            _flag_raw(keys_to_drop)
+            _drop_results(keys_to_drop)
 
         # --- pass 3: corrupted binding-well filter ---
         if self.max_frac_neg_dG_first_half > 0 and not sMDDdata.results.empty:
@@ -1030,10 +1052,11 @@ class SMDAnalysis:
                             (sMDDdata.results['estimator'] == estimator)
                         ].index
                     )
-                # Drop from raw_data any (speed, path) now absent from results entirely
+                # Flag in raw_data any (speed, path) now absent from results entirely
                 touched_sp = {(s, p) for s, p, _ in est_keys_to_drop}
                 surviving_sp = set(zip(sMDDdata.results['speed'], sMDDdata.results['path']))
-                _drop_keys(touched_sp - surviving_sp)
+                _flag_raw(touched_sp - surviving_sp)
+                _drop_results(touched_sp - surviving_sp)
 
         # Replica balance report per speed
         for speed, gspeed in sMDDdata.results.groupby('speed'):
