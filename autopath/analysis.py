@@ -262,7 +262,7 @@ def correct_fe_for_funnel(
         be passed directly.
     funnel_params : dict
         From ``generate_funnel_parameters_from_trajectory()``. Must contain
-        ``"R_cylinder"`` as an OpenMM Quantity in angstroms.
+        ``"R_cylinder"``, ``"z_cc"``, and ``"z_max"`` as OpenMM Quantities in angstroms.
     temperature : float
         Kelvin (default 298.15 K).
     grid_min, grid_max : float
@@ -337,13 +337,16 @@ def correct_fe_for_funnel(
     dG_bind_sim = float(fe_norm[min_idx])
     cv_at_min = float(cv[min_idx])
 
-    # R_cylinder: OpenMM Quantity → Å
-    R_cyl_qty = funnel_params["R_cylinder"]
-    R_cyl_ang = float(R_cyl_qty.value_in_unit(openmmunit.angstrom))
+    # R_cylinder, z_cc, z_max: OpenMM Quantities → Å
+    R_cyl_ang = float(funnel_params["R_cylinder"].value_in_unit(openmmunit.angstrom))
+    z_cc_ang = float(funnel_params["z_cc"].value_in_unit(openmmunit.angstrom))
+    z_max_ang = float(funnel_params["z_max"].value_in_unit(openmmunit.angstrom))
+    L_cyl_ang = z_max_ang - z_cc_ang  # cylinder length (Å)
 
     # Standard-state correction (Limongelli 2013 Eq. 3)
-    A_cyl = math.pi * R_cyl_ang ** 2            # Å²
-    correction = kT * math.log(A_cyl * C0_per_A3)  # kJ/mol; negative for typical R
+    # correction = kT * ln(V_cyl * C°)  where V_cyl = π R² L
+    V_cyl = math.pi * R_cyl_ang ** 2 * L_cyl_ang  # Å³
+    correction = kT * math.log(V_cyl * C0_per_A3)  # kJ/mol; dimensionless argument
 
     # Corrected FE array: unbound plateau → |correction|; bound min → ΔG°_b
     fe_rw = fe_norm - correction
@@ -353,7 +356,8 @@ def correct_fe_for_funnel(
 
     logger.info(
         f"Funnel correction: ΔG_sim={dG_bind_sim:.2f} kJ/mol, "
-        f"correction={correction:.2f} kJ/mol (R_cyl={R_cyl_ang:.1f} Å), "
+        f"correction={correction:.2f} kJ/mol "
+        f"(R_cyl={R_cyl_ang:.1f} Å, L_cyl={L_cyl_ang:.1f} Å, V_cyl={V_cyl:.1f} Å³), "
         f"ΔG°_b={dG_bind_std:.2f} kJ/mol, pKd={pKd:.2f}"
     )
 
@@ -363,6 +367,10 @@ def correct_fe_for_funnel(
         "correction_kj_mol": correction,
         "dG_bind_std_kj_mol": dG_bind_std,
         "R_cylinder_ang": R_cyl_ang,
+        "z_cc_ang": z_cc_ang,
+        "z_max_ang": z_max_ang,
+        "L_cylinder_ang": L_cyl_ang,
+        "V_cylinder_ang3": V_cyl,
         "pKd": pKd,
         "cv_at_minimum": cv_at_min,
         "n_fe_files": n_files,

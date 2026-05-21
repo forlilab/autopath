@@ -835,10 +835,10 @@ class AutoPath:
                             universe,
                             host_selection=funnel_host_sel,
                             guest_selection=f"resname {ligand_resname}",
-                            percentile_z=99.0,
+                            percentile_z=65.0,
                             R_cylinder_ang=1.5,
-                            percentile_r_funnel=75.0,
-                            alpha_cone_degrees=25.0,
+                            # z_cc_ang=5, # this overrides the default automatic z_cc calculation (floor is 5A)
+                            alpha_cone_degrees=45.0,
                             verbose=True,
                         )
                         

@@ -1499,9 +1499,10 @@ def _funnel_cgo(
         angles = np.linspace(0, 2 * np.pi, n_pts, endpoint=False)
         return [rc + radius * (np.cos(a) * e1 + np.sin(a) * e2) for a in angles]
 
-    # Cone section (0 → z_cc_visual) + three cylinder levels beyond
+    # Cone section (0 → z_cc_visual) + cylinder rings spaced ~5 Å apart
     z_cone = np.linspace(0.0, max(z_cc_visual, 0.0), n_z)
-    z_cyl = [z_cc_visual + extension * t for t in (0.33, 0.67, 1.0)]
+    n_cyl_rings = max(3, int(extension / 5.0) + 1)
+    z_cyl = [z_cc_visual + extension * t for t in np.linspace(0, 1, n_cyl_rings, endpoint=True)]
     z_all = list(z_cone) + z_cyl
 
     rings = []
@@ -1576,7 +1577,10 @@ def write_funnel_pymol(
     unbinding_axis = np.array(funnel_params["unbinding_axis"], dtype=float)
     unbinding_axis /= np.linalg.norm(unbinding_axis)
     com_traj = funnel_params["com_trajectory"].astype(float)   # relative Å (guest - host)
-    extension = 5.0  # extra cylinder length for context
+
+    # Draw the cylinder exactly to z_max (the hard cap used in the force).
+    z_max = funnel_params["z_max"].value_in_unit(openmmunit.angstrom)
+    extension = max(5.0, z_max - z_cc)
 
     # --- Re-anchor to the reference PDB coordinate frame ---
     # com_traj is a relative quantity (guest_com − host_com) computed during
