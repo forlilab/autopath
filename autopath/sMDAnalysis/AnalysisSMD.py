@@ -617,25 +617,17 @@ class SMDAnalysis:
                         "value": val,
                     })
 
-                # Stage 3: skip convergence comparison below min_replicas
-                # (keep prev_pmf and prev barrier/r_ts updated so the first comparison
-                # at min_replicas has a full prior state to compare against)
-                if k < min_replicas:
+                # Stage 3: first PMF in the trace window — initialize prev state, no comparison yet
+                if prev_pmf is None:
                     prev_pmf = pmf_k
                     prev_barrier_height, prev_r_ts = self._compute_barrier_rts(pmf_k, 1.0/smd.beta, protocol_grid)
                     continue
 
-                # === convergence comparison (k >= min_replicas) ===
+                # === convergence comparison (all k > trace_min_replicas) ===
+                # Metrics are computed from here regardless of min_replicas, so plots
+                # show early trends even when convergence is declared just after the floor.
 
                 barrier_height, r_ts = self._compute_barrier_rts(pmf_k, 1.0/smd.beta, protocol_grid)
-
-                # first PMF eligible for comparison: initialize
-                # (fires when trace_min_replicas == min_replicas, i.e. standard fallback)
-                if prev_pmf is None or prev_pmf.empty:
-                    prev_pmf = pmf_k
-                    prev_barrier_height = barrier_height
-                    prev_r_ts = r_ts
-                    continue
 
                 # compare PMF(k) vs PMF(k-1)
                 common_r = pmf_k.index.intersection(prev_pmf.index)

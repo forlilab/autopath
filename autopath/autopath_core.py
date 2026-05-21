@@ -73,7 +73,7 @@ class AutoPath:
         run_sMDpulling: bool = True,
         sMD_outdir: str = "sMD",
         sMD_pulling_dir: str = "forward",  # "forward" or "backward"
-        sMD_pulling_speeds: dict = {0.005:None, 0.0025:None, 0.001:None},  # nm/ps
+        sMD_pulling_speeds: dict = {0.005:5, 0.0025:5, 0.001:5},  # nm/ps; value = min reps (floor) if sMD_converge_speeds, else total reps
         sMD_max_pulling_dist: float = 3.5,  # nm
         sMD_max_r_offset: float = 3.0,    # max displacement offset (nm): cap pull at r0 + offset nm (also capped at half-box - 0.5 nm)
         sMD_autostop_nc: bool = False,
@@ -81,7 +81,7 @@ class AutoPath:
         sMD_autostop_lag_sigma: float = 5.0,
         sMD_autostop_lag_window: int = 25,
         sMD_autostop_min_displacement: float = 0.5,
-        sMD_convergence_min_reps: int = 5,
+        sMD_converge_speeds: bool = True,
         sMD_time: int = None,  # ns
         sMD_steps_per_move: int = None,
         sMD_dx_per_move: float = 0.001,  # nm, this is the displacement per move
@@ -137,7 +137,7 @@ class AutoPath:
         self.sMD_pulling_dir = sMD_pulling_dir
         self.sMD_max_pulling_dist = sMD_max_pulling_dist
         self.sMD_max_r_offset = sMD_max_r_offset
-        self.sMD_convergence_min_reps = sMD_convergence_min_reps
+        self.sMD_converge_speeds = sMD_converge_speeds
         self.sMD_autostop_nc = sMD_autostop_nc
         self.sMD_autostop_nc_threshold = sMD_autostop_nc_threshold
         self.sMD_autostop_lag_sigma = sMD_autostop_lag_sigma
@@ -391,27 +391,8 @@ class AutoPath:
             )
 
             for speed, reps in self.sMD_pulling_speeds.items():
-                if reps is not None:
-                    logger.info(f"Running sMD for speed {speed} nm/ps with {reps} replicas.")
-                    for i in range(reps):
-                        existing = glob(f"{sMD_traj_outdir}/sMD_*_v{speed}_{self.sMD_pulling_dir}.dat")
-                        if len(existing) >= self.sMD_max_replicas:
-                            logger.warning(
-                                f"Reached maximum replicas ({self.sMD_max_replicas}) for speed {speed} nm/ps "
-                                f"(folder already has {len(existing)}). Stopping."
-                            )
-                            break
-                        try:
-                            sMD.run(
-                                checkpoint_file=equilibrated_chk,
-                                pulling_speed=speed,  # nm/ps
-                                pulling_direction=self.sMD_pulling_dir,
-                            )
-                        except Exception as e:
-                            logger.error(f"Error during sMD pulling for speed {speed} nm/ps, replica {i+1}: {e}")
-                            continue
-                else:
-                    logger.info(f"Running sMD for speed {speed} nm/ps until convergence.")
+                if self.sMD_converge_speeds:
+                    logger.info(f"Running sMD for speed {speed} nm/ps until convergence (min {reps} replicas).")
                     CONVERGED = False
                     while not CONVERGED:
                         log_files = glob(f"{sMD_traj_outdir}/sMD_*_v{speed}_{self.sMD_pulling_dir}.dat")
@@ -422,9 +403,8 @@ class AutoPath:
                         if len(log_files) >= self.sMD_max_replicas:
                             logger.warning(f"Reached maximum number of replicas ({self.sMD_max_replicas}) for speed {speed} nm/ps without convergence. Stopping.")
                             break
-                        
-                        if len(log_files) >= self.sMD_convergence_min_reps:
-                            
+
+                        if len(log_files) >= reps:
                             # loads the sMD data
                             smdanalysis = SMDAnalysis(sysname=sys_name, path_model='dtw', estimators=['cumulant'],
                                                     do_plots=False, seed=self.random_state,
@@ -432,14 +412,14 @@ class AutoPath:
                                                     outdir=sMD_analysis_outdir,
                                                     ligand_select=f"resname {ligand_resname} and not name H*",
                                                     )
-                            
+
                             # check convergence for this speed
                             conv_df, traces_df = smdanalysis.check_convergence(
                                 logs=log_files, speeds=[speed],
-                                min_replicas=self.sMD_convergence_min_reps,
+                                min_replicas=reps,
                             )
-                            
-                            # conv_df is empty when replicas == min_replicas (first PMF comparison
+
+                            # conv_df is empty when replicas == reps (first PMF comparison
                             # needs one more replica); skip writing/plotting until data is available
                             if conv_df.empty:
                                 logger.info(f"Not enough replicas yet for convergence comparison at speed {speed} nm/ps.")
@@ -461,9 +441,9 @@ class AutoPath:
                                     logger.info(f"Only {len(conv_df)} convergence comparison available for speed {speed} nm/ps; need 2 to declare convergence.")
                                 if CONVERGED:
                                     logger.warning(f"sMD pulling for speed {speed} nm/ps CONVERGED after {current_replica} replicas.")
-                                    continue # continue to next speed
+                                    continue
 
-                        # Run the next replica if not converged
+                        # Run the next replica
                         try:
                             sMD.run(
                                 checkpoint_file=equilibrated_chk,
@@ -472,6 +452,25 @@ class AutoPath:
                             )
                         except Exception as e:
                             logger.error(f"Error during sMD pulling for speed {speed} nm/ps, replica {current_replica}: {e}")
+                            continue
+                else:
+                    logger.info(f"Running sMD for speed {speed} nm/ps with {reps} replicas.")
+                    for i in range(reps):
+                        existing = glob(f"{sMD_traj_outdir}/sMD_*_v{speed}_{self.sMD_pulling_dir}.dat")
+                        if len(existing) >= self.sMD_max_replicas:
+                            logger.warning(
+                                f"Reached maximum replicas ({self.sMD_max_replicas}) for speed {speed} nm/ps "
+                                f"(folder already has {len(existing)}). Stopping."
+                            )
+                            break
+                        try:
+                            sMD.run(
+                                checkpoint_file=equilibrated_chk,
+                                pulling_speed=speed,  # nm/ps
+                                pulling_direction=self.sMD_pulling_dir,
+                            )
+                        except Exception as e:
+                            logger.error(f"Error during sMD pulling for speed {speed} nm/ps, replica {i+1}: {e}")
                             continue
                         
         # Load and align sMD trajectories
