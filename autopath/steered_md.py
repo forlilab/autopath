@@ -94,7 +94,8 @@ class SteeredMD:
         autostop_nc: bool = False,        # stop when NC drops below autostop_nc_threshold (ligand detached)
         autostop_nc_threshold: float = 1.0,
         autostop_min_displacement: float = 0.5,  # nm — don't fire autostop before this displacement from r0
-        sMD_max_r_offset: float = 3.0,   # max displacement offset (nm): cap pull at r0 + offset nm (also capped at half-box - 0.5 nm)
+        sMD_max_r_offset: float = 3.0,   # max displacement offset (nm): cap pull at r0 + offset nm (also capped by PBC half-box minus pbc_safety_nm)
+        pbc_safety_nm: float = 0.5,      # nm — safety margin subtracted from the per-axis PBC half-box cap (raise for large proteins)
         use_NVT: bool = False,  # Use NVT ensemble
         use_GReweighting: bool = False,
         out_dir: str = None,
@@ -126,6 +127,7 @@ class SteeredMD:
         self.autostop_nc_threshold = float(autostop_nc_threshold)
         self.autostop_min_displacement = float(autostop_min_displacement)
         self.sMD_max_r_offset    = float(sMD_max_r_offset)
+        self.pbc_safety_nm       = float(pbc_safety_nm)
         self.use_NVT = use_NVT
 
         self.integrator_friction = 1.0 / openmmunit.picoseconds  # Friction coefficient for Langevin integrator
@@ -197,18 +199,60 @@ class SteeredMD:
         simulation.context.setParameter("r0_smd", initial_r0)
 
         # ── Move count cap: box safety + r0 factor ─────────────────────────────
+        # PBC cap: cvpack uses pbc=True so the COM-COM distance is the minimum
+        # image. The reported scalar becomes ill-defined once any component of
+        # the COM-COM vector exceeds L_axis/2. Project the initial vector onto
+        # each axis to get the per-axis limit on the spring's scalar r:
+        #     r_max_i = (L_i / 2) * |v| / |v_i|
+        # Take the min across axes. For elongated boxes (long axis aligned with
+        # the pull direction), this gives ~L_long/2, not min(L)/2.
         initial_r0_nm = initial_r0.value_in_unit(openmmunit.nanometers)
         dx_nm = float(self.dx_per_move.value_in_unit(openmmunit.nanometers))
         n_moves = self.sMD_moves
-        if self.sMD_max_r_offset > 0:
-            box_vecs = simulation.topology.getPeriodicBoxVectors()
-            min_box_nm = min(abs(box_vecs[i][i].value_in_unit(openmmunit.nanometers)) for i in range(3))
-            r_max_pbc      = min_box_nm / 2.0 - 0.5
+        if direction == "forward" and self.sMD_max_r_offset > 0:
+            state    = simulation.context.getState(getPositions=True)
+            box_vecs = state.getPeriodicBoxVectors()
+            L = np.array([
+                abs(box_vecs[i][i].value_in_unit(openmmunit.nanometers))
+                for i in range(3)
+            ])
+
+            positions = state.getPositions(asNumpy=True).value_in_unit(openmmunit.nanometers)
+            weigh_by_mass = not (len(self.groupA_atoms) == 1 or len(self.groupB_atoms) == 1)
+            if weigh_by_mass:
+                masses_A = np.array([simulation.system.getParticleMass(i).value_in_unit(openmmunit.dalton)
+                                     for i in self.groupA_atoms])
+                masses_B = np.array([simulation.system.getParticleMass(i).value_in_unit(openmmunit.dalton)
+                                     for i in self.groupB_atoms])
+            else:
+                masses_A = np.ones(len(self.groupA_atoms))
+                masses_B = np.ones(len(self.groupB_atoms))
+            com_A = np.average(positions[self.groupA_atoms], axis=0, weights=masses_A)
+            com_B = np.average(positions[self.groupB_atoms], axis=0, weights=masses_B)
+            v = com_A - com_B
+            v -= np.round(v / L) * L  # minimum-image wrap (orthorhombic)
+            v_norm = float(np.linalg.norm(v))
+            if abs(v_norm - initial_r0_nm) > 0.05:
+                logger.warning(
+                    f"PBC cap: |v|={v_norm:.3f} nm differs from cvpack initial_r0="
+                    f"{initial_r0_nm:.3f} nm. Check that protein/ligand are not split "
+                    f"across a periodic boundary at t=0; cap may be unreliable."
+                )
+            abs_v = np.abs(v)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                r_max_per_axis = np.where(abs_v > 1e-6, (L / 2.0) * v_norm / abs_v, np.inf)
+            r_max_pbc      = float(np.min(r_max_per_axis)) - self.pbc_safety_nm
             r_max_offset   = initial_r0_nm + self.sMD_max_r_offset
             r_max          = min(r_max_pbc, r_max_offset)
             moves_safe     = max(1, int((r_max - initial_r0_nm) / dx_nm))
             if n_moves > moves_safe:
-                reason = "PBC half-box" if r_max == r_max_pbc else f"r0+{self.sMD_max_r_offset:.1f}nm offset"
+                if r_max == r_max_pbc:
+                    dom_axis = int(np.argmin(r_max_per_axis))
+                    reason = (f"PBC axis-{('xyz')[dom_axis]} half-box "
+                              f"(L={L[dom_axis]:.2f} nm, |v|/|v_{('xyz')[dom_axis]}|={v_norm/max(abs_v[dom_axis],1e-12):.2f}, "
+                              f"safety={self.pbc_safety_nm:.2f} nm)")
+                else:
+                    reason = f"r0+{self.sMD_max_r_offset:.1f}nm offset"
                 logger.warning(
                     f"Capping sMD_moves {n_moves} → {moves_safe}: planned r_end="
                     f"{initial_r0_nm + n_moves * dx_nm:.3f} nm exceeds {reason} limit "
