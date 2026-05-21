@@ -64,8 +64,8 @@ def main():
     ap = AutoPath(pdb_path=receptor,
                     pocket_selection=pocket_selection,
 
-                    do_fix_pdb=True,
-                    run_preparation=True,
+                    do_fix_pdb=False,
+                    run_preparation=False,
                     padding=1.2,
                     hydrogenMass=1.5, 
                     ionicStrength=0.15,
@@ -73,31 +73,30 @@ def main():
 
                     lig_ff='openff-2.3.0',
 
-                    run_equilibration=True,
+                    run_equilibration=False,
                     protocol_fname=protocol,
 
                     run_sMDpulling=True,
                     sMD_outdir='sMD',
                     sMD_ligand_anchor_mode='murcko',
+                    sMD_converge_speeds=True,
                     sMD_max_replicas = 50,
                     sMD_pulling_speeds={
-                                        0.010:None, # nm/ps equivalent to 10.0 m/s nm/ns
-                                        0.0050:None, # nm/ps equivalent to 5.0 m/s nm/ns
-                                        0.0010:None, # nm/ps equivalent to 1.0 m/s nm/ns
+                                        0.010:5, # nm/ps equivalent to 10.0 m/s nm/ns
+                                        0.0050:5, # nm/ps equivalent to 5.0 m/s nm/ns
+                                        # 0.0010:5, # nm/ps equivalent to 1.0 m/s nm/ns
                                         },
-
-                    sMD_dx_per_move=0.001, # nm
 
                     sMD_run_analysis=True,
                     # cluster_across_speeds=True,
 
-                    extract_milestones=True,
+                    extract_milestones=False,
                     n_milestones=3,
                     
-                    run_metadynamics=True,
-                    mMD_use_funnel_potential=True,
+                    run_metadynamics=False,
+                    # mMD_use_funnel_potential=True,
                     # mMD_preseed_bias=False,
-                    mMD_multiple_walkers=True,
+                    # mMD_multiple_walkers=True,
                     
                     mMD_time=5, # ns
                     mMD_bias_frequency=2,
