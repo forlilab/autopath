@@ -64,8 +64,8 @@ def main():
     ap = AutoPath(pdb_path=receptor,
                     pocket_selection=pocket_selection,
 
-                    do_fix_pdb=False,
-                    run_preparation=False,
+                    do_fix_pdb=True,
+                    run_preparation=True,
                     padding=1.2,
                     hydrogenMass=1.5, 
                     ionicStrength=0.15,
@@ -73,29 +73,29 @@ def main():
 
                     lig_ff='openff-2.3.0',
 
-                    run_equilibration=False,
+                    run_equilibration=True,
                     protocol_fname=protocol,
 
-                    run_sMDpulling=False,
+                    run_sMDpulling=True,
                     sMD_outdir='sMD',
                     sMD_ligand_anchor_mode='murcko',
                     sMD_converge_speeds=True,
                     sMD_max_replicas = 50,
                     sMD_pulling_speeds={
-                                        0.010:3, # nm/ps equivalent to 10.0 m/s nm/ns
-                                        0.0050:3, # nm/ps equivalent to 5.0 m/s nm/ns
-                                        # 0.0010:3, # nm/ps equivalent to 1.0 m/s nm/ns
+                                        0.010:10, # nm/ps equivalent to 10.0 m/s nm/ns
+                                        0.0050:10, # nm/ps equivalent to 5.0 m/s nm/ns
+                                        0.0010:10, # nm/ps equivalent to 1.0 m/s nm/ns
                                         },
 
-                    sMD_run_analysis=False,
+                    sMD_run_analysis=True,
                     # cluster_across_speeds=True,
 
-                    extract_milestones=False,
+                    extract_milestones=True,
                     n_milestones=3,
                     
                     run_metadynamics=True,
                     mMD_use_funnel_potential=True,
-                    # mMD_preseed_bias=False,
+                    mMD_preseed_bias=False,
                     mMD_multiple_walkers=True,
                     
                     mMD_time=5, # ns
