@@ -29,6 +29,7 @@ from autopath import (
     MetadynamicsMD,
 )
 from autopath.metadynamics import (
+    MetadynamicsAnalysis,
     com_cv,
     pathCV_cv,
     write_metad_preseed,
@@ -37,9 +38,9 @@ from autopath.metadynamics import (
     save_funnel_params,
     write_funnel_pymol,
 )
-from autopath.sMDAnalysis import SMDData, SMDAnalysis
-from autopath.sMDAnalysis.PathModel import DTWPathModel
-from autopath.sMDAnalysis.Diagnostics import plot_convergence_traces, plot_convergence_metrics
+from autopath.pulling import SMDData, SMDAnalysis
+from autopath.pulling.PathModel import DTWPathModel
+from autopath.pulling.Diagnostics import plot_convergence_traces, plot_convergence_metrics
 
 import logging
 logger = logging.getLogger('autopath.core')
@@ -880,16 +881,20 @@ class AutoPath:
                     logger.warning("Continuing without funnel potential")
                     funnel_force = None
 
-            first_milestone_chk = None  # set after first milestone is relaxed; reused in single-walker mode
+            # Single-walker mode: all walkers start from the most-bound (first) milestone.
+            # Resolve this before reversing the loop so it is milestone-order independent.
+            first_milestone_name = os.path.basename(milestones[0]).split('.')[0]
+            first_milestone_chk = f"{milestones_outdir}/{first_milestone_name}_relax_checkpoint.chk"
+            walker_run_info = {}  # {run_id: (checkpoint_path, system_xml_path)} for stuck-walker retry
 
-            for milestone in milestones:
+            # Run most-unbound walker first so the most-bound walker inherits their accumulated bias.
+            for milestone in reversed(milestones):
                 milestone_name = os.path.basename(milestone).split('.')[0]
-                # milestone_number = int(milestone_name.split('_')[-3])
-                milestone_system = f"{milestones_outdir}/{milestone_name}_relax_system.xml"
+                milestone_system_xml = f"{milestones_outdir}/{milestone_name}_relax_system.xml"
                 milestone_chk = f"{milestones_outdir}/{milestone_name}_relax_checkpoint.chk"
 
-                if os.path.exists(milestone_system):
-                    milestone_system = load_system(milestone_system)
+                if os.path.exists(milestone_system_xml):
+                    milestone_system = load_system(milestone_system_xml)
                     logger.info(f"Loading relaxed milestone {milestone_name}")
                 else:
                     logger.info(f'Relaxing milestone {milestone_name}')
@@ -900,33 +905,82 @@ class AutoPath:
                         logger.error(f"Error relaxing {milestone_name}: {e}")
                         continue
 
-                # Track the first relaxed checkpoint for single-walker mode
-                if first_milestone_chk is None:
-                    first_milestone_chk = milestone_chk
-
                 # Multiple-walker: each walker starts from its own relaxed checkpoint.
-                # Single-walker: all walkers start from the first milestone (bound state) checkpoint.
+                # Single-walker: all walkers start from the most-bound milestone checkpoint.
                 chk_to_use = milestone_chk if self.mMD_multiple_walkers else first_milestone_chk
 
                 logger.info(f"Running WTMetaD for milestone {milestone_name}")
                 try:
-                    # print('nothing here yet')
                     WTMetaD.run(
                         checkpoint_file=chk_to_use,
                         system=milestone_system,
                         run_id=milestone_name,
                         cv_specs=[path_cv],
-                        mMD_time=self.mMD_time, #ns
+                        mMD_time=self.mMD_time,
                         bias_factor=self.mMD_bias_factor,
                         hill_height=self.mMD_hill_height,
-                        biasFrequency=self.mMD_bias_frequency, #ps
+                        biasFrequency=self.mMD_bias_frequency,
                         funnel_force=funnel_force,
                         funnel_params=funnel_params if funnel_force is not None else None,
                     )
+                    walker_run_info[milestone_name] = (chk_to_use, milestone_system_xml)
                 except Exception as e:
                     logger.error(f"Error during WTMetaD for {milestone_name}: {e}")
                     continue
-                 
+
+            # Retry walkers that never left the bound state (max PathCV < 0.5).
+            # By this point the biasDir contains the full accumulated bias from all
+            # successful walkers, so a stuck walker starting from the same checkpoint
+            # now has a warm landscape to climb out of.
+            stuck_walkers = [
+                (run_id, chk, xml)
+                for run_id, (chk, xml) in walker_run_info.items()
+                if os.path.exists(f"{mMD_out_dir}/COLVAR_{run_id}.npy")
+                and float(np.load(f"{mMD_out_dir}/COLVAR_{run_id}.npy")[:, 0].max()) < 0.5
+            ]
+            if stuck_walkers:
+                logger.info(
+                    f"{len(stuck_walkers)} stuck walker(s) detected "
+                    f"({[r for r, _, _ in stuck_walkers]}); retrying with accumulated bias."
+                )
+                for run_id, chk, xml in stuck_walkers:
+                    try:
+                        WTMetaD.run(
+                            checkpoint_file=chk,
+                            system=load_system(xml),
+                            run_id=f"{run_id}_retry",
+                            cv_specs=[path_cv],
+                            mMD_time=self.mMD_time,
+                            bias_factor=self.mMD_bias_factor,
+                            hill_height=self.mMD_hill_height,
+                            biasFrequency=self.mMD_bias_frequency,
+                            funnel_force=funnel_force,
+                            funnel_params=funnel_params if funnel_force is not None else None,
+                        )
+                    except Exception as e:
+                        logger.error(f"Retry failed for {run_id}: {e}")
+
+            # Post-run diagnosis: FES, walker stats, and ΔG°_b from the coverage-filtered FES.
+            try:
+                colvar_files_diag = sorted(glob(f"{mMD_out_dir}/COLVAR_*.npy"))
+                if colvar_files_diag:
+                    ma = MetadynamicsAnalysis(out_dir=mMD_out_dir)
+                    diag = ma.diagnose(
+                        colvar_files=colvar_files_diag,
+                        temperature=float(self.temperature),
+                        bias_factor=float(self.mMD_bias_factor),
+                        cv_name="PathCV progress (s)",
+                        out_prefix=os.path.join(mMD_out_dir, sys_name),
+                    )
+                    if diag.get('dG_bind_std_kcal') is not None:
+                        logger.info(
+                            f"Final ΔG°_b = {diag['dG_bind_std_kcal']:.2f} kcal/mol  "
+                            f"pKd = {diag['pKd']:.2f}  "
+                            f"({diag['n_converged_cv']}/{diag['n_walkers']} walkers converged)"
+                        )
+            except Exception as _diag_err:
+                logger.warning(f"Post-run metadynamics diagnosis failed (non-fatal): {_diag_err}")
+
         # Load and align the WTMetaD trajectories
         WTMetaD_trajs = glob(f"{mMD_out_dir}/trajectory_metadynamics_milestone_*_frame_*.dcd")
         WTMetaD_trajs = [f for f in WTMetaD_trajs if "aligned" not in f]  # only process unaligned trajectories

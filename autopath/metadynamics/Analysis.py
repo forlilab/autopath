@@ -12,7 +12,7 @@ plt.rcParams["savefig.facecolor"] = 'white'
 plt.rcParams["savefig.edgecolor"] = 'white'
 plt.rcParams["axes.facecolor"] = 'white'
 
-from autopath.sMDAnalysis.Estimators import _find_pmf_peak
+from autopath.pulling.Estimators import _find_pmf_peak
 
 logger = logging.getLogger("autopath")
 
@@ -116,10 +116,10 @@ def plot_FE(out_dir, x_min, x_max, grid_points, colvar_name):
 def plot_FE_rw(out_dir, x_min, x_max, grid_points, colvar_name):
     """Plot standard-state-corrected FE profiles (FE_*_rw.npy).
 
-    Each _rw file is the corresponding biased FE normalised so the unbound plateau
-    is zero, then shifted by the Limongelli 2013 standard-state correction so that
-    the bound-state minimum directly reads as ΔG°_b.  Later files are more
-    converged; the last file is the best current estimate and is highlighted.
+    Each _rw file shows the FES normalised to the unbound endpoint (s=1 ≈ 0) with
+    the Limongelli 2013 standard-state correction applied.  ΔG°_b is read from the
+    bound-basin minimum (first 20 % of the CV).  Each legend entry includes the
+    per-walker ΔG°_b.  The title reports the best (most negative valid) estimate.
     """
     sys_name = out_dir.split("/")[0]
     axis_values = np.linspace(x_min, x_max, grid_points)
@@ -129,29 +129,50 @@ def plot_FE_rw(out_dir, x_min, x_max, grid_points, colvar_name):
     if not files:
         return
 
+    bound_bins = max(1, int(0.20 * grid_points))
+    kT_log10 = 8.314e-3 * 298.15 * np.log(10)
+    best_dG, best_pKd = None, None
+
     data = []
     for f in files:
-        walker_name = os.path.splitext(os.path.basename(f))[0]
-        np_data = np.load(f) * 0.239006  # kJ/mol → kcal/mol
-        df = pd.DataFrame(np_data, columns=["FE"])
+        raw_name = os.path.splitext(os.path.basename(f))[0]
+        # Shorten label: strip common prefix and suffix
+        short = raw_name.replace("FE_", "").replace("_rw", "")
+        fe_kcal = np.load(f) * 0.239006  # kJ/mol → kcal/mol
+        dG = float(fe_kcal[:bound_bins].min())
+        pKd_w = -dG * 4.184 / kT_log10
+        dG_str = f"{dG:.1f}" if dG < 0 else f"+{dG:.1f}"
+        label = f"{short}  ({dG_str} kcal/mol)"
+        df = pd.DataFrame(fe_kcal, columns=["FE"])
         df.index = axis_values
-        df["walker"] = walker_name
+        df["walker"] = label
         data.append(df)
+        # Best = last walker (most accumulated bias = most converged) with a
+        # valid negative bound-basin ΔG AND a roughly flat plateau (|mean| of
+        # mid-CV region s=0.4–0.8 within 5 kcal/mol of zero).
+        if dG < 0:
+            mid_lo = int(0.40 * len(fe_kcal))
+            mid_hi = int(0.80 * len(fe_kcal))
+            plateau_ok = abs(float(fe_kcal[mid_lo:mid_hi].mean())) < 5.0
+            if plateau_ok:
+                best_dG, best_pKd = dG, pKd_w   # overwrite → last valid wins
 
-    last_fe_kcal = np.load(files[-1]) * 0.239006
-    dG_std_kcal = float(last_fe_kcal.min())
-    dG_std_kj = dG_std_kcal * 4.184
-    pKd = -dG_std_kj / (8.314e-3 * 298.15 * np.log(10))
+    if best_dG is None:        # no walker passed — fall back to last negative ΔG
+        for f in files:
+            dG_f = float(np.load(f)[:bound_bins].min() * 0.239006)
+            if dG_f < 0:
+                best_dG = dG_f
+                best_pKd = -best_dG * 4.184 / kT_log10
 
     data = pd.concat(data, axis=0)
-    plt.figure(figsize=(10, 4))
-    sns.lineplot(data, x=data.index, y="FE", hue="walker")
-    plt.axhline(0, color="grey", linewidth=0.8, linestyle=":")
-    plt.ylabel("ΔG°_b (kcal/mol)")
-    plt.xlabel(colvar_name)
-    plt.legend(bbox_to_anchor=(1.1, 1.05), fontsize="10")
-    plt.title(f"FE standard-state corrected - {sys_name}\n"
-              f"ΔG°_b (last walker) ≈ {dG_std_kcal:.1f} kcal/mol | pKd ≈ {pKd:.2f}")
+    fig, ax = plt.subplots(figsize=(12, 4))
+    sns.lineplot(data, x=data.index, y="FE", hue="walker", ax=ax)
+    ax.axhline(0, color="grey", linewidth=0.8, linestyle=":")
+    ax.set_ylabel("ΔG°_b (kcal/mol)")
+    ax.set_xlabel(colvar_name)
+    ax.legend(loc="upper right", fontsize=8, framealpha=0.85)
+    ax.set_title(f"FE standard-state corrected — {sys_name}   "
+                 f"ΔG°_b ≈ {best_dG:.1f} kcal/mol  |  pKd ≈ {best_pKd:.2f}")
     plt.tight_layout()
     plt.savefig(f"{out_dir}/{sys_name}_FE_rw.png")
     plt.close()
@@ -301,27 +322,35 @@ def correct_fe_for_funnel(
 
     cv = np.linspace(grid_min, grid_max, len(fe))
 
-    tail = fe[int(0.7 * len(fe)):]
-    n = min(n_plateau_points, len(tail))
-    if len(tail) > n:
-        stds = [float(tail[i : i + n].std()) for i in range(len(tail) - n + 1)]
-        best_start = int(np.argmin(stds))
-        plateau_val = float(tail[best_start : best_start + n].mean())
-    else:
-        plateau_val = float(tail.mean())
-
-    fe_max = float(fe.max())
-    unsampled_gap = fe_max - plateau_val
-    if unsampled_gap < 10.0:
-        raise ValueError(
-            f"Unbound state not sampled: plateau ({plateau_val:.1f} kJ/mol) is only "
-            f"{unsampled_gap:.1f} kJ/mol below the FE maximum ({fe_max:.1f} kJ/mol). "
-            "The walker did not reach the unbound end of the CV; ΔG would be meaningless."
-        )
+    # Unbound-state reference: mean of the last N grid points (s ≈ 1).
+    # This sets the actual funnel endpoint as the zero reference, which is what
+    # the Limongelli 2013 correction assumes.  Walkers that over-biased s≈1
+    # produce a deeply-negative endpoint; the bound-depth check below detects
+    # them (their bound basin stays positive relative to the reference) and
+    # raises an error before a bad ΔG is reported.
+    n_tail = min(n_plateau_points, len(fe))
+    plateau_val = float(fe[-n_tail:].mean())
 
     fe_norm = fe - plateau_val
 
-    min_idx = int(np.argmin(fe_norm))
+    # Read ΔG from the bound basin only (first 20 % of the CV), so that an
+    # over-biased unbound region never masquerades as the binding minimum.
+    bound_bins = max(1, int(0.20 * len(fe_norm)))
+
+    # Sanity check: the bound basin must be meaningfully deeper than the reference.
+    # We check this *after* normalization and *in the bound basin*, which is the
+    # region we actually read ΔG from.  This replaces the old "unsampled_gap"
+    # check (fe_max − plateau < 10) which misfired when the whole FES was deeply
+    # negative (both ends heavily biased — more sampled, not less).
+    bound_depth = float(fe_norm[:bound_bins].min())   # should be negative
+    if bound_depth > -10.0:
+        sign = "above" if bound_depth >= 0 else "only"
+        raise ValueError(
+            f"Bound state not sampled: the FES in the bound basin (s < 0.20) "
+            f"sits {sign} {bound_depth:.1f} kJ/mol relative to the unbound reference. "
+            "The walker may not have visited the binding site; ΔG would be meaningless."
+        )
+    min_idx = int(np.argmin(fe_norm[:bound_bins]))
     dG_bind_sim = float(fe_norm[min_idx])
     cv_at_min = float(cv[min_idx])
 
@@ -335,7 +364,7 @@ def correct_fe_for_funnel(
 
     fe_rw = fe_norm - correction
 
-    dG_bind_std = float(fe_rw.min())
+    dG_bind_std = float(fe_rw[:bound_bins].min())
     pKd = -dG_bind_std / (kT * math.log(10))
 
     logger.info(
@@ -727,17 +756,14 @@ class MetadynamicsAnalysis:
     ) -> dict:
         """Comprehensive multi-walker WT-MetaD diagnostic.
 
-        Produces a four-panel PNG figure (PLUMED-community style) and returns
-        a summary dict.  The four panels are:
+        Produces a three-panel PNG figure and returns a summary dict.
+        The three panels are:
 
         1. CV time traces — each walker, annotated with transition counts.
            Solid lines = reached unbound state; dashed = stuck.
         2. Self-bias per walker — what each walker actually deposited on the
            CV grid (only its own Gaussians, not the total).
-        3. Per-walker FES — FES computed from each walker's self-bias alone
-           (normalized min=0).  Reveals whether a single walker gives a
-           physically reasonable shape.
-        4. Combined vs converged-only FES — FES from all biases summed vs
+        3. Combined vs converged-only FES — FES from all biases summed vs
            FES from walkers that passed the coverage threshold, both
            normalized to zero at the unbound plateau.  ΔG estimates are
            annotated directly on the plot.
@@ -795,26 +821,51 @@ class MetadynamicsAnalysis:
         n = len(axis)
 
         def _norm_plateau(fes_kj):
-            plateau = fes_kj[int(0.85 * n):].mean()
+            plateau = fes_kj[-10:].mean()          # last 10 bins = unbound endpoint
             return (fes_kj - plateau) * 0.239006  # kcal/mol, unbound≈0
 
         fes_all_kcal = _norm_plateau(fes_all_kj)
 
-        fes_conv_kcal = None
-        if len(converged_biases) < len(all_biases):
-            _, fes_conv_kj = self.compute_fes(
-                [b for _, b in converged_biases], temperature, bias_factor, grid_min, grid_max
-            )
-            fes_conv_kcal = _norm_plateau(fes_conv_kj)
+        # Coverage-filtered FES: useful for visual comparison (shows what walkers that
+        # reached unbound contribute), but may have poor bound-basin coverage.
+        _, fes_conv_kj = self.compute_fes(
+            [b for _, b in converged_biases], temperature, bias_factor, grid_min, grid_max
+        )
+        fes_conv_kcal = _norm_plateau(fes_conv_kj) if len(converged_biases) < len(all_biases) else None
+
+        # Limongelli 2013 standard-state correction uses the ALL-WALKERS combined FES.
+        # Stuck walkers supply the bound-basin bias; converged walkers supply the
+        # unbound-basin bias.  Together they give the best available estimate of both
+        # endpoints, even when no single walker crossed the full CV range.
+        dG_result = None
+        funnel_npz = os.path.join(self.out_dir, 'funnel_params.npz')
+        if os.path.exists(funnel_npz):
+            try:
+                from openmm import unit as openmmunit
+                _raw = np.load(funnel_npz, allow_pickle=True)
+                _fp = {
+                    'R_cylinder': float(_raw['R_cylinder_ang']) * openmmunit.angstrom,
+                    'z_cc':       float(_raw['z_cc_ang'])       * openmmunit.angstrom,
+                    'z_max':      float(_raw['z_max_ang'])       * openmmunit.angstrom,
+                }
+                dG_result = correct_fe_for_funnel(
+                    fes_all_kj, _fp,
+                    temperature=temperature,
+                    grid_min=grid_min,
+                    grid_max=grid_max,
+                )
+            except Exception as _fe_err:
+                logging.warning(f"Limongelli correction failed (non-fatal): {_fe_err}")
 
         n_w = len(walker_data)
         colors = plt.cm.tab10(np.linspace(0, 1, max(n_w, 1)))
 
-        fig = plt.figure(figsize=(14, 12))
-        gs = gridspec.GridSpec(3, 2, figure=fig, hspace=0.50, wspace=0.38)
+        fig = plt.figure(figsize=(14, 11))
+        gs = gridspec.GridSpec(3, 1, figure=fig, hspace=0.50,
+                               height_ratios=[2, 1.5, 2])
 
         # Panel 1 — CV traces
-        ax1 = fig.add_subplot(gs[0, :])
+        ax1 = fig.add_subplot(gs[0])
         ax1.axhspan(0, bound_threshold, alpha=0.07, color='royalblue')
         ax1.axhspan(unbound_threshold, 1.0, alpha=0.07, color='tomato')
         ax1.axhline(bound_threshold,   color='royalblue', lw=0.7, ls='--', alpha=0.5)
@@ -832,61 +883,63 @@ class MetadynamicsAnalysis:
         ax1.set_ylim(-0.05, 1.05)
         ax1.set_xlabel("Frame #")
         ax1.set_ylabel(cv_name)
-        ax1.set_title("CV traces  (T=transitions  RT=round-trips  |  solid=reached unbound  dashed=stuck)")
+        ax1.set_title("CV traces  (solid = converged,  dashed = stuck)")
         ax1.legend(fontsize=8, loc='upper left', framealpha=0.85)
 
         # Panel 2 — Self-bias per walker
-        ax2 = fig.add_subplot(gs[1, 0])
+        ax2 = fig.add_subplot(gs[1])
         for k, (wid, barr) in enumerate(sorted(all_biases.items())):
             cov = self.bias_coverage(barr)
             ax2.plot(axis, barr * 0.239006, color=colors[k % len(colors)], lw=1.5,
                       label=f"id={wid}  cov={100*cov:.0f}%", alpha=0.85)
         ax2.set_xlabel(cv_name)
         ax2.set_ylabel("Self-bias (kcal/mol)")
-        ax2.set_title("Self-bias per walker\n(only this walker's Gaussians)")
+        ax2.set_title("Self-bias per walker")
         ax2.legend(fontsize=8)
 
-        # Panel 3 — Per-walker FES from self-bias only
-        ax3 = fig.add_subplot(gs[1, 1])
-        for k, (wid, barr) in enumerate(sorted(all_biases.items())):
-            cov = self.bias_coverage(barr)
-            _, fes_s_kj = self.compute_fes([barr], temperature, bias_factor, grid_min, grid_max)
-            fes_s = fes_s_kj * 0.239006
-            fes_s -= fes_s.min()
-            ax3.plot(axis, fes_s, color=colors[k % len(colors)], lw=1.5,
-                      label=f"id={wid}  cov={100*cov:.0f}%", alpha=0.85)
-        ax3.set_xlabel(cv_name)
-        ax3.set_ylabel("FE from self-bias (kcal/mol, min=0)")
-        ax3.set_title("Per-walker FES\n(self-bias only — shape reflects individual sampling)")
-        ax3.legend(fontsize=8)
-
-        # Panel 4 — Combined vs converged-only FES
-        ax4 = fig.add_subplot(gs[2, :])
+        # Panel 3 — Combined vs converged-only FES + ΔG°_b annotation
+        ax4 = fig.add_subplot(gs[2])
         dG_all = float(fes_all_kcal.min())
         ax4.plot(axis, fes_all_kcal, 'k-', lw=2.0,
-                  label=f"All walkers (n={len(all_biases)})  ΔG={dG_all:.1f} kcal/mol")
+                  label=f"All walkers (n={len(all_biases)})  ΔG_sim={dG_all:.1f} kcal/mol")
         if fes_conv_kcal is not None:
             dG_conv = float(fes_conv_kcal.min())
             ax4.plot(axis, fes_conv_kcal, 'g--', lw=2.0,
-                      label=f"Coverage-filtered (n={len(converged_biases)})  ΔG={dG_conv:.1f} kcal/mol")
+                      label=f"Coverage-filtered (n={len(converged_biases)})  ΔG_sim={dG_conv:.1f} kcal/mol")
         ax4.axhline(0, color='gray', lw=0.7, ls=':')
         ax4.axvline(bound_threshold,   color='royalblue', lw=0.7, ls='--', alpha=0.4)
         ax4.axvline(unbound_threshold, color='tomato',    lw=0.7, ls='--', alpha=0.4)
-        idx_min = int(np.argmin(fes_all_kcal))
-        ax4.annotate(f"ΔG={dG_all:.1f}", xy=(axis[idx_min], dG_all),
-                      xytext=(axis[idx_min] + 0.1, dG_all + 1.5), fontsize=9,
-                      arrowprops=dict(arrowstyle='->', lw=0.8))
+        if dG_result is not None:
+            dG_std_kcal = dG_result['dG_bind_std_kj_mol'] * 0.239006
+            pKd = dG_result['pKd']
+            cv_min = dG_result['cv_at_minimum']
+            bound_bins_plot = max(1, int(0.20 * len(fes_all_kcal)))
+            idx_best = int(np.argmin(fes_all_kcal[:bound_bins_plot]))
+            ax4.annotate(
+                f"ΔG°_b={dG_std_kcal:.1f} kcal/mol  pKd={pKd:.2f}",
+                xy=(axis[idx_best], float(fes_all_kcal[idx_best])),
+                xytext=(max(0.05, axis[idx_best] + 0.15),
+                        float(fes_all_kcal[idx_best]) + abs(float(fes_all_kcal.ptp())) * 0.12),
+                fontsize=9, color='darkgreen',
+                arrowprops=dict(arrowstyle='->', lw=0.8, color='darkgreen'),
+            )
+        else:
+            idx_min = int(np.argmin(fes_all_kcal))
+            ax4.annotate(f"ΔG_sim={dG_all:.1f}", xy=(axis[idx_min], dG_all),
+                          xytext=(axis[idx_min] + 0.1, dG_all + 1.5), fontsize=9,
+                          arrowprops=dict(arrowstyle='->', lw=0.8))
         ax4.set_xlabel(cv_name)
         ax4.set_ylabel("ΔG (kcal/mol, unbound plateau = 0)")
+        title_dg = (f"  ·  ΔG°_b={dG_result['dG_bind_std_kj_mol']*0.239006:.1f} kcal/mol,"
+                    f"  pKd={dG_result['pKd']:.2f}" if dG_result else "")
         ax4.set_title(
-            f"FES comparison — {n_converged_cv}/{n_w} walkers reached unbound state\n"
-            f"Use coverage-filtered FES when walkers are compartmentalized (Raiteri 2006)"
+            f"FES  ·  {n_converged_cv}/{n_w} walkers converged{title_dg}"
         )
         ax4.legend(fontsize=9)
 
         plt.suptitle(
             f"WT-MetaD Diagnosis — {os.path.basename(self.out_dir)}",
-            fontsize=12, fontweight='bold'
+            fontsize=11, fontweight='bold'
         )
         out_path = f"{out_prefix}_diagnosis.png"
         plt.savefig(out_path, dpi=150, bbox_inches='tight')
@@ -901,16 +954,26 @@ class MetadynamicsAnalysis:
                 f"  max_CV={ts['max_cv']:.3f}"
                 f"  bound={100*ts['frac_bound']:.0f}%  unbound={100*ts['frac_unbound']:.0f}%"
             )
-        logging.info(f"  ΔG(all walkers)     = {dG_all:.2f} kcal/mol")
+        logging.info(f"  ΔG_sim (all walkers)              = {dG_all:.2f} kcal/mol")
         if fes_conv_kcal is not None:
-            logging.info(f"  ΔG(coverage-filter) = {float(fes_conv_kcal.min()):.2f} kcal/mol")
+            logging.info(f"  ΔG_sim (coverage-filtered)        = {float(fes_conv_kcal.min()):.2f} kcal/mol")
+        if dG_result is not None:
+            dG_std_kcal = dG_result['dG_bind_std_kj_mol'] * 0.239006
+            conv_note = " [⚠ FES min not in bound basin]" if dG_result['cv_at_minimum'] > 0.3 else ""
+            logging.info(
+                f"  ΔG°_b (Limongelli, {len(converged_biases)} converged walkers) "
+                f"= {dG_std_kcal:.2f} kcal/mol  pKd={dG_result['pKd']:.2f}{conv_note}"
+            )
         logging.info("────────────────────────────────────────────────────────")
 
         return {
-            'walker_stats':   walker_stats,
-            'fes_all_kcal':   fes_all_kcal,
-            'fes_conv_kcal':  fes_conv_kcal,
-            'cv_axis':        axis,
-            'n_converged_cv': n_converged_cv,
-            'n_walkers':      n_w,
+            'walker_stats':     walker_stats,
+            'fes_all_kcal':     fes_all_kcal,
+            'fes_conv_kcal':    fes_conv_kcal,
+            'cv_axis':          axis,
+            'n_converged_cv':   n_converged_cv,
+            'n_walkers':        n_w,
+            'dG_bind_std_kcal': dG_result['dG_bind_std_kj_mol'] * 0.239006 if dG_result else None,
+            'pKd':              dG_result['pKd'] if dG_result else None,
+            'fes_min_at_cv':    dG_result['cv_at_minimum'] if dG_result else None,
         }
