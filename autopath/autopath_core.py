@@ -106,7 +106,8 @@ class AutoPath:
         mMD_hill_height: float = 1.2,  # kJ/mol approx 0.5KT
         mMD_hill_width: float = 0.05,
         mMD_time: int = 5,  # ns
-        mMD_multiple_walkers: bool = True,
+        mMD_milestone_seeding: bool = True,
+        mMD_multiple_walkers: bool = False,
         mMD_preseed_bias: bool = False,
         mMD_preseed_speed: float = None,
         mMD_funnel_host_selection: str | None = None,
@@ -168,6 +169,7 @@ class AutoPath:
         self.mMD_hill_height = mMD_hill_height
         self.mMD_hill_width = mMD_hill_width
         self.mMD_time = mMD_time
+        self.mMD_milestone_seeding = mMD_milestone_seeding
         self.mMD_multiple_walkers = mMD_multiple_walkers
         self.mMD_preseed_bias = mMD_preseed_bias
         self.mMD_preseed_speed = mMD_preseed_speed
@@ -905,9 +907,18 @@ class AutoPath:
                         logger.error(f"Error relaxing {milestone_name}: {e}")
                         continue
 
-                # Multiple-walker: each walker starts from its own relaxed checkpoint.
-                # Single-walker: all walkers start from the most-bound milestone checkpoint.
-                chk_to_use = milestone_chk if self.mMD_multiple_walkers else first_milestone_chk
+                # mMD_milestone_seeding=True : each walker starts from its own milestone's checkpoint.
+                # mMD_milestone_seeding=False: all walkers start from the first (bound-state) checkpoint.
+                chk_to_use = milestone_chk if self.mMD_milestone_seeding else first_milestone_chk
+
+                # mMD_multiple_walkers=True : each walker gets its own bias subdir → independent runs,
+                #   hills are NOT shared between milestones.
+                # mMD_multiple_walkers=False (default): all walkers share mMD_out_dir as biasDir so
+                #   OpenMM accumulates hills from all of them (true multi-walker metadynamics).
+                walker_bias_dir = (
+                    os.path.join(mMD_out_dir, f"bias_{milestone_name}")
+                    if self.mMD_multiple_walkers else None
+                )
 
                 logger.info(f"Running WTMetaD for milestone {milestone_name}")
                 try:
@@ -922,6 +933,7 @@ class AutoPath:
                         biasFrequency=self.mMD_bias_frequency,
                         funnel_force=funnel_force,
                         funnel_params=funnel_params if funnel_force is not None else None,
+                        bias_dir=walker_bias_dir,
                     )
                     walker_run_info[milestone_name] = (chk_to_use, milestone_system_xml)
                 except Exception as e:

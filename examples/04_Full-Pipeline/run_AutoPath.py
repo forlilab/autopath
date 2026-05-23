@@ -96,7 +96,7 @@ def main():
                     run_metadynamics=True,
                     mMD_use_funnel_potential=True,
                     mMD_preseed_bias=False,
-                    mMD_multiple_walkers=True,
+                    mMD_milestone_seeding=True,
                     
                     mMD_time=5, # ns
                     mMD_bias_frequency=2,

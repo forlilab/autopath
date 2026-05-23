@@ -102,6 +102,7 @@ class MetadynamicsMD:
         saveFrequency: int = 50,
         funnel_force: Force = None,
         funnel_params: dict = None,
+        bias_dir: str = None,
     ) -> str:
 
         start_time = time.monotonic()
@@ -209,6 +210,14 @@ class MetadynamicsMD:
             for s in resolved
         ]
 
+        # bias_dir controls where OpenMM writes/reads hill files.
+        # None (default) → shared self.out_dir; walkers accumulate bias together
+        # (OpenMM multi-walker convention, all walkers see each other's hills).
+        # Passing a per-walker subdirectory makes the simulation independent —
+        # hills are not shared with other walkers.
+        effective_bias_dir = bias_dir if bias_dir is not None else self.out_dir
+        os.makedirs(effective_bias_dir, exist_ok=True)
+
         meta = Metadynamics(
             system,
             bias_variables,
@@ -217,7 +226,7 @@ class MetadynamicsMD:
             hill_height,
             frequency=biasFrequency,
             saveFrequency=saveFrequency,
-            biasDir=self.out_dir,
+            biasDir=effective_bias_dir,
         )
 
         simulation.context.setTime(0)
