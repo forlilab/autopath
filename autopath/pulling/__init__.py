@@ -1,4 +1,5 @@
 
+from .steered_md import SteeredMD
 from .SMDData import SMDData
 from .AnalysisSMD import SMDAnalysis
 from .PathModel import DTWPathModel, NullPathModel
@@ -8,6 +9,7 @@ from .Estimators import (
     CumulantEstimator,
 )
 __all__ = [
+            "SteeredMD",
             "SMDData",
             "SMDAnalysis",
             "DTWPathModel",

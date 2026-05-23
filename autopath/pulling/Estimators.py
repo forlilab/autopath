@@ -8,10 +8,10 @@ from scipy.stats import linregress
 from scipy.signal import savgol_filter, find_peaks
 from scipy.ndimage import gaussian_filter1d
 
-from autopath.sMDAnalysis.SMDData import SMDData
+from autopath.pulling.SMDData import SMDData
 
 import logging
-logger = logging.getLogger("autopath.sMDAnalysis.Estimators")
+logger = logging.getLogger("autopath.pulling.Estimators")
 
 
 class BaseEstimator(ABC):

@@ -21,7 +21,7 @@ import logging
 logger = logging.getLogger("autopath.PathModel")
 
 class PathModel(ABC):
-    """Abstract base class for path models in sMDAnalysis."""
+    """Abstract base class for path models in pulling."""
     def __init__(self):
         pass
 

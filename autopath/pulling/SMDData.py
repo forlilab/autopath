@@ -9,7 +9,7 @@ from MDAnalysis.lib.distances import distance_array
 import tqdm
 
 import logging
-logger = logging.getLogger("autopath.sMDAnalysis.SMDData")
+logger = logging.getLogger("autopath.pulling.SMDData")
 from collections import defaultdict
 
 class SMDData:

@@ -8,7 +8,7 @@ import MDAnalysis as mda
 
 from .SMDData import SMDData
 
-logger = logging.getLogger("autopath.sMDAnalysis.LigandFeatures")
+logger = logging.getLogger("autopath.pulling.LigandFeatures")
 
 
 # Per-frame RDKit 3D shape descriptors. All are mass-weighted (PMI-based) or

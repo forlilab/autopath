@@ -1,4 +1,4 @@
-from autopath.sMDAnalysis.SMDData import SMDData
+from autopath.pulling.SMDData import SMDData
 import pandas as pd
 import os
 import numpy as np
@@ -22,7 +22,7 @@ from MDAnalysis.analysis import align, density
 from scipy.ndimage import gaussian_filter
 
 import logging
-logger = logging.getLogger("autopath.sMDAnalysis.Diagnostics")
+logger = logging.getLogger("autopath.pulling.Diagnostics")
 
 def plot_work_profiles(
     results: pd.DataFrame,
@@ -661,7 +661,7 @@ def make_unbinding_paths_visualization(
         output_format: ``"pse"`` saves a portable, self-contained session file;
             ``"pml"`` writes a script + auxiliary .dx files next to it.
         friction_csv: Path to ``friction.csv`` produced by
-            :class:`~autopath.sMDAnalysis.Estimators.FrictionEstimator`.
+            :class:`~autopath.pulling.Estimators.FrictionEstimator`.
             When provided, the isosurfaces are coloured by local friction
             Γ(r) as a blue (low) → white → red (high) gradient.
         friction_estimator: Which estimator row to use from *friction_csv*

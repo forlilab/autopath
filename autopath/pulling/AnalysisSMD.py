@@ -8,10 +8,10 @@ import logging
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import find_peaks
 
-from autopath.sMDAnalysis import SMDData
-from autopath.sMDAnalysis.Estimators import BaseEstimator, FrictionEstimator
-from autopath.sMDAnalysis.PathModel import DTWPathModel, NullPathModel, PathModel
-from autopath.sMDAnalysis.Estimators import (
+from autopath.pulling import SMDData
+from autopath.pulling.Estimators import BaseEstimator, FrictionEstimator
+from autopath.pulling.PathModel import DTWPathModel, NullPathModel, PathModel
+from autopath.pulling.Estimators import (
     JarzynskiEstimator,
     CumulantEstimator,
     KramersEstimator,
@@ -21,19 +21,19 @@ from autopath.sMDAnalysis.Estimators import (
     extrapolate_to_v0,
     _find_pmf_peak,
 )
-from autopath.sMDAnalysis.Diagnostics import (
+from autopath.pulling.Diagnostics import (
     plot_work_profiles,
     plot_profile,
     plot_friction,
     plot_extrapolated_param,
     make_unbinding_paths_visualization,
 )
-from autopath.sMDAnalysis.LigandFeatures import (
+from autopath.pulling.LigandFeatures import (
     LigandTrajectoryFeatures,
     SUPPORTED_FEATURES as LIGAND_FEATURE_POOL,
 )
 
-logger = logging.getLogger("autopath.sMDAnalysis")
+logger = logging.getLogger("autopath.pulling")
 
 # Trace-feature names that exist on SMDData.raw_data after __init__:
 # the .dat columns (force, U_cvpack, dW_protocol, m_eff, r_before, r_after)
