@@ -515,6 +515,7 @@ class AutoPath:
                                     do_plots=True, seed=self.random_state,
                                     temperature=self.temperature,
                                     ligand_select=_lig_sel_ha,
+                                    pocket_select=self.pocket_selection,
                                     outdir=sMD_analysis_outdir,
                                     filter_low_support=True,
                                     min_samples_per_step=5,

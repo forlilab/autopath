@@ -21,6 +21,7 @@ import MDAnalysis as mda
 from MDAnalysis.analysis import align, density
 from scipy.ndimage import gaussian_filter
 
+import re
 import logging
 logger = logging.getLogger("autopath.pulling.Diagnostics")
 
@@ -587,6 +588,53 @@ def plot_extrapolated_param(df: pd.DataFrame = None,
 
     return
 
+def _parse_speed_from_path(path_name: str) -> float | None:
+    """Extract pulling speed (nm/ps) from a path name such as ``'path-0_v0.001'``.
+
+    Returns ``None`` when the pattern ``_v{number}`` is absent (e.g. when
+    clustering was performed across speeds without a per-speed suffix).
+    """
+    m = re.search(r'[_\-]v([\d.]+)', path_name)
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            pass
+    return None
+
+
+def _get_friction_profile_for_path(
+    path_name: str,
+    friction_profiles: dict,
+    friction_speed_override: float | None,
+) -> "pd.Series | None":
+    """Return the per-speed friction profile for *path_name*.
+
+    Lookup order:
+    1. Speed parsed from the path name (e.g. ``path-0_v0.001`` → 0.001 nm/ps).
+    2. *friction_speed_override* when the name carries no speed.
+    3. Fastest available speed as a last resort.
+
+    Returns ``None`` when *friction_profiles* is empty.
+    """
+    if not friction_profiles:
+        return None
+    path_speed = _parse_speed_from_path(path_name)
+    if path_speed is None:
+        path_speed = friction_speed_override
+    if path_speed is None:
+        path_speed = max(friction_profiles)
+    if path_speed in friction_profiles:
+        return friction_profiles[path_speed]
+    # nearest speed fallback
+    nearest = min(friction_profiles, key=lambda s: abs(s - path_speed))
+    logger.info(
+        f"No friction profile for speed={path_speed} nm/ps (path='{path_name}'); "
+        f"using nearest available speed={nearest} nm/ps."
+    )
+    return friction_profiles[nearest]
+
+
 def _build_friction_grid(dens, friction_profile: pd.Series, center_pos_nm: np.ndarray):
     """Build a volumetric friction map on the same grid as a density object.
 
@@ -613,7 +661,11 @@ def _build_friction_grid(dens, friction_profile: pd.Series, center_pos_nm: np.nd
     import gridData
 
     r_vals = friction_profile.index.to_numpy(dtype=float)
-    g_vals = np.clip(friction_profile.to_numpy(dtype=float), 0, None)
+    g_vals = friction_profile.to_numpy(dtype=float)
+    # Replace any residual NaN (e.g. from clipped/noisy profiles) with 0 before
+    # interpolation — NaN propagates through interp1d and makes the entire grid NaN.
+    g_vals = np.where(np.isfinite(g_vals), g_vals, 0.0)
+    g_vals = np.clip(g_vals, 0, None)
     order = np.argsort(r_vals)
     r_vals, g_vals = r_vals[order], g_vals[order]
 
@@ -653,7 +705,8 @@ def make_unbinding_paths_visualization(
     output_format: str = "pse",
     friction_csv: str = None,
     friction_estimator: str = "cumulant",
-    friction_center_select: str = "resname DUM",
+    friction_center_select: str | None = None,
+    friction_speed: float | None = None,
 ) -> str:
     """Generate ligand-path density maps as a PyMOL session or script.
 
@@ -668,9 +721,17 @@ def make_unbinding_paths_visualization(
             (``"cumulant"`` or ``"jarzynski"``).  Default ``"cumulant"``.
         friction_center_select: MDAnalysis selection for the CV reference
             anchor used to map voxel distances to r_coord values.
-            Default ``"resname DUM"`` (membrane-pull convention).  If this
-            selection matches 0 atoms and *pocket_select* is provided, the
-            pocket COM is used as fallback (pocket-unbinding convention).
+            Default ``None``: the pocket COM (*pocket_select*) is used directly
+            when provided (pocket-unbinding convention).  Pass an explicit
+            selection string (e.g. ``"resname DUM"`` for membrane-pull systems)
+            to override.  If the explicit selection matches 0 atoms, the
+            pocket COM fallback is attempted; if that also fails, friction
+            colouring is disabled.
+        friction_speed: Pulling speed (nm/ps) whose derivative-friction profile
+            is used for colouring.  ``None`` (default) picks the fastest
+            non-zero speed present in *friction_csv*, which typically gives the
+            widest spatial coverage and the smoothest Gamma profile.  The
+            derivative at speed=0 is always excluded (its Gamma is undefined).
     """
     if output_format not in ("pse", "pml"):
         raise ValueError(f"output_format must be 'pse' or 'pml', got '{output_format}'")
@@ -686,55 +747,83 @@ def make_unbinding_paths_visualization(
     u_ref = mda.Universe(protein_abs)
 
     # ---------------------------------------------------------------------- #
-    # Load friction profile (optional)                                         #
+    # Load per-speed friction profiles (optional)                              #
     # ---------------------------------------------------------------------- #
-    friction_profile: Optional[pd.Series] = None
+    # friction_profiles: speed (nm/ps) → Gamma(r) Series.
+    # Each path is later coloured with the profile that matches its own speed
+    # (parsed from the path name, e.g. "path-0_v0.001" → 0.001 nm/ps).
+    # speed=0 rows are always excluded because their Gamma is NaN (derivative
+    # is undefined at v=0). friction_speed acts as a fallback for paths whose
+    # name carries no speed suffix.
+    friction_profiles: dict = {}
     friction_center_nm: Optional[np.ndarray] = None
+
     if friction_csv is not None:
         try:
-            fdf = pd.read_csv(friction_csv)
-            fdf = fdf[(fdf["method"] == "derivative") & (fdf["estimator"] == friction_estimator)]
-            if fdf.empty:
+            fdf_all = pd.read_csv(friction_csv)
+            fdf_deriv = fdf_all[
+                (fdf_all["method"] == "derivative") & (fdf_all["estimator"] == friction_estimator)
+            ]
+            valid_speeds = sorted(s for s in fdf_deriv["speed"].unique() if s > 0)
+            if not valid_speeds:
                 logger.warning(
-                    f"No derivative/{friction_estimator} rows in {friction_csv}. "
+                    f"No non-zero derivative/{friction_estimator} speeds in {friction_csv}. "
                     "Friction colouring disabled."
                 )
             else:
-                fdf = fdf.sort_values("r_coord")
-                friction_profile = pd.Series(
-                    fdf["Gamma"].to_numpy(), index=fdf["r_coord"].to_numpy()
-                )
-                center_ag = u_ref.select_atoms(friction_center_select)
-                if center_ag.n_atoms == 0:
-                    if pocket_select is not None:
-                        pocket_ag = u_ref.select_atoms(pocket_select)
-                        if pocket_ag.n_atoms > 0:
-                            logger.info(
-                                f"Friction centre selection '{friction_center_select}' found 0 atoms. "
-                                "Falling back to pocket_select COM as friction anchor."
-                            )
-                            friction_center_nm = pocket_ag.center_of_geometry() / 10.0  # Å → nm
-                        else:
-                            logger.warning(
-                                f"Friction centre selection '{friction_center_select}' found 0 atoms "
-                                "and pocket_select also found 0 atoms. Friction colouring disabled."
-                            )
-                            friction_profile = None
-                    else:
-                        logger.warning(
-                            f"Friction centre selection '{friction_center_select}' found 0 atoms "
-                            "and no pocket_select provided. Friction colouring disabled."
+                for spd in valid_speeds:
+                    rows = (fdf_deriv[fdf_deriv["speed"] == spd]
+                            .sort_values("r_coord")
+                            .dropna(subset=["Gamma"]))
+                    if not rows.empty:
+                        friction_profiles[spd] = pd.Series(
+                            rows["Gamma"].to_numpy(), index=rows["r_coord"].to_numpy()
                         )
-                        friction_profile = None
-                else:
-                    friction_center_nm = center_ag.center_of_geometry() / 10.0  # Å → nm
-                if friction_center_nm is not None:
-                    logger.info(
-                        f"Friction colouring enabled ({friction_estimator}). "
-                        f"Centre: {friction_center_nm} nm"
-                    )
+                logger.info(
+                    f"Loaded friction profiles for {len(friction_profiles)} speed(s): "
+                    f"{sorted(friction_profiles)} nm/ps."
+                )
         except Exception as exc:
             logger.warning(f"Could not load friction data from {friction_csv}: {exc}. Skipping.")
+
+    if friction_profiles:
+        # Determine the spatial anchor for Γ(r) lookup (same for all paths).
+        # Anchor = the fixed point from which per-voxel distance is computed
+        # to index into the friction profile.
+        _center_selected = False
+        try:
+            if friction_center_select is not None:
+                center_ag = u_ref.select_atoms(friction_center_select)
+                if center_ag.n_atoms > 0:
+                    friction_center_nm = center_ag.center_of_geometry() / 10.0  # Å → nm
+                    _center_selected = True
+                else:
+                    logger.warning(
+                        f"Friction centre selection '{friction_center_select}' found 0 atoms; "
+                        "trying pocket_select fallback."
+                    )
+
+            if not _center_selected:
+                if pocket_select is not None:
+                    pocket_ag = u_ref.select_atoms(pocket_select)
+                    if pocket_ag.n_atoms > 0:
+                        friction_center_nm = pocket_ag.center_of_geometry() / 10.0  # Å → nm
+                        logger.info("Using pocket_select COM as friction anchor.")
+                    else:
+                        logger.warning("pocket_select found 0 atoms. Friction colouring disabled.")
+                else:
+                    logger.info("No friction anchor provided. Friction colouring disabled.")
+        except Exception as exc:
+            logger.warning(
+                f"Friction anchor determination failed: {exc}. Friction colouring disabled."
+            )
+
+        if friction_center_nm is not None:
+            logger.info(
+                f"Friction colouring enabled ({friction_estimator}). "
+                f"Centre: {friction_center_nm} nm — "
+                f"each path coloured by its own pulling speed."
+            )
 
     default_palette = ["violetpurple", "marine", "forest", "deepsalmon", "gold", "tv_red", "tv_blue"]
     path_colors = {name: default_palette[i % len(default_palette)] for i, name in enumerate(paths)}
@@ -782,15 +871,25 @@ def make_unbinding_paths_visualization(
         dens.export(dx_path)
         dx_files[path_name] = dx_path
 
-        # Build friction volumetric map on the same grid as the density
-        if friction_profile is not None and friction_center_nm is not None:
-            try:
-                fric_grid = _build_friction_grid(dens, friction_profile, friction_center_nm)
-                fric_dx_path = str(dx_dest / f"{path_name}_friction.dx")
-                fric_grid.export(fric_dx_path)
-                friction_dx_files[path_name] = fric_dx_path
-            except Exception as exc:
-                logger.warning(f"Could not build friction grid for {path_name}: {exc}")
+        # Build friction volumetric map on the same grid as the density.
+        # Each path uses the friction profile at its own pulling speed so that
+        # the spatial Γ(r) pattern reflects the actual simulation conditions.
+        if friction_center_nm is not None:
+            path_profile = _get_friction_profile_for_path(
+                path_name, friction_profiles, friction_speed
+            )
+            if path_profile is not None:
+                try:
+                    fric_grid = _build_friction_grid(dens, path_profile, friction_center_nm)
+                    fric_dx_path = str(dx_dest / f"{path_name}_friction.dx")
+                    fric_grid.export(fric_dx_path)
+                    friction_dx_files[path_name] = fric_dx_path
+                    logger.info(
+                        f"Built friction grid for '{path_name}' "
+                        f"(speed={_parse_speed_from_path(path_name)} nm/ps)."
+                    )
+                except Exception as exc:
+                    logger.warning(f"Could not build friction grid for {path_name}: {exc}")
 
         n_frames = len(u.trajectory)
         if n_lig_conformations >= n_frames:
@@ -805,23 +904,36 @@ def make_unbinding_paths_visualization(
                 W.write(lig)
         lig_pdb_files[path_name] = lig_pdb
 
-    # Determine friction colour range from all paths combined (use 5th–95th percentile)
+    # Determine friction colour range (shared ramp, 5th–95th percentile).
+    # Collect Gamma from the per-path profiles actually used for the grids so
+    # that the ramp reflects exactly the data that was rendered.  Using a shared
+    # ramp keeps colours comparable across paths even when they were pulled at
+    # different speeds.
     friction_ramp_vals: Optional[List[float]] = None
     if friction_dx_files:
         all_gamma: List[float] = []
-        for path_name in friction_dx_files:
-            fdf = pd.read_csv(friction_csv)
-            fdf = fdf[(fdf["method"] == "derivative") & (fdf["estimator"] == friction_estimator)]
-            all_gamma.extend(np.clip(fdf["Gamma"].to_numpy(), 0, None).tolist())
+        for pname in friction_dx_files:
+            pprofile = _get_friction_profile_for_path(pname, friction_profiles, friction_speed)
+            if pprofile is not None:
+                all_gamma.extend(np.clip(pprofile.to_numpy(dtype=float), 0, None).tolist())
         if all_gamma:
-            g_lo  = float(np.percentile(all_gamma, 5))
-            g_mid = float(np.percentile(all_gamma, 60))
-            g_hi  = float(np.percentile(all_gamma, 95))
-            friction_ramp_vals = [g_lo, g_mid, g_hi]
-            logger.info(
-                f"Friction ramp: low={g_lo:.0f}, mid={g_mid:.0f}, "
-                f"high={g_hi:.0f} kJ·ps/mol/nm²"
-            )
+            arr = np.asarray(all_gamma, dtype=float)
+            arr = arr[np.isfinite(arr)]
+            if arr.size > 0:
+                g_lo  = float(np.percentile(arr, 5))
+                g_mid = float(np.percentile(arr, 60))
+                g_hi  = float(np.percentile(arr, 95))
+                friction_ramp_vals = [g_lo, g_mid, g_hi]
+                logger.info(
+                    f"Friction ramp: low={g_lo:.0f}, mid={g_mid:.0f}, "
+                    f"high={g_hi:.0f} kJ·ps/mol/nm²"
+                )
+            else:
+                logger.warning(
+                    "All Gamma values are NaN/inf; friction ramp could not be set. "
+                    "Friction colouring disabled."
+                )
+                friction_dx_files.clear()
 
     pocket_resids: List[int] = []
     if pocket_select is not None:

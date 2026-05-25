@@ -73,6 +73,7 @@ class SMDAnalysis:
         do_plots: bool = True,
         reference_pdb: Optional[str] = None,
         ligand_select: Optional[str] = 'resname UNK',
+        pocket_select: Optional[str] = None,
         seed: int = 42,
         # --- filtering / weighting thresholds (all visible at construction time) ---
         filter_low_support: bool = True,
@@ -89,6 +90,7 @@ class SMDAnalysis:
         self.do_plots = do_plots
         self.reference_pdb = reference_pdb
         self.ligand_select = ligand_select
+        self.pocket_select = pocket_select
         self.outdir = outdir
         self.filter_low_support = filter_low_support
         self.min_support_ratio = min_support_ratio
@@ -415,7 +417,7 @@ class SMDAnalysis:
                         ligand_select=self.ligand_select,
                         outdir=os.path.join(self.path_model.outdir, "path_analysis"),
                         friction_csv=friction_csv_path,
-                        pocket_select=group_B,
+                        pocket_select=group_B if group_B is not None else self.pocket_select,
                     )
                     logger.info("Friction-coloured unbinding paths PSE regenerated.")
             except Exception as _exc:
