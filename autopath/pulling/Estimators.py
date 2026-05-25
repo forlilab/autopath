@@ -420,10 +420,12 @@ class KramersEstimator:
         temperature: float = 310.0,
         gamma_floor: float = 1.0,
         attempt_time_ps: float = 1.0,
+        barrier_warn_kjmol: float = 80.0,
     ):
         self.temperature = temperature
         self.gamma_floor = gamma_floor
         self.attempt_time_ps = attempt_time_ps
+        self.barrier_warn_kjmol = barrier_warn_kjmol
         self.kBT = self.R_GAS_KJ_MOL_K * temperature
 
     # -----------------------------------------------------------------------
@@ -435,17 +437,38 @@ class KramersEstimator:
         pmf_df: pd.DataFrame,
         fric_df: pd.DataFrame,
     ) -> pd.DataFrame:
-        """Inner join of PMF and friction on r_coord."""
-        merged = pd.merge(
-            pmf_df[["r_coord", "dG"]],
-            fric_df[["r_coord", "Gamma"]],
-            on="r_coord",
-            how="inner",
-        )
+        """Inner join of PMF and friction.
+
+        Merges on ``step`` (integer, protocol-anchored) when both DataFrames
+        carry the column, avoiding float jitter in ``r_coord`` that causes
+        spurious row drops after ``extrapolate_to_v0()`` end-trimming.
+        Falls back to ``r_coord`` for the per-path codepath where ``step``
+        is not available.  ``r_coord`` in the output always comes from
+        *pmf_df* (authoritative source).
+        """
+        use_step = "step" in pmf_df.columns and "step" in fric_df.columns
+        key_label = "step" if use_step else "r_coord"
+
+        if use_step:
+            left = pmf_df[["step", "r_coord", "dG"]].copy()
+            right = fric_df[["step", "Gamma"]].copy()
+            # Coerce to int64 defensively (float step can arise after CSV round-trip)
+            left["step"] = left["step"].astype("int64")
+            right["step"] = right["step"].astype("int64")
+            merged = pd.merge(left, right, on="step", how="inner")
+            # r_coord comes from pmf_df (left); no r_coord_x/r_coord_y ambiguity
+        else:
+            merged = pd.merge(
+                pmf_df[["r_coord", "dG"]],
+                fric_df[["r_coord", "Gamma"]],
+                on="r_coord",
+                how="inner",
+            )
+
         dropped = max(len(pmf_df), len(fric_df)) - len(merged)
         if dropped > 3 and len(merged) > 0:
             logger.warning(
-                f"[Kramers] r_coord mismatch: PMF rows={len(pmf_df)}, "
+                f"[Kramers] merge key='{key_label}': PMF rows={len(pmf_df)}, "
                 f"friction rows={len(fric_df)}, merged rows={len(merged)} "
                 f"({dropped} dropped)"
             )
@@ -626,6 +649,13 @@ class KramersEstimator:
         # Reference ΔF so ΔF(start_r) = 0
         dF = dF - float(np.interp(start_r, r, dF))
 
+        # Shift dF so its minimum is ≥ 0 (clips noise-induced dips below zero).
+        # The Pontryagin MFPT integral is invariant to a constant shift of ΔF
+        # (the shift cancels between exp_pos and exp_neg in the product).
+        dF_min = float(np.nanmin(dF))
+        if dF_min < 0.0:
+            dF = dF - dF_min
+
         # Canonical ascending form: mirror if absorbing boundary is to the left
         mirrored = abs_r < start_r
         if mirrored:
@@ -637,11 +667,43 @@ class KramersEstimator:
 
         beta_dF = dF / kBT
         max_bdg = float(np.nanmax(beta_dF))
+
+        # Compute mask and barrier early so the early-return path can populate them
+        mask = (r >= start_r) & (r <= abs_r)
+        if mask.sum() < 2:
+            raise RuntimeError(
+                "[Kramers] Fewer than 2 grid points between start_r and abs_r"
+            )
+        barrier_mask_dF = dF[mask]
+        barrier_kjmol = float(np.max(barrier_mask_dF))
+        barrier_r = float(r[mask][int(np.argmax(barrier_mask_dF))])
+        if mirrored:
+            barrier_r = 2.0 * start_r - barrier_r
+
+        # Soft warning: precision degrades for β·ΔF > 100
         if max_bdg > 100.0:
             logger.warning(
                 f"[Kramers] max(β·ΔF) = {max_bdg:.1f} — exp(β·ΔF) may overflow; "
                 "τ estimate may be unreliable."
             )
+
+        # Hard guard: float64 saturates at exp(≈709); beyond this τ = ∞
+        _FLOAT64_MAX_EXP = np.log(np.finfo(np.float64).max) - 1.0  # ≈ 708.4
+        if max_bdg > _FLOAT64_MAX_EXP:
+            logger.warning(
+                f"[Kramers] max(β·ΔF) = {max_bdg:.1f} exceeds float64 limit "
+                f"({_FLOAT64_MAX_EXP:.0f}); τ = ∞. "
+                "Use more replicas or slower pulling speeds."
+            )
+            return {
+                "tau_ps": float("inf"),
+                "barrier_kjmol": barrier_kjmol,
+                "barrier_r_nm": barrier_r,
+                "max_beta_dF": max_bdg,
+                "reflect_r_canon": reflect_r,
+                "mirrored": mirrored,
+                "start_r_input": start_r,
+            }
 
         exp_neg = np.exp(-beta_dF)
         exp_pos = np.exp(+beta_dF)
@@ -658,11 +720,6 @@ class KramersEstimator:
         outer = exp_pos / D * inner_cum
 
         # Integrate from start_r to abs_r
-        mask = (r >= start_r) & (r <= abs_r)
-        if mask.sum() < 2:
-            raise RuntimeError(
-                "[Kramers] Fewer than 2 grid points between start_r and abs_r"
-            )
         r_int = r[mask]
         outer_int = outer[mask]
         if r_int[0] > start_r + 1e-9:
@@ -673,12 +730,6 @@ class KramersEstimator:
             outer_int = np.concatenate((outer_int, [float(np.interp(abs_r, r, outer))]))
 
         tau_ps = float(np.trapz(outer_int, r_int))
-
-        barrier_mask_dF = dF[mask]
-        barrier_kjmol = float(np.max(barrier_mask_dF))
-        barrier_r = float(r[mask][int(np.argmax(barrier_mask_dF))])
-        if mirrored:
-            barrier_r = 2.0 * start_r - barrier_r
 
         return {
             "tau_ps": tau_ps,
@@ -802,8 +853,23 @@ class KramersEstimator:
                     )
                     continue
 
+                if res["barrier_kjmol"] > self.barrier_warn_kjmol:
+                    logger.warning(
+                        f"[Kramers] Large barrier detected: {res['barrier_kjmol']:.1f} kJ/mol "
+                        f"(estimator={est_name}, source={source}, speed={speed}). "
+                        f"Barriers >{self.barrier_warn_kjmol:.0f} kJ/mol are likely artifacts "
+                        "from insufficient sampling. "
+                        "Recommended: increase replicas to ≥25 per speed, add slower pulling "
+                        "speeds (v ≤ 0.0005 nm/ps), and verify Wdiss ∝ v (linear-response check)."
+                    )
+
                 tau_ps = res["tau_ps"]
-                k_off = self.PS_PER_S / tau_ps if tau_ps > 0 else float("nan")
+                if not np.isfinite(tau_ps):
+                    k_off = float("nan")
+                elif tau_ps > 0:
+                    k_off = self.PS_PER_S / tau_ps
+                else:
+                    k_off = float("nan")
 
                 attempt_time_s = self.attempt_time_ps / self.PS_PER_S
                 if np.isfinite(k_off) and k_off > 0:
@@ -900,6 +966,13 @@ class KramersEstimator:
                     f"{est_name}/{speed}/{path}: {exc}"
                 )
                 continue
+
+            if float(res["barrier_kjmol"]) > self.barrier_warn_kjmol:
+                logger.warning(
+                    f"[Kramers/per-path] Large barrier: {float(res['barrier_kjmol']):.1f} kJ/mol "
+                    f"(estimator={est_name}, speed={speed}, path={path}). "
+                    f"Likely a sampling artifact (threshold: {self.barrier_warn_kjmol:.0f} kJ/mol)."
+                )
 
             p_eq   = weights_by_estimator.get(est_name, {}).get(speed, {}).get(path, float("nan"))
             tau_ps = float(res["tau_ps"])

@@ -456,7 +456,7 @@ class DTWPathModel(PathModel):
             ax_load.set_yticks(y)
             ax_load.set_yticklabels(feature_names)
             ax_load.axvline(0, color='black', lw=0.8)
-            ax_load.set_xlabel("Loading (standardised units)")
+            ax_load.set_xlabel("Loadings")
             ax_load.set_title("Feature contributions to PCs")
             ax_load.legend(frameon=False)
 
