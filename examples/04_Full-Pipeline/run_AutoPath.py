@@ -88,7 +88,6 @@ def main():
                                         },
 
                     sMD_run_analysis=True,
-                    # cluster_across_speeds=True,
 
                     extract_milestones=True,
                     n_milestones=3,
@@ -98,7 +97,7 @@ def main():
                     mMD_preseed_bias=False,
                     mMD_milestone_seeding=True,
                     
-                    mMD_time=5, # ns
+                    mMD_time=10, # ns
                     mMD_bias_frequency=2,
                     mMD_hill_width=0.05,
                     mMD_hill_height=1.2,
