@@ -79,7 +79,7 @@ class AutoPath:
         sMD_pulling_speeds: dict = {0.005:5, 0.0025:5, 0.001:5},  # nm/ps; value = min reps (floor) if sMD_converge_speeds, else total reps
         sMD_max_pulling_dist: float = 3.5,  # nm
         sMD_max_r_offset: float = 3.0,    # max displacement offset (nm): cap pull at r0 + offset nm (also capped at half-box - 0.5 nm)
-        sMD_autostop_nc: float | None = 0.1,  # fraction of NC_initial; None disables
+        sMD_autostop_nc: float | None = 0.01,  # fraction of NC_initial; None disables
         sMD_autostop_nc_window: int = 5,
         sMD_autostop_min_displacement: float = 0.5,
         sMD_converge_speeds: bool = True,
@@ -522,7 +522,7 @@ class AutoPath:
                                     min_support_ratio=1.0,
                                     min_replicas_per_path=self.sMD_min_replicas_per_path,
                                     min_path_steps_ratio=0.6,
-                                    max_frac_neg_dG_first_half=0.25,
+                                    max_frac_neg_dG_first_half=0.1,
                                     min_speeds_for_extrapolation=2,
                                     )
 
@@ -679,14 +679,7 @@ class AutoPath:
         ##############################################################################################
         ##################################### Metadynamics simulations ###############################
         ##############################################################################################
-        use_biasing_scheme = False
-        biasing_scheme = {
-                            1:{'height': 1.2, 'width': 0.04}, #KJ/mol and nm
-                            2:{'height': 1.0, 'width': 0.05},
-                            3:{'height': 0.8, 'width': 0.06},
-                            # 4:{'height': 0.2, 'width': 0.07},
-                            # 5:{'height': 0.1, 'width': 0.08}
-                            }
+        
         if self.mMD_use_funnel_potential:
             if self.mMD_preseed_bias:
                 mMD_out_dir = f"{sys_name}/metadynamics_funnel_preseed"
