@@ -907,13 +907,13 @@ class AutoPath:
                 # mMD_milestone_seeding=False: all walkers start from the first (bound-state) checkpoint.
                 chk_to_use = milestone_chk if self.mMD_milestone_seeding else first_milestone_chk
 
-                # mMD_multiple_walkers=True : each walker gets its own bias subdir → independent runs,
-                #   hills are NOT shared between milestones.
-                # mMD_multiple_walkers=False (default): all walkers share mMD_out_dir as biasDir so
+                # mMD_multiple_walkers=False (default): each walker gets its own bias subdir so
+                #   hills are NOT shared — walkers run independently without bias communication.
+                # mMD_multiple_walkers=True: all walkers share mMD_out_dir as biasDir so
                 #   OpenMM accumulates hills from all of them (true multi-walker metadynamics).
                 walker_bias_dir = (
                     os.path.join(mMD_out_dir, f"bias_{milestone_name}")
-                    if self.mMD_multiple_walkers else None
+                    if not self.mMD_multiple_walkers else None
                 )
 
                 logger.info(f"Running WTMetaD for milestone {milestone_name}")
@@ -937,9 +937,12 @@ class AutoPath:
                     continue
 
             # Retry walkers that never left the bound state (max PathCV < 0.5).
-            # By this point the biasDir contains the full accumulated bias from all
-            # successful walkers, so a stuck walker starting from the same checkpoint
-            # now has a warm landscape to climb out of.
+            # mMD_multiple_walkers=True (shared bias): by this point the biasDir contains
+            #   accumulated hills from all successful walkers, so a stuck walker benefits
+            #   from a warm landscape.
+            # mMD_multiple_walkers=False (isolated): each walker retries with its own
+            #   previously-deposited hills; no cross-walker benefit, but the walker may
+            #   still climb out given its own partial bias.
             stuck_walkers = [
                 (run_id, chk, xml)
                 for run_id, (chk, xml) in walker_run_info.items()
@@ -952,6 +955,10 @@ class AutoPath:
                     f"({[r for r, _, _ in stuck_walkers]}); retrying with accumulated bias."
                 )
                 for run_id, chk, xml in stuck_walkers:
+                    retry_bias_dir = (
+                        os.path.join(mMD_out_dir, f"bias_{run_id}")
+                        if not self.mMD_multiple_walkers else None
+                    )
                     try:
                         WTMetaD.run(
                             checkpoint_file=chk,
@@ -964,6 +971,7 @@ class AutoPath:
                             biasFrequency=self.mMD_bias_frequency,
                             funnel_force=funnel_force,
                             funnel_params=funnel_params if funnel_force is not None else None,
+                            bias_dir=retry_bias_dir,
                         )
                     except Exception as e:
                         logger.error(f"Retry failed for {run_id}: {e}")
