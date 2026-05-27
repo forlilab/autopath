@@ -47,6 +47,7 @@ class CVSpec:
     _factory: Optional[Callable] = field(default=None, repr=False)
 
     def is_deferred(self) -> bool:
+        """Return True if this CV requires positions to materialize before use."""
         return self._factory is not None
 
     def resolve(self, input_positions, n_atoms: int, topology) -> "CVSpec":
@@ -112,6 +113,7 @@ def rmsd_cv(
     Note: This cv is aligned so only captures ligand internal conformational changes, not translation or rotation.
     """
     def factory(input_positions, n_atoms, topology):
+        # input_positions in nm (OpenMM default); cvpack.RMSD expects nm
         return cvpack.RMSD(input_positions, ligand_atoms, n_atoms)
 
     return CVSpec(
@@ -170,6 +172,18 @@ def rmsd_states_cv(
     )
 
 
+def _milestone_sort_key(path: str) -> int:
+    """Extract the integer index from a milestone filename (<prefix>_<int>[_<suffix>].pdb)."""
+    parts = os.path.basename(path).split("_")
+    try:
+        return int(parts[1])
+    except (IndexError, ValueError) as exc:
+        raise ValueError(
+            f"Cannot parse milestone index from '{os.path.basename(path)}'. "
+            f"Expected format: <prefix>_<integer>[_<suffix>].pdb"
+        ) from exc
+
+
 def path_rmsd_cv(
     topology,
     milestones: list[str],
@@ -181,9 +195,7 @@ def path_rmsd_cv(
     sigma: float = 0.001,
 ) -> CVSpec:
     """Path-in-RMSD-space CV through ligand heavy-atom milestones (deferred: needs positions)."""
-    import os
-
-    milestones = sorted(milestones, key=lambda x: int(os.path.basename(x).split("_")[1]))
+    milestones = sorted(milestones, key=_milestone_sort_key)
 
     def factory(input_positions, n_atoms, topology):
         ligand_residue = [r for r in topology.residues() if r.name == ligand_resname]

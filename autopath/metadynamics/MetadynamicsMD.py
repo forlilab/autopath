@@ -30,6 +30,8 @@ from autopath.utils import (
 )
 from autopath.customForces import add_harmonic_restraints
 
+logger = logging.getLogger(__name__)
+
 try:
     from openmmtools.integrators import LangevinSplittingGirsanov
     from reweightingreporter import ReweightingReporter
@@ -39,6 +41,55 @@ except ImportError:
 
 
 class MetadynamicsMD:
+    """OpenMM well-tempered metadynamics (WT-MetaD) driver supporting 1D and 2D CVs
+    with optional funnel restraints.
+
+    Parameters
+    ----------
+    topology : openmm.app.Topology
+        System topology.
+    ligand_atoms : list[int]
+        Indices of ligand heavy atoms.
+    pocket_atoms : list[int]
+        Indices of binding-pocket reference atoms.
+    restrained_atoms : list[int], optional
+        Atom indices to harmonically restrain during the simulation.
+    is_membrane : bool, optional
+        Whether the system contains a lipid membrane (default False).
+    timestep : float, optional
+        Integration timestep in picoseconds (default 0.004, i.e. 4 fs).
+    temp : float, optional
+        Simulation temperature in Kelvin (default 300).
+    use_GReweighting : bool, optional
+        Enable Girsanov reweighting via openmmtools (default False).
+    ligand_resname : str, optional
+        Residue name of the ligand in the topology (default "UNK").
+    platform : str, optional
+        OpenMM platform name or "fastest" for automatic selection (default "fastest").
+    out_dir : str, optional
+        Directory for all output files (default "metadynamics").
+    verbose : bool, optional
+        Periodically save COLVAR arrays during the run (default True).
+
+    Attributes
+    ----------
+    out_dir : str
+        Output directory created (or confirmed) on construction.
+    topology : openmm.app.Topology
+        Stored topology reference.
+    n_atoms : int
+        Total number of atoms, cached from topology.
+    timestep : openmm.unit.Quantity
+        Timestep as an OpenMM Quantity (picoseconds).
+    temperature : openmm.unit.Quantity
+        Temperature as an OpenMM Quantity (kelvin).
+    platform : openmm.Platform
+        Selected OpenMM platform.
+    record_CV : int
+        Steps between CV snapshots (~every 10 ps at default timestep).
+    store_CV : int
+        Steps between on-disk COLVAR saves (~every 100 ps at default timestep).
+    """
 
     def __init__(
         self,
@@ -104,6 +155,74 @@ class MetadynamicsMD:
         funnel_params: dict = None,
         bias_dir: str = None,
     ) -> str:
+        """Run a single WT-MetaD trajectory and return the run identifier.
+
+        Parameters
+        ----------
+        pdb_file : str, optional
+            Path to a PDB file used to set initial positions and box vectors.
+            Mutually exclusive with ``checkpoint_file``; if both are given,
+            the checkpoint takes precedence with a warning.
+        system : openmm.System
+            Prepared OpenMM System object (forces already added before calling).
+        checkpoint_file : str, optional
+            Path to an OpenMM binary checkpoint to resume from.
+        run_id : str, optional
+            Label for all output files.  Auto-generated from wall-clock time
+            when ``None`` (format ``W-HHMMSS``).
+        cv_specs : list[CVSpec]
+            One or two ``CVSpec`` objects defining the collective variables.
+            CVSpecs may be deferred — they call ``.resolve()`` internally once
+            input positions are available.  Use CV factory functions such as
+            ``com_cv`` or ``rmsd_cv`` to construct them.
+        mMD_time : int, optional
+            Total simulation time in nanoseconds (default 10).
+        bias_factor : float, optional
+            Well-tempered γ parameter controlling bias growth rate (default 10).
+            Higher values allow larger biases and faster exploration at the cost
+            of convergence noise.
+        hill_height : float, optional
+            Initial Gaussian hill height in kJ/mol (default 1.2, ≈ 0.5 k_B T at
+            300 K).
+        biasFrequency : int, optional
+            Frequency of Gaussian hill deposition in picoseconds (default 2 ps).
+            Converted internally to an integer step count.
+        saveFrequency : int, optional
+            Frequency of on-disk bias saves in picoseconds (default 50 ps).
+        funnel_force : openmm.Force, optional
+            Pre-built funnel restraint force.  Because ``system.addForce()``
+            transfers C++ ownership, the force is serialized/deserialized inside
+            ``run()`` to obtain a fresh owned copy.  Do not reuse the same
+            ``Force`` object across multiple ``run()`` calls.
+        funnel_params : dict, optional
+            Parameter dict passed to ``correct_fe_for_funnel`` for the
+            Limongelli 2013 standard-state correction.  Skipped when ``None``.
+        bias_dir : str, optional
+            Directory where OpenMM reads and writes hill files.  Defaults to
+            ``None``, which maps to ``self.out_dir`` — all walkers writing to
+            the same directory accumulate each other's hills (OpenMM multi-walker
+            convention).  Pass a per-walker subdirectory to make a walker
+            independent.
+
+        Returns
+        -------
+        str
+            The ``run_id`` string used for all output file names produced by
+            this call (COLVAR, FE, checkpoint, PDB, system XML).
+
+        Warns
+        -----
+        UserWarning (via logging.warning)
+            Emitted after the simulation if the first CV never exceeded 0.5,
+            indicating the ligand may not have reached the unbound state.
+
+        Raises
+        ------
+        ValueError
+            If neither ``pdb_file`` nor ``checkpoint_file`` is supplied.
+        AssertionError
+            If ``cv_specs`` is ``None`` or empty.
+        """
 
         start_time = time.monotonic()
 
@@ -112,7 +231,7 @@ class MetadynamicsMD:
             "Use autopath.metadynamics CV factory functions (e.g. com_cv, rmsd_cv) to build them."
 
         if run_id is None:
-            run_id = f'W-{datetime.now().strftime("%H%M%S")}'
+            run_id = f'W-{datetime.now().strftime("%H%M%S%f")}'
 
         mMD_steps = math.ceil(mMD_time / self.timestep.value_in_unit(openmmunit.picoseconds) * 1000.0)
         biasFrequency = int((1/self.timestep.value_in_unit(openmmunit.picoseconds)) * biasFrequency)
@@ -142,8 +261,7 @@ class MetadynamicsMD:
         simulation = Simulation(self.topology, system, integrator, self.platform)
 
         if checkpoint_file is None and pdb_file is None:
-            logging.error("Either pdb_file or checkpoint_file must be provided to set initial positions.")
-            exit(1)
+            raise ValueError("Either pdb_file or checkpoint_file must be provided to set initial positions.")
         elif checkpoint_file is None and pdb_file is not None:
             logging.info(f"Setting positions from PDB file {pdb_file}")
             pdb = PDBFile(pdb_file)
@@ -172,9 +290,7 @@ class MetadynamicsMD:
                 14,
             )
 
-        # system.addForce() transfers C++ ownership of the force, so reusing the same
-        # funnel_force object across multiple run() calls would leave it non-owning.
-        # Serializing and deserializing gives a fresh owned copy each time.
+        # Serialize/deserialize to get a fresh C++-owned copy (addForce transfers ownership).
         if funnel_force is not None:
             fresh_funnel = XmlSerializer.deserialize(XmlSerializer.serialize(funnel_force))
             system.addForce(fresh_funnel)
@@ -210,11 +326,7 @@ class MetadynamicsMD:
             for s in resolved
         ]
 
-        # bias_dir controls where OpenMM writes/reads hill files.
-        # None (default) → shared self.out_dir; walkers accumulate bias together
-        # (OpenMM multi-walker convention, all walkers see each other's hills).
-        # Passing a per-walker subdirectory makes the simulation independent —
-        # hills are not shared with other walkers.
+        # None → shared self.out_dir (multi-walker); a per-walker path makes the walker independent.
         effective_bias_dir = bias_dir if bias_dir is not None else self.out_dir
         os.makedirs(effective_bias_dir, exist_ok=True)
 
@@ -233,14 +345,14 @@ class MetadynamicsMD:
         simulation.context.setStepCount(0)
         simulation.context.reinitialize(preserveState=True)
 
-        colvar_array = np.array([meta.getCollectiveVariables(simulation)])
+        colvar_list = [meta.getCollectiveVariables(simulation)]
         for i in range(0, int(mMD_steps), self.record_CV):
             if self.verbose and i % self.store_CV == 0:
-                np.save(os.path.join(self.out_dir, f"COLVAR_{run_id}.npy"), colvar_array)
+                np.save(os.path.join(self.out_dir, f"COLVAR_{run_id}.npy"), np.array(colvar_list))
 
             meta.step(simulation, self.record_CV)
-            current_cvs = meta.getCollectiveVariables(simulation)
-            colvar_array = np.append(colvar_array, [current_cvs], axis=0)
+            colvar_list.append(meta.getCollectiveVariables(simulation))
+        colvar_array = np.array(colvar_list)
 
         np.save(os.path.join(self.out_dir, f"COLVAR_{run_id}.npy"), colvar_array)
 
@@ -272,7 +384,7 @@ class MetadynamicsMD:
                     f"pKd={result['pKd']:.2f}"
                 )
             except Exception as e:
-                logging.warning(f"Funnel standard-state correction failed for {run_id}: {e}")
+                logger.warning(f"Funnel standard-state correction failed for {run_id}: {e}", exc_info=True)
 
         if len(resolved) == 1:
             s = resolved[0]
@@ -302,6 +414,12 @@ class MetadynamicsMD:
         return run_id
 
     def run2D(self, *args, **kwargs):
+        """Deprecated stub — use ``run()`` with two ``CVSpec`` objects instead.
+
+        .. deprecated::
+            Pass a two-element ``cv_specs`` list to :meth:`run` to run 2D
+            metadynamics.  This method always raises ``NotImplementedError``.
+        """
         raise NotImplementedError(
             "run2D() has been removed. Pass two CVSpec objects via cv_specs to run() instead. "
             "Example:\n"

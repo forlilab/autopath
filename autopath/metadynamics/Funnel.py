@@ -30,6 +30,12 @@ def add_funnel_restraints(
     Applies a funnel potential restraint to a guest molecule.
     Limongelli, V., Bonomi, M., & Parrinello, M. (2013). Funnel metadynamics as accurate binding free-energy method. Proceedings of the National Academy of Sciences, 110(16), 6358-6363.
     https://github.com/jeff231li/funnel_potential
+
+    Note
+    ----
+    This is the simplified Z-axis-aligned funnel variant.
+    For a general PCA-derived unbinding-axis funnel with a z_max cap,
+    use :func:`create_funnel_force_from_trajectory_analysis` instead.
     """
 
     funnel = CustomCentroidBondForce(
@@ -289,6 +295,10 @@ def save_funnel_params(params_dict: Dict, filepath: str) -> None:
         k_xy         → kcal/mol/Å²
 
     Trajectory arrays (angstroms) and metadata are stored as-is.
+
+    Note
+    ----
+    ``force_name`` is now saved and restored faithfully.
     """
     np.savez(
         filepath,
@@ -319,6 +329,7 @@ def save_funnel_params(params_dict: Dict, filepath: str) -> None:
         axial_distances=np.array(params_dict["axial_distances"]),
         force_group=np.array(params_dict["force_group"]),
         trajectory_length=np.array(params_dict["trajectory_length"]),
+        force_name=np.array(params_dict.get("force_name", "k_funnel_trajectory")),
     )
     logger.info(f"Funnel parameters saved to {filepath}.npz")
 
@@ -356,7 +367,7 @@ def load_funnel_params(filepath: str) -> Dict:
         "radial_distances": data["radial_distances"],
         "axial_distances": data["axial_distances"],
         "force_group": int(data["force_group"]),
-        "force_name": "k_funnel_trajectory",
+        "force_name": str(data["force_name"]),
         "trajectory_length": int(data["trajectory_length"]),
     }
 
@@ -383,6 +394,12 @@ def create_funnel_force_from_trajectory_analysis(
     -------
     CustomCentroidBondForce
         Configured funnel force ready to use in metadynamics
+
+    Note
+    ----
+    This is the general PCA-axis funnel with a ``z_max`` hard cap.
+    For a simpler Z-axis-aligned funnel (no trajectory analysis required),
+    use :func:`add_funnel_restraints` instead.
     """
 
     host_index = params_dict["host_index"]

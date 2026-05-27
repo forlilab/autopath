@@ -1,5 +1,6 @@
 import os
 import logging
+from pathlib import Path
 import numpy as np
 import pandas as pd
 from glob import glob
@@ -16,17 +17,35 @@ from autopath.pulling.Estimators import _find_pmf_peak
 
 logger = logging.getLogger("autopath")
 
+KJ_TO_KCAL = 0.239006  # kJ/mol → kcal/mol conversion factor
+
 
 # ---------------------------------------------------------------------------
 # Plotting helpers
 # ---------------------------------------------------------------------------
 
 def plot_colvar(out_dir: str = None, colvar_name: str = None):
-    sys_name = out_dir.split("/")[0]
+    """Plot 1D collective variable (CV) time traces for each walker.
+
+    Loads all ``COLVAR_*.npy`` files from ``out_dir`` and draws one line per
+    walker on a shared axes, using walker filename as the legend label.
+
+    Parameters
+    ----------
+    out_dir : str
+        Directory containing ``COLVAR_*.npy`` output files from MetadynamicsMD.
+    colvar_name : str
+        Label for the CV axis (e.g. ``"PathCV_progress"``).
+
+    Output
+    ------
+    Saves ``<sys_name>_COLVAR.png`` into ``out_dir``.
+    """
+    sys_name = Path(out_dir).parts[0]
     files = glob(f"{out_dir}/COLVAR_*")
     data = []
     for f in files:
-        walker_name = f.split("/")[2].split(".")[0]
+        walker_name = os.path.splitext(os.path.basename(f))[0]
         np_data = np.load(f)
         df = pd.DataFrame(np_data, columns=[colvar_name])
         df["walker"] = walker_name
@@ -46,16 +65,36 @@ def plot_colvar(out_dir: str = None, colvar_name: str = None):
 
 
 def plot_bias(out_dir: str = None, x_min: float = None, x_max: float = None, grid_points: int = None, colvar_name: str = None):
-    sys_name = out_dir.split("/")[0]
+    """Plot per-walker accumulated bias profiles (hill deposition) over the CV grid.
+
+    Loads all ``bias_*.npy`` files from ``out_dir``, converts from kJ/mol to
+    kcal/mol, and draws one line per walker on a shared axes.
+
+    Parameters
+    ----------
+    out_dir : str
+        Directory containing ``bias_*.npy`` output files from MetadynamicsMD.
+    x_min, x_max : float
+        CV grid bounds used to reconstruct the axis values.
+    grid_points : int
+        Number of grid points on the CV axis (must match the MetadynamicsMD run).
+    colvar_name : str
+        Label for the CV axis (e.g. ``"PathCV_progress"``).
+
+    Output
+    ------
+    Saves ``<sys_name>_BIAS.png`` into ``out_dir``.
+    """
+    sys_name = Path(out_dir).parts[0]
     axis_values = np.linspace(x_min, x_max, grid_points)
     axis_values = [round(i, 2) for i in axis_values]
 
     files = glob(f"{out_dir}/bias_*")
     data = []
     for f in files:
-        walker_name = f.split("/")[2].split(".")[0]
+        walker_name = os.path.splitext(os.path.basename(f))[0]
         np_data = np.load(f)
-        np_data = np_data * 0.239006  # KJ to Kcal
+        np_data = np_data * KJ_TO_KCAL
         df = pd.DataFrame(np_data, columns=["bias"])
         df.index = axis_values
         df["walker"] = walker_name
@@ -82,7 +121,7 @@ def plot_FE(out_dir, x_min, x_max, grid_points, colvar_name):
     bias (shared biasDir), so later files are more converged estimates.  All
     walker traces are shown together to visualise convergence.
     """
-    sys_name = out_dir.split("/")[0]
+    sys_name = Path(out_dir).parts[0]
     axis_values = np.linspace(x_min, x_max, grid_points)
     axis_values = [round(i, 2) for i in axis_values]
 
@@ -94,7 +133,7 @@ def plot_FE(out_dir, x_min, x_max, grid_points, colvar_name):
     data = []
     for f in files:
         walker_name = os.path.splitext(os.path.basename(f))[0]
-        np_data = np.load(f) * 0.239006  # kJ/mol → kcal/mol
+        np_data = np.load(f) * KJ_TO_KCAL
         df = pd.DataFrame(np_data, columns=["FE"])
         df.index = axis_values
         df["walker"] = walker_name
@@ -113,15 +152,32 @@ def plot_FE(out_dir, x_min, x_max, grid_points, colvar_name):
     return
 
 
-def plot_FE_rw(out_dir, x_min, x_max, grid_points, colvar_name):
+def plot_FE_rw(out_dir, x_min, x_max, grid_points, colvar_name, temperature: float = 298.15):
     """Plot standard-state-corrected FE profiles (FE_*_rw.npy).
 
     Each _rw file shows the FES normalised to the unbound endpoint (s=1 ≈ 0) with
     the Limongelli 2013 standard-state correction applied.  ΔG°_b is read from the
     bound-basin minimum (first 20 % of the CV).  Each legend entry includes the
     per-walker ΔG°_b.  The title reports the best (most negative valid) estimate.
+
+    Parameters
+    ----------
+    out_dir : str
+        Directory containing ``FE_*_rw.npy`` output files from MetadynamicsMD.
+    x_min, x_max : float
+        CV grid bounds used to reconstruct the axis values.
+    grid_points : int
+        Number of grid points on the CV axis (must match the MetadynamicsMD run).
+    colvar_name : str
+        Label for the CV axis (e.g. ``"PathCV_progress"``).
+    temperature : float
+        Simulation temperature in K used to convert ΔG to pKd (default 298.15 K).
+
+    Output
+    ------
+    Saves ``<sys_name>_FE_rw.png`` into ``out_dir``.
     """
-    sys_name = out_dir.split("/")[0]
+    sys_name = Path(out_dir).parts[0]
     axis_values = np.linspace(x_min, x_max, grid_points)
     axis_values = [round(i, 2) for i in axis_values]
 
@@ -130,15 +186,14 @@ def plot_FE_rw(out_dir, x_min, x_max, grid_points, colvar_name):
         return
 
     bound_bins = max(1, int(0.20 * grid_points))
-    kT_log10 = 8.314e-3 * 298.15 * np.log(10)
+    kT_log10 = 8.314e-3 * temperature * np.log(10)
     best_dG, best_pKd = None, None
 
     data = []
     for f in files:
         raw_name = os.path.splitext(os.path.basename(f))[0]
-        # Shorten label: strip common prefix and suffix
         short = raw_name.replace("FE_", "").replace("_rw", "")
-        fe_kcal = np.load(f) * 0.239006  # kJ/mol → kcal/mol
+        fe_kcal = np.load(f) * KJ_TO_KCAL
         dG = float(fe_kcal[:bound_bins].min())
         pKd_w = -dG * 4.184 / kT_log10
         dG_str = f"{dG:.1f}" if dG < 0 else f"+{dG:.1f}"
@@ -159,7 +214,7 @@ def plot_FE_rw(out_dir, x_min, x_max, grid_points, colvar_name):
 
     if best_dG is None:        # no walker passed — fall back to last negative ΔG
         for f in files:
-            dG_f = float(np.load(f)[:bound_bins].min() * 0.239006)
+            dG_f = float(np.load(f)[:bound_bins].min() * KJ_TO_KCAL)
             if dG_f < 0:
                 best_dG = dG_f
                 best_pKd = -best_dG * 4.184 / kT_log10
@@ -182,7 +237,34 @@ def plot_FE_rw(out_dir, x_min, x_max, grid_points, colvar_name):
 def plot_FE_2D(
     out_dir, x_min, x_max, x_grid_points, xCV_name, y_min, y_max, y_grid_points, yCV_name
 ):
-    sys_name = out_dir.split("/")[0]
+    """Plot a 2D free energy surface (FES) heatmap from 2D metadynamics.
+
+    Loads all ``FE_*.npy`` files from ``out_dir`` — each expected to be a 2D
+    array of shape ``(y_grid_points, x_grid_points)`` in kJ/mol — converts to
+    kcal/mol, and saves one heatmap per walker using a Spectral colormap.
+
+    Parameters
+    ----------
+    out_dir : str
+        Directory containing ``FE_*.npy`` output files from MetadynamicsMD.
+    x_min, x_max : float
+        Grid bounds for the first (x) collective variable.
+    x_grid_points : int
+        Number of grid points along the x CV axis.
+    xCV_name : str
+        Label for the x CV axis.
+    y_min, y_max : float
+        Grid bounds for the second (y) collective variable.
+    y_grid_points : int
+        Number of grid points along the y CV axis.
+    yCV_name : str
+        Label for the y CV axis.
+
+    Output
+    ------
+    Saves one PNG per walker as ``<sys_name>_<walker_name>.png`` in ``out_dir``.
+    """
+    sys_name = Path(out_dir).parts[0]
 
     x_values = np.linspace(x_min, x_max, x_grid_points)
     x_values = [round(i, 2) for i in x_values]
@@ -195,7 +277,7 @@ def plot_FE_2D(
         walker_name = os.path.splitext(os.path.basename(f))[0]
 
         np_data = np.load(f)
-        np_data = np_data * 0.239006  # KJ to Kcal
+        np_data = np_data * KJ_TO_KCAL
         df = pd.DataFrame(np_data)
 
         df.index, df.columns = y_values, x_values
@@ -213,7 +295,28 @@ def plot_FE_2D(
 
 
 def plot_colvar_2D(out_dir, xCV_name, yCV_name):
-    sys_name = out_dir.split("/")[0]
+    """Plot 2D CV time traces for each walker as separate line plots.
+
+    Loads all ``COLVAR_*.npy`` files from ``out_dir``, expecting each array
+    to have two columns (one per CV).  Produces two figures: one for
+    ``xCV_name`` vs frame index and one for ``yCV_name`` vs frame index,
+    with one line per walker on each.
+
+    Parameters
+    ----------
+    out_dir : str
+        Directory containing ``COLVAR_*.npy`` output files from MetadynamicsMD.
+    xCV_name : str
+        Name of the first collective variable (column 0 of the COLVAR array).
+    yCV_name : str
+        Name of the second collective variable (column 1 of the COLVAR array).
+
+    Output
+    ------
+    Saves ``<sys_name>_<xCV_name>_COLVAR.png`` and
+    ``<sys_name>_<yCV_name>_COLVAR.png`` into ``out_dir``.
+    """
+    sys_name = Path(out_dir).parts[0]
     files = glob(f"{out_dir}/COLVAR_*")
     data = []
     for f in files:
@@ -305,6 +408,22 @@ def correct_fe_for_funnel(
         cv_at_minimum       — PathCV progress at the FE minimum
         n_fe_files          — number of FE files/arrays combined
         temperature_K       — temperature used
+
+    Notes
+    -----
+    **Unbound-state normalization:** The last ``n_plateau_points`` grid points
+    (s ≈ 1, funnel endpoint) are averaged and subtracted to set the unbound
+    reference to zero — the assumption underlying the Limongelli 2013
+    standard-state correction (Eq. 3).  Walkers that over-biased s ≈ 1 produce
+    a deeply-negative endpoint; the bound-depth check below catches them
+    (their bound basin stays positive relative to the reference) and raises
+    a ``ValueError`` before a spurious ΔG is reported.
+
+    **Bound-basin ΔG (20 % rule):** ΔG is read from the minimum within the first
+    20 % of the CV grid (s < 0.20), so an over-biased unbound region can never
+    masquerade as the binding minimum.  This replaces an older ``unsampled_gap``
+    check (``fe_max − plateau < 10``) that misfired when the entire FES was
+    deeply negative (heavily biased at both ends — more sampled, not less).
     """
     import math
     from openmm import unit as openmmunit
@@ -322,26 +441,16 @@ def correct_fe_for_funnel(
 
     cv = np.linspace(grid_min, grid_max, len(fe))
 
-    # Unbound-state reference: mean of the last N grid points (s ≈ 1).
-    # This sets the actual funnel endpoint as the zero reference, which is what
-    # the Limongelli 2013 correction assumes.  Walkers that over-biased s≈1
-    # produce a deeply-negative endpoint; the bound-depth check below detects
-    # them (their bound basin stays positive relative to the reference) and
-    # raises an error before a bad ΔG is reported.
+    # Last N points → unbound reference (s ≈ 1); see Notes in docstring.
     n_tail = min(n_plateau_points, len(fe))
     plateau_val = float(fe[-n_tail:].mean())
 
     fe_norm = fe - plateau_val
 
-    # Read ΔG from the bound basin only (first 20 % of the CV), so that an
-    # over-biased unbound region never masquerades as the binding minimum.
+    # First 20 % of CV = bound basin; see Notes in docstring.
     bound_bins = max(1, int(0.20 * len(fe_norm)))
 
-    # Sanity check: the bound basin must be meaningfully deeper than the reference.
-    # We check this *after* normalization and *in the bound basin*, which is the
-    # region we actually read ΔG from.  This replaces the old "unsampled_gap"
-    # check (fe_max − plateau < 10) which misfired when the whole FES was deeply
-    # negative (both ends heavily biased — more sampled, not less).
+    # Sanity check: bound basin must be meaningfully below the unbound reference.
     bound_depth = float(fe_norm[:bound_bins].min())   # should be negative
     if bound_depth > -10.0:
         sign = "above" if bound_depth >= 0 else "only"
@@ -669,7 +778,8 @@ class MetadynamicsAnalysis:
             Simulation temperature in K (not used in the formula but
             kept for API completeness / future extensions).
         bias_factor : float
-            WT-MetaD bias factor γ.
+            WT-MetaD bias factor γ.  Must be > 1; γ = 1 corresponds to
+            unbiased MD where the FES estimator is undefined (divide-by-zero).
         grid_min, grid_max : float
             CV grid bounds — used only to build the returned axis.
 
@@ -680,6 +790,11 @@ class MetadynamicsAnalysis:
         """
         V = np.sum(np.stack(bias_arrays), axis=0)
         gamma = float(bias_factor)
+        if abs(gamma - 1.0) < 1e-9:
+            raise ValueError(
+                f"bias_factor (γ) must be > 1 for well-tempered metadynamics; got {gamma}. "
+                f"γ = 1 corresponds to unbiased MD where the FES estimator is undefined."
+            )
         fes = -(gamma / (gamma - 1.0)) * V
         axis = np.linspace(grid_min, grid_max, fes.shape[0])
         return axis, fes
@@ -704,13 +819,19 @@ class MetadynamicsAnalysis:
             frac_bound           — fraction of frames in bound basin
             frac_unbound         — fraction of frames in unbound basin
             reached_unbound      — bool: crossed unbound_threshold at least once
+
+        Notes
+        -----
+        **Asymmetric seeding:** Walkers seeded from an unbound sMD milestone
+        start with CV ≈ 1 (already in the unbound basin).  ``in_unbound`` is
+        initialised to ``True`` in that case so the first return below
+        ``bound_threshold`` is correctly counted as a round trip rather than
+        discarded.
         """
         cv = colvar_array[:, 0] if np.ndim(colvar_array) > 1 else np.asarray(colvar_array)
         n_trans, n_rt, first_frame = 0, 0, -1
 
-        # Determine starting basin.  A walker seeded from an unbound sMD
-        # milestone starts with CV≈1; we set in_unbound=True so that the
-        # first return to the bound state is correctly counted as a round trip.
+        # Initialise starting basin; unbound-seeded walkers get in_unbound=True.
         in_unbound = cv[0] > unbound_threshold
         in_bound   = cv[0] < bound_threshold
 
@@ -770,12 +891,12 @@ class MetadynamicsAnalysis:
             if cov >= min_coverage:
                 selected.append((wid, barr))
             else:
-                logging.warning(
+                logger.warning(
                     f"Walker id={wid}: bias coverage {100*cov:.1f}% < "
                     f"{100*min_coverage:.0f}% — likely stuck, excluded from converged set."
                 )
         if not selected:
-            logging.warning("No walkers passed the coverage threshold — returning all biases.")
+            logger.warning("No walkers passed the coverage threshold — returning all biases.")
             selected = list(sorted(biases.items()))
         return selected
 
@@ -834,6 +955,16 @@ class MetadynamicsAnalysis:
             cv_axis         — grid axis
             n_converged_cv  — walkers that reached unbound_threshold
             n_walkers       — total walkers in colvar_files
+
+        Notes
+        -----
+        **Standard-state correction uses all walkers:** The Limongelli 2013
+        correction is applied to the combined FES from *all* walkers, not only
+        the converged subset.  Stuck walkers accumulate hills in the bound basin
+        (supplying bound-state bias); converged walkers explore the full CV and
+        supply the unbound-basin bias.  Together they produce the best available
+        estimate of both FES endpoints, even when no individual walker traversed
+        the complete CV range.
         """
         import matplotlib.gridspec as gridspec
 
@@ -860,7 +991,7 @@ class MetadynamicsAnalysis:
 
         def _norm_plateau(fes_kj):
             plateau = fes_kj[-10:].mean()          # last 10 bins = unbound endpoint
-            return (fes_kj - plateau) * 0.239006  # kcal/mol, unbound≈0
+            return (fes_kj - plateau) * KJ_TO_KCAL  # kcal/mol, unbound plateau = 0
 
         fes_all_kcal = _norm_plateau(fes_all_kj)
 
@@ -871,10 +1002,7 @@ class MetadynamicsAnalysis:
         )
         fes_conv_kcal = _norm_plateau(fes_conv_kj) if len(converged_biases) < len(all_biases) else None
 
-        # Limongelli 2013 standard-state correction uses the ALL-WALKERS combined FES.
-        # Stuck walkers supply the bound-basin bias; converged walkers supply the
-        # unbound-basin bias.  Together they give the best available estimate of both
-        # endpoints, even when no single walker crossed the full CV range.
+        # All-walkers FES for Limongelli correction; see Notes in docstring.
         dG_result = None
         funnel_npz = os.path.join(self.out_dir, 'funnel_params.npz')
         if os.path.exists(funnel_npz):
@@ -893,7 +1021,7 @@ class MetadynamicsAnalysis:
                     grid_max=grid_max,
                 )
             except Exception as _fe_err:
-                logging.warning(f"Limongelli correction failed (non-fatal): {_fe_err}")
+                logger.warning(f"Limongelli correction failed (non-fatal): {_fe_err}")
 
         n_w = len(walker_data)
         colors = plt.cm.tab10(np.linspace(0, 1, max(n_w, 1)))
@@ -928,7 +1056,7 @@ class MetadynamicsAnalysis:
         ax2 = fig.add_subplot(gs[1])
         for k, (wid, barr) in enumerate(sorted(all_biases.items())):
             cov = self.bias_coverage(barr)
-            ax2.plot(axis, barr * 0.239006, color=colors[k % len(colors)], lw=1.5,
+            ax2.plot(axis, barr * KJ_TO_KCAL, color=colors[k % len(colors)], lw=1.5,
                       label=f"id={wid}  cov={100*cov:.0f}%", alpha=0.85)
         ax2.set_xlabel(cv_name)
         ax2.set_ylabel("Self-bias (kcal/mol)")
@@ -948,7 +1076,7 @@ class MetadynamicsAnalysis:
         ax4.axvline(bound_threshold,   color='royalblue', lw=0.7, ls='--', alpha=0.4)
         ax4.axvline(unbound_threshold, color='tomato',    lw=0.7, ls='--', alpha=0.4)
         if dG_result is not None:
-            dG_std_kcal = dG_result['dG_bind_std_kj_mol'] * 0.239006
+            dG_std_kcal = dG_result['dG_bind_std_kj_mol'] * KJ_TO_KCAL
             pKd = dG_result['pKd']
             cv_min = dG_result['cv_at_minimum']
             bound_bins_plot = max(1, int(0.20 * len(fes_all_kcal)))
@@ -968,7 +1096,7 @@ class MetadynamicsAnalysis:
                           arrowprops=dict(arrowstyle='->', lw=0.8))
         ax4.set_xlabel(cv_name)
         ax4.set_ylabel("ΔG (kcal/mol, unbound plateau = 0)")
-        title_dg = (f"  ·  ΔG°_b={dG_result['dG_bind_std_kj_mol']*0.239006:.1f} kcal/mol,"
+        title_dg = (f"  ·  ΔG°_b={dG_result['dG_bind_std_kj_mol']*KJ_TO_KCAL:.1f} kcal/mol,"
                     f"  pKd={dG_result['pKd']:.2f}" if dG_result else "")
         ax4.set_title(
             f"FES  ·  {n_converged_cv}/{n_w} walkers converged{title_dg}"
@@ -996,7 +1124,7 @@ class MetadynamicsAnalysis:
         if fes_conv_kcal is not None:
             logging.info(f"  ΔG_sim (coverage-filtered)        = {float(fes_conv_kcal.min()):.2f} kcal/mol")
         if dG_result is not None:
-            dG_std_kcal = dG_result['dG_bind_std_kj_mol'] * 0.239006
+            dG_std_kcal = dG_result['dG_bind_std_kj_mol'] * KJ_TO_KCAL
             conv_note = " [⚠ FES min not in bound basin]" if dG_result['cv_at_minimum'] > 0.3 else ""
             logging.info(
                 f"  ΔG°_b (Limongelli, {len(converged_biases)} converged walkers) "
@@ -1011,7 +1139,7 @@ class MetadynamicsAnalysis:
             'cv_axis':          axis,
             'n_converged_cv':   n_converged_cv,
             'n_walkers':        n_w,
-            'dG_bind_std_kcal': dG_result['dG_bind_std_kj_mol'] * 0.239006 if dG_result else None,
+            'dG_bind_std_kcal': dG_result['dG_bind_std_kj_mol'] * KJ_TO_KCAL if dG_result else None,
             'pKd':              dG_result['pKd'] if dG_result else None,
             'fes_min_at_cv':    dG_result['cv_at_minimum'] if dG_result else None,
         }
