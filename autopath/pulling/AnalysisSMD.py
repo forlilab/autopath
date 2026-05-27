@@ -64,6 +64,41 @@ assert TRACE_FEATURE_POOL.isdisjoint(LIGAND_FEATURE_POOL), (
 )
 
 class SMDAnalysis:
+    """Orchestrates the full dcTMD/SMD post-processing pipeline.
+
+    Pipeline stages
+    ---------------
+    1. Load SMD traces from log files via :class:`SMDData`.
+    2. Cluster trajectories into unbinding paths using DTW
+       (:class:`DTWPathModel`) or a user-supplied path model.
+    3. Estimate ΔG and W_diss per (speed, path, step) using
+       Jarzynski and/or Cumulant estimators.
+    4. Build a mixture PMF weighted by equilibrium path probabilities
+       (p_eq), then extrapolate to v→0 when multiple speeds are present.
+    5. Compute friction (γ) from the dissipative work profile and
+       estimate k_off via Kramers/Pontryagin MFPT.
+    6. Write CSV outputs and optional diagnostic plots.
+
+    Feature design: ``TRACE_FEATURE_POOL``
+    ---------------------------------------
+    Trace features (RC progress + energetics: ``lag``, ``work``,
+    ``r_before``, …) capture what distinguishes genuinely different
+    unbinding routes.  Shape features (``npr1``, ``npr2``, ``pbf``) are
+    optional — they are useful only when trajectories diverge spatially
+    AND ligand conformation varies across those routes.  Including shape
+    features by default causes paths to split on conformation rather than
+    exit route when trajectories are kinematically similar (e.g. all
+    autostop at the same barrier).  Pass them explicitly via the
+    ``features`` argument to :meth:`run` when needed.
+
+    Parameters
+    ----------
+    replica_imbalance_threshold : float, optional
+        Warn when the max/min replica count ratio across paths exceeds this
+        value (default 3.0).  Logged in :meth:`_path_filtering` after the
+        replica-balance report per speed.
+    """
+
     def __init__(self,
         sysname: str = 'system',
         path_model: Union[PathModel, str] = 'dtw',
@@ -83,6 +118,7 @@ class SMDAnalysis:
         min_path_steps_ratio: float = 0.6,
         max_frac_neg_dG_first_half: float = 0.25,
         min_speeds_for_extrapolation: int = 2,
+        replica_imbalance_threshold: float = 3.0,
     ):
         self.sysname = sysname
         self.seed = seed
@@ -99,6 +135,7 @@ class SMDAnalysis:
         self.min_path_steps_ratio = min_path_steps_ratio
         self.max_frac_neg_dG_first_half = max_frac_neg_dG_first_half
         self.min_speeds_for_extrapolation = min_speeds_for_extrapolation
+        self.replica_imbalance_threshold = replica_imbalance_threshold
         os.makedirs(outdir, exist_ok=True)
         os.makedirs(os.path.join(outdir, "path_analysis"), exist_ok=True)
     
@@ -204,7 +241,6 @@ class SMDAnalysis:
                 f"  Trace pool:  {sorted(TRACE_FEATURE_POOL)}\n"
                 f"  Ligand pool: {sorted(LIGAND_FEATURE_POOL)}"
             )
-        # Partition while preserving caller order.
         trace_feats  = [f for f in features if f in TRACE_FEATURE_POOL]
         ligand_feats = [f for f in features if f in LIGAND_FEATURE_POOL]
 
@@ -250,7 +286,6 @@ class SMDAnalysis:
             if not lf.empty:
                 ligand_feat_dfs.append(lf)
 
-        # Assemble clustering feature DataFrame — merge all available sources.
         all_feat_dfs = [traces_feat_df]
         if dist_feat_df is not None and merge_features:
             all_feat_dfs.append(dist_feat_df)
@@ -266,13 +301,11 @@ class SMDAnalysis:
             feat_df = traces_feat_df
             logger.info('Clustering will be performed using trace features only')
 
-        # assemble trajectory files for path model (if needed)
         trajectory_files = {}
         for traj in sMDDdata.traj_files:
             trajname = SMDData._traj_to_log_name(traj)
             trajectory_files[trajname] = (self.reference_pdb, traj)
 
-        # fit path model and assign paths to trajectories
         path_mappings = self.path_model.fit_transform(
             feat_df,
             reference_pdb=self.reference_pdb,
@@ -284,15 +317,15 @@ class SMDAnalysis:
 
         sMDDdata.raw_data['path'] = sMDDdata.raw_data['trajname'].map(path_mappings)
 
-        # trim (speed, path) groups with insufficient sample support for reliable estimation
         if self.filter_low_support:
             sMDDdata.raw_data = trim_results_by_n_samples_support(
                 sMDDdata.raw_data,
                 min_samples=self.min_samples_per_step,
                 min_support_ratio=self.min_support_ratio,
             )
-        
-        # fit estimators sequentially (some may rely on the path assignments, so do this before any path filtering)
+
+        # Fit estimators sequentially; some may rely on path assignments,
+        # so this must run before any path filtering.
         for estimator in self.estimators:
             logger.info(f"Fitting estimator: {estimator.name}")
             sMDDdata = estimator.fit_transform(sMDDdata)
@@ -481,12 +514,24 @@ class SMDAnalysis:
         trim_fraction: float = 0.1,      # drop steps where fewer than (1-trim_fraction) of replicas contributed; 0=no trimming
         min_common_points: int = 5,
     ):
-        """
-        Sequential convergence check for a single pulling speed using
-        the weighted PMF (mixture over paths).
+        """Check PMF convergence as replica count grows, per pulling speed.
 
-        The PMF for k replicas is assumed to be invariant once computed;
-        only PMF(k) vs PMF(k-1) is compared.
+        For each speed, replicas are added one at a time in sorted order.
+        After every addition the mixture PMF is rebuilt from the running
+        estimator statistics.  Consecutive PMFs (PMF(k) vs PMF(k-1)) are
+        compared on three criteria: RMSD over the common r-range, change
+        in barrier height, and change in transition-state position.
+
+        Returns
+        -------
+        convergence_df : pd.DataFrame
+            One row per (speed, k) with columns: ``n_replicas``,
+            ``{quantity}-rmsd``, ``barrier_delta``, ``r_ts_delta``,
+            ``barrier_height``, ``r_ts``, ``converged``, and ``reason``
+            (when convergence criteria cannot be evaluated).
+        traces_df : pd.DataFrame
+            Long-form PMF traces — one row per (speed, k, step) — for
+            plotting PMF evolution with increasing replica count.
         """
 
         if isinstance(quantities, str):
@@ -506,26 +551,24 @@ class SMDAnalysis:
             )
 
         if speeds is None:
-            speeds = sorted(set(self._speed_from_log(fn) for fn in logs))
+            speeds = sorted(set(SMDData._speed_from_log(fn) for fn in logs))
 
         convergence_all_speeds = []
         traces_all_speeds = []
 
         for speed in speeds:
             
-            #filter logs by speed
-            speed_logs = [fn for fn in logs if self._speed_from_log(fn) == speed]
+            # filter logs by speed
+            speed_logs = [fn for fn in logs if SMDData._speed_from_log(fn) == speed]
 
             if len(speed_logs) < min_replicas:
                 raise ValueError(
                     f"Not enough replicas for speed={speed}: {len(speed_logs)}"
                 )
 
-            # sort replicas sequentially
-            speed_logs = sorted(speed_logs, key=self._replica_idx_from_log)
+            speed_logs = sorted(speed_logs, key=SMDData._replica_idx_from_log)
             logger.info(f"Checking convergence for speed={speed} with {len(speed_logs)} replicas")
 
-            # Build SMDData and clustering ONCE for this speed
             smd = SMDData(
                 speed_logs,
                 sysname=self.sysname,
@@ -941,6 +984,11 @@ class SMDAnalysis:
     def _path_filtering(self, sMDDdata: SMDData) -> SMDData:
         """Drop (speed, path) groups that are under-sampled or prematurely terminated.
 
+        Must be called after path assignments have been written to
+        ``sMDDdata.raw_data['path']`` and estimators have been fitted,
+        because the filtering logic reads both ``raw_data`` and
+        ``sMDDdata.results``.
+
         Three passes, controlled by instance attributes:
 
         Pass 1 — replica count (``self.min_replicas_per_path``): drop paths
@@ -964,7 +1012,7 @@ class SMDAnalysis:
 
         Applied after estimator fitting and before p_eq computation and PMF
         construction.  Also logs a per-speed replica imbalance warning when
-        the ratio of max/min replica counts exceeds 3.
+        the ratio of max/min replica counts exceeds ``self.replica_imbalance_threshold``.
         """
         sMDDdata.raw_data['path_ok'] = True
 
@@ -1069,7 +1117,7 @@ class SMDAnalysis:
             if not counts:
                 continue
             logger.info(f"  Speed={speed} nm/ps  replicas: {counts}")
-            if max(counts.values()) / max(min(counts.values()), 1) > 3:
+            if max(counts.values()) / max(min(counts.values()), 1) > self.replica_imbalance_threshold:
                 logger.warning(
                     f"Replica imbalance at speed={speed} nm/ps: {counts}. "
                     f"Cumulant variance scales with 1/N — under-sampled paths "
@@ -1192,18 +1240,3 @@ class SMDAnalysis:
                 )
 
         return p_eq_dic
-
-    @staticmethod
-    def _speed_from_log(fn):
-        # Example log name: sMD_replica-182557_v0.005_forward.dat
-        base = os.path.basename(fn)
-        for token in base.split("_"):
-            if token.startswith("v"):
-                return float(token[1:])
-        return None
-    
-    @staticmethod
-    def _replica_idx_from_log(fn):
-        base = os.path.basename(fn)[:-4]
-        rep = base.split("_")[-3]
-        return int(rep.split("-")[1])

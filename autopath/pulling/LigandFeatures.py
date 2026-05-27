@@ -11,16 +11,20 @@ from .SMDData import SMDData
 logger = logging.getLogger("autopath.pulling.LigandFeatures")
 
 
-# Per-frame RDKit 3D shape descriptors. All are mass-weighted (PMI-based) or
-# purely geometric, so they are invariant under permutation of same-element
-# atoms — element-level matching between SDF and trajectory selection is
-# sufficient to guarantee correctness. PMI1/2/3 are deliberately omitted:
-# absolute-scale (Å^2·Da) and redundant with the mass-weighted
-# RadiusOfGyration once the shape ratios above are kept.
 def _rdkit_feature_fns() -> dict[str, Callable]:
-    """Build the name → descriptor-callable map lazily to avoid top-level
-    RDKit imports (the class only needs RDKit when an rdkit feature is
-    actually requested)."""
+    """Lazily build the feature-name → RDKit descriptor callable mapping.
+
+    Construction is deferred to call time so that RDKit — an optional
+    dependency — is only imported when an RDKit feature is actually
+    requested.  Callers that only use ``"rog"`` never trigger the import.
+
+    Returns
+    -------
+    dict
+        Maps each supported RDKit feature name (e.g. ``"asphericity"``)
+        to its corresponding callable from ``rdkit.Chem.Descriptors3D``
+        or ``rdkit.Chem.rdMolDescriptors``.
+    """
     from rdkit.Chem import Descriptors3D, rdMolDescriptors
     return {
         "asphericity":    Descriptors3D.Asphericity,
@@ -81,6 +85,17 @@ class LigandTrajectoryFeatures:
     For RDKit descriptors the SDF and the MDAnalysis selection must agree
     on heavy-atom **element order**. The class validates this at the start
     of :meth:`compute` and raises on mismatch.
+
+    **RDKit descriptor selection rationale**: all supported 3D descriptors
+    are either mass-weighted (PMI-based, e.g. asphericity, eccentricity,
+    NPR1/2) or purely geometric (e.g. PBF), so they are invariant under
+    permutation of same-element atoms.  This means element-level matching
+    between the SDF template and the MDAnalysis trajectory selection is
+    sufficient for correctness — atom-index identity is not required.
+    PMI1, PMI2, and PMI3 are deliberately excluded: they are absolute-scale
+    quantities (Å²·Da) and become redundant with the mass-weighted
+    RadiusOfGyration once the shape ratios (NPR1/2, asphericity, …) are
+    retained.
     """
 
     def __init__(

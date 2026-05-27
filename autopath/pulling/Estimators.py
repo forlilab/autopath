@@ -173,6 +173,7 @@ class FrictionEstimator(BaseEstimator):
         wdiss: np.ndarray,
         speed: float,
     ) -> np.ndarray:
+        """Return dWdiss/dr / speed after optionally smoothing Wdiss."""
         if len(r) < 2 or speed <= 0:
             return np.full_like(r, np.nan, dtype=float)
 
@@ -224,6 +225,36 @@ class FrictionEstimator(BaseEstimator):
         df: pd.DataFrame,
         estimator: str | None = None,
     ) -> pd.DataFrame:
+        """Compute the friction profile Γ(r) = dWdiss/dr / v using the derivative method.
+
+        For each (estimator, speed[, path]) group, sorts by r_coord, smooths Wdiss,
+        and takes a numerical gradient to obtain the local friction coefficient Γ(r)
+        at each grid point.  Also returns the cumulative integral Γ_integrated(r).
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Estimator results table with columns ``r_coord``, ``speed``,
+            ``estimator``, and the configured ``w_col`` (default ``'Wdiss'``).
+        estimator : str or None
+            If provided, filter to a single estimator label before computing.
+
+        Returns
+        -------
+        pd.DataFrame
+            One row per grid point per (estimator, speed[, path]) with columns
+            ``r_coord``, ``speed``, ``Gamma``, ``Gamma_integrated``, ``method``
+            (= ``'derivative'``), ``estimator``, and optionally ``path``.
+
+        Note
+        ----
+        For backward pulling, r_coord decreases with step.  After sorting by
+        r_coord the step index is reversed: the small-r end (center) comes first
+        and carries the largest accumulated Wdiss, making dWdiss/dr negative.
+        The correct formula for backward pulling is γ = −dWdiss/dr / v (sign flip
+        because dr < 0 during the pull).  Direction is detected from the ``step``
+        column when available, otherwise from the sign of Wdiss[0] − Wdiss[−1].
+        """
         if df is None or df.empty:
             return pd.DataFrame()
 
@@ -250,12 +281,7 @@ class FrictionEstimator(BaseEstimator):
             wdiss = g[self.w_col].to_numpy(dtype=float)
             speed = float(g['speed'].iloc[0])
 
-            # For backward pulling r_coord decreases with step, so after sorting by
-            # r_coord the step index is reversed: the small-r end (center) comes first
-            # and carries the largest accumulated Wdiss. This makes dWdiss/dr negative,
-            # which would give a negative gamma. The correct formula for backward pulling
-            # is γ = -dWdiss/dr / v (sign flip because dr < 0 during the pull).
-            # Detect direction: if step at r_min > step at r_max, it's backward.
+            # Detect pulling direction: if step at r_min > step at r_max, it's backward.
             if 'step' in g.columns:
                 is_backward = float(g.iloc[0]['step']) > float(g.iloc[-1]['step'])
             else:
@@ -284,6 +310,31 @@ class FrictionEstimator(BaseEstimator):
         df: pd.DataFrame,
         estimator: str | None = None,
     ) -> pd.DataFrame:
+        """Compute the friction profile Γ(r) by linear regression of Wdiss across speeds.
+
+        Fits Wdiss(r, v) ≈ Γ(r)·v + b(r) at each grid point using
+        :func:`extrapolate_to_v0`, then differentiates the resulting
+        Gamma_integrated(r) = slope(r) to obtain the local friction Γ(r).
+
+        This cross-speed approach averages over pulling-speed noise and is
+        complementary to the per-speed derivative method
+        (:meth:`gamma_from_wdiss_derivative`).
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Estimator results table containing at least ``r_coord``, ``speed``,
+            ``estimator``, and the configured ``w_col`` (default ``'Wdiss'``).
+        estimator : str or None
+            If provided, filter to a single estimator label before fitting.
+
+        Returns
+        -------
+        pd.DataFrame
+            One row per grid point per estimator with columns ``r_coord``,
+            ``estimator``, ``Gamma``, ``Gamma_integrated``, ``method``
+            (= ``'regression'``), and ``step`` when available.
+        """
         if df is None or df.empty:
             return pd.DataFrame()
 
@@ -605,7 +656,49 @@ class KramersEstimator:
         kBT: float,
         gamma_floor: float,
     ) -> dict:
-        """Pontryagin MFPT integral.  Returns a diagnostics dict."""
+        """Compute the mean first-passage time (MFPT) via the Pontryagin/Kramers double integral.
+
+        Evaluates τ = ∫_{start_r}^{abs_r} [exp(+βΔF(r)) / D(r)]
+                           · ∫_{reflect_r}^{r} exp(−βΔF(r')) dr' dr
+        where D(r) = kBT / Γ(r) is the position-dependent diffusivity.
+
+        Parameters
+        ----------
+        profile_df : pd.DataFrame
+            Merged PMF + friction table with columns ``r_coord``, ``dG``, and
+            ``Gamma`` (produced by :meth:`_merge_pmf_friction`).
+        start_r : float
+            Starting coordinate (nm) — the reflecting/equilibrium position.
+        abs_r : float
+            Absorbing boundary coordinate (nm) — typically the barrier peak
+            located by :meth:`detect_ts` (calls :func:`_find_pmf_peak`).
+        reflect_r : float or None
+            Reflecting boundary for the inner integral.  ``None`` defaults to
+            ``r_coord.min()`` (forward pull) or ``r_coord.max()`` (backward pull).
+        kBT : float
+            Thermal energy in kJ/mol.
+        gamma_floor : float
+            Minimum allowed Γ value (kJ·ps/mol/nm²); clips non-physical negatives.
+
+        Returns
+        -------
+        dict
+            Diagnostics dictionary with keys:
+            ``tau_ps`` (MFPT in ps), ``barrier_kjmol``, ``barrier_r_nm``,
+            ``max_beta_dF``, ``reflect_r_canon``, ``mirrored``, ``start_r_input``.
+
+        Note
+        ----
+        ΔF is first shifted so ΔF(start_r) = 0, then shifted again so its
+        minimum is ≥ 0 (to clip noise-induced dips below zero).  This second
+        shift is valid because the Pontryagin MFPT integral is invariant to a
+        constant shift of ΔF — the constant cancels between the exp(+βΔF) and
+        exp(−βΔF) factors in the double integral.
+
+        A soft warning is emitted when max(β·ΔF) > 100 (precision degrades).
+        A hard guard triggers at max(β·ΔF) ≈ 708 (float64 overflow); in that
+        case ``tau_ps = inf`` is returned.
+        """
         df = (
             profile_df.sort_values("r_coord")
             .drop_duplicates("r_coord")
@@ -650,8 +743,6 @@ class KramersEstimator:
         dF = dF - float(np.interp(start_r, r, dF))
 
         # Shift dF so its minimum is ≥ 0 (clips noise-induced dips below zero).
-        # The Pontryagin MFPT integral is invariant to a constant shift of ΔF
-        # (the shift cancels between exp_pos and exp_neg in the product).
         dF_min = float(np.nanmin(dF))
         if dF_min < 0.0:
             dF = dF - dF_min
@@ -1164,6 +1255,13 @@ def calculate_weighted_pmf(
     weights_by_estimator : dict
         Pre-computed weights ``{estimator: {speed: {path: p_eq}}}``.
         Obtain these from :meth:`SMDAnalysis.compute_p_eq`.
+
+    Note
+    ----
+    The grid is restricted to the shortest path's last step so that all paths
+    contribute at every grid point.  Without this restriction, when a shorter
+    path terminates the p_eq renormalization denominator changes abruptly,
+    producing a visible discontinuity in the weighted PMF.
     """
 
     results = smd_data.results.copy()
@@ -1190,10 +1288,6 @@ def calculate_weighted_pmf(
             if not speed_weights:
                 continue
 
-            # Restrict the grid to the shortest path's last step so that all
-            # paths contribute at every step. Without this, when a shorter path
-            # terminates the p_eq renormalization denominator changes abruptly,
-            # producing a visible discontinuity in the weighted PMF.
             path_last = speedg.groupby("path")[grid_col].max()
             max_grid_step = path_last.min()
             grid_vals = sorted(speedg.loc[speedg[grid_col] <= max_grid_step, grid_col].dropna().unique())
@@ -1209,11 +1303,7 @@ def calculate_weighted_pmf(
                 for path, g in slice_g.groupby('path'):
                     if path not in speed_weights:
                         continue
-                    
-                    # # skip terminal or undersampled points
-                    # if g['n_samples'].iloc[0] < 3:
-                    #     continue
-                    
+
                     w = speed_weights[path]
 
                     for col in weight_cols:
@@ -1304,6 +1394,20 @@ def extrapolate_to_v0(
 
         This output is directly compatible with
         :func:`Diagnostics.plot_extrapolated_param`.
+
+    Note
+    ----
+    **Step selection trade-off (min_speeds):** requiring all speeds (equivalent
+    to setting ``min_speeds`` equal to the total number of speeds) cuts the
+    extrapolated PMF to whichever speed has the shortest profile.  Allowing
+    fewer speeds via a lower ``min_speeds`` lets the tail extend further at the
+    cost of a less constrained fit (fewer data points per step).
+
+    **Edge trimming:** after the per-step regressions, leading and trailing steps
+    where fewer than the maximum number of available speeds contributed are
+    stripped.  Edge rows with only ``min_speeds`` data points have R²=1.0
+    trivially (zero degrees of freedom) and produce unconstrained intercept
+    spikes.
     """
 
     df = results.copy()
@@ -1328,10 +1432,6 @@ def extrapolate_to_v0(
     for estimator, est_group in df.groupby('estimator'):
         sub = est_group.dropna(subset=[param])
 
-        # Keep steps present in at least min_speeds speeds.
-        # Requiring all speeds (the old behaviour) cuts the extrapolated PMF
-        # to whichever speed has the shortest profile.  Allowing fewer speeds
-        # lets the tail extend further at the cost of a less constrained fit.
         step_speed_counts = sub.groupby('step')['speed'].nunique()
         common_steps = step_speed_counts[step_speed_counts >= min_speeds].index
         sub = sub[sub['step'].isin(common_steps)].copy()
@@ -1392,9 +1492,6 @@ def extrapolate_to_v0(
     v0_df = pd.DataFrame(out_rows)
     if not v0_df.empty:
         v0_df = v0_df.sort_values(['estimator', 'step']).reset_index(drop=True)
-        # Strip leading/trailing steps where not all available speeds contributed.
-        # Edge rows with n_speeds == min_speeds have R²=1.0 trivially (zero degrees
-        # of freedom) and produce unconstrained intercept spikes.
         trimmed = []
         for _est, eg in v0_df.groupby('estimator', sort=False):
             eg = eg.sort_values('step').reset_index(drop=True)

@@ -13,7 +13,33 @@ logger = logging.getLogger("autopath.pulling.SMDData")
 from collections import defaultdict
 
 class SMDData:
-    def __init__(self, 
+    """Container and preprocessor for steered MD log files.
+
+    Wraps one or more ``.dat`` log files produced by a dcTMD/SMD run.
+    On construction the logs are loaded, filtered, and augmented with
+    cumulative work and analysis-coordinate columns; the result is stored
+    in ``self.raw_data``.  Estimator results are accumulated later via
+    :meth:`add_estimator_results` and stored in ``self.results``.
+
+    Coordinate conventions
+    ----------------------
+    ``r_target`` is the theoretical protocol grid — the ideal constraint
+    position at each step, used by dcTMD.  Because it follows a fixed
+    schedule it is identical across replicas and suitable for grouping.
+
+    ``r_before`` is the actual ligand distance measured *before* the
+    constraint force is applied.  It reflects stochastic fluctuations, so
+    different replicas land on different grids; it requires binning before
+    it can be used as an analysis coordinate.
+
+    Parameters (selected)
+    ---------------------
+    completion_threshold_nm : float
+        Distance threshold (nm) used to drop trajectories that did not
+        reach their end state (default 0.1 nm).
+    """
+
+    def __init__(self,
                 log_files: list[str],
                 sysname: str = 'autopath',
                 exclude_speeds: list[float] = None,
@@ -22,6 +48,7 @@ class SMDData:
                 reference_pdb: str = None,
                 work_mode: str = 'protocol',  # 'force_dx', 'protocol' or 'auto'
                 protocol_work_column: str = 'dW_protocol',
+                completion_threshold_nm: float = 0.1,
                 ):
         
         self.sysname = sysname
@@ -34,49 +61,40 @@ class SMDData:
         self.RT = self.R * self.temperature
         self.beta = 1.0 / self.RT
         
-        # get it from the first log file
         self.pulling_direction = self.log_files[0].split("_")[-1].replace(".dat","")
-        self.force_column = 'force'  # assuming the log files have a 'force' column
+        self.force_column = 'force'
         self.outdir = os.path.dirname(self.log_files[0])
-        
-        # r_target is the theoretical target distance grid, the one that dcTMD uses
-        # r_before is the actual distance before applying the constraint force. This one requires
-        # binning because different replicas will have different grids.
+
         self.r_column = r_column
         if r_column not in ['r_target', 'r_before']:
-            logger.error(f'Unknown r_column: {r_column}. Must be "r_target" or "r_before".')
-            exit(1)
+            raise ValueError(f'r_column must be "r_target" or "r_before", got: {r_column!r}')
+        self.completion_threshold_nm = completion_threshold_nm
 
         self.work_mode = work_mode
         self.protocol_work_column = protocol_work_column
-            
-        # load the data        
+
         raw_data = self.load_logs()
-        
-        # Build protocol grids BEFORE any filtering
+
+        # Build protocol grids before any filtering so all speeds are captured.
         self.protocol_grids = self.build_protocol_grids(raw_data)
-        
-        # filter out unwanted speeds
+
         if exclude_speeds is not None:
             logger.warning(f'The following speeds will be excluded from analysis: {exclude_speeds}')
             raw_data = raw_data[~raw_data['speed'].isin(exclude_speeds)]
             
-        # filter out trajectories that did not reach end state
         to_drop = []
         for traj_name, traj_data in raw_data.groupby('trajname'):
             if self.pulling_direction == 'forward':
-                if traj_data["r_after"].min() < 0.1:
+                if traj_data["r_after"].min() < self.completion_threshold_nm:
                     logger.warning(f'Dropping {traj_name}, min distance {traj_data["r_after"].min():.2f} nm')
                     to_drop.append(traj_name)
             else:  # backward pulling
-                if traj_data["r_after"].min() > 0.1:
+                if traj_data["r_after"].min() > self.completion_threshold_nm:
                     logger.warning(f'Dropping {traj_name}, min distance {traj_data["r_after"].min():.2f} nm')
                     to_drop.append(traj_name)
         
         raw_data = raw_data[~raw_data['trajname'].isin(to_drop)]
 
-        # Build cumulative work either from protocol increments (preferred when available)
-        # or from force-distance integration (legacy behavior).
         raw_data = self.integrate_force_dx(
             raw_data,
             r_column,
@@ -86,8 +104,8 @@ class SMDData:
         
         raw_data['lag'] = raw_data['r_after'] - raw_data['r_target']
         
-        # build common r_coord grid across replicas for a given speed.
-        # THIS GRID SHOULD NOT BE USED FOR BINNING OR INDEXING, ONLY FOR ANALYSIS COORDINATE
+        # r_coord is a median-based analysis coordinate shared across replicas;
+        # it must not be used for binning or indexing — only for plotting/analysis.
         raw_data = self.build_analysis_coord(raw_data)
 
         raw_data['path'] = 1  # default single path
@@ -98,8 +116,17 @@ class SMDData:
         return None
         
     def load_logs(self) -> pd.DataFrame:
+        """Read all log files and return a concatenated DataFrame.
 
-        # compile raw log files
+        Each file is read with ``pd.read_csv`` (comment lines starting
+        with ``#`` are skipped).  The columns ``trajname``, ``speed``,
+        and ``repid`` are appended from the filename.  Files that cannot
+        be parsed are skipped with an error log.
+
+        After this call ``self.raw_data`` does not yet exist — the
+        returned DataFrame is passed through further processing steps in
+        ``__init__`` before being assigned to ``self.raw_data``.
+        """
         count = 0
         raw_data = []
         for fn in self.log_files:
@@ -116,7 +143,7 @@ class SMDData:
         if count == 0:
             logger.warning("No valid log files found.")
             return None
-        logger.info(f"Loaded {count} log files'.")
+        logger.info(f"Loaded {count} log files.")
 
         if not raw_data:
             logger.warning("No data loaded from log files.")
@@ -171,7 +198,7 @@ class SMDData:
         Attach an analysis coordinate r_coord derived from r_target,
         without redefining the protocol grid. In theory r_target should be the same
         across replicas for a given speed, but in practice there are tiny numerical differences,
-        mostly becuase r0 is not exactly the same. Here we just take the median
+        mostly because r0 is not exactly the same. Here we just take the median
         """
         df = raw_data.copy()
 
@@ -235,8 +262,17 @@ class SMDData:
 
         return raw_data
     
-    def filter_by_r_range(self, r_range, r_column) -> pd.DataFrame:
-        """Filter raw_data by r_column within r_range.
+    def filter_by_r_range(self, r_range, r_column) -> None:
+        """Restrict ``self.raw_data`` to rows where ``r_column`` falls within ``r_range``.
+
+        Modifies ``self.raw_data`` in-place and returns ``None``.
+
+        Parameters
+        ----------
+        r_range : tuple[float, float]
+            ``(r_min, r_max)`` bounds (inclusive) in the same units as ``r_column``.
+        r_column : str
+            Column name to filter on (typically ``'r_target'`` or ``'r_before'``).
         """
 
         logger.warning(f'Filtering data by x-range: {r_range}')
@@ -255,10 +291,16 @@ class SMDData:
     
     @staticmethod
     def _replica_idx_from_log(fn):
+        """Extract the integer replica ID from a log filename.
+
+        Expected format: ``sMD_replica-{ID}_v{speed}_{direction}.dat``
+        (e.g. ``sMD_replica-182557_v0.005_forward.dat``).  Index ``-3``
+        after splitting on ``_`` yields the ``replica-{ID}`` token.
+        """
         base = os.path.basename(fn)[:-4]
         rep = base.split("_")[-3]
         return int(rep.split("-")[1])
-    
+
     @staticmethod
     def _traj_to_log_name(traj_path: str) -> str:
         """
@@ -338,6 +380,17 @@ class SMDData:
                           ) -> pd.DataFrame:
         """
         Compute (or load) distance features between pocket and ligand.
+
+        Parameters
+        ----------
+        group_A : str
+            MDAnalysis selection string for the **pocket** atoms.
+        group_B : str
+            MDAnalysis selection string for the **ligand** atoms.
+        recompute : bool, optional
+            If False (default), load from cache if available.
+        stride : int, optional
+            Frame stride for trajectory reading (default 2).
 
         Returns a DataFrame with columns:
             ['trajname', 'step', 'time'] + dist_* feature columns
@@ -497,7 +550,11 @@ class SMDData:
         return SMDData.merge_feature_sets(geom_df, trace_df, tolerance_ps=tolerance_ps)
 
     def add_estimator_results(self, estimator_name: str, results_df: pd.DataFrame):
-        """Store estimator results in the SMDData object.
+        """Append per-(speed, path, step) estimator output to ``self.results``.
+
+        Tags ``results_df`` with an ``'estimator'`` column set to
+        ``estimator_name``, then concatenates into ``self.results``.
+        Multiple calls accumulate results from different estimators.
         """
         if self.results is None:
             self.results = pd.DataFrame()
@@ -554,7 +611,13 @@ class SMDData:
 
     @staticmethod
     def _choose_estimator_for_weights(results: pd.DataFrame, estimator: str = 'auto') -> str:
-        """Resolve which estimator column should be used for p_eq computation."""
+        """Resolve which estimator to use for p_eq computation.
+
+        When ``estimator='auto'`` (default), preference order is
+        ``'cumulant'`` > ``'jarzynski'`` > first available.  Raises
+        ``ValueError`` if no estimator results are present or the
+        explicitly requested estimator is not in ``results``.
+        """
         if 'estimator' not in results.columns:
             raise ValueError("results must include an 'estimator' column.")
 
@@ -575,75 +638,3 @@ class SMDData:
                 f"Available: {sorted(available_estimators)}"
             )
         return estimator
-
-    # def _bin_data(self,
-    #             x_col:str='r_before',
-    #             use_quantiles: bool = True,
-    #             n_bins: int=50,
-    #             min_points: int = 1       # drop bins with < min_points
-    #             ) -> tuple[pd.DataFrame, np.ndarray]:
-    #     """
-    #     Bins r_column into n_bins using pd.cut (equal width) or pd.qcut (equal count).
-    #     After optional filtering of low-count bins, bins are reindexed to 0..M-1 and centers
-    #     are returned only for surviving bins. 'r_coord' holds the center for each row.
-
-    #     Returns
-    #     -------
-    #     raw_data : DataFrame with columns ['bin', 'r_coord'] added
-    #     centers  : np.ndarray of bin centers aligned with bin indices 0..M-1
-    #     """
-    #     rvals = self.raw_data[x_col].to_numpy()
-    #     raw_data = self.raw_data.copy()
-
-    #     if use_quantiles:
-    #         # equal-count bins
-    #         codes, edges = pd.qcut(rvals, q=n_bins, labels=False, retbins=True, duplicates='drop', precision=3)
-    #     else:
-    #         # equal-width bins
-    #         codes, edges = pd.cut(rvals, bins=n_bins, labels=False, include_lowest=True, right=False, retbins=True, precision=3)
-
-    #     # assign bins; drop anything not assigned (NaN)
-    #     raw_data['bin'] = pd.Series(codes, index=raw_data.index, dtype='Int64')
-    #     raw_data = raw_data.dropna(subset=['bin']).copy()
-    #     raw_data['bin'] = raw_data['bin'].astype(int)
-
-    #     # pre-centers from edges
-    #     centers = 0.5 * (edges[:-1] + edges[1:])
-
-    #     # optional filter: remove bins with toso few points
-    #     if min_points > 1:
-    #         counts = raw_data['bin'].value_counts()
-    #         keep = set(counts[counts >= min_points].index.tolist())
-    #         raw_data = raw_data[raw_data['bin'].isin(keep)].copy()
-
-    #     # reindex surviving bins to 0..M-1 and shrink centers accordingly
-    #     present_bins = np.sort(raw_data['bin'].unique())
-    #     bin_map = {old: i for i, old in enumerate(present_bins)}
-    #     raw_data['bin'] = raw_data['bin'].map(bin_map)
-    #     centers = np.asarray(centers)[present_bins]
-
-    #     # these are the center each point belongs to
-    #     raw_data['r_coord'] = raw_data['bin'].map(lambda b: centers[b] if 0 <= b < len(centers) else np.nan)
-
-    #     return raw_data, centers
-    
-    # def _filter_low_count_bins(self, raw_data, min_points):
-    #     """Filter low count bins per speed. This function filters out bins 
-    #     that have fewer than `min_points` data points for each speed.
-    #     """
-    #     #TODO add this to bin_data and group by path too.
-    #     # Im not dropping bins any more
-        
-    #     all_data = []
-    #     for speed in raw_data['speed'].unique():
-
-    #         df = raw_data[raw_data['speed'] == speed]
-
-    #         # Count points per bin and filter out bins with too few points
-    #         points_per_bin = df.groupby('bin').size()
-    #         points_per_bin = points_per_bin[points_per_bin > min_points]  
-    #         df = df[df['bin'].isin(points_per_bin.index)]
-    #         df['speed'] = speed  # add speed column
-    #         all_data.append(df)
-
-    #     return pd.concat(all_data)

@@ -169,7 +169,26 @@ class SteeredMD:
                               run_id: int, 
                               direction: str = "forward",
                              ):
-        """Run the pulling process in a single direction (forward or backward) for a single replica."""
+        """Main pulling loop for a single replica in one direction.
+
+        Advances the spring centre r0 by ``dx_per_move`` each iteration and
+        integrates ``steps_per_move`` MD steps. At each move the method records
+        instantaneous force, the incremental protocol work ``dW_protocol``
+        (energy change due to the r0 shift *before* MD relaxation — distinct
+        from the cumulative work), the lag (r0 - r_after), and, every
+        ``save_freq`` moves, the soft contact count NC.
+
+        NC autostop: the loop halts early when NC drops below
+        ``autostop_nc × NC_initial`` for ``autostop_nc_window`` consecutive
+        samples and the cumulative displacement exceeds
+        ``autostop_min_displacement``.
+
+        Output
+        ------
+        Writes ``{out_dir}/sMD_{run_id}.dat`` with columns:
+        step, time, r_target, r_before, r_after, force, U_cvpack,
+        dW_protocol, lag_nm
+        """
                     
         add_reporters(simulation, self.out_dir, f"sMD_{run_id}",
             total_steps=self.sMD_moves*self.steps_per_move, # total steps 
@@ -178,9 +197,12 @@ class SteeredMD:
         )
 
         if self.use_GReweighting:
-            simulation.reporters.append(ReweightingReporter(f"{self.out_dir}/sMD_{run_id}.dat", 
-                                                            self.steps_per_move, 
-                                                            simulation.integrator, 
+            # NOTE: 'unperturebed' and 'firtsPertubation' are the canonical parameter names in
+            # ReweightingReporter.__init__ (autopath/reweightingreporter.py) — the
+            # misspellings are in the class definition itself and must be matched here.
+            simulation.reporters.append(ReweightingReporter(f"{self.out_dir}/sMD_{run_id}.dat",
+                                                            self.steps_per_move,
+                                                            simulation.integrator,
                                                             unperturebed=True,
                                                             firtsPertubation=True,
                                                             ))
@@ -191,23 +213,32 @@ class SteeredMD:
         simulation.context.setParameter("r0_smd", initial_r0)
 
         # ── Move count cap: box safety + r0 factor ─────────────────────────────
-        # PBC cap: cvpack uses pbc=True so the COM-COM distance is the minimum
-        # image. The reported scalar becomes ill-defined once any component of
-        # the COM-COM vector exceeds L_axis/2. Project the initial vector onto
-        # each axis to get the per-axis limit on the spring's scalar r:
+        # PBC cap: cvpack uses pbc=True, so the COM-COM distance is the
+        # minimum image. The scalar becomes ill-defined once any component of
+        # the COM-COM vector exceeds L_axis/2. Per-axis limit on r:
         #     r_max_i = (L_i / 2) * |v| / |v_i|
-        # Take the min across axes. For elongated boxes (long axis aligned with
-        # the pull direction), this gives ~L_long/2, not min(L)/2.
+        # The binding axis dominates; for a box elongated along the pull
+        # direction this gives ~L_long/2, not the more conservative min(L)/2.
+        # WARNING: minimum-image wrap (line below) is orthorhombic only.
         initial_r0_nm = initial_r0.value_in_unit(openmmunit.nanometers)
         dx_nm = float(self.dx_per_move.value_in_unit(openmmunit.nanometers))
         n_moves = self.sMD_moves
         if direction == "forward" and self.sMD_max_r_offset > 0:
             state    = simulation.context.getState(getPositions=True)
             box_vecs = state.getPeriodicBoxVectors()
-            L = np.array([
-                abs(box_vecs[i][i].value_in_unit(openmmunit.nanometers))
+            box_arr = np.array([
+                [box_vecs[i][j].value_in_unit(openmmunit.nanometers) for j in range(3)]
                 for i in range(3)
             ])
+            off_diag_max = float(np.abs(box_arr - np.diag(np.diag(box_arr))).max())
+            if off_diag_max > 1e-3:
+                logger.warning(
+                    f"PBC move-capping: non-orthorhombic box detected "
+                    f"(max off-diagonal element = {off_diag_max:.4f} nm). "
+                    f"Minimum-image wrapping assumes orthorhombic geometry and may be incorrect "
+                    f"for triclinic boxes."
+                )
+            L = np.diag(box_arr)
 
             positions = state.getPositions(asNumpy=True).value_in_unit(openmmunit.nanometers)
             weigh_by_mass = not (len(self.groupA_atoms) == 1 or len(self.groupB_atoms) == 1)
@@ -222,7 +253,7 @@ class SteeredMD:
             com_A = np.average(positions[self.groupA_atoms], axis=0, weights=masses_A)
             com_B = np.average(positions[self.groupB_atoms], axis=0, weights=masses_B)
             v = com_A - com_B
-            v -= np.round(v / L) * L  # minimum-image wrap (orthorhombic)
+            v -= np.round(v / L) * L  # minimum-image (orthorhombic only; triclinic triggers a warning above)
             v_norm = float(np.linalg.norm(v))
             if abs(v_norm - initial_r0_nm) > 0.05:
                 logger.warning(
@@ -256,11 +287,10 @@ class SteeredMD:
         print_interval = max(50, n_moves // 10)
 
         # ── Autostop state ─────────────────────────────────────────────────────
-        # NC criterion (every save_freq moves):
-        #   NC is the soft contact count between ligand and pocket atoms.
-        #   _nc_initial is measured post-relaxation. Autostop fires when
-        #   NC < autostop_nc × _nc_initial for autostop_nc_window
-        #   consecutive samples and the min-displacement guard is satisfied.
+        # NC is the soft contact count (switching function 1/(1+(d/r0)^6))
+        # sampled every save_freq moves. Autostop fires when NC falls below
+        # autostop_nc × NC_initial for autostop_nc_window consecutive samples
+        # after the min-displacement guard is satisfied.
         _nc_buf: deque[float] = deque(maxlen=self.autostop_nc_window)
         _nc_initial = None
         if self.autostop_nc is not None and self.subset_protein_HA is not None:
@@ -552,7 +582,12 @@ class SteeredMD:
     @staticmethod
     def adapt_speed_from_meff(m_eff_dalton, dx_target_nm=0.01, gammaL_ps=2.0,
                           v_min=0.0005, v_max=0.01):
-        """Heuristically adapt the pulling speed based on effective mass"""
+        """Heuristically adapt the pulling speed from the ligand effective mass.
+
+        Uses v = dx_target * gammaL / m_eff (Einstein–Smoluchowski scaling)
+        then clamps the result to [v_min, v_max].  Useful for choosing a
+        speed that keeps the ligand near equilibrium during the pull.
+        """
         v = dx_target_nm * gammaL_ps / m_eff_dalton  # in nm/ps
         return min(max(v, v_min), v_max)
     
@@ -567,7 +602,18 @@ class SteeredMD:
         return float(np.sum(1.0 / (1.0 + x**6)))
 
     def _get_pocket_atoms(self, simulation, cutoff=0.6):
-        """Get a subset of protein heavy atoms within cutoff nm of the ligand (used for verbose NC monitoring)."""
+        """Return protein heavy atoms within *cutoff* nm of any ligand atom.
+
+        Solvent, ions, and unknown residues are excluded. Used both for
+        verbose NC monitoring and for the NC-based autostop criterion.
+
+        Returns
+        -------
+        subset_protein_HA : np.ndarray of int
+            Indices of pocket heavy atoms within cutoff of the ligand.
+        subset_protein_residues : list of Residue
+            Corresponding residue objects.
+        """
 
         protein_atoms = [atom for atom in self.topology.atoms() if atom.residue.name not in ["HOH", "WAT", "SOL", "NA", "CL", "K","MG", 'UNK']]
         protein_HA = [atom.index for atom in protein_atoms if atom.element.symbol != "H"]  # Exclude hydrogens

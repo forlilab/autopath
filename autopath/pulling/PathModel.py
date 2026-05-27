@@ -69,8 +69,6 @@ class DTWPathModel(PathModel):
         self._use_silhouette = True
         self.n_geom_pcs = n_geom_pcs
         self.geom_feature_prefix = geom_feature_prefix
-
-        return None
     
     def fit_transform(self,
                     feature_df: pd.DataFrame,
@@ -102,6 +100,24 @@ class DTWPathModel(PathModel):
         trajectory_files : dict, optional
             Dictionary mapping trajectory names to (topology, trajectory) tuples
             for unbinding path visualization.
+
+        Returns
+        -------
+        dict
+            Mapping of trajectory name → path label (e.g. ``"path-0_v0.001"``).
+            ``paths_`` in downstream SMDData contains only medoid trajectories
+            (one representative per cluster), not all trajectories.
+
+        Notes
+        -----
+        Feature handling (merged feature mode):
+            When both geometric features (columns starting with
+            ``geom_feature_prefix``) and trace features are present,
+            a PCA is applied to the geometric features *before* DTW distance
+            computation, reducing them to ``n_geom_pcs`` principal components.
+            This equalises their dimensionality contribution relative to the
+            trace features; without it, large numbers of pairwise-distance
+            columns would dominate the DTW metric.
         """
         
         # r-range filtering. You may want to cluster only around the TS region
@@ -128,8 +144,9 @@ class DTWPathModel(PathModel):
             if c not in ['trajname', 'time', 'step', 'speed', 'path']
         ]
         
-        #IDK why this happens but sometimes we get NaN values in the features.
-        # Warn and drop those rows if present.
+        # NaN values occasionally appear in DTW feature matrices, likely from
+        # trajectory frames with undefined geometry (e.g., PBC artifacts or
+        # extreme conformations). Drop them to avoid distance computation failures.
         logger.info(f'Features used for clustering: {feature_cols}')
         if feature_df[feature_cols].isnull().any().any():
             logger.warning(
@@ -141,7 +158,7 @@ class DTWPathModel(PathModel):
                                  
         # logger.info(f"Feature matrix shape after NaN removal: {feature_df.shape}")
               
-        # ecide grouping strategy
+        # Decide grouping strategy
         if cluster_across_speeds:
             grouping_iter = [(None, feature_df)]
         else:
@@ -191,8 +208,7 @@ class DTWPathModel(PathModel):
                 scaler.transform(arr) for arr in vectors_stacked
             ]
 
-            # PCA reduction of geometric features to equalize contribution
-            # with trace features when both are present (merged feature mode).
+            # Equalize geom vs trace feature contribution (see fit_transform Notes).
             geom_idx = [
                 i for i, c in enumerate(feature_cols)
                 if c.startswith(self.geom_feature_prefix)
@@ -374,7 +390,14 @@ class DTWPathModel(PathModel):
 
         return all_path_mappings
     
-    def plot_distance_matrix(self, distmatrix:np.ndarray=None):
+    def plot_distance_matrix(self, distmatrix: np.ndarray = None):
+        """Plot and save the pairwise DTW distance matrix as a heatmap.
+
+        Parameters
+        ----------
+        distmatrix : np.ndarray
+            Square (N_traj × N_traj) DTW distance matrix.
+        """
         plt.figure(figsize=(8,6))
         sns.heatmap(distmatrix, cmap='viridis')
         plt.title('DTW Distance Matrix');         plt.xlabel('Trajectories')
@@ -385,6 +408,16 @@ class DTWPathModel(PathModel):
         return
     
     def plot_elbow(self, scores: dict, K: int):
+        """Plot and save the elbow/silhouette curve used to select the number of clusters.
+
+        Parameters
+        ----------
+        scores : dict
+            Mapping of k (number of clusters) → silhouette score (or negative
+            loss when silhouette is disabled).
+        K : int
+            The selected optimal k, marked with a vertical red dashed line.
+        """
         plt.figure(figsize=(6, 5))
         K_values = [int(k) for k in scores.keys()]
         sns.lineplot(x=K_values, y=[scores[k] for k in K_values])
@@ -404,7 +437,26 @@ class DTWPathModel(PathModel):
                           vectors_stacked_scaled: list = None,
                           feature_names: list = None,
                           ):
+        """Project scaled trajectory features onto 2-D PCA and colour by cluster.
 
+        Only medoid trajectories are coloured; all others are shown in light
+        gray. Trajectory vectors are truncated to the minimum trajectory length
+        before stacking, so the PCA is well-defined even when trajectories differ
+        in length. A feature-loadings bar chart is added as a second panel when
+        ``feature_names`` is provided.
+
+        Parameters
+        ----------
+        feature_df : pd.DataFrame
+            Full (untruncated) feature DataFrame for the current speed group.
+        path_mapping_dic : dict
+            Mapping of trajectory name → path label.
+        vectors_stacked_scaled : list of np.ndarray
+            Scaled (and optionally PCA-reduced) feature arrays, one per trajectory.
+        feature_names : list of str, optional
+            Column names used for the loadings panel; if ``None``, the loadings
+            panel is omitted.
+        """
         feature_df['path'] = feature_df['trajname'].map(path_mapping_dic)
 
         min_len = min(arr.shape[0] for arr in vectors_stacked_scaled)
@@ -415,7 +467,12 @@ class DTWPathModel(PathModel):
         X_pca = pca.fit_transform(X)
 
         traj_order = [name for name, _ in feature_df.groupby('trajname')]
-        assert len(traj_order) == len(vectors_trimmed), "traj_order and vectors_stacked_scaled misaligned"
+        if len(traj_order) != len(vectors_trimmed):
+            raise ValueError(
+                f"Trajectory order ({len(traj_order)}) and feature vectors "
+                f"({len(vectors_trimmed)}) are misaligned — check that all "
+                f"trajectories in feature_df are present in vectors_stacked_scaled."
+            )
 
         has_loadings = feature_names is not None
         fig, axes = plt.subplots(1, 2 if has_loadings else 1,
