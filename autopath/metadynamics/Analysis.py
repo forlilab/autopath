@@ -407,6 +407,7 @@ def write_metad_preseed(
     grid_max: float = 1.0,
     speed: float = None,
     estimator: str = 'jarzynski',
+    taper: str = 'cosine',
 ) -> str | None:
     """Pre-seed the metadynamics bias surface from a sMD PMF profile.
 
@@ -419,9 +420,13 @@ def write_metad_preseed(
     where F_sMD is the sMD PMF in kJ/mol (0 at bound state) mapped onto the
     path-CV progress coordinate s ∈ [0,1] using the milestone COM distances.
 
-    The preseed is truncated at the transition state (PMF peak): grid points
-    beyond s_TS are set to zero so metadynamics explores the post-barrier region
-    without bias from the sMD profile.
+    The preseed is tapered toward the transition state (PMF peak) and set to zero
+    beyond it, so metadynamics explores the post-barrier region without bias from
+    the sMD profile.  The taper accounts for the heteroskedastic reliability of
+    the sMD PMF: the bound-state region (s ≈ 0) has low cumulative variance and
+    is seeded at full ``alpha``; variance accumulates toward the barrier, so the
+    effective seeding fraction smoothly declines to zero at s_TS (``taper='cosine'``
+    default) rather than applying a uniform bias up to a hard cutoff.
 
     Parameters
     ----------
@@ -438,8 +443,10 @@ def write_metad_preseed(
     temperature : float
         Temperature in K (default 298.15).
     alpha : float
-        Fraction of the converged bias to pre-seed (default 0.3; values 0.1–0.5
-        are reasonable — too large risks over-constraining the walker).
+        Maximum fraction of the converged bias to pre-seed, applied at s=0
+        (default 0.3; values 0.1–0.5 are reasonable — too large risks
+        over-constraining the walker).  With a taper, the effective fraction
+        declines toward zero at the TS.
     grid_points : int
         Must match the CVSpec.grid_points used in the run (default 125).
     grid_min, grid_max : float
@@ -451,6 +458,12 @@ def write_metad_preseed(
         extrapolated PMF, or a non-zero float to select a specific pulling speed.
     estimator : str
         Estimator to use (``'cumulant'`` or ``'jarzynski'``, default ``'cumulant'``).
+    taper : str
+        Shape of the position-dependent alpha(s) decay from ``alpha`` at s=0 to
+        0 at s=s_TS.  ``'cosine'`` (default): smooth cos²(π/2 · s/s_TS) ramp —
+        no discontinuity at s_TS and steeper near the bound state.
+        ``'linear'``: alpha × (1 − s/s_TS) — linear decline.
+        ``'step'``: original flat-then-zero behaviour (uniform alpha up to s_TS).
 
     Returns
     -------
@@ -529,7 +542,6 @@ def write_metad_preseed(
     F_meta = F_grid - dG_unbind
 
     wtf = (gamma - 1.0) / gamma
-    V_preseed = -alpha * wtf * F_meta
 
     kBT = 8.314e-3 * temperature
     s_ts, barrier_kJ = _find_pmf_peak(s_grid, F_grid, kBT, prominence_factor=1.0)
@@ -543,11 +555,37 @@ def write_metad_preseed(
         )
         return None
 
-    n_zeroed = int(np.sum(s_grid > s_ts))
-    V_preseed[s_grid > s_ts] = 0.0
+    # Position-dependent taper: alpha_s(s) declines from alpha at s=0 to 0 at s_ts.
+    # The sMD PMF (Jarzynski/cumulant) accumulates variance along the path, so it is
+    # most reliable near the bound state and least reliable near the barrier.  Grading
+    # the preseed strength by position seeds most strongly where sMD statistics are best.
+    if taper == 'cosine':
+        # Smooth cos²(π/2 · s/s_ts) ramp — no kink at s_ts, steeper near bound state.
+        alpha_s = np.where(
+            s_grid <= s_ts,
+            alpha * np.cos(0.5 * np.pi * s_grid / s_ts) ** 2,
+            0.0,
+        )
+    elif taper == 'linear':
+        # Linear ramp: alpha × (1 − s/s_ts).
+        alpha_s = np.where(
+            s_grid <= s_ts,
+            alpha * (1.0 - s_grid / s_ts),
+            0.0,
+        )
+    elif taper == 'step':
+        # Original behaviour: uniform alpha up to s_ts, hard zero beyond.
+        alpha_s = np.where(s_grid <= s_ts, float(alpha), 0.0)
+    else:
+        raise ValueError(
+            f"Unknown taper '{taper}'; choose 'cosine' (default), 'linear', or 'step'."
+        )
+
+    V_preseed = -alpha_s * wtf * F_meta
+
     logger.info(
         f"Preseed truncated at s_TS={s_ts:.3f} (barrier={barrier_kJ:.1f} kJ/mol); "
-        f"zeroed {n_zeroed}/{grid_points} post-TS grid points."
+        f"taper='{taper}', alpha(s=0)={float(alpha_s[0]):.3f}."
     )
     logger.info(
         f"Preseed bias ({speed_label}): "
