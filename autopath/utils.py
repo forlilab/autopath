@@ -27,6 +27,7 @@ import MDAnalysis as mda
 from MDAnalysis.analysis.rms import RMSD, RMSF
 from scipy.spatial.distance import cdist
 from MDAnalysis.analysis.distances import distance_array
+from MDAnalysis.lib.distances import minimize_vectors
 
 from pymol import cmd
 
@@ -128,6 +129,12 @@ def wrap_align_save_traj(traj_files, topology, remove_original=True, is_membrane
         if len(backbone) > 0:
             try:
                 traj = traj.superpose(traj[0], atom_indices=backbone)
+                # Re-image after superposition: rigid-body rotation can move the ligand
+                # into a distant periodic image in Cartesian space even though PBC
+                # distances are unchanged. A second imaging pass restores every
+                # molecule to the image closest to the (now-fixed) protein backbone.
+                if not is_membrane:
+                    traj = traj.image_molecules(make_whole=True)
             except Exception as e:
                 logging.warning(f"Superposition failed for {traj_file}: {e}. Proceeding without superposition.")
         out_path = traj_file.replace(".dcd", "_aligned.dcd")
@@ -1137,7 +1144,12 @@ def compute_distance_features(u: mda.Universe,
 
     all_dists = []
     for ts in u.trajectory[::stride]:
-        dists = distance_array(ligand_atoms.positions, pocket_atoms.positions)
+        # Pass box=u.dimensions so MDAnalysis uses the minimum-image convention.
+        # Without this, frames where the ligand is in a different periodic image
+        # from the pocket (e.g. after backbone superposition) produce inflated
+        # Euclidean distances that corrupt PCA-based milestone selection.
+        box = u.dimensions if u.dimensions is not None else None
+        dists = distance_array(ligand_atoms.positions, pocket_atoms.positions, box=box)
         all_dists.append(dists.flatten() / 10.0)  # Angstroms -> nm
 
     return np.array(all_dists)
@@ -1177,6 +1189,55 @@ def _plot_pca_milestones(
 
     return
 
+def _reimaging_ligand(u: mda.Universe, ligand_sel: str) -> bool:
+    """
+    Translate the ligand to the minimum-image position relative to the protein COM.
+
+    After backbone superposition the ligand may end up in a distant periodic image
+    in Cartesian space (especially with non-orthogonal boxes such as rhombic
+    dodecahedra). This helper corrects that by computing the minimum-image
+    displacement of the ligand COM relative to the protein COM and translating
+    all ligand atoms accordingly.  The modification is in-place on the Universe's
+    current frame positions and is NOT written back to the trajectory file.
+
+    Parameters
+    ----------
+    u : mda.Universe
+        Universe at the desired frame (caller must call ``u.trajectory[frame]``
+        before invoking this function).
+    ligand_sel : str
+        MDAnalysis selection string for the ligand.
+
+    Returns
+    -------
+    bool
+        True if a significant translation was applied (> 0.1 Å), False otherwise.
+    """
+    box = u.dimensions
+    if box is None:
+        return False
+
+    lig_atoms = u.select_atoms(ligand_sel)
+    prot_atoms = u.select_atoms("protein")
+
+    if lig_atoms.n_atoms == 0 or prot_atoms.n_atoms == 0:
+        return False
+
+    prot_com = prot_atoms.center_of_geometry()
+    lig_com = lig_atoms.center_of_geometry()
+
+    # Vector from protein COM to ligand COM
+    disp = (lig_com - prot_com).reshape(1, 3)
+    # Minimum-image equivalent of that vector (handles any box type)
+    min_disp = minimize_vectors(disp, box)[0]
+
+    translation = min_disp - disp[0]
+    if np.linalg.norm(translation) > 0.1:   # only apply if > 0.1 Å shift needed
+        lig_atoms.positions += translation
+        return True
+    return False
+
+
 def extract_milestones(
     u: mda.Universe,
     X: np.ndarray,
@@ -1186,6 +1247,7 @@ def extract_milestones(
     min_frame_separation: int = 0,
     pca_n_components: int = 2,
     plot: bool = True,
+    ligand_sel: str = None,
 ) -> Tuple[np.ndarray, np.ndarray, list]:
     """
     Extract milestone frames from sMD trajectory data.
@@ -1214,6 +1276,14 @@ def extract_milestones(
         Number of PCA components to keep for the projection (default 2).
     plot : bool
         If True and out_dir is provided, save a PCA cluster scatter plot.
+    ligand_sel : str, optional
+        MDAnalysis selection string for the ligand. When provided, each milestone
+        frame is corrected for PBC imaging artifacts before the PDB is written:
+        the ligand is translated to the minimum-image position relative to the
+        protein COM. This is necessary because backbone superposition can displace
+        the ligand into a distant periodic image (particularly for non-orthogonal
+        boxes such as rhombic dodecahedra), which would corrupt PathCV reference
+        distances.
 
     Returns
     -------
@@ -1255,6 +1325,22 @@ def extract_milestones(
     for i, frame_index in enumerate(closest_frames):
         frame_index = int(frame_index)
         u.trajectory[frame_index]
+
+        # Correct any PBC imaging artifact before writing:
+        # backbone superposition can leave the ligand in a distant periodic image.
+        if ligand_sel is not None:
+            try:
+                reimaged = _reimaging_ligand(u, ligand_sel)
+                if reimaged:
+                    logger.info(
+                        f"  Milestone {i+1} (frame {frame_index}): ligand was re-imaged "
+                        f"to the minimum-image position relative to protein COM."
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"  Milestone {i+1} (frame {frame_index}): re-imaging failed: {e}"
+                )
+
         fname = os.path.join(out_dir, f"{prefix}_{i+1}_frame_{frame_index}.pdb")
         with mda.Writer(fname, reindex=True) as W:
             W.write(u.atoms)

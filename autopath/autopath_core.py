@@ -656,6 +656,7 @@ class AutoPath:
                             out_dir=path_outdir,
                             prefix=f"milestone_{path_id}",
                             min_frame_separation=self.milestone_min_frame_separation,
+                            ligand_sel=ligand_sel,
                         )
                         all_milestone_files.extend(ms_files)
 
@@ -672,6 +673,7 @@ class AutoPath:
                     out_dir=milestones_outdir,
                     prefix="milestone",
                     min_frame_separation=self.milestone_min_frame_separation,
+                    ligand_sel=ligand_sel,
                 )
 
                 logger.info(f"Extracted {len(milestone_files)} milestones from {len(medoid_dcds)} medoid trajectories.")
