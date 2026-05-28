@@ -8,12 +8,33 @@ __version__ = "0.1.0"
 
 import importlib as _importlib
 
-# Lazy imports to avoid pulling in OpenMM (and its CUDA/OpenCL contexts)
-# at package-load time.  This prevents fork-based multiprocessing
-# (used by ProLIF / multiprocess) from breaking with UnicodeDecodeError.
 
 def __getattr__(name):
+    """Lazily import heavy submodules on first attribute access.
+
+    Importing OpenMM (and its CUDA/OpenCL runtime) at package-load time causes
+    ``UnicodeDecodeError`` crashes in fork-based multiprocessing (used by
+    ProLIF and ``multiprocess``).  By deferring the import until the name is
+    first referenced, the package is safe to import in the parent process before
+    ``fork()`` is called.
+
+    Parameters
+    ----------
+    name : str
+        Name of the attribute being accessed on the ``autopath`` module.
+
+    Returns
+    -------
+    object
+        The requested class or submodule.
+
+    Raises
+    ------
+    AttributeError
+        If *name* is not registered in the lazy-import table.
+    """
     _lazy_imports = {
+        "Config":               ".config",
         "Equilibration":        ".equilibration",
         "SystemPreparation":    ".preparation",
         "SteeredMD":            ".pulling",
@@ -22,7 +43,7 @@ def __getattr__(name):
         "RelaxMD":              ".relax_md",
         "VanillaMD":            ".vanilla_md",
         "CVSpec":               ".metadynamics",
-        "pulling":          ".pulling",
+        "pulling":              ".pulling",
         "metadynamics":         ".metadynamics",
     }
     if name in _lazy_imports:
@@ -33,6 +54,7 @@ def __getattr__(name):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
+    "Config",
     "Equilibration",
     "SystemPreparation",
     "SteeredMD",

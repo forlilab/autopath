@@ -5,7 +5,7 @@ import time
 import numpy as np
 import pandas as pd
 import warnings
-# import shutil
+import shutil
 from sys import exit
 from glob import glob
 import MDAnalysis as mda
@@ -46,6 +46,110 @@ import logging
 logger = logging.getLogger('autopath.core')
 
 class AutoPath:
+    """Main orchestrator for the AutoPath binding-free-energy pipeline.
+
+    AutoPath runs a six-stage protocol that takes a protein-ligand PDB as input
+    and produces a converged binding free energy estimate:
+
+    1. **System preparation** — parametrises the protein + ligand, solvates,
+       adds ions, and writes ``system.xml`` / ``system.pdb`` via
+       :class:`~autopath.preparation.SystemPreparation`.
+    2. **Equilibration** — multi-stage NPT/NVT equilibration via
+       :class:`~autopath.equilibration.Equilibration`.  Saves a checkpoint and
+       an equilibrated PDB used by all downstream stages.
+    3. **Steered MD (sMD)** — pulls the ligand out of the pocket along the COM
+       distance at multiple speeds via :class:`~autopath.pulling.SteeredMD`.
+       Replicas can be run until convergence (``sMD_converge_speeds=True``) or
+       to a fixed count.  A hard cap (``sMD_max_replicas``) prevents infinite
+       loops.
+    4. **Path clustering & PMF estimation** — :class:`~autopath.pulling.SMDAnalysis`
+       clusters trajectories with DTW-based path models, estimates the PMF via
+       cumulant and Jarzynski estimators, and identifies medoid trajectories for
+       downstream milestone extraction.
+    5. **Metadynamics** — multi-walker well-tempered funnel metadynamics via
+       :class:`~autopath.metadynamics.MetadynamicsMD`.  Each milestone from
+       stage 4 seeds a separate walker.  Walkers that remain stuck in the bound
+       state (max PathCV < 0.5) are automatically retried with the accumulated
+       bias surface.  Optionally, the sMD PMF is used to pre-seed the
+       metadynamics bias (``mMD_preseed_bias=True``).
+    6. **Analysis & funnel correction** — :class:`~autopath.metadynamics.MetadynamicsAnalysis`
+       computes the FES, applies the funnel volume correction, and reports
+       ΔG°_b and pK_d.
+
+    Subcomponents
+    -------------
+    :class:`~autopath.preparation.SystemPreparation`,
+    :class:`~autopath.equilibration.Equilibration`,
+    :class:`~autopath.pulling.SteeredMD`,
+    :class:`~autopath.pulling.SMDAnalysis`,
+    :class:`~autopath.relax_md.RelaxMD`,
+    :class:`~autopath.metadynamics.MetadynamicsMD`,
+    :class:`~autopath.metadynamics.MetadynamicsAnalysis`
+
+    Parameter groups
+    ----------------
+    General
+        ``VS_mode``, ``pdb_path``, ``do_fix_pdb``, ``pocket_selection``,
+        ``temperature``, ``random_state``, ``platform``
+    System preparation
+        ``run_preparation``, ``forcefield``, ``hydrogenMass``, ``timestep``,
+        ``lig_ff``, ``boxShape``, ``padding``, ``ionicStrength``, ``ions``,
+        ``variants``, ``is_membrane``, ``lipid_type``
+    Equilibration
+        ``run_equilibration``, ``protocol_fname``
+    Steered MD
+        ``run_sMDpulling``, ``sMD_outdir``, ``sMD_pulling_dir``,
+        ``sMD_pulling_speeds``, ``sMD_max_pulling_dist``, ``sMD_max_r_offset``,
+        ``sMD_autostop_nc``, ``sMD_autostop_nc_window``,
+        ``sMD_autostop_min_displacement``, ``sMD_converge_speeds``,
+        ``sMD_time``, ``sMD_steps_per_move``, ``sMD_dx_per_move``,
+        ``sMD_spring_cte``, ``sMD_ligand_anchor_mode``, ``sMD_max_replicas``,
+        ``sMD_run_analysis``, ``sMD_clust_selection``, ``sMD_features``,
+        ``cluster_across_speeds``, ``sMD_min_replicas_per_path``
+    Milestone extraction
+        ``extract_milestones``, ``milestone_mode``,
+        ``milestone_min_frame_separation``, ``n_milestones``, ``relax_steps``
+    Metadynamics
+        ``run_metadynamics``, ``mMD_use_funnel_potential``,
+        ``mMD_bias_factor``, ``mMD_bias_frequency``, ``mMD_hill_height``,
+        ``mMD_hill_width``, ``mMD_time``, ``mMD_milestone_seeding``,
+        ``mMD_multiple_walkers``, ``mMD_preseed_bias``, ``mMD_preseed_speed``,
+        ``mMD_funnel_host_selection``
+
+    Notes
+    -----
+    **hill_height guideline** — The default ``mMD_hill_height=1.2`` kJ/mol is
+    approximately 0.5 kBT at 300 K, which is the recommended starting point.
+    Lower values converge more slowly; higher values risk over-filling barriers
+    and producing noisy free-energy surfaces.
+
+    **CVSpec / deferred CV pattern** — Collective variables are specified as
+    :class:`~autopath.metadynamics.CVSpec` objects and instantiated inside the
+    metadynamics loop rather than at construction time so that the OpenMM
+    ``System`` object (which must already contain the force) is available when
+    the CV is created.
+
+    **Multi-walker seeding modes** — Two independent flags control walker
+    initialisation:
+
+    * ``mMD_milestone_seeding=True`` (default): each walker starts from the
+      relaxed checkpoint of its own milestone, providing diverse starting
+      positions along the path.
+    * ``mMD_milestone_seeding=False``: all walkers start from the first
+      (most-bound) milestone's checkpoint.
+
+    **Multi-walker bias sharing** — ``mMD_multiple_walkers=True`` directs all
+    walkers to read from and write to the same bias directory so that OpenMM
+    accumulates hills from every walker (true multi-walker metadynamics).
+    ``mMD_multiple_walkers=False`` (default) gives each walker its own bias
+    subdirectory so walkers run independently without cross-walker coupling.
+
+    **Stuck-walker retry** — After the main loop, any walker whose PathCV never
+    exceeds 0.5 is considered stuck and is re-run.  In shared-bias mode the
+    retry benefits from hills deposited by successful walkers; in isolated mode
+    the walker continues from its own partial bias.
+    """
+
     def __init__(
         self,
         VS_mode: bool = False,
@@ -194,7 +298,29 @@ class AutoPath:
             self.protein_file = pdb_path
 
     def run(self, ligand_file: str = None, ligand_selection: str = "resname UNK"):
+        """Execute the full six-stage AutoPath pipeline for one ligand.
 
+        Stages are run in order: system preparation → equilibration →
+        steered MD → path clustering → metadynamics → trajectory alignment.
+        Each stage can be skipped by setting the corresponding ``run_*`` flag
+        to ``False`` in the constructor; the stage will read outputs written by
+        a previous run instead.
+
+        Parameters
+        ----------
+        ligand_file : str, optional
+            Path to the ligand SDF file.  The stem of this filename is used as
+            the system name (output subdirectory).  If ``None``, the protein PDB
+            stem is used instead.
+        ligand_selection : str, optional
+            MDAnalysis / OpenMM selection string identifying the ligand residue.
+            Default ``"resname UNK"``.
+
+        Returns
+        -------
+        None
+            All results are written to disk under the system-name subdirectory.
+        """
         start_time = time.monotonic()
 
         if ligand_file is not None:
@@ -583,8 +709,7 @@ class AutoPath:
             logger.info(f"Found {len(sMD_trajs)} sMD trajectories for milestone extraction.")
 
             if len(sMD_trajs) == 0:
-                logger.error("No sMD trajectories found. Please check the sMD pulling step.")
-                exit(1)
+                raise RuntimeError("No sMD trajectories found. Please check the sMD pulling step.")
 
             # Load medoid info (from analysis or from saved file)
             medoid_info_path = f"{sMD_analysis_outdir}/medoid_info.json"
@@ -708,8 +833,7 @@ class AutoPath:
             milestones = [m for m in milestones if not m.endswith('_relax.pdb')]  # Simplified check
             
             if len(milestones) == 0:
-                logger.error("No milestones found. Please check the milestone extraction step.")
-                exit(1)
+                raise RuntimeError("No milestones found. Please check the milestone extraction step.")
 
             #sort the milestones by their index (milestone number is the last token before 'frame')
             milestones.sort(key=lambda x: int(os.path.basename(x).split('_frame_')[0].rsplit('_', 1)[-1]))
@@ -916,6 +1040,15 @@ class AutoPath:
                     if not self.mMD_multiple_walkers else None
                 )
 
+                # In isolated mode the preseed file lives in mMD_out_dir but each walker's
+                # biasDir is a subdirectory, so OpenMM would not find it.  Copy it there
+                # before the walker initialises its Metadynamics object.
+                if walker_bias_dir is not None and self.mMD_preseed_bias:
+                    preseed_src = os.path.join(mMD_out_dir, "bias_0_0.npy")
+                    if os.path.exists(preseed_src):
+                        os.makedirs(walker_bias_dir, exist_ok=True)
+                        shutil.copy2(preseed_src, os.path.join(walker_bias_dir, "bias_0_0.npy"))
+
                 logger.info(f"Running WTMetaD for milestone {milestone_name}")
                 try:
                     WTMetaD.run(
@@ -1010,13 +1143,44 @@ class AutoPath:
     
     @staticmethod
     def _replica_idx_from_log(fn):
+        """Extract the integer replica index from an sMD log filename.
+
+        Expected filename pattern:
+        ``sMD_replica-<N>_<speed>_<direction>.dat``
+
+        Parameters
+        ----------
+        fn : str
+            Full or basename path to the sMD ``.dat`` log file.
+
+        Returns
+        -------
+        int
+            Zero-based replica index embedded in the filename.
+        """
         base = os.path.basename(fn)[:-4]
         rep = base.split("_")[-3]
         return int(rep.split("-")[1])
     
     
-    # Map medoid names to DCD trajectory files
     def _trajname_to_dcd(self, trajname: str) -> str:
-        """Convert a trajname (log basename without ext) to the corresponding .dcd path."""
+        """Resolve the aligned DCD path for a medoid trajectory name.
+
+        Medoid names are stored as log-file basenames (without extension) by
+        :class:`~autopath.pulling.PathModel.DTWPathModel`.  This method maps
+        them to the corresponding aligned DCD file under
+        ``<sMD_outdir>/trajectories/``.
+
+        Parameters
+        ----------
+        trajname : str
+            Log-file basename without extension (e.g.
+            ``"sMD_replica-3_v0.001_forward"``).
+
+        Returns
+        -------
+        str
+            Absolute or relative path to ``<sMD_outdir>/trajectories/<name>_aligned.dcd``.
+        """
         dcd_name = trajname.replace("log", "traj") + "_aligned.dcd"
         return os.path.join(self.sMD_outdir, "trajectories", dcd_name)

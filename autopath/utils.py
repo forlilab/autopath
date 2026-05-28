@@ -79,11 +79,32 @@ def setup_logging(logfile: str = 'autopath.log',
     return logger
 
 def save_model(model, filename):
+    """Serialize *model* to *filename* using pickle.
+
+    Parameters
+    ----------
+    model : object
+        Any picklable Python object.
+    filename : str
+        Destination file path.
+    """
     with open(filename, 'wb') as file:
         pickle.dump(model, file)
     return None
 
 def load_model(filename):
+    """Deserialize and return the object stored in *filename* using pickle.
+
+    Parameters
+    ----------
+    filename : str
+        Path to a pickle file previously written by :func:`save_model`.
+
+    Returns
+    -------
+    object
+        The deserialized Python object.
+    """
     with open(filename, 'rb') as file:
         model = pickle.load(file)
     return model
@@ -232,7 +253,16 @@ def save_system(system: System, out_path: str) -> None:
 
 
 def save_simulation(simulation, out_path: str) -> None:
+    """Save an OpenMM simulation checkpoint and XML state to disk.
 
+    Parameters
+    ----------
+    simulation : openmm.app.Simulation
+        The running simulation object.
+    out_path : str
+        Base path (without extension); writes ``<out_path>.chk`` and
+        ``<out_path>.xml``.
+    """
     simulation.saveCheckpoint(f"{out_path}.chk")
     simulation.saveState(f"{out_path}.xml")
 
@@ -252,8 +282,7 @@ def load_system(system_path: str) -> System:
         with open(system_path) as fi:
             system = XmlSerializer.deserialize(fi.read())
     except Exception as e:
-        logging.error(f"Something went wrong while opening {system_path}\n {e}")
-        exit(1)
+        raise RuntimeError(f"Failed to load OpenMM system from '{system_path}'") from e
     return system
 
 def save_amber_files(
@@ -263,9 +292,27 @@ def save_amber_files(
     out_path: str = None,
 ) -> None:
 
-    """Saves the OpenMM system and topology to AMBER format files.
-    https://parmed.github.io/ParmEd/html/openmm.html
-    If system is None, it will not save the data from system but still will save the topology and positions. 
+    """Save an OpenMM topology and system to AMBER-format files via ParmEd.
+
+    Writes ``<out_path>/system.prmtop`` always. Writes ``<out_path>/system.rst7``
+    only when *positions* is not None.
+
+    Parameters
+    ----------
+    topology : app.Topology
+        OpenMM topology of the system.
+    positions : list or None
+        Atomic positions; if None the rst7 coordinate file is skipped.
+    system : openmm.System or None
+        OpenMM system; if None the prmtop will contain topology information
+        only (no force-field parameters).
+    out_path : str
+        Directory where output files are written (created if absent).
+
+    Note
+    ----
+    Uses ``parmed.openmm.topsystem.load_topology``.
+    See https://parmed.github.io/ParmEd/html/openmm.html for details.
     """
     os.makedirs(out_path, exist_ok=True)
 
@@ -279,8 +326,22 @@ def save_amber_files(
 
     return
 
-def select_platform(platform_name: str = None, device_index: str = "0"):
+def select_platform(platform_name: str = None, device_index: str = "0") -> Platform:
+    """Return a configured OpenMM Platform object.
 
+    Parameters
+    ----------
+    platform_name : str, optional
+        Platform name: ``"CUDA"``, ``"OpenCL"``, ``"CPU"``, ``"Reference"``, or
+        ``"fastest"``/``None`` to auto-select the fastest available platform.
+    device_index : str
+        GPU device index string (e.g. ``"0"``), used for CUDA and OpenCL.
+
+    Returns
+    -------
+    openmm.Platform
+        Configured platform with mixed precision set for GPU backends.
+    """
     platform_name = platform_name.upper() if platform_name is not None else None
     if platform_name is None or platform_name == "FASTEST":
         platform_name = get_fastest_platform().getName().upper()
@@ -312,7 +373,31 @@ def add_reporters(
     logperiod: int = 2500,
     verbose: int = 2,
 ) -> None:
-    """Set up the reporters"""
+    """Attach DCD trajectory and CSV state-data reporters to a simulation.
+
+    Replaces any existing reporters on the simulation object. A progress
+    reporter is always written to stdout. A DCD file is always written.
+    A CSV with thermodynamic state data is written when ``verbose > 0``;
+    full energies, temperature, volume, and density are included when
+    ``verbose > 1``.
+
+    Parameters
+    ----------
+    simulation : openmm.app.Simulation
+        The simulation to which reporters are added.
+    out_dir : str
+        Directory for output files.
+    suffix : str
+        Filename stem; output files are ``<out_dir>/<suffix>.dcd`` and
+        ``<out_dir>/<suffix>.csv``.
+    total_steps : int
+        Total number of integration steps (used for progress reporting).
+    logperiod : int
+        Reporting interval in steps.
+    verbose : int
+        Verbosity level: 0 = no CSV, 1 = CSV with progress only,
+        2 = CSV with full thermodynamic data.
+    """
 
     logging.debug(f"Adding reporters to the simulation")
     simulation.reporters = []  # Delete all current reporters
@@ -362,9 +447,25 @@ def add_reporters(
 
     return
 
-def add_barostat(system: System=None, temp: float=300, is_membrane: bool=False) -> System:
-    """Add an appropriate barostat to the system.
-    Simulation for membrane proteins are run at 0 surface tension and semiisotropic pressure
+def add_barostat(system: System = None, temp: float = 300, is_membrane: bool = False) -> System:
+    """Add an appropriate Monte Carlo barostat to the OpenMM system.
+
+    Parameters
+    ----------
+    system : openmm.System
+        The system to modify in-place.
+    temp : float
+        Target temperature in Kelvin.
+    is_membrane : bool
+        If True, use a ``MonteCarloMembraneBarostat`` with zero surface tension
+        and semi-isotropic pressure coupling (XY isotropic, Z free), which is
+        appropriate for membrane protein simulations. If False, use an isotropic
+        ``MonteCarloBarostat`` at 1 atm.
+
+    Returns
+    -------
+    openmm.System
+        The system with the barostat force added.
     """
 
     if is_membrane:
@@ -387,14 +488,22 @@ def add_barostat(system: System=None, temp: float=300, is_membrane: bool=False) 
 
 
 def add_variants(modeller: Modeller, variants_dict: dict = None) -> Modeller:
-    """Adds variants for specific protonation states.
+    """Apply user-specified protonation-state variants and add hydrogens.
 
-    :param modeller: OpenMM Modeller
-    :type Modeller: Modeller
-    :param variants_dict: dict of variants to apply for the protonation states
-    :type variants: dict
-    :return: Modeller object with added protonation states
-    :rtype: Modeller
+    Parameters
+    ----------
+    modeller : openmm.app.Modeller
+        OpenMM Modeller to modify.
+    variants_dict : dict
+        Mapping of ``"<chain_id>:<residue_number>"`` → variant string (e.g.
+        ``"HIE"``, ``"HID"``). Residues not present in the dict receive the
+        default protonation state.
+
+    Returns
+    -------
+    openmm.app.Modeller
+        The same Modeller object after ``addHydrogens`` has been called with
+        the specified variants list.
     """
 
     variants = list()
@@ -415,40 +524,57 @@ def add_variants(modeller: Modeller, variants_dict: dict = None) -> Modeller:
 
     return modeller 
 
-def get_pocket_atoms_idxs(u:mda.Universe = None,
-                     pocket_selection:str = None,
-                     ligand_selection:str = None,
-                     cutoff: float = 6.0
-                     ) -> List[int]:
-    """Get the pocket atoms based on a user provided selection 
-    or the ligand residue name and some default heuristics."""
+def get_pocket_atoms_idxs(u: mda.Universe = None,
+                          pocket_selection: str = None,
+                          ligand_selection: str = None,
+                          cutoff: float = 6.0
+                          ) -> List[int]:
+    """Return atom indices defining the binding pocket.
+
+    Exactly one of *pocket_selection* or *ligand_selection* must be provided.
+    When *pocket_selection* is given it is used directly. When *ligand_selection*
+    is given, the pocket is defined as the CA atoms of all protein residues
+    within *cutoff* Å of any ligand atom (evaluated at the last trajectory frame).
+
+    Parameters
+    ----------
+    u : mda.Universe
+        MDAnalysis Universe containing the system.
+    pocket_selection : str, optional
+        Arbitrary MDAnalysis selection string for the pocket atoms.
+    ligand_selection : str, optional
+        MDAnalysis selection string for the ligand; used to identify pocket
+        residues by proximity.
+    cutoff : float
+        Distance cutoff in Angstroms for proximity-based pocket detection.
+
+    Returns
+    -------
+    list of int
+        Atom indices of the pocket atoms.
+    """
 
     if u is None:
-        print("No MDAnalysis Universe provided.")
-        exit(1)
-        
+        raise ValueError("No MDAnalysis Universe provided.")
+
     u.trajectory[-1]  # set pointer to last frame if its a trajectory
 
     if pocket_selection is None and ligand_selection is None:
-        print("No pocket selection or ligand residue name provided.")
-        exit(1)
+        raise ValueError("No pocket selection or ligand residue name provided.")
     # If a custom pocket selection is provided, use it directly
     elif pocket_selection is not None and ligand_selection is None:
         pocket_atoms = u.select_atoms(pocket_selection)
         pocket_atoms_indices = [atom.index for atom in pocket_atoms]
     # If no custom selection, use the ligand residue name to define the pocket
     elif ligand_selection is not None and pocket_selection is None:
-        # backbone_names = ["N", "CA", "C", "O"]
         ligand = u.select_atoms(ligand_selection)
         protein_residues = u.select_atoms(f"protein and around {cutoff} group ligand", ligand=ligand).residues
         pocket_atoms_indices = [atom.index for res in protein_residues for atom in res.atoms if atom.name in ['CA']]
     else:
-        print("Please provide either a pocket selection or a ligand residue name, not both.")
-        exit(1)
-        
+        raise ValueError("Please provide either a pocket selection or a ligand residue name, not both.")
+
     if len(pocket_atoms_indices) == 0:
-        print(f"No atoms found for the provided pocket selection")
-        exit(1)
+        raise ValueError("No atoms found for the provided pocket selection.")
         
     return pocket_atoms_indices
 
@@ -742,15 +868,49 @@ def get_ligand_anchor_atoms(
     verbose: bool = True,
     ref_mol=None,
 ):
-    """
-    Select anchor atoms in the ligand for pulling and optionally visualize them.
-    if reduce_before is True, the ligand is first reduced to its Murcko scaffold before
-    If mode="murcko", returns Murcko scaffold atoms.
-    If expand_rings is True, expands selection to include entire rings containing anchor atoms.
-    Only top n_atoms are selected based on the chosen mode.
+    """Select anchor atoms on the ligand for COM-based pulling and optionally visualize them.
+
     Parameters
     ----------
+    u : mda.Universe
+        MDAnalysis Universe (trajectory should be loaded).
+    lig_selection : str
+        MDAnalysis selection string identifying the ligand.
+    pocket_sel : str, optional
+        Selection string for the binding pocket; defaults to protein atoms within
+        5 Å of the ligand (heavy atoms only).
+    mode : str
+        Strategy for picking anchor atoms. Options:
 
+        * ``"lig_ha"``      — all ligand heavy atoms.
+        * ``"murcko"``      — Murcko scaffold heavy atoms.
+        * ``"ca"``          — ligand CA atoms (useful for peptides/cofactors).
+        * ``"lig_com"``     — heavy atoms closest to the ligand COM.
+        * ``"pocket_com"``  — heavy atoms closest to the pocket COM.
+        * ``"contacts"``    — atoms with the most pocket contacts over the trajectory.
+        * ``"inertia"``     — atoms along the principal inertia axis.
+        * ``"weighted_com"``— COM of the top-contact atoms.
+    frames : int
+        Number of trajectory frames to sample for contact-based modes.
+    n_atoms : int
+        Maximum number of anchor atoms for COM/contact/inertia modes.
+    reduce_before : bool
+        If True, reduce the ligand to its Murcko scaffold *before* applying
+        the chosen mode.
+    expand_rings : bool
+        If True, expand the anchor selection to include all atoms in any ring
+        that contains at least one anchor atom (heavy atoms only).
+    out_dir : str, optional
+        Directory where the 2D highlight image is saved.
+    verbose : bool
+        Log ring-expansion details at DEBUG level.
+    ref_mol : rdkit.Chem.Mol, optional
+        Reference RDKit molecule for 2D visualization alignment.
+
+    Returns
+    -------
+    list of int
+        MDAnalysis atom indices of the selected anchor atoms.
     """
     
     if out_dir is None:
@@ -801,9 +961,7 @@ def get_ligand_anchor_atoms(
         ligand = ligand_ha
         highlight_rdk_indices = []
 
-    # This are the difrent modes implemented.
-    # TODO implement MMGBSA by residue decomposition 
-    # and select top n_atoms from the ligand interacting residues.
+    # TODO: implement MM-GBSA residue decomposition as an additional mode.
 
     if mode == "lig_ha":
         # all heavy atoms of the ligand
@@ -888,7 +1046,7 @@ def get_ligand_anchor_atoms(
         anchor = sorted(set(anchor).union(expanded_mda_indices))
 
         if verbose:
-            print(f"[get_ligand_anchor_atoms] Expanded to include rings (heavy only): {expanded_mda_indices}")
+            logger.debug(f"[get_ligand_anchor_atoms] Expanded to include rings (heavy only): {expanded_mda_indices}")
 
     # Draw 2D image (single-residue small molecules only)
     if not is_multi_residue:
@@ -919,17 +1077,26 @@ def get_ligand_anchor_atoms(
 
 
 def get_protein_ha(topology: app.Topology, lig_name: str = "UNK") -> Tuple[list, list]:
+    """Return the indices and names of all non-hydrogen protein heavy atoms.
 
+    Solvent molecules (HOH, WAT), ions (K, CL, NA), membrane lipids (POP),
+    and the ligand residue are excluded.
+
+    Parameters
+    ----------
+    topology : app.Topology
+        OpenMM topology of the full system.
+    lig_name : str
+        Residue name of the small-molecule ligand to exclude (default ``"UNK"``).
+
+    Returns
+    -------
+    protein_ha_idx : list of int
+        Atom indices for all protein heavy atoms.
+    protein_ha_name : list of str
+        Corresponding atom names.
+    """
     ATOMSET = set(("HOH", "WAT", "POP", "K", "CL", "NA", lig_name))
-
-    # # Restraint heavy atoms only: C, O, N, S, P, CA and MG
-    # elements = set((element.carbon, element.oxygen, element.magnesium, element.calcium,
-    #                     element.nitrogen, element.sulfur, element.phosphorus))
-
-    # protein_ha = []
-    # for atom in topology.atoms():
-    #     if atom.residue.name not in ATOMSET and atom.element in elements:
-    #         protein_ha.append(atom.index)
 
     protein_ha_idx = []
     protein_ha_name = []
@@ -958,56 +1125,128 @@ def get_ligand_ha(topology: app.Topology, lig_name: str = "UNK") -> Tuple[list, 
 
 
 def get_pocket_ha(topology: app.Topology, pocket_resid: list[int] = None) -> list:
-    """get names for all non-hydrogen ligand atoms"""
+    """Return the indices of all non-hydrogen pocket atoms.
 
+    Parameters
+    ----------
+    topology : app.Topology
+        OpenMM topology of the full system.
+    pocket_resid : list of int
+        Zero-based residue indices (``residue.index``) that define the pocket.
+
+    Returns
+    -------
+    list of int
+        Atom indices for every heavy atom belonging to the specified pocket
+        residues.
+    """
     residues = topology.residues()
     pocket_ha_idx = []
 
     for r in residues:
         if r.index in pocket_resid:
-            print(f"match for {r.index} {r.name} {r.id}")
+            logger.debug(f"match for {r.index} {r.name} {r.id}")
             res_ha_idx = [a.index for a in r.atoms() if not a.name.startswith("H")]
             pocket_ha_idx.extend(res_ha_idx)
 
     return pocket_ha_idx
 
 def get_center(positions, atoms, group, weighByMass):
-    """Calculate the center of mass (COM) or center of geometry (COG) for a group of atoms in OpenMM."""
+    """Return the center of mass (COM) or center of geometry (COG) for a group of atoms.
 
-    group_positions = positions[group]  # Get positions for the group
+    Parameters
+    ----------
+    positions : np.ndarray
+        Array of shape (n_atoms, 3) with atomic positions in nanometers
+        (as returned by ``getPositions(asNumpy=True) / openmmunit.nanometers``).
+    atoms : list of openmm.app.topology.Atom
+        All atoms in the topology, in index order.
+    group : list of int
+        Atom indices belonging to the group of interest.
+    weighByMass : bool
+        If True, compute the mass-weighted center (COM); otherwise compute the
+        unweighted geometric center (COG).
+
+    Returns
+    -------
+    np.ndarray
+        Shape (3,) center coordinates in the same units as *positions*.
+    """
+    group_positions = positions[group]
 
     if weighByMass:
         masses = np.array([atom.element.mass.value_in_unit(openmmunit.dalton) for atom in atoms if atom.index in group])
         if sum(masses) == 0:
             logging.warning("All atoms in the group have zero mass. Using simple mean instead.")
             masses = None
-        center = np.average(group_positions, axis=0, weights=masses)  # Weighted average for COM
+        center = np.average(group_positions, axis=0, weights=masses)
     else:
-        center = np.mean(group_positions, axis=0)  # Simple mean for COG
+        center = np.mean(group_positions, axis=0)
     return center
     
-def get_COM_dist(simulation, 
-                 groupA:list[int]=None, 
-                 groupB:list[int]=None,
-                 weighByMass:bool=True
+def get_COM_dist(simulation,
+                 groupA: list[int] = None,
+                 groupB: list[int] = None,
+                 weighByMass: bool = True
                  ) -> float:
-    """Calculate the distance between the centers of mass (COM) or centers of geometry (COG) of two groups of atoms in OpenMM."""
-    
-    # Get positions
+    """Calculate the distance between the centers of mass (or geometry) of two atom groups.
+
+    Parameters
+    ----------
+    simulation : openmm.app.Simulation
+        The running simulation; positions are read from its context.
+    groupA : list of int
+        Atom indices for the first group.
+    groupB : list of int
+        Atom indices for the second group.
+    weighByMass : bool
+        If True, compute center of mass; if False, compute center of geometry.
+
+    Returns
+    -------
+    float
+        Distance in nanometers.
+
+    Note
+    ----
+    Positions are retrieved via ``getPositions(asNumpy=True) / openmmunit.nanometers``,
+    which strips the OpenMM unit wrapper while normalizing to nanometers. The
+    returned scalar is therefore dimensionless but numerically in nanometers.
+    """
     state = simulation.context.getState(getPositions=True, getVelocities=False)
     positions = state.getPositions(asNumpy=True) / openmmunit.nanometers
     atoms = [atom for atom in simulation.topology.atoms()]
 
-    # Calculate centers for both groups and their distance
     centerA = get_center(positions, atoms, groupA, weighByMass)
     centerB = get_center(positions, atoms, groupB, weighByMass)
     dist = np.linalg.norm(centerA - centerB)
 
-    return dist  # Unitless, but effectively in nanometers because.... openMM
+    return dist
 
 
 def calculate_com_distance(u, ligand_atoms=None, pocket_atoms=None, weighByMass: bool = True, wrap: bool = True) -> np.ndarray:
-    """ Calculate the distance between the center of mass (COM) or center of geometry (COG) between two atom groups in an MDAnalysis Universe."""
+    """Calculate the COM (or COG) distance between two atom groups over a trajectory.
+
+    Parameters
+    ----------
+    u : mda.Universe
+        MDAnalysis Universe with trajectory loaded.
+    ligand_atoms : mda.AtomGroup
+        Atom group for the ligand.
+    pocket_atoms : mda.AtomGroup
+        Atom group for the pocket (or any reference group).
+    weighByMass : bool
+        If True, use center of mass; if False, use center of geometry.
+    wrap : bool
+        Passed to MDAnalysis ``center_of_mass``/``center_of_geometry``; wraps
+        atoms into the primary unit cell before computing the center.
+
+    Returns
+    -------
+    np.ndarray
+        1D array of distances in Angstroms (MDAnalysis native units),
+        one value per trajectory frame.
+    """
     distances = []
     for ts in u.trajectory:
         if weighByMass:
@@ -1019,17 +1258,43 @@ def calculate_com_distance(u, ligand_atoms=None, pocket_atoms=None, weighByMass:
 
         distances.append(np.linalg.norm(prot_com - lig_com))
 
-    return np.array(distances) # Distance will be in Angstroms because of MDanalysis
+    return np.array(distances)
 
-def compute_rmsd(u, 
+def compute_rmsd(u,
                 u_ref,
-                alig_select:str='backbone', 
-                groupselections:dict={}, 
-                aligned_fname:str=None,
-                plots_outdir:str=None,
-                suffix:str=None
+                alig_select: str = 'backbone',
+                groupselections: dict = {},
+                aligned_fname: str = None,
+                plots_outdir: str = None,
+                suffix: str = None
                 ) -> pd.DataFrame:
-    r = RMSD(u, 
+    """Compute RMSD of one or more atom groups relative to a reference structure.
+
+    Parameters
+    ----------
+    u : mda.Universe
+        Mobile trajectory universe.
+    u_ref : mda.Universe
+        Reference universe (single frame).
+    alig_select : str
+        MDAnalysis selection string used for alignment (default ``'backbone'``).
+    groupselections : dict
+        Mapping of label -> MDAnalysis selection string for additional RMSD
+        groups to track beyond the alignment selection.
+    aligned_fname : str, optional
+        If provided, write the aligned trajectory to this path.
+    plots_outdir : str, optional
+        If provided, save per-group RMSD line plots to this directory.
+    suffix : str, optional
+        Appended to plot filenames to distinguish runs.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``frame``, ``time (ps)``, ``RMSD_selected_alignment``, and
+        one ``RMSD_<label>`` column per entry in *groupselections*.
+    """
+    r = RMSD(u,
              u_ref,
              select=alig_select,
              groupselections=list(groupselections.values()),
