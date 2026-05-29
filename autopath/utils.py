@@ -1710,15 +1710,9 @@ def write_pocket_pymol(
     ligand_atoms = u.select_atoms(ligand_selection)
     pocket_atoms = u.select_atoms(pocket_selection)
     pocket_com = pocket_atoms.center_of_mass()
+    pocket_resids = sorted(set(pocket_atoms.resids))
+    pocket_resi_sel = "+".join(str(r) for r in pocket_resids)
 
-    # COM pseudoatom written as a one-line PDB regardless of format
-    com_pdb_content = (
-        "REMARK Pocket center of mass\n"
-        f"ATOM      1  COM COM SYS A   1    "
-        f"{pocket_com[0]:8.3f}{pocket_com[1]:8.3f}{pocket_com[2]:8.3f}"
-        "  1.00  0.00           C\n"
-        "END\n"
-    )
 
     # ------------------------------------------------------------------ #
     # PSE branch                                                           #
@@ -1734,7 +1728,6 @@ def write_pocket_pymol(
             protein_pdb = str(tmpdir / "protein.pdb")
             ligand_pdb = str(tmpdir / "ligand.pdb")
             pocket_pdb = str(tmpdir / "pocket.pdb")
-            com_pdb = str(tmpdir / "pocket_com.pdb")
 
             with mda.Writer(protein_pdb, protein_atoms.n_atoms) as w:
                 w.write(protein_atoms)
@@ -1742,7 +1735,6 @@ def write_pocket_pymol(
                 w.write(ligand_atoms)
             with mda.Writer(pocket_pdb, pocket_atoms.n_atoms) as w:
                 w.write(pocket_atoms)
-            Path(com_pdb).write_text(com_pdb_content)
 
             pse_path = str(out_dir / "pocket_view.pse")
             with pymol2.PyMOL() as pymol:
@@ -1751,17 +1743,18 @@ def write_pocket_pymol(
                 cmd.load(protein_pdb, "protein")
                 cmd.load(ligand_pdb, "ligand")
                 cmd.load(pocket_pdb, "pocket")
-                cmd.load(com_pdb, "pocket_com")
+                cmd.pseudoatom("pocket_com", pos=list(map(float, pocket_com)))
                 cmd.hide("everything")
                 cmd.show("cartoon", "protein")
                 cmd.show("sticks", "ligand")
                 cmd.show("sticks", "pocket")
                 cmd.show("spheres", "pocket_com")
                 cmd.color(protein_color, "protein")
+                cmd.color(pocket_color, f"protein and resi {pocket_resi_sel}")
                 cmd.color(ligand_color, "ligand")
                 cmd.color(pocket_color, "pocket")
                 cmd.color(com_color, "pocket_com")
-                cmd.set("sphere_scale", com_sphere_radius)
+                cmd.set("sphere_scale", com_sphere_radius, "pocket_com")
                 cmd.set("stick_radius", 0.2)
                 cmd.set("cartoon_transparency", 0.2)
                 if show_surface:
@@ -1779,7 +1772,6 @@ def write_pocket_pymol(
     protein_pdb = str(out_dir / "pocket_protein.pdb")
     ligand_pdb = str(out_dir / "pocket_lig.pdb")
     pocket_pdb = str(out_dir / "pocket_definition.pdb")
-    com_pdb = str(out_dir / "pocket_com.pdb")
 
     with mda.Writer(protein_pdb, protein_atoms.n_atoms) as w:
         w.write(protein_atoms)
@@ -1787,24 +1779,24 @@ def write_pocket_pymol(
         w.write(ligand_atoms)
     with mda.Writer(pocket_pdb, pocket_atoms.n_atoms) as w:
         w.write(pocket_atoms)
-    Path(com_pdb).write_text(com_pdb_content)
 
     lines = [
         "reinitialize",
         f"load {os.path.basename(protein_pdb)}, protein",
         f"load {os.path.basename(ligand_pdb)}, ligand",
         f"load {os.path.basename(pocket_pdb)}, pocket",
-        f"load {os.path.basename(com_pdb)}, pocket_com",
+        f"pseudoatom pocket_com, pos=[{pocket_com[0]:.3f},{pocket_com[1]:.3f},{pocket_com[2]:.3f}]",
         "hide everything",
         "show cartoon, protein",
         "show sticks, ligand",
         "show sticks, pocket",
         "show spheres, pocket_com",
         f"color {protein_color}, protein",
+        f"color {pocket_color}, protein and resi {pocket_resi_sel}",
         f"color {ligand_color}, ligand",
         f"color {pocket_color}, pocket",
         f"color {com_color}, pocket_com",
-        f"set sphere_scale, {com_sphere_radius}",
+        f"set sphere_scale, {com_sphere_radius}, pocket_com",
         "set stick_radius, 0.2",
         "set cartoon_transparency, 0.2",
         "zoom ligand, 12",

@@ -967,7 +967,7 @@ class AutoPath:
                             universe,
                             host_selection=funnel_host_sel,
                             guest_selection=ligand_selection,
-                            percentile_z=65.0,
+                            percentile_z=50.0,
                             R_cylinder_ang=2.0, # Angstroms; radius of cylindrical part of funnel
                             # z_cc_ang=5, # this overrides the default automatic z_cc calculation (floor is 5A)
                             alpha_cone_degrees=45.0,
