@@ -3,10 +3,9 @@ import logging
 import argparse
 
 import MDAnalysis as mda
-import mdtraj as md
 
 from autopath import SteeredMD
-from autopath.utils import load_system, setup_logging
+from autopath.utils import load_system, setup_logging, wrap_align_save_traj
 from openmm.app import PDBFile, AmberPrmtopFile
 
 
@@ -80,16 +79,15 @@ def main():
         groupB_atoms=pocket_atoms_idx,
         restrained_atoms=None,
         restart_velocities=True,
-        autostop_freq=50,
         out_dir=f"{sys_name}/sMD",
+        dx_per_move=DX_PER_MOVE,
+        max_displacement=2.5,
+        sMD_spring_cte=sMD_spring_cte,
     )
 
     for rep_idx in range(1, N_REPS+1):
         rep_id = sMD.run(
-                max_displacement=2.5, #nm 
-                dx_per_move=DX_PER_MOVE, #nm
                 pulling_speed=SPEED, #nm/ps
-                sMD_spring_cte=sMD_spring_cte,
                 checkpoint_file=checkpoint,
                 pulling_direction=DIRECTION,
                 )
@@ -101,16 +99,7 @@ def main():
         ##############################################################
         
         smd_traj = f"{sys_name}/sMD/sMD_{rep_id}.dcd"
-        traj = md.load(smd_traj, top=prmtop_fname)
-        traj = traj.center_coordinates()
-        traj = traj.image_molecules()
-        try: # if there's no protein
-            backbone = traj.topology.select("backbone")
-            traj = traj.superpose(traj[0], atom_indices=backbone)
-        except Exception as e:
-            logger.warning(f"Superposition failed: {e}. Proceeding without superposition.")
-        traj.save(smd_traj.replace(".dcd", "_aligned.dcd"))
-        os.remove(smd_traj)
+        wrap_align_save_traj(smd_traj, prmtop_fname)
     
     return
 

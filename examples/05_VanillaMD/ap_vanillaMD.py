@@ -6,8 +6,10 @@ import MDAnalysis as mda
 import mdtraj as md
 
 from autopath import VanillaMD
-from autopath.analysis import plot_atomic_rmsf
+from autopath.ap_PLIP import plot_atomic_property, calculate_ligand_rmsf
 from autopath.utils import load_system, compute_rmsd
+from autopath.utils import setup_logging
+
 from openmm.app import PDBFile
 
 def cmd_lineparser():
@@ -65,14 +67,8 @@ def main():
     
     os.makedirs(sys_name, exist_ok=True)
 
-    logging.basicConfig(
-    level="INFO",
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(f"{sys_name}/{sys_name}.log", mode="a"),
-        logging.StreamHandler(),
-    ],
-    )
+    # Setup logging
+    logger = setup_logging(f"{sys_name}/autopath.log", log_level="INFO")
     
     ########################################################################################
     ######################################## Vanilla MD ####################################
@@ -121,14 +117,13 @@ def main():
         backbone = traj.topology.select("backbone")
         traj = traj.superpose(traj[0], atom_indices=backbone)
     except Exception as e:
-        logging.warning(f"Superposition failed: {e}. Proceeding without superposition.")
+        logger.warning(f"Superposition failed: {e}. Proceeding without superposition.")
     traj.save(traj_fname.replace(".dcd", "_aligned.dcd"))
     os.remove(traj_fname)
-    logging.info(f"Aligned trajectory saved to {traj_fname.replace('.dcd', '_aligned.dcd')}")
+    logger.info(f"Aligned trajectory saved to {traj_fname.replace('.dcd', '_aligned.dcd')}")
     
     # Calculate RMSD and RMSF of the ligand
     u = mda.Universe(system_prmtop, traj_fname.replace(".dcd", "_aligned.dcd"), in_memory=True)
-    # u_ref = mda.Universe(system_prmtop, system_pdb_file) # you can use other references here
     
     rmsd_df = compute_rmsd(u, u,
                             alig_select="backbone", 
@@ -142,7 +137,8 @@ def main():
     rmsd_df.to_csv(f"{sys_name}/MD/{run_id}_rmsd.csv", index=False)
     
     if lig_resname is not None:
-        plot_atomic_rmsf(u, outname=f"{sys_name}/MD/{run_id}_RMSF.png", log_rmsf=True)
+        _rmsf = calculate_ligand_rmsf(u)
+        plot_atomic_property(u, _rmsf, outname=f"{sys_name}/MD/{run_id}_RMSF.png")
 
     return
 

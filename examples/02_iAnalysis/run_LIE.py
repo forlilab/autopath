@@ -21,18 +21,18 @@ args = cmd_lineparser()
 sysname = args.sysname
 
 aplip = ProteinLigandAnalyzer(
-    top=f"{sysname}/system.prmtop",
-    trajs=[f"{sysname}/equilibration/equilibration_{sysname}_aligned.dcd"],
+    top=f"../01_Build_and_Equilibrate/{sysname}/system.prmtop",
+    trajs=[f"../01_Build_and_Equilibrate/{sysname}/equilibration/equilibration_{sysname}_aligned.dcd"],
     ligand_mda_selection='resname UNK',
     protein_mda_selection='protein',
-    outdir=f"{sysname}/equilibration/lie")
+    outdir=f"{sysname}/lie")
 
-# important_residues, persistence_byRes, persistence_byRes_byType = aplip.get_persistent_interactions(frequency_cutoff=0.5, n_jobs=None)
-# print("Important residues:", important_residues)
-# print("Computing LIE for important residues...")
-# lie_df = aplip.compute_LIE(use_residues=important_residues)
-# aplip.plot_lie_components(lie_df)
-# lie_df.to_csv("LIE_importance05.csv")
+important_residues, persistence_byRes, persistence_byRes_byType = aplip.get_persistent_interactions(frequency_cutoff=0.5, n_jobs=1)
+print("Important residues:", important_residues)
+print("Computing LIE for important residues...")
+lie_df = aplip.compute_LIE(use_residues=important_residues)
+aplip.plot_lie_components(lie_df)
+lie_df.to_csv(f"{sysname}/lie/LIE_importance05.csv")
 
 print("Computing LIE for all residues...")
 lie_df = aplip.compute_LIE(use_residues=None,
@@ -40,4 +40,4 @@ lie_df = aplip.compute_LIE(use_residues=None,
                            )
 
 aplip.plot_lie_components(lie_df)
-lie_df.to_csv(f"{sysname}/equilibration/lie/LIE_ALL.csv")
+lie_df.to_csv(f"{sysname}/lie/LIE_ALL.csv")

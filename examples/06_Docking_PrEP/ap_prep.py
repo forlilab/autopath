@@ -6,8 +6,9 @@ import MDAnalysis as mda
 import mdtraj as md
 
 from autopath import SystemPreparation, Equilibration
-from autopath.ap_PLIP import plot_atomic_rmsf
-from autopath.utils import fix_pdb, fetch_pdb, save_receptor_and_ligand_from_pdb, save_receptor_and_ligand_from_openmm, save_pdb, save_receptor_w_colig, load_system, setup_logging, compute_rmsd
+from autopath.ap_PLIP import plot_atomic_property, calculate_ligand_rmsf
+from autopath.utils import fetch_pdb, save_receptor_and_ligand_from_pdb, save_receptor_and_ligand_from_openmm, save_pdb, save_receptor_w_colig, load_system, setup_logging, compute_rmsd
+from autopath.pdb_preprocessor import PDBPreprocessor
 from openmm.app import PDBFile
 
 def cmd_lineparser():
@@ -283,7 +284,7 @@ def main():
     logger.info("Starting equilibration process")
 
     # Fix/prepare the receptor
-    protein_pdb = fix_pdb(pdbfile=rec_path, keep_heterogens=True, pH=7.4, discard_input_hydrogens=args.discard_input_hydrogens)
+    protein_pdb = PDBPreprocessor(rec_path).fix(keep_heterogens=True, pH=7.4, discard_input_hydrogens=args.discard_input_hydrogens)
     pdb_name = os.path.splitext(os.path.basename(rec_path))[0]
     #save full receptor 
     prot_path = f"{save_dir}/{pdb_name}_fixed.pdb"
@@ -327,7 +328,7 @@ def main():
             out_dir=save_dir,
             boxShape="dodecahedron",
             padding=1.2,
-            lig_ff="espaloma",
+            lig_ff="espaloma-0.3.2",
             ionicStrength=0.15,
             is_membrane=False,
             lipid_type="POPC",
@@ -427,7 +428,8 @@ def main():
                                               plots_outdir=f"{save_dir}/equilibration"
                                               )
         lig_rmsd_equilibration.to_csv(f"{save_dir}/equilibration/{sys_name}_ligand_rmsd.csv", index=False)
-        plot_atomic_rmsf(u_eq, outname=f"{save_dir}/equilibration/{sys_name}_RMSF.png", log_rmsf=True)
+        _rmsf = calculate_ligand_rmsf(u_eq)
+        plot_atomic_property(u_eq, _rmsf, outname=f"{save_dir}/equilibration/{sys_name}_RMSF.png")
 
     return
 

@@ -6,8 +6,9 @@ import MDAnalysis as mda
 import mdtraj as md
 
 from autopath import SystemPreparation, Equilibration
-from autopath.ap_PLIP import plot_atomic_rmsf
-from autopath.utils import fix_pdb, save_pdb, load_system, setup_logging, compute_rmsd
+from autopath.ap_PLIP import plot_atomic_property, calculate_ligand_rmsf
+from autopath.utils import save_pdb, load_system, setup_logging, compute_rmsd
+from autopath.pdb_preprocessor import PDBPreprocessor
 from openmm.app import PDBFile
 
 def cmd_lineparser():
@@ -109,7 +110,7 @@ def main():
     if not args.fixpdb:
         fixed_receptor = receptor
     else:
-        fixed_receptor = fix_pdb(pdbfile=receptor, 
+        fixed_receptor = PDBPreprocessor(receptor).fix(
                             replace_nonstandard_residues=True,
                             ignore_terminal_missing_residues=True,
                             keep_heterogens=True,
@@ -125,7 +126,7 @@ def main():
             boxShape="dodecahedron",
             padding=1.2,
             hydrogenMass=1.5,
-            lig_ff="openff",
+            lig_ff="openff-2.3.0",
             ionicStrength=0.15,
             ions=("Na+", "Cl-"),
             is_membrane=False,
@@ -179,13 +180,13 @@ def main():
         traj = traj.superpose(traj[0], atom_indices=backbone)
     except Exception as e:
         logging.warning(f"Superposition failed: {e}. Proceeding without superposition.")
-    traj.save(equilibrated_traj.replace(".dcd", "_aligned.xtc"))
+    traj.save(equilibrated_traj.replace(".dcd", "_aligned.dcd"))
     os.remove(equilibrated_traj)
-    logger.info(f"Aligned trajectory saved to {equilibrated_traj.replace('.dcd', '_aligned.xtc')}")
+    logger.info(f"Aligned trajectory saved to {equilibrated_traj.replace('.dcd', '_aligned.dcd')}")
 
     # Calculate RMSD and RMSF of the ligand
     # Make sure to customize/add the selections as needed
-    u_eq = mda.Universe(system_pdb_file, equilibrated_traj.replace(".dcd", "_aligned.xtc"), in_memory=True)
+    u_eq = mda.Universe(system_pdb_file, equilibrated_traj.replace(".dcd", "_aligned.dcd"), in_memory=True)
     rmsd_equilibration = compute_rmsd(u_eq, u_eq,
                                           alig_select="backbone", 
                                           groupselections={
@@ -196,9 +197,9 @@ def main():
                                           )
     rmsd_equilibration.to_csv(f"{sys_name}/equilibration/RMSD_{sys_name}.csv", index=False)
     if ligands is not None:
-        plot_atomic_rmsf(u_eq, lig_resname,
-                         outname=f"{sys_name}/equilibration/RMSF_{sys_name}.png",
-                        )
+        _rmsf = calculate_ligand_rmsf(u_eq, lig_resname)
+        plot_atomic_property(u_eq, _rmsf, lig_resname=lig_resname,
+                             outname=f"{sys_name}/equilibration/RMSF_{sys_name}.png")
     return
 
 if __name__ == "__main__":

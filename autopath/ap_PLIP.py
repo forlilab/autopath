@@ -8,10 +8,12 @@ from collections import Counter
 
 import MDAnalysis as mda
 from MDAnalysis.analysis.rms import RMSF
+from MDAnalysis.analysis.distances import distance_array
 import pytraj as pt
 from prolif import Fingerprint
 from rdkit import DataStructs
 from rdkit import Chem
+from rdkit.Chem import AllChem
 from rdkit.Chem.Draw import rdMolDraw2D, SimilarityMaps
 
 import seaborn as sns
@@ -53,11 +55,16 @@ class ProteinLigandAnalyzer:
         top : str
             Topology file (PDB, PRMTOP, PSF, etc.)
         trajs : list of str
-            List of trajectory files (each considered a separate replica)
-        ligand_resname : str
-            Residue name for the ligand (default "UNK")
-        selection : str or None
-            Residue selection string (MDAnalysis-style). If None, LIE uses all residues.
+            List of trajectory files (each treated as an independent replica).
+        ligand_mda_selection : str
+            MDAnalysis selection string for the ligand (default ``"resname UNK"``).
+        protein_mda_selection : str or None
+            MDAnalysis selection string for the protein. Used as the ProLIF protein
+            selection and to restrict LIE calculations. If None, ``"protein"`` is used.
+        traj_start, traj_end, traj_step : int or None
+            Frame slicing parameters (reserved for future use).
+        outdir : str
+            Directory for cached fingerprints and output figures.
         """
         self.top = top
         self.traj_paths = trajs
@@ -77,8 +84,13 @@ class ProteinLigandAnalyzer:
     # -----------------------------------------------------------
 
     def _load_trajectories(self):
-        """Load each replica separately using MDAnalysis."""
-        #FIXME the slicing is nto working as intended
+        """Load each replica separately using MDAnalysis.
+
+        Note
+        ----
+        Trajectory slicing (``traj_start``/``traj_end``/``traj_step``) is not
+        applied here; slicing is currently handled at the point of analysis.
+        """
         self.replicas = {}
         for t in self.traj_paths:
             try:
@@ -90,7 +102,13 @@ class ProteinLigandAnalyzer:
                 pass
             
     def concat_trajectories(self):
-        """Concatenate all replicas into a single MDAnalysis Universe."""
+        """Concatenate all replica trajectories into a single MDAnalysis Universe.
+
+        Returns
+        -------
+        mda.Universe
+            A new Universe whose trajectory is the in-memory concatenation of all replicas.
+        """
         all_trajs = []
         for rep in self.replicas.values():
             all_trajs.append(rep.trajectory)
@@ -110,9 +128,10 @@ class ProteinLigandAnalyzer:
             stop: Optional[int] = None,
             step: Optional[int] = None,
         ) -> str:
-        """
-        Combine multiple trajectories into a single trajectory file,
-        applying start/stop/step independently to each input trajectory.
+        """Combine multiple trajectory files into a single output trajectory.
+
+        Each input trajectory is sliced with ``start``/``stop``/``step``
+        independently before being appended to the output.
 
         Parameters
         ----------
@@ -123,7 +142,12 @@ class ProteinLigandAnalyzer:
         output_traj : str
             Output trajectory filename.
         start, stop, step : int or None
-            Slicing applied independently to each trajectory.
+            Slicing applied independently to each input trajectory.
+
+        Returns
+        -------
+        str
+            Path to the combined output trajectory file (``output_traj``).
         """
 
         # Load first trajectory to initialize writer
@@ -148,12 +172,38 @@ class ProteinLigandAnalyzer:
             fraction_persistence: float = 0.9,
             pdb_fname: str = None,
     ):
-        """
-        Identify persistent interfacial water molecules across a trajectory.
+        """Identify persistent interfacial water molecules across a trajectory.
 
-        A water is interfacial in a frame if:
-            - any atom of that water is within `cutoff` Å of protein
-            - AND within `cutoff` Å of ligand
+        A water residue is considered interfacial in a frame when at least one
+        of its atoms is within ``cutoff`` Å of the protein **and** within
+        ``cutoff`` Å of the ligand simultaneously.  Only waters that are
+        interfacial in at least ``fraction_persistence`` of all analyzed frames
+        are returned.
+
+        Parameters
+        ----------
+        u : mda.Universe
+            MDAnalysis Universe with topology and trajectory loaded.
+        ligand_sel : str
+            MDAnalysis selection string for the ligand.
+        protein_sel : str
+            MDAnalysis selection string for the protein.
+        traj_slice : tuple of (int, int, int) or None
+            ``(start, end, step)`` frame slice. If None, all frames are analyzed.
+        cutoff : float
+            Distance threshold (Å) for the protein–water and ligand–water contacts.
+        fraction_persistence : float
+            Minimum fraction of frames in which a water must be interfacial to be
+            included in the returned set (e.g. 0.9 means present in >= 90% of frames).
+        pdb_fname : str or None
+            If provided, write a PDB containing the protein, ligand, and persistent
+            waters from the last trajectory frame to this path.
+
+        Returns
+        -------
+        dict
+            ``{resid: persistence_fraction}`` for waters that meet the threshold,
+            sorted by descending persistence.
         """
 
         WATER_SEL= "resname HOH or resname WAT or resname SOL"
@@ -220,16 +270,35 @@ class ProteinLigandAnalyzer:
                                    ):
         """
         Identify most persistent interactions across replicas using ProLif.
-        Prolif gives me problems with parallel processing, so n_jobs=1 by default.
 
         Parameters
         ----------
+        fp_interactions : list of str or None
+            ProLIF interaction types to fingerprint. If None, ProLIF defaults are used.
         frequency_cutoff : float
             Only interactions present in at least this fraction of frames are kept.
+        stride : int
+            Frame stride passed to ProLIF. See Warning below.
+        n_jobs : int
+            Number of parallel workers for ProLIF. See Warning below.
 
         Returns
         -------
         important_resids : list of int
+            Sorted residue IDs whose interaction frequency exceeds ``frequency_cutoff``.
+        persistence_byRes : pd.DataFrame
+            Interaction persistence grouped by residue (all interaction types merged).
+        persistence_byRes_byType : pd.DataFrame
+            Interaction persistence broken down by residue and interaction type.
+
+        Warning
+        -------
+        The ``stride`` parameter is currently not applied correctly by ProLIF; all
+        frames in each replica trajectory are analyzed regardless of the value passed.
+
+        The ``n_jobs`` parameter is currently non-functional due to serialization
+        incompatibilities (dill/multiprocess version conflicts in ProLIF). All
+        fingerprint computations run serially regardless of the value passed.
         """
 
         important_resids = set()
@@ -250,13 +319,11 @@ class ProteinLigandAnalyzer:
                 ligand_sel = u.select_atoms(self.ligand_mda_selection)
                 logger.info(f"Ligand selection has {ligand_sel.n_atoms} atoms.")
                 
-                # Compute interaction fingerprint over trajectory, optionally strided
-                fp = fp.run(u.trajectory, #FIXME stride does not work here
-                            protein_sel, 
+                fp = fp.run(u.trajectory,
+                            protein_sel,
                             ligand_sel,
-                            n_jobs=n_jobs
+                            n_jobs=n_jobs,
                             )
-                # TODO: another function should read and analyze these pickles
                 fp.to_pickle(fp_fname)
             
             # convert to DataFrame
@@ -289,8 +356,28 @@ class ProteinLigandAnalyzer:
         return sorted(list(important_resids)), persistence_byRes, persistence_byRes_byType
 
     @staticmethod
-    def plot_tanimoto_similarity(query_fp, reference_fp, use_frame:int=None, outdir:str=None):
-        
+    def plot_tanimoto_similarity(query_fp, reference_fp, use_frame: int = None, outdir: str = None):
+        """Plot Tanimoto similarity between ProLIF fingerprints and save the figure(s).
+
+        Parameters
+        ----------
+        query_fp : prolif.Fingerprint
+            Fingerprint to compare against (all frames).
+        reference_fp : prolif.Fingerprint or None
+            Reference fingerprint. If None, ``query_fp`` is used as its own reference
+            (self-similarity matrix).
+        use_frame : int or None
+            If provided, compute similarity of every query frame to this reference frame
+            and plot a line graph. If None, compute and plot the full similarity matrix.
+        outdir : str or None
+            Directory for output figures. Defaults to current directory.
+
+        Returns
+        -------
+        list of float or pd.DataFrame
+            If ``use_frame`` is set: list of per-frame Tanimoto similarities.
+            Otherwise: symmetric similarity matrix as a DataFrame.
+        """
         if outdir is None:
             outdir = "."
             
@@ -346,26 +433,44 @@ class ProteinLigandAnalyzer:
                     stride: int = 1,
                     lie_options:str = 'nopbc cutvdw 10.0 cutelec 10.0' # dielec 2
                     ):
-        """
-        Compute LIE for each replica using pytraj.
-        some literature:
-        https://ambermd.org/tutorials/advanced/tutorial24/liew.php
-        https://pubs.acs.org/doi/10.1021/acs.jcim.9b00609
-        https://pmc.ncbi.nlm.nih.gov/articles/PMC7311763/
-        
+        """Compute Linear Interaction Energy (LIE) for each replica using pytraj.
+
+        LIE approximates binding free energy as a linear combination of
+        electrostatic and van der Waals interaction energies between the ligand
+        and the surrounding environment.  See:
+
+        - https://ambermd.org/tutorials/advanced/tutorial24/liew.php
+        - https://pubs.acs.org/doi/10.1021/acs.jcim.9b00609
+        - https://pmc.ncbi.nlm.nih.gov/articles/PMC7311763/
+
         Parameters
         ----------
-        prmtop : str
-            Amber PRMTOP topology for pytraj. If not provided, use topology from self.top.
-        use_residues : list of ints or None
-            If provided, only use these residues in LIE mask.
+        prmtop : str or None
+            Amber PRMTOP topology for pytraj. Defaults to ``self.top``.
+        use_residues : list of int or None
+            Explicit list of residue numbers to include in the LIE environment
+            mask. If None, residues within ``cutoff`` Å of the ligand are
+            selected automatically.
+        ligand_amber_selection : str
+            Amber mask for the ligand (e.g. ``":UNK"``).
+        exclude_amber_selection : str or None
+            Amber mask of atoms to exclude from the auto-selected environment
+            (ions, counter-ions, etc.).
         cutoff : float
-            Distance cutoff (Å) for selecting residues when use_residues=None.
+            Distance cutoff (Å) used to auto-select environment residues when
+            ``use_residues`` is None.
+        stride : int
+            Frame stride passed to ``pt.iterload``.
+        lie_options : str
+            Additional options string passed to ``pt.analysis.energy_analysis.lie``
+            (e.g. ``'nopbc cutvdw 10.0 cutelec 10.0'``).
 
         Returns
         -------
-        lie_df : pd.DataFrame
-            Combined LIE results for all replicas.
+        pd.DataFrame
+            Combined LIE results for all replicas with columns
+            ``EELEC``, ``VDW``, ``Total``, and ``run``.  Also saved to
+            ``{outdir}/LIE_results.csv``.
         """
 
         if prmtop is None:
@@ -417,9 +522,14 @@ class ProteinLigandAnalyzer:
         
         return df_all
 
-    def plot_lie_components(self, lie_df: pd.DataFrame):
-        
-        # create one subplot for each component
+    def plot_lie_components(self, lie_df: pd.DataFrame) -> None:
+        """Plot LIE energy components (Total, EELEC, VDW) over time and save the figure.
+
+        Parameters
+        ----------
+        lie_df : pd.DataFrame
+            Output of :meth:`compute_LIE`, with columns ``Total``, ``EELEC``, ``VDW``.
+        """
         fig, axes = plt.subplots(1, 3, figsize=(15, 5),
             sharex=True, sharey=False)
 
@@ -452,7 +562,7 @@ class ProteinLigandAnalyzer:
                     radii: str = 'mbondi2',
                     time: str = "0:10:00",
                     omp_threads: int = 222,
-                    partition: str = "highmem,shared,gpu",
+                    partition: str = "forli,forli-pro,shared,highmem,gpu",
                     slurm_template_fname: str = None,
                     ):
         """Write a SLURM qfile for MMPBSA calculations.
@@ -487,11 +597,11 @@ class ProteinLigandAnalyzer:
             partition=partition,
         )
 
-        with open(f"qfiles_mmpbsa/{sysname}_mmpbsa.q", "w") as f:
+        with open(f"qfiles_mmgbsa/{sysname}_mmgbsa.q", "w") as f:
             f.write(rendered)
     
     @staticmethod
-    def prepare_mmpbsa_batch(
+    def prepare_mmgbsa_batch(
             sysname:str=None,
             prmtop:str=None,
             traj_fname:str=None,
@@ -502,17 +612,61 @@ class ProteinLigandAnalyzer:
             persistent_waters_cutoff:float=None,
             mmpbsa_in:str="mmgbsa.in",
             radii:str='mbondi2',
-            output_folder:str="mmpbsa_results",
-            bash_fname:str="run_mmpbsa_batch.sh",
+            output_folder:str="mmgbsa_results",
+            bash_fname:str="run_mmgbsa_batch.sh",
             mpi_threads:int=222,
-            slurm_template_fname:str=None,
+            slurm_template_fname: str = None,
             ):
-        """Prepare MMPBSA batch script and qfiles."""
-        
+        """Prepare a per-system MMPBSA SLURM qfile and a master batch script.
+
+        Writes a modified MMPBSA input file (with correct frame range and optional
+        persistent-water strip mask) and a SLURM submission script, then updates
+        a master bash script that submits all qfiles in the ``qfiles_mmgbsa/``
+        directory with ``sbatch``.
+
+        Parameters
+        ----------
+        sysname : str
+            Identifier for this system (used in output filenames).
+        prmtop : str
+            Amber topology file (.prmtop).
+        traj_fname : str
+            Trajectory file (DCD, XTC, NC, …).
+        ligand_amber_selection : str
+            Amber mask for the ligand (e.g. ``":UNK"``).
+        ligand_mda_selection : str or None
+            MDAnalysis selection string for the ligand. Derived from
+            ``ligand_amber_selection`` if not provided.
+        strip_amber_selection : str
+            Amber mask of residues to strip before MMPBSA (waters, ions, lipids).
+        traj_slice : tuple of (int, int, int) or None
+            ``(start, end, step)`` frame slice applied to the trajectory.
+        persistent_waters_cutoff : float or None
+            If provided, waters whose occupancy at the protein–ligand interface
+            exceeds this fraction are kept in the MMPBSA calculation. Waters are
+            identified with :meth:`find_interfacial_waters`.
+        mmpbsa_in : str
+            Path to the MMPBSA input template file.
+        radii : str
+            Implicit-solvent radii set (e.g. ``'mbondi2'``).
+        output_folder : str
+            Directory for MMPBSA output and the modified input file.
+        bash_fname : str
+            Filename of the master ``sbatch`` batch script.
+        mpi_threads : int
+            Maximum number of MPI threads. Capped at the number of frames.
+        slurm_template_fname : str or None
+            Path to a custom SLURM template. Defaults to the bundled template.
+
+        Returns
+        -------
+        str
+            Path to the written master batch script (``bash_fname``).
+        """
         if sysname is None or prmtop is None or traj_fname is None:
             raise ValueError("sysname, prmtop, and traj_fname must be provided.")
         
-        os.makedirs('qfiles_mmpbsa', exist_ok=True)
+        os.makedirs('qfiles_mmgbsa', exist_ok=True)
         os.makedirs(output_folder, exist_ok=True)
 
         if ligand_mda_selection is None:
@@ -569,7 +723,7 @@ class ProteinLigandAnalyzer:
                 logger.info(f"No persistent interfacial waters found with the given cutoff {persistent_waters_cutoff}")
             
         # Write the modified content back to the file
-        mmpbsa_out = os.path.join(output_folder, f"mmpbsa_{sysname}_mmpbsa.in")
+        mmpbsa_out = os.path.join(output_folder, f"{sysname}_mmgbsa.in")
         mmpbsa_out_abs = os.path.abspath(mmpbsa_out)
         with open(mmpbsa_out_abs, 'w') as file:
             file.writelines(mmpbsa_template)
@@ -587,28 +741,41 @@ class ProteinLigandAnalyzer:
                                                 )
         
         # update batch bash script with all qfiles in folder
-        qfiles = [f for f in os.listdir('qfiles_mmpbsa') if f.endswith('_mmpbsa.q')]
+        qfiles = [f for f in os.listdir('qfiles_mmgbsa') if f.endswith('_mmgbsa.q')]
         with open(bash_fname, "w") as f:
             f.write("#!/bin/bash\n\n")
             for qf in qfiles:
-                f.write(f"sbatch {os.path.abspath(os.path.join('qfiles_mmpbsa', qf))}\n")
+                f.write(f"sbatch {os.path.abspath(os.path.join('qfiles_mmgbsa', qf))}\n")
 
         os.chmod(bash_fname, 0o755)
         
         return bash_fname
         
     @staticmethod
-    def parse_mmpbsa_differences_table(path:str) -> pd.DataFrame:
-        """
-        Parse the 'Differences (Complex - Receptor - Ligand):' table from FINAL_RESULTS_mmpbsa.dat.
+    def parse_mmpbsa_differences_table(path: str) -> pd.DataFrame:
+        """Parse the 'Differences' table from an AMBER MMPBSA results file.
 
-        Returns DataFrame with:
-        Component, Average, Std_Dev, Std_Err_Mean
+        Reads the ``Differences (Complex - Receptor - Ligand):`` section from
+        ``FINAL_RESULTS_mmpbsa.dat`` and returns one row per energy component.
+
+        Parameters
+        ----------
+        path : str
+            Path to ``FINAL_RESULTS_mmpbsa.dat``.
+
+        Returns
+        -------
+        pd.DataFrame
+            Columns: ``Component``, ``Average``, ``Std_Dev``, ``Std_Err_Mean``.
+
+        Raises
+        ------
+        ValueError
+            If the Differences section is not found, or if no data rows are parsed.
         """
         with open(path, "r") as f:
             lines = f.readlines()
 
-        #Locate the start of the Differences section
         start_idx = None
         for i, line in enumerate(lines):
             if line.strip().startswith("Differences (Complex - Receptor - Ligand):"):
@@ -617,7 +784,7 @@ class ProteinLigandAnalyzer:
         if start_idx is None:
             raise ValueError("Could not find 'Differences (Complex - Receptor - Ligand):' section.")
 
-        # ve to first data line (after dashed separator)
+        # Advance to the first data line (after the dashed separator)
         i = start_idx + 1
         while i < len(lines):
             if re.match(r"^-{5,}\s*$", lines[i].strip()):  # line of dashes
@@ -625,7 +792,7 @@ class ProteinLigandAnalyzer:
                 break
             i += 1
 
-        #Parse rows: name (possibly with spaces) + 3 floats
+        # Parse rows: component name (possibly with spaces) followed by 3 floats
         float_row = re.compile(
             r"^\s*(?P<name>.*?)\s+"
             r"(?P<avg>-?\d+(?:\.\d+)?)\s+"
@@ -665,10 +832,30 @@ class ProteinLigandAnalyzer:
         return pd.DataFrame(rows)
         
     @staticmethod
-    def parse_mmpbsa_deltas_all_components(filepath:str=None) -> pd.DataFrame:
-        """
-        Parse the DELTAS section of an AMBER MMPBSA per-residue decomposition file
-        with all energy components (PB/GB).
+    def parse_mmpbsa_deltas_all_components(filepath: str = None) -> pd.DataFrame:
+        """Parse the DELTAS section of an AMBER MMPBSA per-residue decomposition file.
+
+        Reads the CSV-formatted ``DELTAS:`` block produced by AMBER's MMPBSA
+        per-residue decomposition (PB or GB), and returns one row per residue.
+
+        Parameters
+        ----------
+        filepath : str
+            Path to the MMPBSA per-residue decomposition output file (typically
+            ``FINAL_DECOMP_MMPBSA.dat``).
+
+        Returns
+        -------
+        pd.DataFrame
+            Columns: ``resname``, ``resid``, ``location``, and one ``{Component}_Avg``,
+            ``{Component}_StdDev``, ``{Component}_StdErr`` column per energy group
+            (e.g. ``Internal``, ``van_der_Waals``, ``Electrostatic``, etc.).
+            An additional ``label`` column is appended (``resname + resid``).
+
+        Raises
+        ------
+        ValueError
+            If the ``DELTAS:`` section is not found or the header format is unexpected.
         """
 
         with open(filepath) as f:
@@ -773,87 +960,39 @@ class ProteinLigandAnalyzer:
         return df
     
     @staticmethod
-    def parse_mmpbsa_differences_table(path):
-        """
-        Parse the 'Differences (Complex - Receptor - Ligand):' table from FINAL_RESULTS_mmpbsa.dat.
-
-        Returns DataFrame with:
-        Component, Average, Std_Dev, Std_Err_Mean
-        """
-        with open(path, "r") as f:
-            lines = f.readlines()
-
-        #Locate the start of the Differences section
-        start_idx = None
-        for i, line in enumerate(lines):
-            if line.strip().startswith("Differences (Complex - Receptor - Ligand):"):
-                start_idx = i
-                break
-        if start_idx is None:
-            raise ValueError("Could not find 'Differences (Complex - Receptor - Ligand):' section.")
-
-        # ve to first data line (after dashed separator)
-        i = start_idx + 1
-        while i < len(lines):
-            if re.match(r"^-{5,}\s*$", lines[i].strip()):  # line of dashes
-                i += 1
-                break
-            i += 1
-
-        #Parse rows: name (possibly with spaces) + 3 floats
-        float_row = re.compile(
-            r"^\s*(?P<name>.*?)\s+"
-            r"(?P<avg>-?\d+(?:\.\d+)?)\s+"
-            r"(?P<std>-?\d+(?:\.\d+)?)\s+"
-            r"(?P<sem>-?\d+(?:\.\d+)?)\s*$"
-        )
-
-        rows = []
-        while i < len(lines):
-            line = lines[i].rstrip("\n")
-            s = line.strip()
-
-            # Skip blank lines (DELTA rows often come after blanks)
-            if s == "":
-                i += 1
-                continue
-
-            # Stop when the next section begins (usually a header ending with :)
-            # e.g. "Energy Component ..." blocks elsewhere, or other section titles
-            if s.endswith(":") and not s.startswith("DELTA"):
-                break
-
-            m = float_row.match(line)
-            if m:
-                rows.append({
-                    "Component": m.group("name").strip(),
-                    "Average": float(m.group("avg")),
-                    "Std_Dev": float(m.group("std")),
-                    "Std_Err_Mean": float(m.group("sem")),
-                })
-
-            i += 1
-
-        if not rows:
-            raise ValueError("Found the Differences section, but parsed zero rows.")
-
-        return pd.DataFrame(rows)
-        
-    @staticmethod
     def plot_mmpbsa_byresidue(df_decomp: pd.DataFrame,
-                            top_residues: int=10,
-                            out_dir: str=None
+                            top_residues: int = 10,
+                            out_dir: str = None
                             ):
+        """Plot per-residue MMGBSA energy decomposition as bar charts.
+
+        For each energy component and each molecular location (receptor, ligand),
+        saves one bar chart showing the ``top_residues`` most favorable and most
+        unfavorable residues.
+
+        Parameters
+        ----------
+        df_decomp : pd.DataFrame
+            Output of :meth:`parse_mmpbsa_deltas_all_components`.
+        top_residues : int
+            Number of top and bottom residues to display per component.
+        out_dir : str or None
+            Output directory for PNG files. Defaults to the current directory.
+
+        Note
+        ----
+        The ``'L'`` (ligand) location is included for protein–protein interaction
+        studies where both partners are decomposed.
+        """
         if out_dir is None:
             out_dir = os.getcwd()
         os.makedirs(out_dir, exist_ok=True)
 
         mmpbsa_components_list = ['TOTAL_Avg', 'Electrostatic_Avg', "van_der_Waals_Avg",
-                    # 'Internal_Avg', #this one is usually not very informative
+                    # 'Internal_Avg' is omitted — not informative for binding
                     "Polar_Solvation_Avg", "Non_Polar_Solv_Avg"]
-        
-        #you may care about ligands if you are studying protein-protein interactions
-        locations = {'R':'receptor', 'L':'ligand'}
+
+        locations = {'R': 'receptor', 'L': 'ligand'}
         for loc, location in locations.items():
             df = df_decomp[df_decomp["location"] == loc].copy()
             
@@ -886,42 +1025,62 @@ class ProteinLigandAnalyzer:
                             normalize: bool=False,
                             outdir: str=None,
                             ):
-        """paint_mmpbsa_byresidue This function colors a PDB structure 
-        based on per-residue MMGBSA decomposition values.
+        """Color a PDB structure by per-residue MMGBSA decomposition values via B-factor.
 
-        Args:
-            df_decomp (pd.DataFrame): DataFrame containing MMGBSA decomposition data.
-            pdb_file (str): Path to the PDB file.
-            prmtop_file (str): Path to the topology file.
-            mmpbsa_component (str): Component to use for coloring (e.g., 'TOTAL').
+        Parameters
+        ----------
+        df_decomp : pd.DataFrame
+            Output of :meth:`parse_mmpbsa_deltas_all_components`, containing per-residue
+            MMGBSA energy components.
+        pdb_file : str
+            Path to the PDB file to paint.
+        prmtop_file : str
+            Path to the Amber topology file (.prmtop).
+        mmpbsa_component : str
+            Energy component column to write into the B-factor field. Use ``'all'`` to
+            iterate over all standard components. One of
+            ``{'TOTAL_Avg', 'Electrostatic_Avg', 'van_der_Waals_Avg',
+            'Polar_Solvation_Avg', 'Non_Polar_Solv_Avg', 'all'}``.
+        normalize : bool
+            If True, rescale B-factors to [0, 100] for easier VMD/PyMOL visualization.
+        outdir : str or None
+            Directory for output PDB files. Defaults to current directory.
+
+        Raises
+        ------
+        ValueError
+            If ``pdb_file`` or ``prmtop_file`` is None, or if ``mmpbsa_component``
+            is not a recognized component name.
         """
         mmpbsa_components_list = ['TOTAL_Avg', 'Electrostatic_Avg', "van_der_Waals_Avg",
-                            # 'Internal_Avg', #this one is usually not very informative
+                            # 'Internal_Avg' is omitted — not informative for binding
                             "Polar_Solvation_Avg", "Non_Polar_Solv_Avg"]
         if outdir is None:
             outdir = '.'
-        
+
         os.makedirs(outdir, exist_ok=True)
-            
+
         if mmpbsa_component.upper() == 'ALL':
             components_list = mmpbsa_components_list
         else:
             if mmpbsa_component not in mmpbsa_components_list:
-                print(f"ERROR: mmpbsa_component must be one of {mmpbsa_components_list} or 'all'.")
+                raise ValueError(
+                    f"mmpbsa_component must be one of {mmpbsa_components_list} or 'all', "
+                    f"got '{mmpbsa_component}'."
+                )
             else:
                 components_list = [mmpbsa_component]
 
         if pdb_file is None or prmtop_file is None:
-            print("ERROR: Both pdb_file and prmtop_file must be provided.")
-            exit(1)
-        
+            raise ValueError("Both pdb_file and prmtop_file must be provided.")
+
         u = mda.Universe(prmtop_file, pdb_file)
-        
+
         # Initialize all B-factors to 0
         u.add_TopologyAttr("tempfactors")
 
         for component in components_list:
-            print(f"Painting component: {component}")
+            logger.info(f"Painting component: {component}")
             out_fname = f'{outdir}/mmpbsa_painted_{component}.pdb'
             u.atoms.tempfactors = 0.0
 
@@ -929,18 +1088,19 @@ class ProteinLigandAnalyzer:
             for res in u.residues:
                 # Determine if the residue is in the receptor (R) or ligand (L)
                 location = "R" if res.resid in df_decomp[df_decomp["location"] == "R"]["resid"].values else "L"
-                
+
                 # Filter the decomposition data for the current residue
                 _df = df_decomp[(df_decomp["resid"] == res.resid) & (df_decomp["location"] == location)]
-                
+
                 if not _df.empty:
                     residue = _df.iloc[0]
-                    # Check if residue names match
                     if res.resname != residue['resname']:
-                        print(f'WARNING: Residue name mismatch for resid {res.resid}: '
-                            f'{res.resname} (PDB) vs {residue["resname"]} (decomp)')
+                        logger.warning(
+                            f'Residue name mismatch for resid {res.resid}: '
+                            f'{res.resname} (PDB) vs {residue["resname"]} (decomp)'
+                        )
                         continue
-                    
+
                     # Assign the MMGBSA component value to the B-factor
                     res.atoms.tempfactors = residue[component]
 
@@ -963,78 +1123,180 @@ def _replace_line(lines: list,
                 line_to_match: str = None,
                 new_line: str = None,
                 ):
-    """
-    Replace the strip_mask line in the mmpbsa input file.
-    """
+    """Replace the first line that starts with ``line_to_match`` in an MMPBSA input template.
 
-    # Replace the specific line
+    Parameters
+    ----------
+    lines : list of str
+        Lines of the MMPBSA input file (as returned by ``file.readlines()``).
+    line_to_match : str
+        Prefix of the line to replace (e.g. ``'startframe'``).
+    new_line : str
+        Replacement text (without trailing newline).
+
+    Returns
+    -------
+    list of str
+        Modified line list with the first matching line replaced.
+    """
     for i, line in enumerate(lines):
         if line.startswith(line_to_match):
             lines[i] = new_line + '\n'
             break
     return lines
 
-def plot_atomic_rmsf(u, lig_resname:str='UNK', outname:str='rmsf.png', log_rmsf:bool=True) -> None:
+def calculate_contact_frequency(u, ligand_selection: str, pocket_cutoff: float = 5.0, contact_cutoff: float = 3.5) -> np.ndarray:
+    """Return per-atom contact frequency for ligand heavy atoms.
+
+    A ligand atom is counted as "in contact" in a frame if any pocket atom
+    lies within ``contact_cutoff`` Å of it.  Pocket atoms are protein heavy
+    atoms within ``pocket_cutoff`` Å of the ligand in the first frame.
+
+    Parameters
+    ----------
+    u : mda.Universe
+        MDAnalysis Universe with topology and trajectory loaded.
+    ligand_selection : str
+        MDAnalysis selection string for the ligand.
+    pocket_cutoff : float
+        Distance (Å) used to define the pocket in the first frame.
+    contact_cutoff : float
+        Distance threshold (Å) for declaring a contact in each frame.
+
+    Returns
+    -------
+    np.ndarray
+        Fraction of trajectory frames in which each ligand heavy atom is in
+        contact with any pocket atom. Shape ``(n_ligand_heavy_atoms,)``.
     """
-    Draws a RMSF (Root Mean Square Fluctuation) plot for a specified ligand and saves it as an image file.
-    Parameters:
-    -----------
-    u : MDAnalysis.Universe
-        The MDAnalysis universe object containing the molecular dynamics trajectory and topology.
-    lig_resname : str, optional
-        The residue name of the ligand to analyze (default is 'UNK').
-    outname : str, optional
-        The name of the output image file where the RMSF plot will be saved (default is 'rmsf.png').
-    log_rmsf : bool, optional
-        If True, logs the RMSF values to a CSV file with the same name as the output image (default is False).
-    Returns:
-    --------
-    None
-        This function does not return any value. It saves the RMSF plot and optionally logs the RMSF values.
+    lig_ha = u.select_atoms(f'({ligand_selection}) and not name H*')
+    u.trajectory[0]
+    pocket = u.select_atoms(f'protein and not name H* and around {pocket_cutoff} ({ligand_selection})')
+    contact_counts = np.zeros(len(lig_ha))
+    for ts in u.trajectory:
+        dmat = distance_array(lig_ha.positions, pocket.positions)
+        contact_counts += (dmat < contact_cutoff).any(axis=1)
+    return contact_counts / len(u.trajectory)
+
+def calculate_ligand_rmsf(u, ligand_selection: str = 'resname UNK') -> np.ndarray:
+    """Return per-atom RMSF values for ligand heavy atoms.
+
+    Parameters
+    ----------
+    u : mda.Universe
+        MDAnalysis Universe with topology and trajectory loaded.
+    ligand_selection : str
+        MDAnalysis selection string for the ligand.
+
+    Returns
+    -------
+    np.ndarray
+        RMSF (Å) for each ligand heavy atom over the full trajectory.
+        Shape ``(n_ligand_heavy_atoms,)``.
     """
+    lig_ha = u.select_atoms(f'({ligand_selection}) and not name H*')
+    return RMSF(atomgroup=lig_ha).run().rmsf
+
+def plot_atomic_property(u, weights: np.ndarray, lig_resname: str = 'resname UNK',
+                         outname: str = 'property.png', ref_mol=None,
+                         color=None, colormap=None) -> None:
+    """Plot a per-atom scalar property on the ligand 2D structure and save as image.
+
+    color: any matplotlib color ('blue', '#1f77b4', (r,g,b,a)) — sets the fill
+           gradient highlight for high positive values (white → color).
+           Takes precedence over colormap.
+    colormap: full 3-color colourMap as a matplotlib colormap object/string,
+              or a list of three RGBA tuples for [negative, zero, positive].
+    """
+    from rdkit import Geometry
+    from rdkit.Chem import Draw, rdDepictor
 
     if outname.endswith('.svg'):
         drawer = rdMolDraw2D.MolDraw2DSVG(300, 300)
     else:
-        # Default to PNG if the file extension is not SVG
         outname = outname.replace('.svg', '.png')
         drawer = rdMolDraw2D.MolDraw2DCairo(300, 300)
 
-    lig_full = u.select_atoms(f'resname {lig_resname}')
-    lig_ha = u.select_atoms(f'resname {lig_resname} and not name H*')
-    r = RMSF(atomgroup=lig_ha).run()
-    probe_mol = lig_full.convert_to('RDKIT')
-    probe_mol.Compute2DCoords()
-    probe_mol = Chem.RemoveHs(probe_mol)
-    assert len(r.rmsf) == probe_mol.GetNumAtoms(), "Mismatch between RMSF length and atom count"
+    # make the background transparent
+    # drawer.drawOptions().setBackgroundColour((1.0, 1.0, 1.0, 0.0))
 
-    fig = SimilarityMaps.GetSimilarityMapFromWeights(mol=probe_mol, 
-                                                     weights=r.rmsf.tolist(), 
-                                                     draw2d=drawer,
-                                                     scale=2.0,
-                                                     step=0.1,
-                                                     alpha=0.5, 
-                                                     contourLines=5
-                                                     ) 
-    fig.FinishDrawing()
-    if outname.endswith('.svg'):
-        fig = fig.GetDrawingText()
-        with open(outname,'w+') as outf:
-            outf.write(fig)
+    if ref_mol is not None:
+        probe_mol = Chem.RemoveHs(ref_mol)
+        AllChem.Compute2DCoords(probe_mol)
     else:
-        fig.WriteDrawingText(outname)
+        lig_full = u.select_atoms(lig_resname)
+        probe_mol = lig_full.convert_to('RDKIT', NoImplicit=False)
+        probe_mol.Compute2DCoords()
+        probe_mol = Chem.RemoveHs(probe_mol)
+    assert len(weights) == probe_mol.GetNumAtoms(), "Mismatch between weights length and atom count"
 
-    # Optionally, log the RMSF values for further analysis
-    if log_rmsf:
-        log_fname = os.path.splitext(outname)[0]
-        with open(f'{log_fname}.csv', 'w') as f:
-            for res_id, rmsf_value in enumerate(r.rmsf):
-                f.write(f'{res_id},{rmsf_value:.3f}\n')
+    # Replicate the draw2d path from GetSimilarityMapFromWeights so we can
+    # set the colourMap directly — that field is not exposed through the public API.
+    mol_prepared = rdMolDraw2D.PrepareMolForDrawing(probe_mol, addChiralHs=False)
+    if not mol_prepared.GetNumConformers():
+        rdDepictor.Compute2DCoords(mol_prepared)
+
+    conf = mol_prepared.GetConformer()
+    if mol_prepared.GetNumBonds() > 0:
+        bond = mol_prepared.GetBondWithIdx(0)
+        p1 = conf.GetAtomPosition(bond.GetBeginAtomIdx())
+        p2 = conf.GetAtomPosition(bond.GetEndAtomIdx())
+    else:
+        p1, p2 = conf.GetAtomPosition(0), conf.GetAtomPosition(1)
+    sigma = round(0.3 * (p1 - p2).Length(), 2)
+
+    sigmas = [sigma] * mol_prepared.GetNumAtoms()
+    locs = [Geometry.Point2D(conf.GetAtomPosition(i).x, conf.GetAtomPosition(i).y)
+            for i in range(mol_prepared.GetNumAtoms())]
+
+    drawer.ClearDrawing()
+    ps = Draw.ContourParams()
+    ps.fillGrid = True
+    ps.gridResolution = 0.1
+    ps.extraGridPadding = 0.5
+
+    if color is not None:
+        from matplotlib.colors import to_rgba
+        r, g, b, a = to_rgba(color)
+        # white for zero/negative, target color for high positive values
+        clrs = [(1.0, 1.0, 1.0, 0.3), (1.0, 1.0, 1.0, 0.1), (r, g, b, a)]
+        ps.setColourMap(clrs)
+    elif colormap is not None:
+        from matplotlib import cm as mpl_cm
+        if isinstance(colormap, str):
+            clrs = [tuple(x) for x in mpl_cm.get_cmap(colormap)([0, 0.5, 1])]
+        elif hasattr(colormap, '__call__'):
+            clrs = [tuple(x) for x in colormap([0, 0.5, 1])]
+        else:
+            clrs = [colormap[0], colormap[1], colormap[2]]
+        ps.setColourMap(clrs)
+
+    Draw.ContourAndDrawGaussians(drawer, locs, weights.tolist(), sigmas, nContours=5, params=ps)
+    drawer.drawOptions().clearBackground = False
+    drawer.DrawMolecule(mol_prepared)
+    drawer.FinishDrawing()
+
+    if outname.endswith('.svg'):
+        with open(outname, 'w+') as outf:
+            outf.write(drawer.GetDrawingText())
+    else:
+        drawer.WriteDrawingText(outname)
     return
 
-def plot_rmsd(rmsd_df:pd.DataFrame=None,
-              sys_name:str=None,
-              out_dir:str=None) -> None:
+def plot_rmsd(rmsd_df: pd.DataFrame = None,
+              sys_name: str = None,
+              out_dir: str = None) -> None:
+    """Plot RMSD over time and save the figure.
+
+    Parameters
+    ----------
+    rmsd_df : pd.DataFrame
+        DataFrame with at least an ``rmsd`` column; the index is used as the x-axis.
+    sys_name : str
+        System name used in the plot title and output filename.
+    out_dir : str
+        Directory where the PNG is saved.
+    """
     plt.figure(figsize=(10, 5))
     sns.lineplot(data=rmsd_df, y="rmsd", x=rmsd_df.index)
     plt.ylabel("RMSD (nm)");     plt.xlabel("Frame #")

@@ -17,6 +17,22 @@ logger = logging.getLogger("autopath")
 
 @dataclass
 class EquilibrationStep:
+    """Single stage in the equilibration protocol as parsed from JSON.
+
+    Attributes
+    ----------
+    name : str
+        Human-readable stage label (e.g. ``"NVT_heavy"``).
+    forces : list of float
+        Force constants in kcal/mol/Å² for each restrained component, in the
+        same order as ``components_lookup``.
+    npt_flag : bool
+        If True, a barostat is added for this stage (NPT); otherwise NVT.
+    nsteps : int
+        Number of integration steps to run for this stage.
+    stepsize : float
+        Integration timestep in picoseconds.
+    """
     name: str
     forces: List[float]
     npt_flag: bool
@@ -30,7 +46,23 @@ def set_force_constants(
     forces: List[float],
     prev_constants: Dict[str, float],
 ) -> None:
-    """Set the force constants for the given components."""
+    """Update simulation context parameters for each restrained component.
+
+    Only parameters whose value has changed (or that have never been set) are
+    pushed to the context, avoiding redundant reinitializations.
+
+    Parameters
+    ----------
+    simulation : openmm.app.Simulation
+        The active simulation whose context is updated.
+    components : list of str
+        Restrained component names (e.g. ``["backbone", "sidechain"]``).
+    forces : list of float
+        New force constants in kcal/mol/Å², parallel to *components*.
+    prev_constants : dict
+        Mutable mapping of component name → last-applied force constant,
+        used to skip redundant context updates. Updated in-place.
+    """
     for component, force_constant in zip(components, forces):
         if (
             prev_constants[component] is None
@@ -83,9 +115,19 @@ def warm_up_system(
 
 def update_force_constants(
     simulation,
-    force_constants_dict:dict=None
-    ) -> None:
-    """Update the force constants for the given components."""
+    force_constants_dict: dict = None
+) -> None:
+    """Push a mapping of component → force-constant values to the simulation context.
+
+    Parameters
+    ----------
+    simulation : openmm.app.Simulation
+        The active simulation whose context parameters are updated.
+    force_constants_dict : dict
+        Mapping of component name (str) → force constant (float) in
+        kcal/mol/Å². Each entry is set as ``k_<name>`` in the context.
+        Errors for individual components are logged and skipped.
+    """
 
     for component, force_constant in force_constants_dict.items():
         try:
@@ -104,11 +146,26 @@ def update_force_constants(
     return None
 
 def run_restrained_minimization(
-                    simulation,
-                    components: List[str],
-                    minim_scheme: Dict[str, Any]
-                    ) -> None:
-    """Perform restrained minimization, progressively releasing constraints."""
+    simulation,
+    components: List[str],
+    minim_scheme: Dict[str, Any]
+) -> None:
+    """Perform energy minimization in multiple stages with progressively relaxed restraints.
+
+    Each stage sets new force constants and runs minimization to convergence
+    (``maxIterations=0``), allowing heavy atoms to be released before lighter
+    atoms in subsequent stages to avoid clashes.
+
+    Parameters
+    ----------
+    simulation : openmm.app.Simulation
+        The simulation to minimize.
+    components : list of str
+        Restrained component names, parallel to ``forces`` in each stage dict.
+    minim_scheme : list of dict
+        Ordered list of minimization stage dicts, each with keys ``"name"``
+        (str) and ``"forces"`` (list of float in kcal/mol/Å²).
+    """
     
     for stage in minim_scheme:
         logger.info(f"Minimization stage {stage['name']}")
@@ -128,7 +185,32 @@ def run_restrained_md(
     temp: int = 300,
     is_membrane: bool = False,
 ) -> None:
-    """Perform restrained equilibration, adjusting force constants, timestep, and barostat as needed."""
+    """Run a multi-stage restrained MD equilibration protocol.
+
+    Iterates through *equil_scheme* stages, updating force constants, the
+    integration timestep, and the barostat ensemble (NVT ↔ NPT) as required.
+    A barostat is added on the first NPT stage encountered; ensemble switches
+    from NVT to NPT are detected by comparing ``npt_flag`` to the previous stage.
+
+    Parameters
+    ----------
+    simulation : openmm.app.Simulation
+        The active simulation.
+    system : openmm.System
+        The OpenMM system (modified in-place when a barostat is added).
+    integrator : openmm.Integrator
+        The integrator whose step size may be updated between stages.
+    components : list of str
+        Restrained component names, parallel to the ``forces`` lists in
+        *equil_scheme*.
+    equil_scheme : list of dict
+        Ordered equilibration stages, each deserializable as an
+        :class:`EquilibrationStep`.
+    temp : int
+        Target temperature in Kelvin (passed to the barostat if added).
+    is_membrane : bool
+        If True, use a membrane-appropriate semi-isotropic barostat.
+    """
 
     steps = [EquilibrationStep(**step) for step in equil_scheme]
 
@@ -162,6 +244,41 @@ def run_restrained_md(
 
 
 class Equilibration:
+    """Orchestrate the multi-stage equilibration/relaxation protocol before production MD.
+
+    Loads a JSON protocol describing minimization and equilibration stages,
+    applies progressively weakened positional restraints, warms the system from
+    a low temperature to the target, and saves the final equilibrated structure
+    and system XML.
+
+    Parameters
+    ----------
+    topology : openmm.app.Topology
+        OpenMM topology of the system to equilibrate.
+    system : openmm.System
+        OpenMM system (force field parameters, bonds, etc.).
+    out_dir : str
+        Directory where equilibration outputs are written.
+    restrained_minimization : bool
+        If True, run a staged restrained minimization (recommended); otherwise
+        run a single unconstrained minimization.
+    restrained_minimization_only : bool
+        If True, stop after minimization and return the minimized system without
+        running the warm-up or equilibration MD.
+    protocol_fname : str
+        Path to the JSON file specifying the minimization and equilibration stages.
+    save_freq : int
+        Reporter output interval in steps (default 6250 ≈ 0.025 ns at 4 fs).
+    is_membrane : bool
+        If True, use a semi-isotropic membrane barostat for NPT stages.
+    platform : str
+        OpenMM platform name (``"CUDA"``, ``"OpenCL"``, ``"CPU"``, or
+        ``"fastest"`` to auto-select).
+    verbose : int
+        Reporter verbosity: 0 = no CSV, 1 = CSV without energies,
+        2 = full thermodynamic CSV output.
+    """
+
     def __init__(
         self,
         topology: str = None,
@@ -170,7 +287,7 @@ class Equilibration:
         restrained_minimization: bool = True,
         restrained_minimization_only: bool = False,
         protocol_fname: str = "autopath/data/equilibration.json",
-        save_freq: int = 6250, # 12500 is 0.05ns at 4fs timestep
+        save_freq: int = 6250,  # 12500 is 0.05 ns at 4 fs timestep
         is_membrane: bool = False,
         platform: str = "fastest",
         verbose: int = 2,
@@ -184,7 +301,7 @@ class Equilibration:
 
         self.is_membrane = is_membrane
 
-        # some default value, its going to be updated by the protocol
+        # Default timestep; overridden by the first equilibration stage in the protocol
         self.timestep = 0.004 * openmmunit.picoseconds
         self.save_freq = save_freq
 
@@ -200,6 +317,29 @@ class Equilibration:
         return
 
     def from_json(self, fname: str = None) -> dict:
+        """Load and parse the equilibration protocol from a JSON file.
+
+        Populates all protocol-derived attributes on this instance
+        (``components_lookup``, ``minimization_scheme``, ``equilibration_scheme``,
+        ``warmup_scheme``, temperatures, step counts, and total simulation time).
+
+        Parameters
+        ----------
+        fname : str
+            Path to the JSON protocol file.
+
+        Returns
+        -------
+        dict
+            The full parsed protocol dictionary.
+
+        Raises
+        ------
+        FileNotFoundError
+            If *fname* does not exist.
+        json.JSONDecodeError
+            If *fname* is not valid JSON.
+        """
         try:
             logger.info(f"Loading equilibration protocol from {fname}.")
             with open(fname) as f:
@@ -236,6 +376,21 @@ class Equilibration:
         return protocol
 
     def to_json(self, fname: str = None) -> None:
+        """Write the current protocol (with run metadata) to a JSON file.
+
+        Adds ``datetime`` and ``time_elapsed`` keys to the protocol dict before
+        serialization so the output captures when and how long the run took.
+
+        Parameters
+        ----------
+        fname : str
+            Destination JSON file path.
+
+        Raises
+        ------
+        FileNotFoundError
+            If the directory containing *fname* does not exist.
+        """
         self.protocol['datetime'] = str(datetime.datetime.now())
         self.protocol['time_elapsed'] = f"{self.simulation_time:.2f} min"
 
@@ -249,15 +404,39 @@ class Equilibration:
 
         return
 
-    def run(self, pdb_file: str = None, run_id:str=None) -> None:
+    def run(self, pdb_file: str = None, run_id: str = None) -> openmm.System:
+        """Execute the full equilibration pipeline and return the final system.
 
+        Steps performed:
+
+        1. Build the simulation with a Langevin integrator.
+        2. Add harmonic positional restraints for each component in
+           ``components_lookup``.
+        3. Run restrained energy minimization (staged or single-pass).
+        4. Remove and re-add restraints anchored to the minimized geometry.
+        5. Warm up from ``T_initial`` to ``T_final`` in NVT.
+        6. Run the staged restrained equilibration (NVT → NPT).
+        7. Remove all restraint forces and save outputs.
+
+        Parameters
+        ----------
+        pdb_file : str
+            Path to the starting structure PDB file.
+        run_id : str
+            String identifier appended to output filenames (e.g. walker index).
+
+        Returns
+        -------
+        openmm.System
+            The equilibrated system with all restraint forces removed.
+        """
         start_time = time.monotonic()
 
         logger.debug("Setting up the integrator..")
-        # The native OpenMM integrator is faster bu cannot change splitting. 
-        # By default it is "V V R O R". If using this, remember to change the 
-        # splitting of any openmmtools integrator downstream.
-        # See this Github thread https://github.com/openmm/openmm/issues/2532
+        # The native OpenMM LangevinMiddleIntegrator is faster but does not
+        # expose the splitting string. By default it uses "V V R O R".
+        # If using openmmtools integrators downstream, set the splitting
+        # explicitly to match. See https://github.com/openmm/openmm/issues/2532
         integrator = LangevinMiddleIntegrator(self.temperature, 
                                         1 / openmmunit.picoseconds, 
                                         self.timestep)
@@ -293,9 +472,9 @@ class Equilibration:
                 initial_positions,
                 self.topology,
                 restrain_idxs,
-                restraint_force=15, # Some default value
+                restraint_force=15,  # default; overridden by minimization/equilibration stages
                 force_name=f"k_{name}",
-                force_group=num+15, #Offset by 15 to avoid overlap with other forces
+                force_group=num + 15,  # offset of 15 keeps each component in a distinct group; see customForces._FG_FUNNEL
             )
         
         simulation.context.reinitialize(preserveState=True)
@@ -324,8 +503,9 @@ class Equilibration:
         if self.restrained_minimization_only:
             return self.system 
 
-        # Re-add the restraints with updated positions.
-        # Because the forces exist this will update them, there's no need to remove them first (I think).
+        # Re-add restraints anchored to minimized positions so the warm-up and
+        # equilibration stages pull toward the post-minimization geometry rather
+        # than the original input coordinates. The old forces were removed above.
         for num, (name, selection) in enumerate(self.components_lookup.items()):
             restrain_idxs = u.select_atoms(selection).indices
             logger.info(f"Re-adding {len(restrain_idxs)} harmonic restraints to {name} after minimization.")
@@ -335,9 +515,9 @@ class Equilibration:
                 minimized_positions,
                 self.topology,
                 restrain_idxs,
-                restraint_force=15,  # some default value, will be updated during equilibration
+                restraint_force=15,  # default; overridden by equilibration stages
                 force_name=f"k_{name}",
-                force_group=num + 15,
+                force_group=num + 15,  # offset of 15 keeps each component in a distinct group; see customForces._FG_FUNNEL
             )
 
         simulation.context.reinitialize(preserveState=True)

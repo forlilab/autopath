@@ -54,9 +54,15 @@ def main():
 
     # Setup logging
     logger = setup_logging(f"{sys_name}/autopath.log", log_level="INFO")
-
+    
+    pocket_residues = [180, 181, 182, 183, 226, 227, 228, 229, 230, 204, 205, 206, 
+                       207, 208, 209, 210, 211, 212, 213, 214, 215, 196, 197, 198, 
+                       199, 200, 201, 133, 134, 135, 136, 137, 138, 139, 140, 156, 
+                       157, 158, 159, 160, 161, 162]
+    pocket_selection = f'resid {" ".join(map(str, pocket_residues))} and name CA'
+    
     ap = AutoPath(pdb_path=receptor,
-                    pocket_selection='(resid 145-153 183-190) and name CA',
+                    pocket_selection=pocket_selection,
 
                     do_fix_pdb=True,
                     run_preparation=True,
@@ -65,32 +71,33 @@ def main():
                     ionicStrength=0.15,
                     boxShape="dodecahedron",
 
-                    lig_ff='OPENFF',
+                    lig_ff='openff-2.3.0',
 
                     run_equilibration=True,
                     protocol_fname=protocol,
 
                     run_sMDpulling=True,
                     sMD_outdir='sMD',
-                    sMD_ligand_anchor_mode='lig_com',
+                    sMD_ligand_anchor_mode='murcko',
+                    sMD_converge_speeds=True,
                     sMD_max_replicas = 50,
                     sMD_pulling_speeds={
-                                        0.0050:None, # nm/ps equivalent to 5.0 m/s nm/ns
-                                        0.0010:None, # nm/ps equivalent to 1.0 m/s nm/ns
-                                        0.010:None, # nm/ps equivalent to 10.0 m/s nm/ns
+                                        0.010:10, # nm/ps equivalent to 10.0 m/s nm/ns
+                                        0.0050:10, # nm/ps equivalent to 5.0 m/s nm/ns
+                                        0.0010:10, # nm/ps equivalent to 1.0 m/s nm/ns
                                         },
 
-                    sMD_autostop_freq=250, #moves
-                    sMD_dx_per_move=0.001, # nm
-
                     sMD_run_analysis=True,
-                    sMD_clust_selection=None,
-                    
-                    extract_milestones=True,
-                    n_milestones=5,
 
+                    extract_milestones=True,
+                    n_milestones=3,
+                    
                     run_metadynamics=True,
-                    mMD_time=10,
+                    mMD_use_funnel_potential=True,
+                    mMD_preseed_bias=False,
+                    mMD_milestone_seeding=True,
+                    
+                    mMD_time=10, # ns
                     mMD_bias_frequency=2,
                     mMD_hill_width=0.05,
                     mMD_hill_height=1.2,
