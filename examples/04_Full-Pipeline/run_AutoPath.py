@@ -82,9 +82,9 @@ def main():
                     sMD_converge_speeds=True,
                     sMD_max_replicas = 50,
                     sMD_pulling_speeds={
-                                        0.010:10, # nm/ps equivalent to 10.0 m/s nm/ns
-                                        0.0050:10, # nm/ps equivalent to 5.0 m/s nm/ns
-                                        0.0010:10, # nm/ps equivalent to 1.0 m/s nm/ns
+                                        0.010: 25, # nm/ps equivalent to 10.0 m/s nm/ns
+                                        0.0050: 25, # nm/ps equivalent to 5.0 m/s nm/ns
+                                        0.0010: 25, # nm/ps equivalent to 1.0 m/s nm/ns
                                         },
 
                     sMD_run_analysis=True,
@@ -103,6 +103,7 @@ def main():
                     mMD_hill_height=1.2,
                     mMD_bias_factor=15
                 )
+    
     ap.run(ligand_file=ligand)
 
 if __name__ == "__main__":
