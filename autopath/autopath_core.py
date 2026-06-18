@@ -155,7 +155,7 @@ class AutoPath:
         VS_mode: bool = False,
         pdb_path: str = None,
         do_fix_pdb: bool = True,
-        pocket_selection: str = None,
+        pocket_selection: str | list = None,
         temperature: float = 300,
         random_state: int = 42,
         platform: str = 'fastest',  # or 'CUDA', 'OpenCL', 'CPU'
@@ -218,6 +218,7 @@ class AutoPath:
     ):
         # General
         self.pocket_selection = pocket_selection
+        self.original_pdb_path = pdb_path
         self.temperature = temperature
         self.random_state = random_state
         self.platform = platform
@@ -358,6 +359,29 @@ class AutoPath:
 
         system = load_system(f"{sys_name}/system.xml")
         topology = PDBFile(solvated_system_pdb).topology
+
+        if isinstance(self.pocket_selection, list):
+            mapping_path = f"{sys_name}/residue_mapping.json"
+            if self.run_preparation or not os.path.exists(mapping_path):
+                mapping = build_residue_mapping(self.original_pdb_path, solvated_system_pdb)
+                with open(mapping_path, "w") as _f:
+                    json.dump({str(k): v for k, v in mapping.items()}, _f, indent=2)
+                logger.info(f"Residue mapping written to {mapping_path}")
+            else:
+                with open(mapping_path) as _f:
+                    mapping = {int(k): v for k, v in json.load(_f).items()}
+                logger.info(f"Loaded existing residue mapping from {mapping_path}")
+
+            translated, missing = [], []
+            for r in self.pocket_selection:
+                (translated if r in mapping else missing).append(r)
+
+            if missing:
+                logger.warning(
+                    f"Pocket residues absent from original PDB (crystallographic gaps?): {missing}"
+                )
+            self.pocket_selection = f'resid {" ".join(map(str, [mapping[r] for r in translated]))} and name CA'
+            logger.info(f"pocket_selection (system numbering): {self.pocket_selection}")
 
         # prmtop_file = f"{sys_name}/system.pdb" 
         # try:

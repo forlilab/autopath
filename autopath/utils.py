@@ -524,6 +524,54 @@ def add_variants(modeller: Modeller, variants_dict: dict = None) -> Modeller:
 
     return modeller 
 
+def build_residue_mapping(original_pdb: str, system_pdb: str, chain: str = None) -> dict:
+    """Map original PDB residue IDs to system.pdb sequential IDs via CA sequence-position alignment.
+
+    Returns {orig_resid (int): system_resid (int)} for every protein CA in the original PDB.
+    Warns when counts differ (PDBFixer modelled in missing residues) or resnames disagree
+    (non-standard residue replacement).
+    """
+    import logging
+    _log = logging.getLogger('autopath.utils')
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        u_orig = mda.Universe(original_pdb)
+        u_sys  = mda.Universe(system_pdb)
+
+    if chain:
+        orig_sel = f'(segid {chain} or chainID {chain}) and name CA'
+    else:
+        orig_sel = 'protein and name CA'
+
+    orig_cas = u_orig.select_atoms(orig_sel)
+    sys_cas  = u_sys.select_atoms('protein and name CA')
+
+    if len(orig_cas) != len(sys_cas):
+        _log.warning(
+            f"CA count mismatch: original PDB has {len(orig_cas)} residues, "
+            f"system.pdb has {len(sys_cas)}. PDBFixer may have modelled in missing residues. "
+            "Mapping by sequence position up to the shorter chain — verify residue_mapping.json."
+        )
+
+    n = min(len(orig_cas), len(sys_cas))
+    mapping = {}
+    renamed = []
+    for i in range(n):
+        o, s = orig_cas[i], sys_cas[i]
+        if o.resname != s.resname:
+            renamed.append(f"{o.resname}{o.resid}→{s.resname}{s.resid}")
+        mapping[int(o.resid)] = int(s.resid)
+
+    if renamed:
+        _log.warning(
+            f"Residue name mismatches (non-standard→standard replacement?): "
+            + ", ".join(renamed)
+        )
+
+    return mapping
+
+
 def get_pocket_atoms_idxs(u: mda.Universe = None,
                           pocket_selection: str = None,
                           ligand_selection: str = None,

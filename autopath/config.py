@@ -88,10 +88,23 @@ class Config(object):
             Run PDB preprocessing (capping termini, adding missing atoms, setting
             pH 7.4 protonation states) before building the system.  Default
             ``True``.
-        pocket_selection : str, optional
-            MDAnalysis selection string that defines the binding-site atoms used
-            to compute COM distances and pocket features.  Default selects
-            non-hydrogen protein residues within 4 Å of resname UNK.
+        pocket_selection : str or list of int, optional
+            Defines the binding-site atoms used for COM distances and pocket
+            features.  Two forms are accepted:
+
+            * **list of int** — residue IDs in the *original PDB* numbering.
+              AutoPath builds ``{sys_name}/residue_mapping.json`` and translates
+              to ``system.pdb`` sequential IDs automatically::
+
+                pocket_selection=[133, 156, 189, 226]   # original PDB resids
+
+            * **str** — MDAnalysis selection applied directly to ``system.pdb``
+              (sequential numbering after PDB preprocessing)::
+
+                pocket_selection='resid 114 137 170 and name CA'
+
+            Default selects non-hydrogen protein residues within 4 Å of
+            resname UNK.
         temperature : float, optional
             Simulation temperature in Kelvin.  Default ``300``.
         random_state : int, optional
