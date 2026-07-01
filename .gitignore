@@ -12,6 +12,7 @@ examples/*/3ptb/*
 */__pycache__/
 *.py[cod]
 *$py.class
+./claude
 
 # C extensions
 *.so

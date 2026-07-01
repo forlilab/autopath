@@ -195,7 +195,109 @@ class SMDAnalysis:
         else:
             raise ValueError(f"path_model must be a string or PathModel instance, got: {type(path_model)}")
         return
-    
+
+    def _build_cluster_feature_df(self, smd, group_A=None, group_B=None,
+                                  features=None, merge_features=True, ligand_sdf=None):
+        """Build the clustering feature DataFrame for an ``SMDData``.
+
+        Shared by :meth:`run` and :meth:`check_convergence` so both cluster on the
+        same feature set. Supports three modes (mirroring ``run``):
+
+        * **trace-only** — no clustering selection (``group_A``/``group_B`` unset).
+        * **distance-only** — a clustering selection is given and ``merge_features``
+          is ``False``: cluster purely on the pocket-ligand ``dist_*`` features.
+        * **merged** — trace + pocket-distance + ligand-shape features combined.
+
+        Returns a DataFrame with the ``trajname/speed/step/time`` index columns plus
+        the selected feature columns, ready for ``DTWPathModel.fit_transform``.
+        """
+        # Resolve & validate the flat feature list.
+        if features is None:
+            features = list(DEFAULT_FEATURES)
+        unknown = set(features) - TRACE_FEATURE_POOL - LIGAND_FEATURE_POOL
+        if unknown:
+            raise ValueError(
+                f"Unsupported feature name(s): {sorted(unknown)}.\n"
+                f"  Trace pool:  {sorted(TRACE_FEATURE_POOL)}\n"
+                f"  Ligand pool: {sorted(LIGAND_FEATURE_POOL)}"
+            )
+        trace_feats  = [f for f in features if f in TRACE_FEATURE_POOL]
+        ligand_feats = [f for f in features if f in LIGAND_FEATURE_POOL]
+
+        if not trace_feats:
+            logger.warning(
+                "No trace features requested; clustering will rely on ligand "
+                "and/or pocket-distance features only."
+            )
+            # get_trace_features still emits the four index columns
+            # (trajname/speed/step/time) — needed for merge_feature_sets.
+            traces_feat_df = smd.get_trace_features(features=[])
+        else:
+            traces_feat_df = smd.get_trace_features(features=trace_feats)
+        logger.info(
+            f"Trace features: {trace_feats or '(none — index columns only)'}; "
+            f"DataFrame columns: {list(traces_feat_df.columns)}"
+        )
+
+        dist_feat_df = None
+        if group_A is not None and group_B is not None:
+            dist_feat_df = smd.calculate_pocket_distances(
+                group_A=group_A,
+                group_B=group_B,
+                recompute=True,
+            )
+
+        # Compute ligand trajectory features (RoG and/or RDKit 3D shape
+        # descriptors) once — used for clustering when requested.
+        ligand_feat_dfs = []
+        if ligand_feats:
+            ref_pdb = self.reference_pdb or smd.reference_pdb
+            if ref_pdb is None:
+                logger.warning(
+                    "Ligand features requested but no reference PDB is available; "
+                    "skipping ligand features for clustering."
+                )
+            else:
+                ligand_resname = self._ligand_resname_from_select(self.ligand_select)
+                lig_calc = LigandTrajectoryFeatures(
+                    lig_resname=ligand_resname,
+                    sdf_file=ligand_sdf,
+                    features=ligand_feats,
+                    stride=1,
+                )
+                lf = lig_calc.compute(smd.traj_files, ref_pdb)
+                if not lf.empty:
+                    ligand_feat_dfs.append(lf)
+
+        if dist_feat_df is not None and not merge_features:
+            # Distance-only clustering: when a clustering selection is provided
+            # but merge_features is False, cluster purely on the pocket–ligand
+            # distance features (PCA-reduced downstream in DTWPathModel). Trace
+            # and ligand/shape features are deliberately excluded so paths split
+            # on geometric exit route alone. dist_feat_df already carries the
+            # trajname/speed/step/time index columns required for clustering.
+            feat_df = dist_feat_df
+            _feat_cols = [c for c in feat_df.columns
+                          if c not in ('trajname', 'speed', 'step', 'time')]
+            logger.info(f'Clustering on distance features only: {len(_feat_cols)} dist_* columns')
+        else:
+            all_feat_dfs = [traces_feat_df]
+            if dist_feat_df is not None and merge_features:
+                all_feat_dfs.append(dist_feat_df)
+            for lf in ligand_feat_dfs:
+                all_feat_dfs.append(lf)
+
+            if len(all_feat_dfs) > 1:
+                feat_df = SMDData.merge_feature_sets(*all_feat_dfs)
+                _feat_cols = [c for c in feat_df.columns
+                              if c not in ('trajname', 'speed', 'step', 'time')]
+                logger.info(f'Clustering features: {_feat_cols}')
+            else:
+                feat_df = traces_feat_df
+                logger.info('Clustering will be performed using trace features only')
+
+        return feat_df, ligand_feat_dfs
+
     def run(self,
             sMDDdata: SMDData,
             r_range: tuple[float, float] | None = None,
@@ -231,75 +333,16 @@ class SMDAnalysis:
         if r_range is not None:
             sMDDdata.filter_by_r_range(r_range, sMDDdata.r_column)
 
-        # Resolve & validate the flat feature list.
-        if features is None:
-            features = list(DEFAULT_FEATURES)
-        unknown = set(features) - TRACE_FEATURE_POOL - LIGAND_FEATURE_POOL
-        if unknown:
-            raise ValueError(
-                f"Unsupported feature name(s): {sorted(unknown)}.\n"
-                f"  Trace pool:  {sorted(TRACE_FEATURE_POOL)}\n"
-                f"  Ligand pool: {sorted(LIGAND_FEATURE_POOL)}"
-            )
-        trace_feats  = [f for f in features if f in TRACE_FEATURE_POOL]
-        ligand_feats = [f for f in features if f in LIGAND_FEATURE_POOL]
-
-        if not trace_feats:
-            logger.warning(
-                "No trace features requested; clustering will rely on ligand "
-                "and/or pocket-distance features only."
-            )
-            # get_trace_features still emits the four index columns
-            # (trajname/speed/step/time) — needed for merge_feature_sets.
-            traces_feat_df = sMDDdata.get_trace_features(features=[])
-        else:
-            traces_feat_df = sMDDdata.get_trace_features(features=trace_feats)
-        logger.info(
-            f"Trace features: {trace_feats or '(none — index columns only)'}; "
-            f"DataFrame columns: {list(traces_feat_df.columns)}"
-        )
-
-        dist_feat_df = None
-        if group_A is not None and group_B is not None:
-            dist_feat_df = sMDDdata.calculate_pocket_distances(
-                group_A=group_A,
-                group_B=group_B,
-                recompute=True,
-            )
-
-        if dist_feat_df is not None and cluster_across_speeds:
+        if (group_A is not None and group_B is not None
+                and merge_features and cluster_across_speeds):
             logger.warning("Clustering using all speeds together on trace features. Those depend on speed, so this may lead to suboptimal clustering. Consider setting cluster_across_speeds=False or using only distance features for clustering.")
 
-        # Compute ligand trajectory features (RoG and/or RDKit 3D shape
-        # descriptors) once — used for both clustering and CSV output to
-        # avoid redundant trajectory reads.
-        ligand_feat_dfs = []
-        if ligand_feats:
-            ligand_resname = self._ligand_resname_from_select(self.ligand_select)
-            lig_calc = LigandTrajectoryFeatures(
-                lig_resname=ligand_resname,
-                sdf_file=ligand_sdf,
-                features=ligand_feats,
-                stride=1,
-            )
-            lf = lig_calc.compute(sMDDdata.traj_files, self.reference_pdb)
-            if not lf.empty:
-                ligand_feat_dfs.append(lf)
-
-        all_feat_dfs = [traces_feat_df]
-        if dist_feat_df is not None and merge_features:
-            all_feat_dfs.append(dist_feat_df)
-        for lf in ligand_feat_dfs:
-            all_feat_dfs.append(lf)
-
-        if len(all_feat_dfs) > 1:
-            feat_df = SMDData.merge_feature_sets(*all_feat_dfs)
-            _feat_cols = [c for c in feat_df.columns
-                          if c not in ('trajname', 'speed', 'step', 'time')]
-            logger.info(f'Clustering features: {_feat_cols}')
-        else:
-            feat_df = traces_feat_df
-            logger.info('Clustering will be performed using trace features only')
+        # Build the clustering feature DataFrame (trace-only / distance-only /
+        # merged) — shared with check_convergence so both cluster identically.
+        feat_df, ligand_feat_dfs = self._build_cluster_feature_df(
+            sMDDdata, group_A=group_A, group_B=group_B,
+            features=features, merge_features=merge_features, ligand_sdf=ligand_sdf,
+        )
 
         trajectory_files = {}
         for traj in sMDDdata.traj_files:
@@ -340,13 +383,25 @@ class SMDAnalysis:
                 "Consider running more SMD replicas or using slower pulling speeds."
             )
 
+        # Determine which estimators still have results after path filtering.
+        # Path filtering may drop cumulant rows (e.g. frac_neg_dG_first_half filter)
+        # while leaving jarzynski intact — continue with whatever survives.
+        results_estimators = set(sMDDdata.results['estimator'].dropna().unique())
+        active_estimators = [e for e in self.estimators if e.name in results_estimators]
+        if len(active_estimators) < len(self.estimators):
+            dropped = [e.name for e in self.estimators if e.name not in results_estimators]
+            logger.warning(
+                f"Estimator(s) {dropped} have no results after path filtering — "
+                f"continuing with {[e.name for e in active_estimators]} only."
+            )
+
         # Compute p_eq per estimator explicitly.
         # Paths with negative dG values trigger a warning; those bins are
         # excluded from the integrand (contribute 0 to Z), which smoothly
         # downweights artifact-heavy paths in the mixture.
         weights_by_estimator = {
             est.name: self.compute_p_eq(sMDDdata, estimator=est.name)
-            for est in self.estimators
+            for est in active_estimators
         }
 
         self._write_path_quality(sMDDdata, weights_by_estimator)
@@ -392,7 +447,7 @@ class SMDAnalysis:
 
         friction_deriv_results = []
         friction_regress_results = []
-        for estimator in self.estimators:
+        for estimator in active_estimators:
             f_deriv = friction_est.gamma_from_wdiss_derivative(df, estimator=estimator.name)
             f_regress = friction_est.gamma_from_wdiss_regression(df, estimator=estimator.name)
             friction_deriv_results.append(f_deriv)
@@ -449,6 +504,7 @@ class SMDAnalysis:
                         reference_pdb=self.reference_pdb,
                         ligand_select=self.ligand_select,
                         outdir=os.path.join(self.path_model.outdir, "path_analysis"),
+                        color_by_friction=True,
                         friction_csv=friction_csv_path,
                         pocket_select=group_B if group_B is not None else self.pocket_select,
                     )
@@ -457,7 +513,7 @@ class SMDAnalysis:
                 logger.warning(f"Could not regenerate friction-coloured PSE: {_exc}")
 
         if self.do_plots:
-            for estimator in self.estimators:
+            for estimator in active_estimators:
                 plot_work_profiles(sMDDdata.results, estimator=estimator.name, outdir=self.outdir)
             for vcol in ['Wdiss', 'dG']:
                 plot_profile(
@@ -506,6 +562,9 @@ class SMDAnalysis:
         estimator_name: str = 'cumulant',
         group_A: str = None,
         group_B: str = None,
+        features: list | None = None,   # clustering feature list (mirrors run())
+        merge_features: bool = False,   # merge trace + pocket-distance + ligand feats
+        ligand_sdf: str | None = None,  # needed only if ligand-shape features requested
         min_replicas: int = 5,
         trace_min_replicas: int = 3,  # start building PMF traces before convergence checking begins
         tol_rmsd: float = 4.0,     # kJ/mol
@@ -576,11 +635,14 @@ class SMDAnalysis:
                 reference_pdb=self.reference_pdb,
             )
 
-            if group_A is not None and group_B is not None:
-                feat_df = smd.calculate_pocket_distances(group_A=group_A, group_B=group_B)
-            else:
-                feat_df = smd.get_trace_features(features=['work', 'lag', 'r_before'])
-                
+            # Build clustering features the same way run() does (trace-only /
+            # distance-only / merged), so convergence clustering matches the
+            # main analysis for every classification.
+            feat_df, _ = self._build_cluster_feature_df(
+                smd, group_A=group_A, group_B=group_B,
+                features=features, merge_features=merge_features, ligand_sdf=ligand_sdf,
+            )
+
             clusterer = DTWPathModel(
                 seed=self.seed,
                 do_plots=False,

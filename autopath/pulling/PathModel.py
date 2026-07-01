@@ -209,6 +209,10 @@ class DTWPathModel(PathModel):
             ]
 
             # Equalize geom vs trace feature contribution (see fit_transform Notes).
+            # PCA is applied whenever geometric (distance) features are present and
+            # n_geom_pcs is set — both in merged mode (geom + trace) and in
+            # distance-only mode (geom only, other_idx empty). An empty other_idx
+            # makes arr[:, other_idx] shape (n, 0), which np.hstack absorbs cleanly.
             geom_idx = [
                 i for i, c in enumerate(feature_cols)
                 if c.startswith(self.geom_feature_prefix)
@@ -217,7 +221,7 @@ class DTWPathModel(PathModel):
                 i for i, c in enumerate(feature_cols)
                 if not c.startswith(self.geom_feature_prefix)
             ]
-            if geom_idx and other_idx and self.n_geom_pcs is not None:
+            if geom_idx and self.n_geom_pcs is not None:
                 n_components = min(self.n_geom_pcs, len(geom_idx))
                 logger.info(
                     f"Applying PCA to {len(geom_idx)} geometric features "
@@ -309,7 +313,7 @@ class DTWPathModel(PathModel):
 
                 # Build plot-space feature names — geom features are PCA-reduced
                 # so their names become geom_PC1, geom_PC2, …
-                if geom_idx and other_idx and self.n_geom_pcs is not None:
+                if geom_idx and self.n_geom_pcs is not None:
                     n_pcs = min(self.n_geom_pcs, len(geom_idx))
                     plot_feature_names = (
                         [f"geom_PC{k+1}" for k in range(n_pcs)]
@@ -326,7 +330,7 @@ class DTWPathModel(PathModel):
                         for name in trajnames
                     ]
                     vectors_plot = [scaler.transform(arr) for arr in vectors_full]
-                    if geom_idx and other_idx and self.n_geom_pcs is not None:
+                    if geom_idx and self.n_geom_pcs is not None:
                         vectors_plot = [
                             np.hstack([
                                 pca_geom.transform(arr[:, geom_idx]),

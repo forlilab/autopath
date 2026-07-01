@@ -672,7 +672,7 @@ class AutoPath:
                                     min_support_ratio=1.0,
                                     min_replicas_per_path=self.sMD_min_replicas_per_path,
                                     min_path_steps_ratio=0.6,
-                                    max_frac_neg_dG_first_half=0.1,
+                                    max_frac_neg_dG_first_half=0.25,
                                     min_speeds_for_extrapolation=2,
                                     )
 
@@ -689,10 +689,14 @@ class AutoPath:
             # Store for downstream milestone extraction
             self._smdanalysis = smdanalysis
 
-            # check convergence regardless of speed and autopstop
+            # check convergence regardless of speed and autopstop.
+            # Cluster with the same feature config as the main analysis run() above
             conv_df, traces_df = smdanalysis.check_convergence(logs=logs,
                 group_A=_lig_sel_ha,
-                group_B=self.sMD_clust_selection
+                group_B=self.sMD_clust_selection,
+                features=self.sMD_features,
+                merge_features=MERGE_CLUSTERING_FEATURES,
+                ligand_sdf=ligand_file,
             )
             conv_df.to_csv(f"{sMD_analysis_outdir}/sMD_conv_vALL_metrics.csv", index=False)
             traces_df.to_csv(f"{sMD_analysis_outdir}/sMD_conv_vALL_traces.csv", index=False)
