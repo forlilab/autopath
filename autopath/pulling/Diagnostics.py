@@ -787,6 +787,7 @@ def make_unbinding_paths_visualization(
     pocket_select: str = None,
     n_lig_conformations: int = 20,
     output_format: str = "pse",
+    color_by_friction: bool = False,
     friction_csv: str = None,
     friction_estimator: str = "cumulant",
     friction_center_select: str | None = None,
@@ -799,10 +800,15 @@ def make_unbinding_paths_visualization(
             ``"pml"`` writes a script + auxiliary .dx files next to it.
             PSE is self-contained (all data embedded); PML references
             auxiliary ``.dx`` files that must stay alongside the script.
+        color_by_friction: When ``True`` (and *friction_csv* is provided), the
+            isosurfaces are coloured by local friction Γ(r) as a blue (low) →
+            white → red (high) gradient.  Default ``False``: each path is
+            instead coloured with a distinct colour from the ``fivethirtyeight``
+            palette (the same cycle used by :func:`plot_work_profiles`), applied
+            to both the density isosurface and the ligand sticks.
         friction_csv: Path to ``friction.csv`` produced by
             :class:`~autopath.pulling.Estimators.FrictionEstimator`.
-            When provided, the isosurfaces are coloured by local friction
-            Γ(r) as a blue (low) → white → red (high) gradient.
+            Only used when *color_by_friction* is ``True``.
         friction_estimator: Which estimator row to use from *friction_csv*
             (``"cumulant"`` or ``"jarzynski"``).  Default ``"cumulant"``.
         friction_center_select: MDAnalysis selection for the CV reference
@@ -854,7 +860,7 @@ def make_unbinding_paths_visualization(
     friction_profiles: dict = {}
     friction_center_nm: Optional[np.ndarray] = None
 
-    if friction_csv is not None:
+    if color_by_friction and friction_csv is not None:
         try:
             fdf_all = pd.read_csv(friction_csv)
             fdf_deriv = fdf_all[
@@ -921,8 +927,17 @@ def make_unbinding_paths_visualization(
                 f"each path coloured by its own pulling speed."
             )
 
-    default_palette = ["violetpurple", "marine", "forest", "deepsalmon", "gold", "tv_red", "tv_blue"]
-    path_colors = {name: default_palette[i % len(default_palette)] for i, name in enumerate(paths)}
+    # Colour each path with the fivethirtyeight palette — the same colour cycle
+    # used by plot_work_profiles — so path identity is consistent across figures.
+    # Colours are stored as RGB (0–1) and registered as custom PyMOL colours
+    # (indexed names sidestep path-name characters PyMOL dislikes).
+    with plt.style.context(_STYLE):
+        _palette_hex = [c['color'] for c in plt.rcParams['axes.prop_cycle']]
+    path_colors = {name: f"ap_path_{i}" for i, name in enumerate(paths)}
+    path_color_rgb = {
+        f"ap_path_{i}": list(mcolors.to_rgb(_palette_hex[i % len(_palette_hex)]))
+        for i, name in enumerate(paths)
+    }
 
     # ------------------------------------------------------------------ #
     # Shared: compute density maps and extract ligand conformations        #
@@ -1055,6 +1070,10 @@ def make_unbinding_paths_visualization(
                 cmd.set("ray_opaque_background", 0)
                 cmd.set("cartoon_transparency", cartoon_transparency)
 
+                # Register per-path palette colours (fivethirtyeight, RGB 0–1)
+                for col_name, rgb in path_color_rgb.items():
+                    cmd.set_color(col_name, rgb)
+
                 cmd.load(protein_abs, "prot")
                 cmd.hide("everything", "prot")
                 cmd.show("cartoon", "prot")
@@ -1152,6 +1171,10 @@ def make_unbinding_paths_visualization(
             pml.write("set specular, 0.2\n")
             pml.write("set ray_shadow, off\n")
             pml.write(f"set cartoon_transparency, {cartoon_transparency:.2f}\n")
+            # Register per-path palette colours (fivethirtyeight, RGB 0–1)
+            for col_name, rgb in path_color_rgb.items():
+                pml.write(f"set_color {col_name}, [{rgb[0]:.4f}, {rgb[1]:.4f}, {rgb[2]:.4f}]\n")
+
             pml.write(f"load {os.path.basename(str(prot_copy))}, prot\n")
             pml.write("hide everything, prot\n")
             pml.write("show cartoon, prot\n")
