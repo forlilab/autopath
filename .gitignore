@@ -140,4 +140,4 @@ dmypy.json
 
 #VSCode
 .vscode
-.claude/settings.json
+.claude/
