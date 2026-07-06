@@ -464,6 +464,9 @@ class SMDAnalysis:
                 mixture_pmfs=self.mixture_pmfs,
                 friction_df=friction_df,
                 dG_extrapolated=_dG_v0,
+                force_df=sMDDdata.raw_data,          # restraint force for boundary detection
+                boundary_method="force_plateau",     # kinetics-motivated abs_r (HSP90-validated)
+                plateau_frac=0.3,
             )
             if not _koff_df.empty:
                 _koff_df.to_csv(os.path.join(self.outdir, 'koff_kramers.csv'), index=False)
