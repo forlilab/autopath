@@ -648,6 +648,74 @@ class KramersEstimator:
         return r_ts
 
     @staticmethod
+    def force_plateau_boundary(
+        force_df: pd.DataFrame,
+        speed: float,
+        start_r: float,
+        r_max: float,
+        frac: float = 0.3,
+    ) -> float | None:
+        """Absorbing boundary from the pulling restraint force (kinetics-motivated).
+
+        The mean |force| along the reaction coordinate peaks at the rupture and
+        decays as the ligand leaves the pocket. The boundary is placed where the
+        (speed-matched) mean |force| has decayed to *frac* of its peak past that
+        peak. Estimator-independent (raw pulling data), so it avoids the failure
+        mode of :meth:`detect_ts` where a noisy/monotonic reconstructed PMF has no
+        clean interior barrier (jarzynski) or a spurious far peak (cumulant at
+        higher speed). Returns ``None`` when it cannot be located, in which case
+        the caller should fall back to :meth:`detect_ts`.
+
+        Validated on the HSP90 kinetics set (koff↔pKoff): with ``frac=0.3`` it
+        rescues the cumulant boundary failures and matches jarzynski. NOTE: this is
+        a *kinetic* boundary for the Kramers MFPT — it is not a thermodynamic
+        affinity readout (use max/end dG for that).
+
+        Parameters
+        ----------
+        force_df : DataFrame
+            Per-frame processed sMD data (``sMD_processed_data``) with columns
+            ``r_coord``, ``force`` and ``speed``.
+        speed : float
+            Pulling speed (nm/ps) of the profile. ``0.0`` (v→0 extrapolation) uses
+            the slowest available speed's force.
+        start_r, r_max : float
+            Reaction-coordinate bounds of the PMF profile (nm).
+        frac : float
+            Decay fraction of the peak mean |force| defining the boundary.
+        """
+        if force_df is None or not {"r_coord", "force", "speed"}.issubset(force_df.columns):
+            return None
+        speeds = sorted(force_df["speed"].dropna().unique())
+        if not speeds:
+            return None
+        use = speed if (speed > 0 and speed in speeds) else speeds[0]
+        d = force_df[force_df["speed"] == use].dropna(subset=["r_coord", "force"])
+        if len(d) < 100:
+            return None
+        disp = d["r_coord"].to_numpy(dtype=np.float64) - float(d["r_coord"].min())
+        F = np.abs(d["force"].to_numpy(dtype=np.float64))
+        hi = float(np.quantile(disp, 0.98))
+        if hi <= 0:
+            return None
+        bins = np.linspace(0.0, hi, 60)
+        bc = 0.5 * (bins[:-1] + bins[1:])
+        idx = np.clip(np.digitize(disp, bins) - 1, 0, len(bc) - 1)
+        mF = np.array([F[idx == i].mean() if (idx == i).any() else np.nan
+                       for i in range(len(bc))])
+        ok = ~np.isnan(mF)
+        if ok.sum() < 5:
+            return None
+        mF = np.interp(np.arange(len(bc)), np.where(ok)[0], mF[ok])
+        mF = pd.Series(mF).rolling(5, center=True, min_periods=1).mean().to_numpy()
+        pk = int(np.argmax(mF))
+        after = np.where(mF[pk:] < frac * mF[pk])[0]
+        if len(after) == 0:
+            return None
+        abs_r = start_r + float(bc[pk + after[0]])
+        return float(min(abs_r, r_max - 1e-6))
+
+    @staticmethod
     def kramers_mfpt(
         profile_df: pd.DataFrame,
         start_r: float,
@@ -847,6 +915,9 @@ class KramersEstimator:
         prefer_v0: bool = True,
         speed_override: float | None = None,
         all_speeds: bool = True,
+        force_df: pd.DataFrame | None = None,
+        boundary_method: str = "pmf_peak",
+        plateau_frac: float = 0.3,
     ) -> pd.DataFrame:
         """Run Kramers MFPT for every dG estimator present in *mixture_pmfs*.
 
@@ -867,9 +938,21 @@ class KramersEstimator:
             Reflecting-wall position (nm).  ``None`` → ``r_coord.min()`` of each
             profile.
         abs_r : float or None
-            Absorbing-boundary position (nm).  ``None`` → auto-detect the PMF
-            barrier peak via :meth:`detect_ts`; falls back to ``r_coord.max()``
-            if no peak is found.
+            Absorbing-boundary position (nm).  ``None`` → auto-detect via
+            *boundary_method*.
+        force_df : DataFrame or None
+            Per-frame processed sMD data (``sMD_processed_data``) with ``r_coord``,
+            ``force``, ``speed``.  Required for ``boundary_method="force_plateau"``.
+        boundary_method : str
+            How to place ``abs_r`` when it is not given explicitly:
+            ``"pmf_peak"`` (default) → :meth:`detect_ts` (highest-prominence PMF
+            peak, falling back to ``r_coord.max()``);
+            ``"force_plateau"`` → :meth:`force_plateau_boundary` (restraint-force
+            decay; falls back to ``detect_ts`` if the force profile is unusable).
+            Force-plateau (``plateau_frac=0.3``) is validated on HSP90 kinetics to
+            rescue cumulant boundary failures; it is a *kinetic* boundary only.
+        plateau_frac : float
+            Decay fraction for ``boundary_method="force_plateau"`` (default 0.3).
         reflect_r : float or None
             Explicit reflecting boundary (nm); ``None`` → same as *start_r*.
         prefer_v0 : bool
@@ -918,6 +1001,25 @@ class KramersEstimator:
 
                 if abs_r is not None:
                     _abs_r = abs_r
+                elif boundary_method == "force_plateau" and force_df is not None:
+                    _abs_r = self.force_plateau_boundary(
+                        force_df, speed, _start_r, float(r_arr.max()), plateau_frac
+                    )
+                    if _abs_r is not None:
+                        logger.info(
+                            f"[Kramers] Force-plateau boundary abs_r={_abs_r:.4f} nm "
+                            f"(estimator={est_name}, speed={speed}, frac={plateau_frac})."
+                        )
+                    else:
+                        # force profile unusable → fall back to PMF peak / r_coord.max()
+                        r_ts = self.detect_ts(r_arr, dG_arr, self.kBT)
+                        _abs_r = r_ts if r_ts is not None else float(r_arr.max())
+                        logger.info(
+                            f"[Kramers] Force-plateau unavailable (estimator={est_name}, "
+                            f"speed={speed}); fell back to "
+                            f"{'PMF peak' if r_ts is not None else 'r_coord.max()'} "
+                            f"abs_r={_abs_r:.4f} nm."
+                        )
                 else:
                     r_ts = self.detect_ts(r_arr, dG_arr, self.kBT)
                     if r_ts is not None:

@@ -464,6 +464,9 @@ class SMDAnalysis:
                 mixture_pmfs=self.mixture_pmfs,
                 friction_df=friction_df,
                 dG_extrapolated=_dG_v0,
+                force_df=sMDDdata.raw_data,          # restraint force for boundary detection
+                boundary_method="force_plateau",     # kinetics-motivated abs_r (HSP90-validated)
+                plateau_frac=0.3,
             )
             if not _koff_df.empty:
                 _koff_df.to_csv(os.path.join(self.outdir, 'koff_kramers.csv'), index=False)
@@ -572,6 +575,8 @@ class SMDAnalysis:
         tol_r_ts: float = 0.1,     # nm — 1 Å change in TS position
         trim_fraction: float = 0.1,      # drop steps where fewer than (1-trim_fraction) of replicas contributed; 0=no trimming
         min_common_points: int = 5,
+        boundary_method: str = "force_plateau",  # TS/barrier detector: "force_plateau" (restraint-force, default) or "pmf_peak"
+        plateau_frac: float = 0.3,
     ):
         """Check PMF convergence as replica count grows, per pulling speed.
 
@@ -735,17 +740,30 @@ class SMDAnalysis:
                         "value": val,
                     })
 
+                # Running per-k restraint-force profile (first k replicas) for the
+                # force-plateau TS detector; None when using the PMF-peak method.
+                force_k = (speed_data[speed_data['trajname'].isin(traj_order[:k])]
+                           if boundary_method == "force_plateau" else None)
+
                 # Stage 3: first PMF in the trace window — initialize prev state, no comparison yet
                 if prev_pmf is None:
                     prev_pmf = pmf_k
-                    prev_barrier_height, prev_r_ts = self._compute_barrier_rts(pmf_k, 1.0/smd.beta, protocol_grid)
+                    prev_barrier_height, prev_r_ts = self._compute_barrier_rts(
+                        pmf_k, 1.0/smd.beta, protocol_grid,
+                        force_df=force_k, speed=speed,
+                        boundary_method=boundary_method, plateau_frac=plateau_frac,
+                    )
                     continue
 
                 # === convergence comparison (all k > trace_min_replicas) ===
                 # Metrics are computed from here regardless of min_replicas, so plots
                 # show early trends even when convergence is declared just after the floor.
 
-                barrier_height, r_ts = self._compute_barrier_rts(pmf_k, 1.0/smd.beta, protocol_grid)
+                barrier_height, r_ts = self._compute_barrier_rts(
+                    pmf_k, 1.0/smd.beta, protocol_grid,
+                    force_df=force_k, speed=speed,
+                    boundary_method=boundary_method, plateau_frac=plateau_frac,
+                )
 
                 # compare PMF(k) vs PMF(k-1)
                 common_r = pmf_k.index.intersection(prev_pmf.index)
@@ -912,15 +930,35 @@ class SMDAnalysis:
         pmf_k: pd.Series,
         kBT: float,
         protocol_grid: pd.Series,
+        force_df: pd.DataFrame | None = None,
+        speed: float | None = None,
+        boundary_method: str = "pmf_peak",
+        plateau_frac: float = 0.3,
     ):
-        """Return (barrier_height_kJ, r_ts_nm) from smoothed PMF peak detection.
+        """Return (barrier_height_kJ, r_ts_nm) for the TS/barrier of PMF(k).
 
-        Delegates to ``_find_pmf_peak`` (shared with ``KramersEstimator.detect_ts``).
-        Returns (np.nan, np.nan) if no peak found (PMF still rising / no barrier).
+        ``boundary_method``:
+        - ``"pmf_peak"`` (default): highest-prominence PMF peak via
+          ``_find_pmf_peak`` (shared with ``KramersEstimator.detect_ts``); falls
+          back to the position/height of ``max(dG)`` when no peak is found.
+        - ``"force_plateau"``: transition state from the restraint-force decay via
+          ``KramersEstimator.force_plateau_boundary`` (estimator-independent, from
+          the running per-k force in *force_df*); ``barrier_height`` is then
+          ``dG(r_ts) − dG(start)``. Falls back to ``"pmf_peak"`` when the force
+          profile is unusable. This keeps the convergence TS consistent with the
+          Kramers k_off absorbing boundary.
         """
         steps = pmf_k.index.to_numpy()
         r = np.array([float(protocol_grid.loc[s]) for s in steps], dtype=float)
         dG = pmf_k.values.astype(float)
+        if boundary_method == "force_plateau" and force_df is not None and len(r) >= 2:
+            r_ts = KramersEstimator.force_plateau_boundary(
+                force_df, speed if speed is not None else 0.0,
+                float(r.min()), float(r.max()), plateau_frac,
+            )
+            if r_ts is not None:
+                return float(np.interp(r_ts, r, dG) - dG[0]), float(r_ts)
+            # force profile unusable → fall through to PMF-peak detection
         r_ts, barrier = _find_pmf_peak(r, dG, kBT)
         if r_ts is None:
             # No prominent peak — fall back to the position and height of max(dG),
