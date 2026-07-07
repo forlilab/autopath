@@ -32,6 +32,7 @@ from autopath.pulling.LigandFeatures import (
     LigandTrajectoryFeatures,
     SUPPORTED_FEATURES as LIGAND_FEATURE_POOL,
 )
+from autopath.pulling.support import SupportPolicy
 
 logger = logging.getLogger("autopath.pulling")
 
@@ -577,6 +578,8 @@ class SMDAnalysis:
         min_common_points: int = 5,
         boundary_method: str = "force_plateau",  # TS/barrier detector: "force_plateau" (restraint-force, default) or "pmf_peak"
         plateau_frac: float = 0.3,
+        min_samples_per_step_conv: int = 3,
+        min_trajs_per_path_conv: int = 2,
     ):
         """Check PMF convergence as replica count grows, per pulling speed.
 
@@ -603,6 +606,11 @@ class SMDAnalysis:
 
         main_quantity = quantities[0]
         value_col = main_quantity[:-9] if main_quantity.endswith('_weighted') else main_quantity
+
+        conv_policy = SupportPolicy(
+            min_samples_per_step=min_samples_per_step_conv,
+            min_trajs_per_path=min_trajs_per_path_conv,
+        )
 
         allowed_estimators = {
             'jarzynski',
@@ -713,6 +721,7 @@ class SMDAnalysis:
                     protocol_grid=protocol_grid,
                     estimator_name=estimator_name,
                     beta=smd.beta,
+                    policy=conv_policy,
                 )
 
                 pmf_k = self._weighted_series_from_results(
@@ -721,6 +730,7 @@ class SMDAnalysis:
                     value_col=value_col,
                     beta=smd.beta,
                     trim_fraction=trim_fraction,
+                    policy=conv_policy,
                 )
 
                 # Empty PMF at this k: skip without touching prev_* — overwriting
@@ -888,6 +898,7 @@ class SMDAnalysis:
         protocol_grid: pd.Series,
         estimator_name: str,
         beta: float,
+        policy: "SupportPolicy | None" = None,
     ) -> pd.DataFrame:
         estimator_cls = ESTIMATOR_REGISTRY.get(estimator_name)
         if estimator_cls is None:
@@ -901,6 +912,8 @@ class SMDAnalysis:
         for (step, path), stats in running_stats.items():
             n = stats['n']
             if n <= 0:
+                continue
+            if policy is not None and not policy.estimable_step(n):
                 continue
 
             raw_W = np.asarray(running_samples.get((step, path), []), dtype=float)
@@ -976,9 +989,15 @@ class SMDAnalysis:
         value_col: str,
         beta: float,
         trim_fraction: float = 0.0,
+        policy: "SupportPolicy | None" = None,
     ) -> pd.Series:
         if results_df.empty or value_col not in results_df.columns:
             return pd.Series(dtype=float)
+
+        if policy is not None:
+            results_df, path_traj_counts = policy.apply(results_df, path_traj_counts)
+            if results_df.empty or not path_traj_counts:
+                return pd.Series(dtype=float)
 
         p_neq = SMDData._compute_p_neq(path_traj_counts)
         if not p_neq:
@@ -994,8 +1013,11 @@ class SMDAnalysis:
         # chop the extent of all other paths — use only multi-traj paths to
         # determine the common step ceiling.
         path_last = results_df.groupby('path')['step'].max()
-        multi_paths = {p for p, c in path_traj_counts.items() if c >= 2}
-        extent_series = path_last[path_last.index.isin(multi_paths)] if multi_paths else path_last
+        if policy is not None:
+            usable = set(path_traj_counts)   # already gated to usable paths
+        else:
+            usable = {p for p, c in path_traj_counts.items() if c >= 2}
+        extent_series = path_last[path_last.index.isin(usable)] if usable else path_last
         max_common_step = extent_series.min() if not extent_series.empty else path_last.min()
         grid_steps = sorted(results_df.loc[results_df['step'] <= max_common_step, 'step'].unique())
 
