@@ -137,6 +137,10 @@ class SMDAnalysis:
         self.max_frac_neg_dG_first_half = max_frac_neg_dG_first_half
         self.min_speeds_for_extrapolation = min_speeds_for_extrapolation
         self.replica_imbalance_threshold = replica_imbalance_threshold
+        self.support_policy = SupportPolicy(
+            min_samples_per_step=self.min_samples_per_step,
+            min_trajs_per_path=self.min_replicas_per_path,
+        )
         os.makedirs(outdir, exist_ok=True)
         os.makedirs(os.path.join(outdir, "path_analysis"), exist_ok=True)
     
@@ -364,7 +368,7 @@ class SMDAnalysis:
         if self.filter_low_support:
             sMDDdata.raw_data = trim_results_by_n_samples_support(
                 sMDDdata.raw_data,
-                min_samples=self.min_samples_per_step,
+                min_samples=self.support_policy.min_samples_per_step,
                 min_support_ratio=self.min_support_ratio,
             )
 
@@ -1171,7 +1175,7 @@ class SMDAnalysis:
         keys_to_drop: list[tuple[float, str]] = []
         for (speed, path), group in sMDDdata.results.groupby(['speed', 'path']):
             n_replicas = int(group['n_samples'].median())
-            if n_replicas < self.min_replicas_per_path:
+            if not self.support_policy.usable_path(n_replicas):
                 logger.warning(
                     f"Excluding path '{path}' at speed={speed} nm/ps: "
                     f"only {n_replicas} replicas < {self.min_replicas_per_path}"

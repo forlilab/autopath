@@ -71,6 +71,14 @@ class TestSupportPolicy(unittest.TestCase):
             gdf.reset_index(drop=True), full.reset_index(drop=True)
         )
 
+    def test_analysis_builds_support_policy_from_attrs(self):
+        from autopath.pulling.AnalysisSMD import SMDAnalysis
+        ana = SMDAnalysis(sysname="t", min_samples_per_step=5,
+                          min_replicas_per_path=5, do_plots=False,
+                          outdir="/tmp/sp_attr_test")
+        self.assertEqual(ana.support_policy.min_samples_per_step, 5)
+        self.assertEqual(ana.support_policy.min_trajs_per_path, 5)
+
 
 if __name__ == "__main__":
     unittest.main()
