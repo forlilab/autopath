@@ -99,6 +99,8 @@ logs = sorted(glob.glob(os.path.join(TMP, "logs", "*.dat")))
 ref_pdb = os.path.join(TMP, "reference.pdb")
 ligand_select = "(resname UNK) and not name H*"
 
+# Customize for your system: adjust ligand_select (resname) and pocket_select
+# (residue numbers) to match your system's numbering in the reference PDB.
 smd_data = SMDData(logs, "2YKJ_YKJ", temperature=300.0, reference_pdb=ref_pdb)
 
 analysis = SMDAnalysis(

@@ -24,6 +24,15 @@ class SupportPolicy:
         estimable (variance needs >= this many samples).
     min_trajs_per_path : int
         Minimum number of trajectories for a path to enter the mixture.
+
+    Notes
+    -----
+    The production ``run()`` pipeline sources THRESHOLDS from this policy
+    (via ``min_samples_per_step`` / ``min_trajs_per_path`` / ``usable_path``),
+    but NOT the ``apply()`` gate itself — ``run()`` keeps its own
+    ``trim_results_by_n_samples_support`` + ``_path_filtering`` to preserve
+    the verified no-op behavior. Routing ``run()`` through ``apply()`` would
+    risk changing production output.
     """
 
     min_samples_per_step: int
@@ -56,7 +65,7 @@ class SupportPolicy:
         }
         if results_df is None or results_df.empty:
             return (
-                results_df if results_df is not None else pd.DataFrame(),
+                results_df.copy() if results_df is not None else pd.DataFrame(),
                 gated_counts,
             )
         mask = (

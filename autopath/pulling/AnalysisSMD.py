@@ -999,6 +999,10 @@ class SMDAnalysis:
             return pd.Series(dtype=float)
 
         if policy is not None:
+            # Belt-and-suspenders: _results_from_running_stats skips below-threshold
+            # steps (estimable_step); this apply() gate re-enforces the same floor
+            # on n_samples + path counts. Both gates are intentional — this apply()
+            # is authoritative for weighting computation downstream.
             results_df, path_traj_counts = policy.apply(results_df, path_traj_counts)
             if results_df.empty or not path_traj_counts:
                 return pd.Series(dtype=float)
