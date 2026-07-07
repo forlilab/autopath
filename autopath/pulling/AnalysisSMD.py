@@ -32,6 +32,7 @@ from autopath.pulling.LigandFeatures import (
     LigandTrajectoryFeatures,
     SUPPORTED_FEATURES as LIGAND_FEATURE_POOL,
 )
+from autopath.pulling.support import SupportPolicy
 
 logger = logging.getLogger("autopath.pulling")
 
@@ -136,6 +137,10 @@ class SMDAnalysis:
         self.max_frac_neg_dG_first_half = max_frac_neg_dG_first_half
         self.min_speeds_for_extrapolation = min_speeds_for_extrapolation
         self.replica_imbalance_threshold = replica_imbalance_threshold
+        self.support_policy = SupportPolicy(
+            min_samples_per_step=self.min_samples_per_step,
+            min_trajs_per_path=self.min_replicas_per_path,
+        )
         os.makedirs(outdir, exist_ok=True)
         os.makedirs(os.path.join(outdir, "path_analysis"), exist_ok=True)
     
@@ -363,7 +368,7 @@ class SMDAnalysis:
         if self.filter_low_support:
             sMDDdata.raw_data = trim_results_by_n_samples_support(
                 sMDDdata.raw_data,
-                min_samples=self.min_samples_per_step,
+                min_samples=self.support_policy.min_samples_per_step,
                 min_support_ratio=self.min_support_ratio,
             )
 
@@ -577,6 +582,8 @@ class SMDAnalysis:
         min_common_points: int = 5,
         boundary_method: str = "force_plateau",  # TS/barrier detector: "force_plateau" (restraint-force, default) or "pmf_peak"
         plateau_frac: float = 0.3,
+        min_samples_per_step_conv: int = 3,
+        min_trajs_per_path_conv: int = 2,
     ):
         """Check PMF convergence as replica count grows, per pulling speed.
 
@@ -603,6 +610,11 @@ class SMDAnalysis:
 
         main_quantity = quantities[0]
         value_col = main_quantity[:-9] if main_quantity.endswith('_weighted') else main_quantity
+
+        conv_policy = SupportPolicy(
+            min_samples_per_step=min_samples_per_step_conv,
+            min_trajs_per_path=min_trajs_per_path_conv,
+        )
 
         allowed_estimators = {
             'jarzynski',
@@ -713,6 +725,7 @@ class SMDAnalysis:
                     protocol_grid=protocol_grid,
                     estimator_name=estimator_name,
                     beta=smd.beta,
+                    policy=conv_policy,
                 )
 
                 pmf_k = self._weighted_series_from_results(
@@ -721,10 +734,13 @@ class SMDAnalysis:
                     value_col=value_col,
                     beta=smd.beta,
                     trim_fraction=trim_fraction,
+                    policy=conv_policy,
                 )
 
+                # Empty PMF at this k: skip without touching prev_* — overwriting
+                # prev_pmf with an empty Series would make it non-None and bypass the
+                # initialization guard below, leaving prev_barrier_height unset (None).
                 if pmf_k.empty:
-                    prev_pmf = pmf_k
                     continue
 
                 # always store PMF trace (from trace_min_replicas onwards)
@@ -746,7 +762,7 @@ class SMDAnalysis:
                            if boundary_method == "force_plateau" else None)
 
                 # Stage 3: first PMF in the trace window — initialize prev state, no comparison yet
-                if prev_pmf is None:
+                if prev_pmf is None or prev_pmf.empty:
                     prev_pmf = pmf_k
                     prev_barrier_height, prev_r_ts = self._compute_barrier_rts(
                         pmf_k, 1.0/smd.beta, protocol_grid,
@@ -886,6 +902,7 @@ class SMDAnalysis:
         protocol_grid: pd.Series,
         estimator_name: str,
         beta: float,
+        policy: "SupportPolicy | None" = None,
     ) -> pd.DataFrame:
         estimator_cls = ESTIMATOR_REGISTRY.get(estimator_name)
         if estimator_cls is None:
@@ -899,6 +916,8 @@ class SMDAnalysis:
         for (step, path), stats in running_stats.items():
             n = stats['n']
             if n <= 0:
+                continue
+            if policy is not None and not policy.estimable_step(n):
                 continue
 
             raw_W = np.asarray(running_samples.get((step, path), []), dtype=float)
@@ -974,9 +993,19 @@ class SMDAnalysis:
         value_col: str,
         beta: float,
         trim_fraction: float = 0.0,
+        policy: "SupportPolicy | None" = None,
     ) -> pd.Series:
         if results_df.empty or value_col not in results_df.columns:
             return pd.Series(dtype=float)
+
+        if policy is not None:
+            # Belt-and-suspenders: _results_from_running_stats skips below-threshold
+            # steps (estimable_step); this apply() gate re-enforces the same floor
+            # on n_samples + path counts. Both gates are intentional — this apply()
+            # is authoritative for weighting computation downstream.
+            results_df, path_traj_counts = policy.apply(results_df, path_traj_counts)
+            if results_df.empty or not path_traj_counts:
+                return pd.Series(dtype=float)
 
         p_neq = SMDData._compute_p_neq(path_traj_counts)
         if not p_neq:
@@ -992,8 +1021,11 @@ class SMDAnalysis:
         # chop the extent of all other paths — use only multi-traj paths to
         # determine the common step ceiling.
         path_last = results_df.groupby('path')['step'].max()
-        multi_paths = {p for p, c in path_traj_counts.items() if c >= 2}
-        extent_series = path_last[path_last.index.isin(multi_paths)] if multi_paths else path_last
+        if policy is not None:
+            usable = set(path_traj_counts)   # already gated to usable paths
+        else:
+            usable = {p for p, c in path_traj_counts.items() if c >= 2}
+        extent_series = path_last[path_last.index.isin(usable)] if usable else path_last
         max_common_step = extent_series.min() if not extent_series.empty else path_last.min()
         grid_steps = sorted(results_df.loc[results_df['step'] <= max_common_step, 'step'].unique())
 
@@ -1147,7 +1179,7 @@ class SMDAnalysis:
         keys_to_drop: list[tuple[float, str]] = []
         for (speed, path), group in sMDDdata.results.groupby(['speed', 'path']):
             n_replicas = int(group['n_samples'].median())
-            if n_replicas < self.min_replicas_per_path:
+            if not self.support_policy.usable_path(n_replicas):
                 logger.warning(
                     f"Excluding path '{path}' at speed={speed} nm/ps: "
                     f"only {n_replicas} replicas < {self.min_replicas_per_path}"
