@@ -723,8 +723,10 @@ class SMDAnalysis:
                     trim_fraction=trim_fraction,
                 )
 
+                # Empty PMF at this k: skip without touching prev_* — overwriting
+                # prev_pmf with an empty Series would make it non-None and bypass the
+                # initialization guard below, leaving prev_barrier_height unset (None).
                 if pmf_k.empty:
-                    prev_pmf = pmf_k
                     continue
 
                 # always store PMF trace (from trace_min_replicas onwards)
@@ -746,7 +748,7 @@ class SMDAnalysis:
                            if boundary_method == "force_plateau" else None)
 
                 # Stage 3: first PMF in the trace window — initialize prev state, no comparison yet
-                if prev_pmf is None:
+                if prev_pmf is None or prev_pmf.empty:
                     prev_pmf = pmf_k
                     prev_barrier_height, prev_r_ts = self._compute_barrier_rts(
                         pmf_k, 1.0/smd.beta, protocol_grid,

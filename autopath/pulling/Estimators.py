@@ -92,7 +92,9 @@ class CumulantEstimator(BaseEstimator):
         if raw_W.size == 0:
             return None
         Wmean = float(raw_W.mean())
-        Wvar = float(raw_W.var(ddof=1))
+        # ddof=1 variance is undefined for a single sample → NaN (propagates to dG);
+        # guard to avoid a spurious "Degrees of freedom <= 0" RuntimeWarning.
+        Wvar = float(raw_W.var(ddof=1)) if raw_W.size > 1 else np.nan
         dG = Wmean - (beta * Wvar) / 2.0
         return {'Wmean': Wmean, 'dG': dG, 'Wdiss': Wmean - dG}
 
