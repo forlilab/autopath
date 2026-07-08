@@ -583,9 +583,16 @@ class AutoPath:
                                 conv_df.to_csv(f"{sMD_analysis_outdir}/sMD_conv_v{speed}_metrics.csv", index=False)
                                 traces_df.to_csv(f"{sMD_analysis_outdir}/sMD_conv_v{speed}_traces.csv", index=False)
 
-                                # Plot convergence results
-                                conv_traces = glob(f"{sMD_analysis_outdir}/sMD_conv_*_traces.csv")
-                                conv_metrics = glob(f"{sMD_analysis_outdir}/sMD_conv_*_metrics.csv")
+                                # Plot convergence results. Use only the per-speed files
+                                # written during this loop
+                                conv_traces = [
+                                    f for f in glob(f"{sMD_analysis_outdir}/sMD_conv_v*_traces.csv")
+                                    if not f.endswith("vALL_traces.csv")
+                                ]
+                                conv_metrics = [
+                                    f for f in glob(f"{sMD_analysis_outdir}/sMD_conv_v*_metrics.csv")
+                                    if not f.endswith("vALL_metrics.csv")
+                                ]
 
                                 plot_convergence_traces(conv_traces, outdir=sMD_analysis_outdir)
                                 plot_convergence_metrics(conv_metrics, outdir=sMD_analysis_outdir, tolerances=CONVERGENCE_TOLERANCES)

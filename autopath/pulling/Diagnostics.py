@@ -408,6 +408,8 @@ def plot_convergence_traces(smd_conv_traces: list[str], outdir: str):
 
                     for n_rep, gg in g_path.groupby("n_replicas"):
                         color = cmap(norm(n_rep))
+                        # Plot in ascending r order.
+                        gg = gg.sort_values("r_coord")
 
                         ax.plot(
                             gg["r_coord"],
