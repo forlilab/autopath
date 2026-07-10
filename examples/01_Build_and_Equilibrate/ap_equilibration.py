@@ -197,7 +197,7 @@ def main():
                                           )
     rmsd_equilibration.to_csv(f"{sys_name}/equilibration/RMSD_{sys_name}.csv", index=False)
     if ligands is not None:
-        _rmsf = calculate_ligand_rmsf(u_eq, lig_resname)
+        _rmsf = calculate_ligand_rmsf(u_eq, f"resname {lig_resname}")
         plot_atomic_property(u_eq, _rmsf, lig_resname=lig_resname,
                              outname=f"{sys_name}/equilibration/RMSF_{sys_name}.png")
     return
