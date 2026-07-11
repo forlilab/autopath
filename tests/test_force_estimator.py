@@ -121,3 +121,37 @@ def test_force_derivative_matches_slope():
         g = out[out['speed'] == sp].sort_values('step')
         np.testing.assert_allclose(g['Gamma'].to_numpy(), gam, atol=1e-6)
     assert (out['method'] == 'derivative').all()
+
+
+def test_force_derivative_drops_steps_without_feq_no_offset():
+    # step 0 has only ONE speed -> extrapolate_to_v0 trims it -> no Feq(step 0).
+    # It must be ABSENT from derivative output (not zero-filled), and the
+    # remaining Gamma_integrated must equal the clean cumulative integral.
+    speeds = [0.001, 0.005, 0.01]
+    rows = []
+    for step, (feq, gam) in enumerate([(0.0, 500.0), (100.0, 800.0),
+                                       (250.0, 1200.0), (300.0, 900.0)]):
+        sp_list = [0.001] if step == 0 else speeds       # step 0: single speed
+        for sp in sp_list:
+            rows.append(dict(estimator='force', step=step, path='p0',
+                             speed=sp, r_coord=float(step) * 0.1,
+                             Fmean=feq + gam * sp))
+    fr = pd.DataFrame(rows)
+    weights = {sp: {'p0': 1.0} for sp in speeds}
+    out = FrictionEstimator().gamma_from_force_derivative(fr, weights)
+    assert (out['step'] != 0).all()                      # trimmed step absent
+    assert out['Gamma_integrated'].notna().all()         # no NaN, no zero-fill
+    # first retained step starts the cumulative integral at 0
+    for sp in [0.005, 0.01]:
+        g = out[out['speed'] == sp].sort_values('step')
+        assert g['Gamma_integrated'].iloc[0] == 0.0
+
+
+def test_mix_force_weighted_average_over_paths():
+    fr = pd.DataFrame([
+        dict(estimator='force', step=0, path='p0', speed=0.01, r_coord=0.0, Fmean=100.0),
+        dict(estimator='force', step=0, path='p1', speed=0.01, r_coord=0.0, Fmean=200.0),
+    ])
+    weights = {0.01: {'p0': 0.25, 'p1': 0.75}}
+    mixed = FrictionEstimator._mix_force(fr, weights)
+    assert mixed.iloc[0]['Fbar'] == pytest.approx(175.0)   # 0.25*100 + 0.75*200
