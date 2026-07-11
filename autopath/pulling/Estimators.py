@@ -126,6 +126,59 @@ class CumulantEstimator(BaseEstimator):
         return smd_data
 
 
+class ForceEstimator(BaseEstimator):
+    """Force / raw-work estimator.
+
+    Per-speed ``dG`` is the raw mean cumulative work ``Wmean`` (uncorrected);
+    its v→0 intercept via :func:`extrapolate_to_v0` is the reversible work = ΔG.
+    Also records ``Fmean`` (mean restraint force per step/speed/path) which the
+    force-based friction (``FrictionEstimator.gamma_from_force_*``) turns into
+    Γ = dF/dv.  Inherently multi-speed: a single speed gives no v→0 intercept.
+    """
+
+    @property
+    def name(self):
+        return 'force'
+
+    @staticmethod
+    def estimate_dG(raw_W: np.ndarray, beta: float, **kwargs) -> dict | None:
+        raw_W = np.asarray(raw_W, dtype=float)
+        if raw_W.size == 0:
+            return None
+        Wmean = float(raw_W.mean())
+        # Per-speed "PMF" is the raw work; dissipation is removed by the v→0
+        # extrapolation, not per-speed.  Wdiss is NaN (force friction uses force).
+        return {'Wmean': Wmean, 'dG': Wmean, 'Wdiss': np.nan}
+
+    def fit_transform(self, smd_data: SMDData) -> SMDData:
+        data = smd_data.raw_data.copy()
+        group_keys = ['step', 'speed', 'path']
+        results = []
+        for (step, speed, path), group in data.groupby(group_keys):
+            r_coord = smd_data.protocol_grids[speed].loc[
+                smd_data.protocol_grids[speed]['step'] == step,
+                'r_target_protocol'
+            ].values[0]
+
+            raw_W = group['work'].astype(float).values
+            result = self.estimate_dG(raw_W, smd_data.beta)
+            if result is None:
+                continue
+
+            results.append({
+                'r_coord': r_coord,
+                'step': step,
+                'speed': speed,
+                'path': path,
+                'n_samples': raw_W.size,
+                'Fmean': float(group['force'].astype(float).mean()),
+                **result,
+            })
+        results_df = pd.DataFrame(results)
+        smd_data.add_estimator_results(self.name, results_df)
+        return smd_data
+
+
 class FrictionEstimator(BaseEstimator):
     """Estimate friction profiles from Wdiss.
 
@@ -1225,6 +1278,7 @@ class KramersEstimator:
 ESTIMATOR_REGISTRY: dict[str, type[BaseEstimator]] = {
     'jarzynski': JarzynskiEstimator,
     'cumulant': CumulantEstimator,
+    'force': ForceEstimator,
 }
 
 

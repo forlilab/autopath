@@ -31,6 +31,7 @@ from .LigandFeatures import LigandTrajectoryFeatures
 from .Estimators import (
     JarzynskiEstimator,
     CumulantEstimator,
+    ForceEstimator,
 )
 __all__ = [
             "SteeredMD",
@@ -41,4 +42,5 @@ __all__ = [
             "LigandTrajectoryFeatures",
             "JarzynskiEstimator",
             "CumulantEstimator",
+            "ForceEstimator",
         ]
