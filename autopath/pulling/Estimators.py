@@ -452,6 +452,87 @@ class FrictionEstimator(BaseEstimator):
 
         return out
 
+    @staticmethod
+    def _mix_force(force_results: pd.DataFrame, weights: dict) -> pd.DataFrame:
+        """Path-mix Fmean into <F>(step, speed) using p_eq weights.
+
+        ``weights`` is ``{speed: {path: p_eq}}``.  For single-path systems this
+        reduces to the plain mean.  Returns columns
+        ``estimator, step, r_coord, speed, Fbar``.
+        """
+        rows = []
+        for (speed, step), g in force_results.groupby(['speed', 'step']):
+            sw = weights.get(speed, {}) if weights else {}
+            num = den = 0.0
+            rcoords = []
+            for _, row in g.iterrows():
+                w = sw.get(row['path'], 0.0) if sw else 1.0
+                if w <= 0:
+                    continue
+                num += w * float(row['Fmean'])
+                den += w
+                rcoords.append(float(row['r_coord']))
+            if den <= 0:
+                continue
+            rows.append(dict(estimator='force', step=step, speed=speed,
+                             r_coord=float(np.mean(rcoords)), Fbar=num / den))
+        return pd.DataFrame(rows)
+
+    def gamma_from_force_regression(self, force_results: pd.DataFrame,
+                                    weights: dict) -> pd.DataFrame:
+        """Γ(r) = dF/dv (slope) and Feq(r) (intercept) via across-speed OLS of <F>."""
+        if force_results is None or force_results.empty:
+            return pd.DataFrame()
+        fbar = self._mix_force(force_results, weights)
+        if fbar.empty or fbar['speed'].nunique() < 2:
+            return pd.DataFrame()
+
+        v0 = extrapolate_to_v0(results=fbar, param='Fbar', speeds=self.speeds)
+        if v0 is None or v0.empty:
+            return pd.DataFrame()
+
+        out = v0.copy()
+        out['Feq'] = out['Fbar'].astype(float)          # intercept
+        out['Gamma'] = out['Fbar_slope'].astype(float)  # local friction dF/dv
+        out = out.sort_values('r_coord').reset_index(drop=True)
+        r = out['r_coord'].to_numpy(dtype=float)
+        out['Gamma_integrated'] = self._cumulative_integral(r, out['Gamma'].to_numpy(dtype=float))
+        out['method'] = 'regression'
+        out['estimator'] = 'force'
+        keep = ['r_coord', 'step', 'speed', 'Gamma', 'Gamma_integrated',
+                'Feq', 'method', 'estimator']
+        return out[[c for c in keep if c in out.columns]]
+
+    def gamma_from_force_derivative(self, force_results: pd.DataFrame,
+                                    weights: dict) -> pd.DataFrame:
+        """Per-speed friction Γ_sp(r) = (<F>(r;v) − Feq(r)) / v."""
+        if force_results is None or force_results.empty:
+            return pd.DataFrame()
+        fbar = self._mix_force(force_results, weights)
+        if fbar.empty or fbar['speed'].nunique() < 2:
+            return pd.DataFrame()
+
+        reg = self.gamma_from_force_regression(force_results, weights)
+        if reg.empty:
+            return pd.DataFrame()
+        feq_by_step = reg.set_index('step')['Feq'].to_dict()
+
+        rows = []
+        for speed, g in fbar.groupby('speed'):
+            if speed <= 0:
+                continue
+            g = g.sort_values('r_coord')
+            r = g['r_coord'].to_numpy(dtype=float)
+            gamma = np.array([(fb - feq_by_step.get(st, np.nan)) / speed
+                              for fb, st in zip(g['Fbar'], g['step'])], dtype=float)
+            gamma_int = self._cumulative_integral(r, np.nan_to_num(gamma))
+            rows.append(pd.DataFrame({
+                'r_coord': r, 'step': g['step'].to_numpy(), 'speed': speed,
+                'Gamma': gamma, 'Gamma_integrated': gamma_int,
+                'method': 'derivative', 'estimator': 'force',
+            }))
+        return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+
 
 def _find_pmf_peak(
     r: np.ndarray,

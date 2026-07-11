@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import pytest
-from autopath.pulling.Estimators import ForceEstimator, ESTIMATOR_REGISTRY
+from autopath.pulling.Estimators import ForceEstimator, ESTIMATOR_REGISTRY, FrictionEstimator
 from autopath.pulling.SMDData import SMDData
 
 
@@ -81,3 +81,43 @@ def test_reference_never_selects_force():
     # force dG is all non-negative -> 0 negatives, but must be excluded
     r = _results(cumulant=[-1.0, 5.0], jarzynski=[-1.0, 6.0], force=[9.0, 10.0])
     assert SMDData.choose_reference_estimator(r) in ('cumulant', 'jarzynski')
+
+
+def _force_results_linear(feq_of_step, gamma_of_step, speeds, paths=('p0',)):
+    """Build force results where Fmean(step,speed) = Feq(step) + Gamma(step)*speed."""
+    rows = []
+    for step, (feq, gam) in enumerate(zip(feq_of_step, gamma_of_step)):
+        for sp in speeds:
+            for p in paths:
+                rows.append(dict(estimator='force', step=step, path=p,
+                                 speed=sp, r_coord=float(step) * 0.1,
+                                 Fmean=feq + gam * sp))
+    return pd.DataFrame(rows)
+
+
+def test_force_regression_recovers_feq_and_gamma():
+    speeds = [0.001, 0.005, 0.01]
+    feq = [0.0, 100.0, 250.0, 300.0, 260.0]
+    gam = [500.0, 800.0, 1200.0, 900.0, 400.0]
+    fr = _force_results_linear(feq, gam, speeds)
+    weights = {sp: {'p0': 1.0} for sp in speeds}
+    out = FrictionEstimator().gamma_from_force_regression(fr, weights)
+    out = out.sort_values('step')
+    np.testing.assert_allclose(out['Feq'].to_numpy(), feq, atol=1e-6)
+    np.testing.assert_allclose(out['Gamma'].to_numpy(), gam, atol=1e-6)
+    assert (out['method'] == 'regression').all()
+    assert (out['estimator'] == 'force').all()
+
+
+def test_force_derivative_matches_slope():
+    speeds = [0.001, 0.005, 0.01]
+    feq = [0.0, 100.0, 250.0]
+    gam = [500.0, 800.0, 1200.0]
+    fr = _force_results_linear(feq, gam, speeds)
+    weights = {sp: {'p0': 1.0} for sp in speeds}
+    out = FrictionEstimator().gamma_from_force_derivative(fr, weights)
+    # For exactly-linear data, per-speed (Fbar-Feq)/v == gamma at every speed.
+    for sp in speeds:
+        g = out[out['speed'] == sp].sort_values('step')
+        np.testing.assert_allclose(g['Gamma'].to_numpy(), gam, atol=1e-6)
+    assert (out['method'] == 'derivative').all()
