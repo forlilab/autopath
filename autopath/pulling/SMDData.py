@@ -611,12 +611,16 @@ class SMDData:
 
     @staticmethod
     def _choose_estimator_for_weights(results: pd.DataFrame, estimator: str = 'auto') -> str:
-        """Resolve which estimator to use for p_eq computation.
+        """Resolve which estimator's dG to use for p_eq computation.
 
-        When ``estimator='auto'`` (default), preference order is
-        ``'cumulant'`` > ``'jarzynski'`` > first available.  Raises
-        ``ValueError`` if no estimator results are present or the
-        explicitly requested estimator is not in ``results``.
+        ``estimator='auto'`` selects by ROBUSTNESS: among genuine free-energy
+        candidates (all available estimators EXCLUDING ``'force'``, whose
+        ``dG=Wmean`` is non-negative by construction), pick the one with the
+        smallest fraction of negative-dG bins — those are exactly the bins
+        masked to 0 in ``_compute_p_eq`` and what destabilises the p_eq integral.
+        Ties resolve to the order ``['cumulant','jarzynski']`` then first
+        available.  An explicitly named estimator is returned as-is (raises if
+        not present).
         """
         if 'estimator' not in results.columns:
             raise ValueError("results must include an 'estimator' column.")
@@ -625,16 +629,31 @@ class SMDData:
         if len(available_estimators) == 0:
             raise ValueError("No estimator results available to compute p_eq.")
 
-        if estimator == 'auto':
-            preferred_estimators = ['cumulant', 'jarzynski']
-            for est in preferred_estimators:
-                if est in available_estimators:
-                    return est
-            return available_estimators[0]
+        if estimator != 'auto':
+            if estimator not in available_estimators:
+                raise ValueError(
+                    f"Estimator '{estimator}' not available in results. "
+                    f"Available: {sorted(available_estimators)}"
+                )
+            return estimator
 
-        if estimator not in available_estimators:
-            raise ValueError(
-                f"Estimator '{estimator}' not available in results. "
-                f"Available: {sorted(available_estimators)}"
-            )
-        return estimator
+        candidates = [e for e in available_estimators if e != 'force']
+        if not candidates:
+            raise ValueError("No non-force estimator available to weight paths.")
+
+        def neg_frac(est: str) -> float:
+            dG = results.loc[results['estimator'] == est, 'dG'].to_numpy(dtype=float)
+            dG = dG[np.isfinite(dG)]
+            return float((dG < 0).mean()) if dG.size else 1.0
+
+        preference = {'cumulant': 0, 'jarzynski': 1}
+        # sort by (neg fraction asc, preference asc, name) -> deterministic
+        best = min(candidates, key=lambda e: (neg_frac(e),
+                                              preference.get(e, 2),
+                                              e))
+        return best
+
+    @staticmethod
+    def choose_reference_estimator(results: pd.DataFrame) -> str:
+        """Robustness-selected reference estimator for shared p_eq weighting."""
+        return SMDData._choose_estimator_for_weights(results, 'auto')
