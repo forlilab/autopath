@@ -155,3 +155,20 @@ def test_mix_force_weighted_average_over_paths():
     weights = {0.01: {'p0': 0.25, 'p1': 0.75}}
     mixed = FrictionEstimator._mix_force(fr, weights)
     assert mixed.iloc[0]['Fbar'] == pytest.approx(175.0)   # 0.25*100 + 0.75*200
+
+
+from autopath.pulling.AnalysisSMD import SMDAnalysis
+from autopath.pulling.Estimators import CumulantEstimator, JarzynskiEstimator
+
+
+def test_setup_estimators_accepts_force():
+    a = SMDAnalysis(estimators=['cumulant', 'force'])
+    assert sorted(e.name for e in a.estimators) == ['cumulant', 'force']
+
+
+def test_speed_guard_drops_force_single_speed(caplog):
+    ests = [CumulantEstimator(), JarzynskiEstimator(), ForceEstimator()]
+    kept = SMDAnalysis._drop_force_if_single_speed(ests, n_speeds=1)
+    assert [e.name for e in kept] == ['cumulant', 'jarzynski']
+    kept2 = SMDAnalysis._drop_force_if_single_speed(ests, n_speeds=3)
+    assert [e.name for e in kept2] == ['cumulant', 'jarzynski', 'force']

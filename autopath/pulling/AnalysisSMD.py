@@ -14,6 +14,7 @@ from autopath.pulling.PathModel import DTWPathModel, NullPathModel, PathModel
 from autopath.pulling.Estimators import (
     JarzynskiEstimator,
     CumulantEstimator,
+    ForceEstimator,
     KramersEstimator,
     ESTIMATOR_REGISTRY,
     trim_results_by_n_samples_support,
@@ -103,7 +104,7 @@ class SMDAnalysis:
     def __init__(self,
         sysname: str = 'system',
         path_model: Union[PathModel, str] = 'dtw',
-        estimators:Union[list[BaseEstimator], list[str]] = ['jarzynski', 'cumulant'],
+        estimators:Union[list[BaseEstimator], list[str]] = ['jarzynski', 'cumulant', 'force'],
         temperature: float = 300.0,
         outdir: str = 'sMD_analysis',
         do_plots: bool = True,
@@ -169,6 +170,7 @@ class SMDAnalysis:
         estimator_map = {
             'jarzynski': JarzynskiEstimator(),
             'cumulant': CumulantEstimator(),
+            'force': ForceEstimator(),
         }
         self.estimators = []
         for est in estimators:
@@ -182,6 +184,19 @@ class SMDAnalysis:
             else:
                 raise ValueError(f"Estimator must be a string or BaseEstimator instance, got: {type(est)}")
         return
+
+    @staticmethod
+    def _drop_force_if_single_speed(estimators: list, n_speeds: int) -> list:
+        """Force needs >=2 speeds for its v->0 intercept; drop it (warn) otherwise."""
+        if n_speeds >= 2:
+            return list(estimators)
+        kept = [e for e in estimators if e.name != 'force']
+        if len(kept) != len(estimators):
+            logger.warning(
+                "Force estimator requires >=2 pulling speeds for v->0 "
+                f"extrapolation; only {n_speeds} present — dropping 'force'."
+            )
+        return kept
     
     def _setup_path_model(self, path_model: Union[PathModel, str]):
         if isinstance(path_model, str):
@@ -374,6 +389,8 @@ class SMDAnalysis:
 
         # Fit estimators sequentially; some may rely on path assignments,
         # so this must run before any path filtering.
+        n_speeds = int(sMDDdata.raw_data['speed'].nunique())
+        self.estimators = self._drop_force_if_single_speed(self.estimators, n_speeds)
         for estimator in self.estimators:
             logger.info(f"Fitting estimator: {estimator.name}")
             sMDDdata = estimator.fit_transform(sMDDdata)
@@ -400,14 +417,16 @@ class SMDAnalysis:
                 f"continuing with {[e.name for e in active_estimators]} only."
             )
 
-        # Compute p_eq per estimator explicitly.
-        # Paths with negative dG values trigger a warning; those bins are
-        # excluded from the integrand (contribute 0 to Z), which smoothly
-        # downweights artifact-heavy paths in the mixture.
-        weights_by_estimator = {
-            est.name: self.compute_p_eq(sMDDdata, estimator=est.name)
-            for est in active_estimators
-        }
+        # Compute p_eq once from a robustness-selected reference estimator and
+        # share it across all active estimators (including 'force', which has
+        # no dG of its own to derive weights from). Paths with negative dG
+        # values trigger a warning; those bins are excluded from the
+        # integrand (contribute 0 to Z), which smoothly downweights
+        # artifact-heavy paths in the mixture.
+        ref_estimator = SMDData.choose_reference_estimator(sMDDdata.results)
+        logger.info(f"[p_eq] shared reference estimator (robustness): {ref_estimator}")
+        ref_weights = self.compute_p_eq(sMDDdata, estimator=ref_estimator)
+        weights_by_estimator = {est.name: ref_weights for est in active_estimators}
 
         self._write_path_quality(sMDDdata, weights_by_estimator)
 
@@ -453,8 +472,13 @@ class SMDAnalysis:
         friction_deriv_results = []
         friction_regress_results = []
         for estimator in active_estimators:
-            f_deriv = friction_est.gamma_from_wdiss_derivative(df, estimator=estimator.name)
-            f_regress = friction_est.gamma_from_wdiss_regression(df, estimator=estimator.name)
+            if estimator.name == 'force':
+                force_rows = sMDDdata.results[sMDDdata.results['estimator'] == 'force']
+                f_deriv = friction_est.gamma_from_force_derivative(force_rows, ref_weights)
+                f_regress = friction_est.gamma_from_force_regression(force_rows, ref_weights)
+            else:
+                f_deriv = friction_est.gamma_from_wdiss_derivative(df, estimator=estimator.name)
+                f_regress = friction_est.gamma_from_wdiss_regression(df, estimator=estimator.name)
             friction_deriv_results.append(f_deriv)
             friction_regress_results.append(f_regress)
 

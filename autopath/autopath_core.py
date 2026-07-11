@@ -686,7 +686,7 @@ class AutoPath:
                                         outdir=sMD_analysis_outdir)
 
             smdanalysis = SMDAnalysis(sys_name, cluster_model,
-                                    estimators=['cumulant', 'jarzynski'],
+                                    estimators=['cumulant', 'jarzynski', 'force'],
                                     do_plots=True, seed=self.random_state,
                                     temperature=self.temperature,
                                     ligand_select=_lig_sel_ha,
