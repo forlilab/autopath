@@ -125,12 +125,48 @@ available).
   for `estimator.name == 'force'` call `gamma_from_force_regression` /
   `gamma_from_force_derivative`; for all other estimators keep the existing
   `gamma_from_wdiss_*` calls.
-- **Path weights:** set
-  `weights_by_estimator['force'] = weights_by_estimator.get('cumulant')` (falling
-  back to `jarzynski`, then any available) instead of running `compute_p_eq` on
-  the force estimator. Path population is physical / estimator-agnostic, and
-  raw-work Boltzmann weights would be dissipation-biased. No effect on
-  single-path systems (p_eq = 1).
+- **Path weights — single shared reference p_eq for ALL estimators:** stop the
+  current per-estimator self-weighting. Instead compute p_eq **once** from a
+  single reference estimator and apply the same `{speed: {path: p_eq}}` to
+  cumulant, jarzynski, AND force when mixing paths:
+
+  ```python
+  ref = SMDData.choose_reference_estimator(sMDDdata.results)   # robustness-based
+  ref_weights = self.compute_p_eq(sMDDdata, estimator=ref)
+  weights_by_estimator = {est.name: ref_weights for est in active_estimators}
+  ```
+
+  Rationale: path population is one physical quantity, estimator-independent;
+  self-weighting was a latent inconsistency that breaks the moment a basis (raw
+  work) isn't a free energy. Weighting force by its own `dG=Wmean` would inject a
+  friction-dependent bias, so force must never be a weighting basis.
+
+  **Reference chosen by robustness, not hard-coded to cumulant.** The quantity
+  that destabilizes `Z_k = ∫e^{−βG}dr` is negative-dG bins (masked to 0 in
+  `_compute_p_eq`). So `choose_reference_estimator` picks, among the genuine
+  free-energy candidates (**available estimators excluding `'force'`**), the one
+  with the smallest fraction of negative-dG bins across all per-path/per-speed
+  `results`; ties (common at 0/0) resolve to the existing preference order
+  (cumulant > jarzynski). This adapts to regime: in the high-dissipation
+  βσ≈10 regime measured on HSP90 6ELO_BAW cumulant produces 153 negative bins vs
+  jarzynski's 0 → jarzynski selected; in a clean low-βσ regime both are 0 →
+  cumulant (its lower-variance advantage when its 2nd-order expansion is valid).
+  The chosen reference is logged for transparency. See the memory note
+  `project_estimator_regime_hsp90.md` for the supporting evidence.
+
+  Implementation: redefine `SMDData._choose_estimator_for_weights(results,
+  'auto')` to this robustness rule (the explicit-name path is unchanged), and add
+  a thin `choose_reference_estimator(results)` = `_choose_estimator_for_weights(
+  results, 'auto')` for readability. **Verify no caller depends on `'auto'`
+  meaning "cumulant first"** before changing it (grep `_choose_estimator_for_weights`
+  / `compute_p_eq(` usages).
+
+  **Behavior change / regression:** this changes the committed cumulant and
+  jarzynski `mixture_pmfs` values for multi-path systems (single-path is a no-op,
+  p_eq=1). The change is expected to be small (p_eq is dominated by the robust
+  low-dG well), but the `mixture_pmfs` regression guard
+  (`tests/regression_run_mixture_pmfs.md`) must be re-baselined as part of this
+  work.
 
 ### 4. Registration & defaults
 
@@ -157,15 +193,22 @@ available).
 4. `run()`-level guard: with a single speed and `'force'` requested, force is
    dropped with a warning and the pipeline completes on the remaining
    estimators.
+5. `choose_reference_estimator` / `_choose_estimator_for_weights('auto')`: given
+   synthetic `results` where cumulant has negative-dG bins and jarzynski has
+   none, selects jarzynski; with both clean, selects cumulant; force is never
+   selected even when present with zero negatives.
+6. Shared-weights invariant: after `run()` (multi-path, multi-speed), every
+   estimator's mixture uses the same `{speed: {path: p_eq}}` (assert the weight
+   dicts are identical across estimators).
 
 ## Data-flow summary
 
 ```
 raw_data[force, work] ──ForceEstimator.fit_transform──▶ results[estimator='force', dG=Wmean, Fmean]
                                     │                                     │
-              calculate_weighted_pmf (reuse cumulant p_eq)   gamma_from_force_regression/derivative
+              calculate_weighted_pmf (reuse shared reference p_eq)   gamma_from_force_regression/derivative
                                     │                          (path-mix Fmean → ⟨F⟩(step,v),
-                                    ▼                           reuse cumulant p_eq)
+                                    ▼                           reuse shared reference p_eq)
                      mixture_pmfs[estimator='force']                     │
                                     │                                     ▼
                      extrapolate_to_v0(param='dG')            friction.csv[estimator='force']
@@ -176,10 +219,14 @@ raw_data[force, work] ──ForceEstimator.fit_transform──▶ results[estima
 
 ## Files touched
 
-- `autopath/pulling/Estimators.py` — `ForceEstimator`, two friction methods,
-  registry entry.
+- `autopath/pulling/Estimators.py` — `ForceEstimator`, two force-friction
+  methods, registry entry.
 - `autopath/pulling/AnalysisSMD.py` — `_setup_estimators` map, run() speed guard,
-  friction-loop branch, force path-weight aliasing, default list.
+  friction-loop branch, single shared reference p_eq (robustness-selected),
+  default list.
+- `autopath/pulling/SMDData.py` — robustness-based `_choose_estimator_for_weights
+  ('auto')` + `choose_reference_estimator` helper (excludes `'force'`).
 - `autopath/pulling/__init__.py` — export `ForceEstimator`.
 - `autopath/autopath_core.py` — add `'force'` to the full-analysis default list.
 - `tests/test_force_estimator.py` — new.
+- `tests/regression_run_mixture_pmfs.md` — re-baseline (weighting change).
