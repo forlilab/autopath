@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from autopath.pulling.Estimators import ForceEstimator, ESTIMATOR_REGISTRY
+from autopath.pulling.SMDData import SMDData
 
 
 def test_estimate_dG_is_raw_mean_work():
@@ -55,3 +56,28 @@ def test_fit_transform_records_fmean_and_dG_equals_wmean():
     np.testing.assert_allclose(res['dG'].to_numpy(), [15.0, 40.0])   # dG == Wmean
     assert res['Wdiss'].isna().all()
     assert (res['estimator'] == 'force').all()
+
+
+def _results(**dg_by_est):
+    frames = []
+    for est, dg in dg_by_est.items():
+        frames.append(pd.DataFrame({'estimator': est, 'dG': dg,
+                                     'step': range(len(dg))}))
+    return pd.concat(frames, ignore_index=True)
+
+
+def test_reference_prefers_fewer_negative_bins():
+    # cumulant has negatives, jarzynski none -> jarzynski (the betasigma~10 regime)
+    r = _results(cumulant=[-1.0, 5.0, 10.0], jarzynski=[1.0, 6.0, 11.0])
+    assert SMDData.choose_reference_estimator(r) == 'jarzynski'
+
+
+def test_reference_ties_go_to_cumulant():
+    r = _results(cumulant=[1.0, 5.0, 10.0], jarzynski=[1.0, 6.0, 11.0])
+    assert SMDData.choose_reference_estimator(r) == 'cumulant'
+
+
+def test_reference_never_selects_force():
+    # force dG is all non-negative -> 0 negatives, but must be excluded
+    r = _results(cumulant=[-1.0, 5.0], jarzynski=[-1.0, 6.0], force=[9.0, 10.0])
+    assert SMDData.choose_reference_estimator(r) in ('cumulant', 'jarzynski')
