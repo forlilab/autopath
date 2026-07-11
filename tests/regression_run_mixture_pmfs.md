@@ -226,12 +226,16 @@ bug.
   estimator), plus a `speed == 0` v→0-extrapolated `dG` row. `friction.csv`
   gains `estimator == "force"` rows for **both** `method in
   {"regression","derivative"}` (force-based `dF/dv` friction, `Feq` from the
-  same regression), and `koff_kramers.csv` gains a corresponding `force` row —
-  same machinery as the existing cumulant/jarzynski `method` rows, just fed a
-  different `Gamma`. Verified end-to-end on real data
-  (`HSP90_OFF/6ELO_BAW/sMD-pocket_com`) in Task 5's integration check:
-  `force` rows present in the `dG` v→0 extrapolation, absent from the `Wdiss`
-  v→0 extrapolation (extrapolate_to_v0 drops NaN per estimator — no crash).
+  same regression), and `koff_kramers.csv` gains a corresponding `force` row:
+  `FrictionEstimator.run_kramers_for_all_estimators` (`Estimators.py`) loops
+  generically over `mixture_pmfs["estimator"].unique()`, so it is not
+  hardcoded to cumulant/jarzynski and picks up `force` automatically. The
+  `dG`/`Wdiss`/friction plumbing itself was verified end-to-end on real data
+  (`HSP90_OFF/6ELO_BAW/sMD-pocket_com`) in Task 5's integration check: `force`
+  rows present in the `dG` v→0 extrapolation, absent from the `Wdiss` v→0
+  extrapolation (extrapolate_to_v0 drops NaN per estimator — no crash), and
+  `force` friction rows returned by both `gamma_from_force_regression` and
+  `gamma_from_force_derivative`.
 - **Cumulant/jarzynski values change for multi-path systems.** Path weighting
   used to be per-estimator self-weighting (each estimator picked its own
   per-path weights from its own `p_eq`/robustness diagnostics). It is now a
