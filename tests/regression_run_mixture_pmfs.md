@@ -208,3 +208,53 @@ Executed on 2026-07-07 with system `2YKJ_YKJ / sMD-lig_ha` (127 SMD logs, speeds
   (and consequent value shifts) — a pre-existing older-revision artifact, **not**
   caused by this branch. This is exactly why the guard compares main-vs-worktree,
   not against the shared CSV.
+
+## Update 2026-07-11: `force` estimator + shared reference `p_eq` (no longer a no-op)
+
+The force-estimator work (spec: shared robustness-selected `p_eq`) changes
+`mixture_pmfs.csv` for multi-path systems — this is an **intended** behavior
+change, not a regression, but it invalidates the byte-for-byte no-op guarantee
+above for any run that adds the `force` estimator or has ≥2 paths per speed.
+Recorded here so a future diff against this doc's baseline isn't mistaken for a
+bug.
+
+- **New `force` estimator rows.** When `force` is included in `estimators`
+  (default-on for runs with ≥2 speeds; auto-dropped for single-speed runs via
+  the speed guard), `mixture_pmfs.csv` gains `estimator == "force"` rows: one
+  per-speed row per step with `dG == Wmean` (raw mean work, no cumulant/Jensen
+  correction) and `Wdiss` left `NaN` (dissipated work is not defined for this
+  estimator), plus a `speed == 0` v→0-extrapolated `dG` row. `friction.csv`
+  gains `estimator == "force"` rows for **both** `method in
+  {"regression","derivative"}` (force-based `dF/dv` friction, `Feq` from the
+  same regression), and `koff_kramers.csv` gains a corresponding `force` row —
+  same machinery as the existing cumulant/jarzynski `method` rows, just fed a
+  different `Gamma`. Verified end-to-end on real data
+  (`HSP90_OFF/6ELO_BAW/sMD-pocket_com`) in Task 5's integration check:
+  `force` rows present in the `dG` v→0 extrapolation, absent from the `Wdiss`
+  v→0 extrapolation (extrapolate_to_v0 drops NaN per estimator — no crash).
+- **Cumulant/jarzynski values change for multi-path systems.** Path weighting
+  used to be per-estimator self-weighting (each estimator picked its own
+  per-path weights from its own `p_eq`/robustness diagnostics). It is now a
+  single **shared reference `p_eq`**, chosen once by
+  `SMDData.choose_reference_estimator` (robustness-selected: fewest
+  negative-`dG` bins among the non-`force` estimators, cumulant wins ties) and
+  reused by every estimator, including `force`, via the same `ref_weights`
+  object. This means cumulant's and jarzynski's `mixture_pmfs` numeric values
+  (and downstream `friction.csv` / `koff_kramers.csv`) for any system with ≥2
+  paths per speed will **not** match the pre-force-estimator baseline
+  byte-for-byte, even at unchanged thresholds — this is expected, not a
+  reintroduction of the `SupportPolicy` bug the procedure above guards
+  against.
+- **Single-path systems are unchanged.** When a speed has exactly one path,
+  `p_eq` is trivially `1.0` regardless of which estimator "chooses" it, so the
+  shared-reference change is a no-op there — the `2YKJ_YKJ` baseline above (and
+  any other single-path-per-speed system) is unaffected by this update.
+- **Reference estimator on the 6ELO_BAW benchmark.** Rebuilding cumulant /
+  jarzynski / force results directly from
+  `HSP90_OFF/6ELO_BAW/sMD-pocket_com/analysis_features/sMD_processed_data.csv`
+  and calling `SMDData.choose_reference_estimator` on the combined results
+  returns `"jarzynski"` (cumulant has negative-`dG` bins at this system's
+  `βσ ≈ 10`, so it loses the robustness comparison) — confirmed by the Task 5
+  integration script, which also confirmed `force`'s friction rows
+  (`{"Gamma","Gamma_integrated","Feq","method","estimator"}` columns) and the
+  dual-pathway `dG`/`Wdiss` v→0 behavior above.
