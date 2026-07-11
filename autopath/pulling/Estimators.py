@@ -522,10 +522,16 @@ class FrictionEstimator(BaseEstimator):
             if speed <= 0:
                 continue
             g = g.sort_values('r_coord')
+            # Friction is undefined at steps the regression trimmed (no Feq);
+            # drop them rather than zero-filling, which would bias the running
+            # cumulative integral for all subsequent steps.
+            g = g[g['step'].isin(feq_by_step.keys())]
+            if g.empty:
+                continue
             r = g['r_coord'].to_numpy(dtype=float)
-            gamma = np.array([(fb - feq_by_step.get(st, np.nan)) / speed
+            gamma = np.array([(fb - feq_by_step[st]) / speed
                               for fb, st in zip(g['Fbar'], g['step'])], dtype=float)
-            gamma_int = self._cumulative_integral(r, np.nan_to_num(gamma))
+            gamma_int = self._cumulative_integral(r, gamma)
             rows.append(pd.DataFrame({
                 'r_coord': r, 'step': g['step'].to_numpy(), 'speed': speed,
                 'Gamma': gamma, 'Gamma_integrated': gamma_int,
