@@ -550,6 +550,11 @@ class AutoPath:
                 if self.sMD_converge_speeds:
                     logger.info(f"Running sMD for speed {speed} nm/ps until convergence (min {reps} replicas).")
                     CONVERGED = False
+                    # Guard against livelock: a failing sMD.run() writes no .dat file, so the
+                    # replica count never advances and the sMD_max_replicas cap never trips.
+                    # Abort after too many consecutive failures that make no progress.
+                    consecutive_failures = 0
+                    MAX_CONSECUTIVE_FAILURES = 5
                     while not CONVERGED:
                         log_files = glob(f"{sMD_traj_outdir}/sMD_*_v{speed}_{self.sMD_pulling_dir}.dat")
                         current_replica = len(log_files) + 1
@@ -613,8 +618,21 @@ class AutoPath:
                                 pulling_speed=speed,  # nm/ps
                                 pulling_direction=self.sMD_pulling_dir,
                             )
+                            consecutive_failures = 0  # progress made; reset the failure counter
                         except Exception as e:
-                            logger.error(f"Error during sMD pulling for speed {speed} nm/ps, replica {current_replica}: {e}")
+                            consecutive_failures += 1
+                            logger.error(
+                                f"Error during sMD pulling for speed {speed} nm/ps, replica {current_replica}: {e} "
+                                f"(consecutive failure {consecutive_failures}/{MAX_CONSECUTIVE_FAILURES})"
+                            )
+                            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                                logger.error(
+                                    f"Aborting sMD for speed {speed} nm/ps after {consecutive_failures} "
+                                    f"consecutive failures with no progress (e.g. CUDA device could not be "
+                                    f"loaded). Check GPU/driver and CUDA_CACHE_PATH."
+                                )
+                                break
+                            time.sleep(min(60, 10 * consecutive_failures))  # linear backoff
                             continue
                 else:
                     logger.info(f"Running sMD for speed {speed} nm/ps with {reps} replicas.")
