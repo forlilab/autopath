@@ -591,6 +591,7 @@ class AutoPath:
                                 min_replicas=reps,
                                 geom_features=bool(self.sMD_log_geom_features),
                                 plateau_frac=self.sMD_plateau_frac,
+                                cluster_to_boundary=self.sMD_cluster_to_boundary,
                                 restrict_rmsd_to_boundary=self.sMD_cluster_to_boundary,
                                 boundary_buffer_frac=self.sMD_boundary_buffer_frac,
                             )
@@ -743,6 +744,7 @@ class AutoPath:
                 ligand_sdf=ligand_file,
                 geom_features=bool(self.sMD_log_geom_features),
                 plateau_frac=self.sMD_plateau_frac,
+                cluster_to_boundary=self.sMD_cluster_to_boundary,
                 restrict_rmsd_to_boundary=self.sMD_cluster_to_boundary,
                 boundary_buffer_frac=self.sMD_boundary_buffer_frac,
             )

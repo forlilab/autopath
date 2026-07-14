@@ -657,6 +657,7 @@ class SMDAnalysis:
         boundary_method: str = "force_plateau",  # TS/barrier detector: "force_plateau" (restraint-force, default) or "pmf_peak"
         plateau_frac: float = 0.4,
         restrict_rmsd_to_boundary: bool = True,   # compute PMF-RMSD only up to the force-plateau boundary (+buffer), not the noisy solvent tail
+        cluster_to_boundary: bool = True,         # restrict clustering to r <= boundary (mirrors run()); else fraction-trim
         boundary_buffer_frac: float = 0.1,        # extend the boundary cap by this fraction of r_ts
         min_samples_per_step_conv: int = 3,
         min_trajs_per_path_conv: int = 2,
@@ -737,42 +738,61 @@ class SMDAnalysis:
                 geom_features=geom_features, geom_merge=geom_merge,
             )
 
+            protocol_grid = smd.protocol_grids[speed].set_index('step')['r_target_protocol']
+
+            # Force-plateau boundary (+buffer) for this speed, computed once from the
+            # full per-speed force data (stable across replica counts). Used to (a)
+            # restrict clustering to the unbinding route and (b) cap the PMF-RMSD
+            # window — both excluding the noisy, dissipation-dominated solvent tail.
+            boundary_cap = None
+            if cluster_to_boundary or restrict_rmsd_to_boundary:
+                _rd = smd.raw_data[smd.raw_data['speed'] == speed]
+                if {'r_coord', 'force', 'speed'}.issubset(_rd.columns):
+                    _r_lo, _r_hi = float(_rd['r_coord'].min()), float(_rd['r_coord'].max())
+                    _rts = KramersEstimator.force_plateau_boundary(
+                        _rd, speed, _r_lo, _r_hi, plateau_frac,
+                    )
+                    if _rts is not None:
+                        boundary_cap = min(_rts * (1.0 + boundary_buffer_frac), _r_hi)
+                        logger.info(
+                            f"[convergence] force-plateau boundary r <= {boundary_cap:.2f} nm "
+                            f"(rupture {_rts:.2f} nm + {boundary_buffer_frac:.0%} buffer, "
+                            f"plateau_frac={plateau_frac})."
+                        )
+                    else:
+                        logger.warning(
+                            "[convergence] force-plateau boundary not found; using full "
+                            "PMF range for clustering and RMSD."
+                        )
+
+            # Cluster (mirroring run()): when cluster_to_boundary and the boundary is
+            # found, restrict clustering to r <= boundary; otherwise fall back to the
+            # fraction-trim that keeps the first (1-trim_fraction) of frames.
+            feat_df_cl = feat_df
+            fit_r_range = 1 - trim_fraction
+            if cluster_to_boundary and boundary_cap is not None:
+                _r_of_step = protocol_grid.reindex(feat_df['step']).to_numpy(dtype=float)
+                _restricted = feat_df[_r_of_step <= boundary_cap]
+                if len(_restricted) >= 2:
+                    feat_df_cl = _restricted
+                    fit_r_range = None   # boundary replaces the fraction-trim
+                    logger.info(
+                        f"[convergence] clustering restricted to r <= {boundary_cap:.2f} nm "
+                        f"(excludes bulk-solvent tail)."
+                    )
+
             clusterer = DTWPathModel(
                 seed=self.seed,
                 do_plots=False,
                 outdir=self.outdir,
             )
-            path_mappings = clusterer.fit_transform(feat_df,
-                                                    r_range=1-trim_fraction,  # use only the first (1-trim_fraction)% of frames for clustering to avoid noisy end states
-            )
-                                                    
+            path_mappings = clusterer.fit_transform(feat_df_cl, r_range=fit_r_range)
+
             smd.raw_data['path'] = smd.raw_data['trajname'].map(path_mappings)
 
             speed_data = smd.raw_data[smd.raw_data['speed'] == speed].copy()
-            protocol_grid = smd.protocol_grids[speed].set_index('step')['r_target_protocol']
 
-            # Fixed convergence-metric window: cap the PMF-RMSD at the force-plateau
-            # boundary (+buffer) so the noisy, dissipation-dominated solvent tail past
-            # rupture does not dominate the RMSD. Computed once from the full per-speed
-            # force data (stable across replica counts), not per-k.
-            rmsd_r_cap = None
-            if restrict_rmsd_to_boundary and {'r_coord', 'force', 'speed'}.issubset(speed_data.columns):
-                _r_lo, _r_hi = float(speed_data['r_coord'].min()), float(speed_data['r_coord'].max())
-                _rts = KramersEstimator.force_plateau_boundary(
-                    speed_data, speed, _r_lo, _r_hi, plateau_frac,
-                )
-                if _rts is not None:
-                    rmsd_r_cap = min(_rts * (1.0 + boundary_buffer_frac), _r_hi)
-                    logger.info(
-                        f"[convergence] RMSD window capped at r <= {rmsd_r_cap:.2f} nm "
-                        f"(force-plateau boundary {_rts:.2f} nm + {boundary_buffer_frac:.0%} buffer); "
-                        f"excludes noisy solvent tail."
-                    )
-                else:
-                    logger.warning(
-                        "[convergence] force-plateau boundary not found; "
-                        "RMSD computed over full PMF range."
-                    )
+            rmsd_r_cap = boundary_cap if restrict_rmsd_to_boundary else None
 
             traj_order = [os.path.basename(fn)[:-4] for fn in speed_logs]
             traj_data_map = {
