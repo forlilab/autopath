@@ -498,7 +498,7 @@ class AutoPath:
         ##############################################################################################
         ##################################### Steered MD simulations #################################
         ##############################################################################################
-        MERGE_CLUSTERING_FEATURES = True
+        MERGE_CLUSTERING_FEATURES = False
         CONVERGENCE_TOLERANCES = {
             "dG_weighted-rmsd": 4.0,  # kJ/mol — must match tol_rmsd in check_convergence()
             "barrier_delta":    3.0,  # kJ/mol — must match tol_barrier
