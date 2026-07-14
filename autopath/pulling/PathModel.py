@@ -58,8 +58,9 @@ class DTWPathModel(PathModel):
                  seed: int = 42,
                  do_plots: bool = True,
                  outdir: str = 'path_analysis',
-                 n_geom_pcs: int | None = 3,
+                 n_geom_pcs: int | None = 4,
                  geom_feature_prefix: str | tuple[str, ...] = ('dist_', 'geom_'),
+                 pca_all_features: bool = True,
                  ):
 
         self.seed = seed
@@ -72,6 +73,11 @@ class DTWPathModel(PathModel):
         # before DTW (pocket distances dist_* and inline geom features geom_*).
         # str.startswith accepts a tuple, so multiple prefixes work directly.
         self.geom_feature_prefix = geom_feature_prefix
+        # When True (default), PCA the ENTIRE standardized feature matrix together
+        # (trace + geom) into n_geom_pcs components, rather than only the
+        # geom-prefixed block with trace passed through raw. This is the hybrid
+        # default; set False to keep trace raw and PCA only the geom block.
+        self.pca_all_features = pca_all_features
     
     def fit_transform(self,
                     feature_df: pd.DataFrame,
@@ -216,14 +222,19 @@ class DTWPathModel(PathModel):
             # n_geom_pcs is set — both in merged mode (geom + trace) and in
             # distance-only mode (geom only, other_idx empty). An empty other_idx
             # makes arr[:, other_idx] shape (n, 0), which np.hstack absorbs cleanly.
-            geom_idx = [
-                i for i, c in enumerate(feature_cols)
-                if c.startswith(self.geom_feature_prefix)
-            ]
-            other_idx = [
-                i for i, c in enumerate(feature_cols)
-                if not c.startswith(self.geom_feature_prefix)
-            ]
+            if self.pca_all_features:
+                # PCA the entire standardized feature matrix together (trace + geom).
+                geom_idx = list(range(len(feature_cols)))
+                other_idx = []
+            else:
+                geom_idx = [
+                    i for i, c in enumerate(feature_cols)
+                    if c.startswith(self.geom_feature_prefix)
+                ]
+                other_idx = [
+                    i for i, c in enumerate(feature_cols)
+                    if not c.startswith(self.geom_feature_prefix)
+                ]
             if geom_idx and self.n_geom_pcs is not None:
                 n_components = min(self.n_geom_pcs, len(geom_idx))
                 logger.info(

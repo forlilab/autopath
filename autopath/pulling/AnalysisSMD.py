@@ -48,17 +48,21 @@ TRACE_FEATURE_POOL = frozenset({
     "force", "U_cvpack", "dW_protocol", "m_eff",
 })
 
-# Default *trace* features for clustering when the caller passes features=None:
-# reaction-coordinate progress (r_before), a spring-fluctuation channel (lag),
-# and a dissipation channel (work). The GEOMETRY comes separately via the inline
-# geom sidecar (geom_features=True by default): exit-direction, mindist, and
-# ligand shape, all under the geom_ prefix and PCA-reduced together in
-# DTWPathModel (n_geom_pcs). So shape is NOT requested here as explicit lig_*
-# features — that would bypass the geom PCA, re-read the DCDs, and (for rigid
-# ligands) inject near-constant noise. Add lig_* shape names to `features`
-# only when you specifically want the un-PCA'd post-processing versions.
-_DEFAULT_TRACE_FEATURES = ("lag", "work", "r_before")
-DEFAULT_FEATURES = list(_DEFAULT_TRACE_FEATURES)
+# Default clustering feature set (hybrid) when the caller passes features=None.
+# Two trace channels — reaction-coordinate progress (r_before) and spring
+# fluctuation (lag) — plus inline-geom columns selected by name from the sidecar
+# (geom_features=True): ligand shape (rog, npr1, npr2) and exit-direction
+# (exit_1/2/3, the unbinding-route discriminator). All of these are PCA'd
+# TOGETHER in DTWPathModel (pca_all_features=True → n_geom_pcs components).
+#
+# geom_* names here are selected from the loaded sidecar (no DCD read). Shape is
+# NOT requested as bare lig_* names (that would use the un-PCA'd post-processing
+# path). The pocket-distance dist_* PCA is a separate reference route and is
+# never merged into this set.
+_DEFAULT_TRACE_FEATURES = ("lag", "r_before")
+_DEFAULT_GEOM_FEATURES = ("geom_rog", "geom_npr1", "geom_npr2",
+                          "geom_exit_1", "geom_exit_2", "geom_exit_3")
+DEFAULT_FEATURES = list(_DEFAULT_TRACE_FEATURES) + list(_DEFAULT_GEOM_FEATURES)
 
 assert TRACE_FEATURE_POOL.isdisjoint(LIGAND_FEATURE_POOL), (
     "TRACE_FEATURE_POOL and LIGAND_FEATURE_POOL must be disjoint; got overlap: "
@@ -232,15 +236,20 @@ class SMDAnalysis:
         Returns a DataFrame with the ``trajname/speed/step/time`` index columns plus
         the selected feature columns, ready for ``DTWPathModel.fit_transform``.
         """
-        # Resolve & validate the flat feature list.
+        # Resolve & validate the flat feature list. Names may be:
+        #   - trace features (TRACE_FEATURE_POOL),
+        #   - bare ligand-shape names (LIGAND_FEATURE_POOL -> un-PCA'd lig_* path), or
+        #   - inline-geom column names prefixed 'geom_' (selected from the sidecar).
         if features is None:
             features = list(DEFAULT_FEATURES)
-        unknown = set(features) - TRACE_FEATURE_POOL - LIGAND_FEATURE_POOL
+        geom_named = [f for f in features if f.startswith("geom_")]
+        unknown = set(features) - TRACE_FEATURE_POOL - LIGAND_FEATURE_POOL - set(geom_named)
         if unknown:
             raise ValueError(
                 f"Unsupported feature name(s): {sorted(unknown)}.\n"
                 f"  Trace pool:  {sorted(TRACE_FEATURE_POOL)}\n"
-                f"  Ligand pool: {sorted(LIGAND_FEATURE_POOL)}"
+                f"  Ligand pool: {sorted(LIGAND_FEATURE_POOL)}\n"
+                f"  Or inline-geom columns prefixed 'geom_' (from the sidecar)."
             )
         trace_feats  = [f for f in features if f in TRACE_FEATURE_POOL]
         ligand_feats = [f for f in features if f in LIGAND_FEATURE_POOL]
@@ -318,18 +327,34 @@ class SMDAnalysis:
                 logger.info('Clustering will be performed using trace features only')
 
         # Inline geom features logged during pulling (sMD_*_geom.dat sidecars).
-        # A near-free, pre-computed alternative to post-processing the DCDs.
-        if geom_features:
+        # A near-free, pre-computed alternative to post-processing the DCDs. When
+        # explicit geom_ names are given (geom_named), only those columns are used;
+        # otherwise (geom_features=True with no names) all geom_ columns are merged.
+        if geom_features or geom_named:
             geom_df = smd.load_geom_features()
             if geom_df.empty:
                 logger.warning(
-                    "geom_features requested but no _geom.dat sidecars found; "
+                    "geom features requested but no _geom.dat sidecars found; "
                     "proceeding without inline geom features."
                 )
             else:
-                feat_df = SMDData.merge_geom_features(feat_df, geom_df, mode=geom_merge)
-                _gcols = [c for c in feat_df.columns if c.startswith("geom_")]
-                logger.info(f"Merged inline geom features ({geom_merge}): {_gcols}")
+                if geom_named:
+                    missing = [c for c in geom_named if c not in geom_df.columns]
+                    if missing:
+                        logger.warning(
+                            f"Requested geom features absent from sidecar, skipped: "
+                            f"{sorted(missing)}"
+                        )
+                    idx_cols = [c for c in ('trajname', 'speed', 'step', 'time')
+                                if c in geom_df.columns]
+                    present = [c for c in geom_named if c in geom_df.columns]
+                    geom_df = geom_df[idx_cols + present]
+                geom_cols_final = [c for c in geom_df.columns if c.startswith("geom_")]
+                if geom_cols_final:
+                    feat_df = SMDData.merge_geom_features(feat_df, geom_df, mode=geom_merge)
+                    logger.info(f"Merged inline geom features ({geom_merge}): {geom_cols_final}")
+                else:
+                    logger.warning("No usable geom_ columns after selection; skipping geom merge.")
 
         return feat_df, ligand_feat_dfs
 
