@@ -395,10 +395,12 @@ class SMDAnalysis:
             self.reference_pdb = sMDDdata.reference_pdb
             logger.warning(f"No reference PDB provided, using from SMDData: {self.reference_pdb}")
 
-        # Restrict clustering to the unbinding route (bound -> rupture), excluding
-        # the post-boundary bulk-solvent tail. When r_range is not given, derive
-        # the upper bound from the force-plateau boundary (same plateau_frac as the
-        # TS/kinetics) so we don't cluster solvent conformations.
+        # Derive the clustering boundary (bound -> rupture) from the force-plateau
+        # so clustering ignores the bulk-solvent tail. This is applied to the
+        # CLUSTERING feature matrix ONLY (below) — never to raw_data, so the
+        # estimators/PMF keep the full pull. An explicit user r_range still
+        # restricts everything via filter_by_r_range (legacy behavior).
+        boundary_cap = None
         if r_range is None and cluster_to_boundary:
             rd = sMDDdata.raw_data
             if {'r_coord', 'force', 'speed'}.issubset(rd.columns):
@@ -407,14 +409,13 @@ class SMDAnalysis:
                     rd, 0.0, r_lo, r_hi, plateau_frac,
                 )
                 if r_ts is not None and r_ts > r_lo:
-                    r_hi_cap = min(r_ts * (1.0 + boundary_buffer_frac), r_hi)
-                    r_range = (r_lo, r_hi_cap)
+                    boundary_cap = min(r_ts * (1.0 + boundary_buffer_frac), r_hi)
                     logger.info(
-                        f"Clustering restricted to force-plateau boundary: r in "
-                        f"[{r_lo:.2f}, {r_hi_cap:.2f}] nm (boundary {r_ts:.2f} + "
+                        f"Clustering restricted to force-plateau boundary: r <= "
+                        f"{boundary_cap:.2f} nm (rupture {r_ts:.2f} + "
                         f"{boundary_buffer_frac:.0%} buffer, plateau_frac={plateau_frac}); "
-                        f"excludes bulk-solvent tail. Set cluster_to_boundary=False "
-                        f"or pass r_range to override."
+                        f"excludes bulk-solvent tail (estimators keep the full range). "
+                        f"Set cluster_to_boundary=False to disable."
                     )
                 else:
                     logger.warning(
@@ -436,6 +437,19 @@ class SMDAnalysis:
             features=features, merge_features=merge_features, ligand_sdf=ligand_sdf,
             geom_features=geom_features, geom_merge=geom_merge,
         )
+
+        # Apply the force-plateau boundary to the CLUSTERING matrix only. raw_data
+        # (and hence the estimators/PMF) is left at full range. Map r via raw_data's
+        # (trajname, step) -> r_coord so it works regardless of which features are used.
+        if boundary_cap is not None and not feat_df.empty:
+            _rc = sMDDdata.raw_data[['trajname', 'step', 'r_coord']]
+            feat_df = feat_df.merge(_rc, on=['trajname', 'step'], how='left')
+            _n0 = len(feat_df)
+            feat_df = feat_df[feat_df['r_coord'] <= boundary_cap].drop(columns='r_coord')
+            logger.info(
+                f"Clustering feature rows after boundary cut: {_n0} -> {len(feat_df)} "
+                f"(r <= {boundary_cap:.2f} nm)."
+            )
 
         trajectory_files = {}
         for traj in sMDDdata.traj_files:
