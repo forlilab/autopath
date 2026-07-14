@@ -64,16 +64,18 @@ def main():
     ap = AutoPath(pdb_path=receptor,
                     pocket_selection=pocket_selection,
 
-                    do_fix_pdb=True,
-                    run_preparation=True,
+                    do_fix_pdb=False,
+                    run_preparation=False,
                     padding=1.2,
                     hydrogenMass=1.5, 
                     ionicStrength=0.15,
                     boxShape="dodecahedron",
 
                     lig_ff='openff-2.3.0',
-
-                    run_equilibration=True,
+                    
+                    platform='OpenCL',
+                    
+                    run_equilibration=False,
                     protocol_fname=protocol,
 
                     run_sMDpulling=True,
@@ -82,20 +84,21 @@ def main():
                     sMD_converge_speeds=True,
                     sMD_max_replicas = 50,
                     sMD_pulling_speeds={
-                                        0.010: 25, # nm/ps equivalent to 10.0 m/s nm/ns
-                                        0.0050: 25, # nm/ps equivalent to 5.0 m/s nm/ns
-                                        0.0010: 25, # nm/ps equivalent to 1.0 m/s nm/ns
+                                        0.015: 5,
+                                        0.010: 5, # nm/ps equivalent to 10.0 m/s nm/ns
+                                        # 0.0050: 25, # nm/ps equivalent to 5.0 m/s nm/ns
+                                        # 0.0010: 25, # nm/ps equivalent to 1.0 m/s nm/ns
                                         },
 
                     sMD_run_analysis=True,
 
-                    extract_milestones=True,
+                    extract_milestones=False,
                     n_milestones=3,
                     
-                    run_metadynamics=True,
-                    mMD_use_funnel_potential=True,
+                    run_metadynamics=False,
+                    mMD_use_funnel_potential=False,
                     mMD_preseed_bias=False,
-                    mMD_milestone_seeding=True,
+                    mMD_milestone_seeding=False,
                     
                     mMD_time=10, # ns
                     mMD_bias_frequency=2,
