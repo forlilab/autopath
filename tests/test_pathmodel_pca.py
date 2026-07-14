@@ -43,6 +43,17 @@ def test_fit_transform_pca_all_reduces_and_clusters(tmp_path):
     assert len({v.split("_")[0] for v in mapping.values()}) == 2
 
 
+def test_plot_no_pca_of_pca(tmp_path):
+    """With pca_all, the cluster plot must reuse the fitted PCA (no second PCA)."""
+    import glob
+    from autopath.pulling.PathModel import DTWPathModel
+    (tmp_path / "path_analysis").mkdir()
+    df = _toy_feat_df()
+    m = DTWPathModel(do_plots=True, outdir=str(tmp_path))
+    m.fit_transform(df, n_paths=2)
+    assert glob.glob(str(tmp_path / "path_analysis" / "cluster_pca_v*.png"))
+
+
 def test_fit_transform_pca_all_handles_all_geom_prefixes(tmp_path):
     """pca_all ignores the prefix — even non-geom trace columns get PCA'd."""
     from autopath.pulling.PathModel import DTWPathModel

@@ -357,11 +357,18 @@ class DTWPathModel(PathModel):
                     vectors_plot = vectors_stacked_scaled
                     speed_df_for_plot = speed_df_full
 
+                # When the geom PCA already reduced the whole vector (pca_all),
+                # the plot must NOT PCA again — pass the fitted PCA so the scatter
+                # uses its scores directly and loadings map the ORIGINAL features.
+                _plot_pca = (pca_geom if (self.pca_all_features and geom_idx
+                                          and self.n_geom_pcs is not None) else None)
                 self.plot_clusters_PCA(
                     feature_df=speed_df_for_plot,
                     path_mapping_dic=path_mapping_dic,
                     vectors_stacked_scaled=vectors_plot,
                     feature_names=plot_feature_names,
+                    pca_model=_plot_pca,
+                    pca_feature_names=feature_cols,
                 )
 
         # Generate unbinding paths visualization if trajectories and reference PDB are available
@@ -454,6 +461,8 @@ class DTWPathModel(PathModel):
                           path_mapping_dic: dict = None,
                           vectors_stacked_scaled: list = None,
                           feature_names: list = None,
+                          pca_model=None,
+                          pca_feature_names: list = None,
                           ):
         """Project scaled trajectory features onto 2-D PCA and colour by cluster.
 
@@ -481,9 +490,6 @@ class DTWPathModel(PathModel):
         vectors_trimmed = [arr[:min_len, :] for arr in vectors_stacked_scaled]
         X = np.vstack(vectors_trimmed)   # (N_traj * min_len, d)
 
-        pca = PCA(n_components=2)
-        X_pca = pca.fit_transform(X)
-
         traj_order = [name for name, _ in feature_df.groupby('trajname')]
         if len(traj_order) != len(vectors_trimmed):
             raise ValueError(
@@ -492,12 +498,27 @@ class DTWPathModel(PathModel):
                 f"trajectories in feature_df are present in vectors_stacked_scaled."
             )
 
-        has_loadings = feature_names is not None
+        # Avoid a PCA-of-PCA: when the clustering vectors are already PCA scores
+        # (pca_model provided), plot the first two components directly and take the
+        # loadings from that PCA over the ORIGINAL features. Otherwise reduce here.
+        if pca_model is not None and X.shape[1] >= 2:
+            X2 = X[:, :2]
+            evr = pca_model.explained_variance_ratio_
+            load1, load2 = pca_model.components_[0], pca_model.components_[1]
+            load_names = pca_feature_names if pca_feature_names is not None else feature_names
+        else:
+            _pca = PCA(n_components=2)
+            X2 = _pca.fit_transform(X)
+            evr = _pca.explained_variance_ratio_
+            load1, load2 = _pca.components_[0], _pca.components_[1]
+            load_names = feature_names
+
+        has_loadings = load_names is not None
         fig, axes = plt.subplots(1, 2 if has_loadings else 1,
                                  figsize=(12, 5) if has_loadings else (6, 5))
         ax_scatter = axes[0] if has_loadings else axes
 
-        ax_scatter.scatter(X_pca[:, 0], X_pca[:, 1],
+        ax_scatter.scatter(X2[:, 0], X2[:, 1],
                            alpha=0.75, color='lightgray', s=50, linewidth=0)
 
         used_labels = set()
@@ -509,27 +530,27 @@ class DTWPathModel(PathModel):
             path_label = path_mapping_dic[trajname]
             label = f'{str(path_label).split("_")[0]}' if path_label not in used_labels else None
             used_labels.add(path_label)
-            ax_scatter.scatter(X_pca[start:end, 0], X_pca[start:end, 1],
+            ax_scatter.scatter(X2[start:end, 0], X2[start:end, 1],
                                s=20, alpha=0.9, label=label)
 
         if used_labels:
             ax_scatter.legend(frameon=False)
-        ax_scatter.set_xlabel(f"PC1 ({pca.explained_variance_ratio_[0]*100:.1f}%)")
-        ax_scatter.set_ylabel(f"PC2 ({pca.explained_variance_ratio_[1]*100:.1f}%)")
+        ax_scatter.set_xlabel(f"PC1 ({evr[0]*100:.1f}%)")
+        ax_scatter.set_ylabel(f"PC2 ({evr[1]*100:.1f}%)")
         ax_scatter.set_title(f"PCA space - speed={self.speed_name} nm/ps")
 
         # ── Feature loadings panel ─────────────────────────────────────────
         if has_loadings:
             ax_load = axes[1]
-            n_feats = len(feature_names)
+            n_feats = len(load_names)
             y = np.arange(n_feats)
             w = 0.35
-            ax_load.barh(y + w / 2, pca.components_[0], w,
-                         label=f"PC1 ({pca.explained_variance_ratio_[0]*100:.1f}%)")
-            ax_load.barh(y - w / 2, pca.components_[1], w,
-                         label=f"PC2 ({pca.explained_variance_ratio_[1]*100:.1f}%)")
+            ax_load.barh(y + w / 2, load1[:n_feats], w,
+                         label=f"PC1 ({evr[0]*100:.1f}%)")
+            ax_load.barh(y - w / 2, load2[:n_feats], w,
+                         label=f"PC2 ({evr[1]*100:.1f}%)")
             ax_load.set_yticks(y)
-            ax_load.set_yticklabels(feature_names)
+            ax_load.set_yticklabels(load_names)
             ax_load.axvline(0, color='black', lw=0.8)
             ax_load.set_xlabel("Loadings")
             ax_load.set_title("Feature contributions to PCs")
