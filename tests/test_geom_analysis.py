@@ -42,6 +42,15 @@ def test_merge_geom_bad_mode():
         SMDData.merge_geom_features(_trace(), _geom(), mode="nope")
 
 
+def test_dtw_geom_prefix_covers_geom_and_dist(tmp_path):
+    from autopath.pulling.PathModel import DTWPathModel
+    m = DTWPathModel(do_plots=False, outdir=str(tmp_path))
+    assert "geom_mindist".startswith(m.geom_feature_prefix)   # inline geom block
+    assert "dist_0".startswith(m.geom_feature_prefix)         # pocket distances
+    assert not "lag".startswith(m.geom_feature_prefix)        # trace stays out
+    assert not "work".startswith(m.geom_feature_prefix)
+
+
 def test_load_geom_features_missing_returns_empty(tmp_path):
     log = tmp_path / "sMD_replica-1_v0.001_forward.dat"
     log.write_text("step,time,r_target,r_before,r_after,force,U_cvpack,dW_protocol,lag_nm\n"

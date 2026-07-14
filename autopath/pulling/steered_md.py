@@ -647,8 +647,13 @@ class SteeredMD:
         return min(max(v, v_min), v_max)
     
     # Bare feature names supported by the geom-logging sidecar.
-    _GEOM_DEFAULT = ["nc", "mindist", "rog", "npr1", "npr2", "spherocity", "pbf"]
-    _GEOM_POCKET = {"nc", "mindist"}
+    # Exit-direction (exit_1/2/3) = ligand->pocket COM unit vector projected onto
+    # the pocket's principal axes (rotation-invariant); captures the unbinding
+    # route, the strongest discriminator for rigid ligands where shape is flat.
+    _GEOM_EXIT = ("exit_1", "exit_2", "exit_3")
+    _GEOM_DEFAULT = ["nc", "mindist", "rog", "npr1", "npr2", "spherocity", "pbf",
+                     "exit_1", "exit_2", "exit_3"]
+    _GEOM_POCKET = {"nc", "mindist", "exit_1", "exit_2", "exit_3"}
 
     def _resolve_geom_features(self) -> list[str]:
         """Ordered list of geom feature names to log (empty when disabled)."""
@@ -686,10 +691,44 @@ class SteeredMD:
             diff = lig[:, np.newaxis, :] - poc[np.newaxis, :, :]
             d2 = np.einsum('ijk,ijk->ij', diff, diff)
             row["mindist"] = float(np.sqrt(d2.min()))
+        if any(f in feats for f in self._GEOM_EXIT) and pocket_ok:
+            e = self._exit_direction(positions_nm)
+            if e is not None:
+                row["exit_1"], row["exit_2"], row["exit_3"] = e
         if self._shape_calc is not None:
             lig_ang = positions_nm[self._lig_heavy_idx] * 10.0
             row.update(self._shape_calc.compute(lig_ang))
         return row
+
+    def _exit_direction(self, positions_nm):
+        """Ligand->pocket COM unit vector in the pocket's principal-axis frame.
+
+        Returns (e1, e2, e3), the components of the unit exit vector projected
+        onto the pocket heavy-atom principal axes. Rotation/translation
+        invariant (the axes co-rotate with the pocket), so it is comparable
+        across replicas even without global alignment. Direction only — the
+        magnitude (~r) is already captured by r_before. Returns None if the
+        ligand and pocket COMs coincide.
+        """
+        lig = positions_nm[self.groupA_atoms]
+        poc = positions_nm[self.subset_protein_HA]
+        cA = lig.mean(0)
+        cB = poc.mean(0)
+        v = cA - cB
+        nrm = float(np.sqrt(v @ v))
+        if nrm < 1e-9:
+            return None
+        u = v / nrm
+        Xp = poc - cB
+        _, V = np.linalg.eigh(Xp.T @ Xp)      # columns: pocket principal axes
+        # Deterministic eigenvector signs (svd_flip convention: largest-|loading|
+        # component positive) so projections are comparable frame-to-frame.
+        for j in range(3):
+            k = int(np.argmax(np.abs(V[:, j])))
+            if V[k, j] < 0:
+                V[:, j] = -V[:, j]
+        e = u @ V
+        return float(e[0]), float(e[1]), float(e[2])
 
     def _compute_nc(self, positions_nm, threshold_nm=0.5):
         """Compute number of contacts via switching function 1/(1+(d/threshold)^6) using positions only.

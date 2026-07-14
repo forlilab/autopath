@@ -50,6 +50,24 @@ def test_compute_geom_row_keys_and_values():
     assert 0.0 <= row["npr1"] <= 1.0
 
 
+def test_compute_geom_row_exit_direction_is_unit_vector():
+    smd = _make_stub(shape_feats=("rog",))
+    smd.log_geom_features = ["exit_1", "exit_2", "exit_3", "rog"]
+    pos_nm = np.random.default_rng(2).normal(size=(9, 3)) * 0.3
+    row = smd._compute_geom_row(pos_nm)
+    assert {"exit_1", "exit_2", "exit_3", "rog"} <= set(row)
+    e = np.array([row["exit_1"], row["exit_2"], row["exit_3"]])
+    assert np.isclose(np.sum(e ** 2), 1.0, atol=1e-6)   # projected unit vector
+
+
+def test_compute_geom_row_exit_skipped_without_pocket():
+    smd = _make_stub(shape_feats=("rog",))
+    smd.subset_protein_HA = None
+    smd.log_geom_features = ["exit_1", "exit_2", "exit_3", "rog"]
+    row = smd._compute_geom_row(np.random.default_rng(3).normal(size=(9, 3)))
+    assert set(row) == {"rog"}
+
+
 def test_compute_geom_row_shape_only_when_pocket_missing():
     smd = _make_stub(shape_feats=("rog", "npr1"))
     smd.subset_protein_HA = None          # no pocket -> nc/mindist skipped

@@ -59,7 +59,7 @@ class DTWPathModel(PathModel):
                  do_plots: bool = True,
                  outdir: str = 'path_analysis',
                  n_geom_pcs: int | None = 2,
-                 geom_feature_prefix: str = 'dist_',
+                 geom_feature_prefix: str | tuple[str, ...] = ('dist_', 'geom_'),
                  ):
 
         self.seed = seed
@@ -68,6 +68,9 @@ class DTWPathModel(PathModel):
         self.do_plots = do_plots
         self._use_silhouette = True
         self.n_geom_pcs = n_geom_pcs
+        # Prefix(es) whose columns form the geometric block that is PCA-reduced
+        # before DTW (pocket distances dist_* and inline geom features geom_*).
+        # str.startswith accepts a tuple, so multiple prefixes work directly.
         self.geom_feature_prefix = geom_feature_prefix
     
     def fit_transform(self,
