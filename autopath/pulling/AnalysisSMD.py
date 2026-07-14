@@ -345,6 +345,7 @@ class SMDAnalysis:
             geom_features: bool = True,
             geom_merge: str = "impute",
             plateau_frac: float = 0.4,
+            cluster_to_boundary: bool = True,
             ) -> SMDData:
         """
         Parameters
@@ -367,6 +368,31 @@ class SMDAnalysis:
         if self.reference_pdb is None:
             self.reference_pdb = sMDDdata.reference_pdb
             logger.warning(f"No reference PDB provided, using from SMDData: {self.reference_pdb}")
+
+        # Restrict clustering to the unbinding route (bound -> rupture), excluding
+        # the post-boundary bulk-solvent tail. When r_range is not given, derive
+        # the upper bound from the force-plateau boundary (same plateau_frac as the
+        # TS/kinetics) so we don't cluster solvent conformations.
+        if r_range is None and cluster_to_boundary:
+            rd = sMDDdata.raw_data
+            if {'r_coord', 'force', 'speed'}.issubset(rd.columns):
+                r_lo, r_hi = float(rd['r_coord'].min()), float(rd['r_coord'].max())
+                r_ts = KramersEstimator.force_plateau_boundary(
+                    rd, 0.0, r_lo, r_hi, plateau_frac,
+                )
+                if r_ts is not None and r_ts > r_lo:
+                    r_range = (r_lo, r_ts)
+                    logger.info(
+                        f"Clustering restricted to force-plateau boundary: r in "
+                        f"[{r_lo:.2f}, {r_ts:.2f}] nm (plateau_frac={plateau_frac}); "
+                        f"excludes bulk-solvent tail. Set cluster_to_boundary=False "
+                        f"or pass r_range to override."
+                    )
+                else:
+                    logger.warning(
+                        "cluster_to_boundary: force-plateau boundary not found; "
+                        "clustering over full r range."
+                    )
 
         if r_range is not None:
             sMDDdata.filter_by_r_range(r_range, sMDDdata.r_column)
