@@ -58,7 +58,7 @@ class DTWPathModel(PathModel):
                  seed: int = 42,
                  do_plots: bool = True,
                  outdir: str = 'path_analysis',
-                 n_geom_pcs: int | None = 2,
+                 n_geom_pcs: int | None = 3,
                  geom_feature_prefix: str | tuple[str, ...] = ('dist_', 'geom_'),
                  ):
 

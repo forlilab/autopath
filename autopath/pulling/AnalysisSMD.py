@@ -48,16 +48,16 @@ TRACE_FEATURE_POOL = frozenset({
     "force", "U_cvpack", "dW_protocol", "m_eff",
 })
 
-# Default features for clustering when the caller passes features=None.
-# Trace features capture reaction-coordinate progress and energetics, which
-# is what distinguishes genuinely different unbinding routes. Shape features
-# (npr1, npr2, pbf) are optional — useful only when trajectories are known
-# to diverge spatially AND ligand conformation varies across those routes.
-# Including shape by default tends to dominate DTW clustering when all
-# trajectories are kinematically similar (e.g. all autostop at the same
-# barrier), causing paths to split on conformation rather than exit route.
+# Default *trace* features for clustering when the caller passes features=None:
+# reaction-coordinate progress (r_before), a spring-fluctuation channel (lag),
+# and a dissipation channel (work). The GEOMETRY comes separately via the inline
+# geom sidecar (geom_features=True by default): exit-direction, mindist, and
+# ligand shape, all under the geom_ prefix and PCA-reduced together in
+# DTWPathModel (n_geom_pcs). So shape is NOT requested here as explicit lig_*
+# features — that would bypass the geom PCA, re-read the DCDs, and (for rigid
+# ligands) inject near-constant noise. Add lig_* shape names to `features`
+# only when you specifically want the un-PCA'd post-processing versions.
 _DEFAULT_TRACE_FEATURES = ("lag", "work", "r_before")
-_DEFAULT_SHAPE_FEATURES  = ("npr1", "npr2", "pbf")
 DEFAULT_FEATURES = list(_DEFAULT_TRACE_FEATURES)
 
 assert TRACE_FEATURE_POOL.isdisjoint(LIGAND_FEATURE_POOL), (
@@ -346,7 +346,6 @@ class SMDAnalysis:
             geom_merge: str = "impute",
             plateau_frac: float = 0.4,
             cluster_to_boundary: bool = True,
-            boundary_buffer_frac: float = 0.1,
             ) -> SMDData:
         """
         Parameters
@@ -382,12 +381,10 @@ class SMDAnalysis:
                     rd, 0.0, r_lo, r_hi, plateau_frac,
                 )
                 if r_ts is not None and r_ts > r_lo:
-                    r_hi_cap = min(r_ts * (1.0 + boundary_buffer_frac), r_hi)
-                    r_range = (r_lo, r_hi_cap)
+                    r_range = (r_lo, r_ts)
                     logger.info(
                         f"Clustering restricted to force-plateau boundary: r in "
-                        f"[{r_lo:.2f}, {r_hi_cap:.2f}] nm (boundary {r_ts:.2f} + "
-                        f"{boundary_buffer_frac:.0%} buffer, plateau_frac={plateau_frac}); "
+                        f"[{r_lo:.2f}, {r_ts:.2f}] nm (plateau_frac={plateau_frac}); "
                         f"excludes bulk-solvent tail. Set cluster_to_boundary=False "
                         f"or pass r_range to override."
                     )
@@ -656,8 +653,6 @@ class SMDAnalysis:
         min_common_points: int = 5,
         boundary_method: str = "force_plateau",  # TS/barrier detector: "force_plateau" (restraint-force, default) or "pmf_peak"
         plateau_frac: float = 0.4,
-        restrict_rmsd_to_boundary: bool = True,   # compute PMF-RMSD only up to the force-plateau boundary (+buffer), not the noisy solvent tail
-        boundary_buffer_frac: float = 0.1,        # extend the boundary cap by this fraction of r_ts
         min_samples_per_step_conv: int = 3,
         min_trajs_per_path_conv: int = 2,
     ):
@@ -750,29 +745,6 @@ class SMDAnalysis:
 
             speed_data = smd.raw_data[smd.raw_data['speed'] == speed].copy()
             protocol_grid = smd.protocol_grids[speed].set_index('step')['r_target_protocol']
-
-            # Fixed convergence-metric window: cap the PMF-RMSD at the force-plateau
-            # boundary (+buffer) so the noisy, dissipation-dominated solvent tail past
-            # rupture does not dominate the RMSD. Computed once from the full per-speed
-            # force data (stable across replica counts), not per-k.
-            rmsd_r_cap = None
-            if restrict_rmsd_to_boundary and {'r_coord', 'force', 'speed'}.issubset(speed_data.columns):
-                _r_lo, _r_hi = float(speed_data['r_coord'].min()), float(speed_data['r_coord'].max())
-                _rts = KramersEstimator.force_plateau_boundary(
-                    speed_data, speed, _r_lo, _r_hi, plateau_frac,
-                )
-                if _rts is not None:
-                    rmsd_r_cap = min(_rts * (1.0 + boundary_buffer_frac), _r_hi)
-                    logger.info(
-                        f"[convergence] RMSD window capped at r <= {rmsd_r_cap:.2f} nm "
-                        f"(force-plateau boundary {_rts:.2f} nm + {boundary_buffer_frac:.0%} buffer); "
-                        f"excludes noisy solvent tail."
-                    )
-                else:
-                    logger.warning(
-                        "[convergence] force-plateau boundary not found; "
-                        "RMSD computed over full PMF range."
-                    )
 
             traj_order = [os.path.basename(fn)[:-4] for fn in speed_logs]
             traj_data_map = {
@@ -883,12 +855,6 @@ class SMDAnalysis:
 
                 # compare PMF(k) vs PMF(k-1)
                 common_r = pmf_k.index.intersection(prev_pmf.index)
-
-                # Cap the RMSD window at the force-plateau boundary (+buffer): drop
-                # steps past rupture whose noisy plateau otherwise dominates the RMSD.
-                if rmsd_r_cap is not None and len(common_r) > 0:
-                    _r_of_step = protocol_grid.reindex(common_r).to_numpy()
-                    common_r = common_r[_r_of_step <= rmsd_r_cap]
 
                 # NaN-aware barrier/r_ts deltas between consecutive estimates:
                 # - both NaN: no peak in either → criterion waived (True)
