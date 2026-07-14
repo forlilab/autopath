@@ -800,8 +800,13 @@ class AutoPath:
             elif os.path.exists(medoid_info_path):
                 with open(medoid_info_path, "r") as f:
                     medoid_info = json.load(f)
-                medoid_names = medoid_info.get("medoid_names", [])
-                medoid_to_path = medoid_info.get("medoid_to_path", {})
+                # Current schema stores only per-speed medoid → path maps under
+                # "by_speed"; flatten them into a single map. Fall back to the
+                # legacy top-level "medoid_to_path" for older files.
+                medoid_to_path = dict(medoid_info.get("medoid_to_path", {}))
+                for mapping in medoid_info.get("by_speed", {}).values():
+                    medoid_to_path.update(mapping)
+                medoid_names = list(medoid_to_path)
                 logger.info(f"Loaded medoid info from {medoid_info_path}: {len(medoid_names)} medoids.")
             else:
                 logger.warning(
