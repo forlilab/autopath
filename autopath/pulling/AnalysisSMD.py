@@ -60,7 +60,7 @@ TRACE_FEATURE_POOL = frozenset({
 # path). The pocket-distance dist_* PCA is a separate reference route and is
 # never merged into this set.
 _DEFAULT_TRACE_FEATURES = ("lag", "r_before")
-_DEFAULT_GEOM_FEATURES = ("geom_rog", "geom_npr1", "geom_npr2",
+_DEFAULT_GEOM_FEATURES = ("geom_rog", #"geom_npr1", "geom_npr2",
                           "geom_exit_1", "geom_exit_2", "geom_exit_3")
 DEFAULT_FEATURES = list(_DEFAULT_TRACE_FEATURES) + list(_DEFAULT_GEOM_FEATURES)
 
@@ -632,6 +632,16 @@ class SMDAnalysis:
                 logger.warning(f"Could not regenerate friction-coloured PSE: {_exc}")
 
         if self.do_plots:
+            # Detected transition state (force-plateau boundary) to mark on the
+            # energy/friction profiles as a dashed vertical line.
+            ts_r = None
+            _rd = sMDDdata.raw_data
+            if {'r_coord', 'force', 'speed'}.issubset(_rd.columns):
+                ts_r = KramersEstimator.force_plateau_boundary(
+                    _rd, 0.0, float(_rd['r_coord'].min()), float(_rd['r_coord'].max()),
+                    plateau_frac,
+                )
+
             for estimator in active_estimators:
                 plot_work_profiles(sMDDdata.results, estimator=estimator.name, outdir=self.outdir)
             for vcol in ['Wdiss', 'dG']:
@@ -641,14 +651,16 @@ class SMDAnalysis:
                     hue='estimator',
                     ylabel='Energy (kJ/mol)',
                     outdir=self.outdir,
+                    ts_line=ts_r,
                 )
             if friction_df is not None and not friction_df.empty:
-                plot_friction(friction_df, outdir=self.outdir)
+                plot_friction(friction_df, outdir=self.outdir, ts_line=ts_r)
             for pcol, v0_df in weighted_pmf_v0.items():
                 plot_extrapolated_param(
                     v0_df,
                     param=pcol,
                     outfname=os.path.join(self.outdir, f'{pcol}_extrapolated.svg'),
+                    ts_line=ts_r,
                 )
 
         # Merge trajectory-derived features into raw_data so they appear in the CSV.
