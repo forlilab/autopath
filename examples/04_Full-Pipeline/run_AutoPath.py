@@ -84,6 +84,7 @@ def main():
                     sMD_converge_speeds=True,
                     sMD_max_replicas = 50,
                     sMD_pulling_speeds={
+                                        0.020: 5,
                                         0.015: 5,
                                         0.010: 5, # nm/ps equivalent to 10.0 m/s nm/ns
                                         # 0.0050: 25, # nm/ps equivalent to 5.0 m/s nm/ns
