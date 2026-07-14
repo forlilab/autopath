@@ -60,7 +60,7 @@ TRACE_FEATURE_POOL = frozenset({
 # path). The pocket-distance dist_* PCA is a separate reference route and is
 # never merged into this set.
 _DEFAULT_TRACE_FEATURES = (
-                        #    "lag", 
+                           "lag", 
                         #    "r_before"
                            )
 _DEFAULT_GEOM_FEATURES = (
