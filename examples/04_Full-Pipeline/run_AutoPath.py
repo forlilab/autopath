@@ -78,7 +78,7 @@ def main():
                     run_equilibration=False,
                     protocol_fname=protocol,
 
-                    run_sMDpulling=True,
+                    run_sMDpulling=False,
                     sMD_outdir='sMD',
                     sMD_ligand_anchor_mode='murcko',
                     sMD_converge_speeds=True,
