@@ -344,6 +344,7 @@ class SMDAnalysis:
             ligand_sdf: str | None = None,
             geom_features: bool = True,
             geom_merge: str = "impute",
+            plateau_frac: float = 0.4,
             ) -> SMDData:
         """
         Parameters
@@ -513,7 +514,7 @@ class SMDAnalysis:
                 dG_extrapolated=_dG_v0,
                 force_df=sMDDdata.raw_data,          # restraint force for boundary detection
                 boundary_method="force_plateau",     # kinetics-motivated abs_r (HSP90-validated)
-                plateau_frac=0.3,
+                plateau_frac=plateau_frac,
             )
             if not _koff_df.empty:
                 _koff_df.to_csv(os.path.join(self.outdir, 'koff_kramers.csv'), index=False)
@@ -625,7 +626,7 @@ class SMDAnalysis:
         trim_fraction: float = 0.1,      # drop steps where fewer than (1-trim_fraction) of replicas contributed; 0=no trimming
         min_common_points: int = 5,
         boundary_method: str = "force_plateau",  # TS/barrier detector: "force_plateau" (restraint-force, default) or "pmf_peak"
-        plateau_frac: float = 0.3,
+        plateau_frac: float = 0.4,
         min_samples_per_step_conv: int = 3,
         min_trajs_per_path_conv: int = 2,
     ):

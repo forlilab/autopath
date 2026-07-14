@@ -105,8 +105,8 @@ class AutoPath:
         ``sMD_time``, ``sMD_steps_per_move``, ``sMD_dx_per_move``,
         ``sMD_spring_cte``, ``sMD_ligand_anchor_mode``, ``sMD_max_replicas``,
         ``sMD_run_analysis``, ``sMD_clust_selection``, ``sMD_features``,
-        ``sMD_log_geom_features``, ``cluster_across_speeds``,
-        ``sMD_min_replicas_per_path``
+        ``sMD_log_geom_features``, ``sMD_plateau_frac``,
+        ``cluster_across_speeds``, ``sMD_min_replicas_per_path``
     Milestone extraction
         ``extract_milestones``, ``milestone_mode``,
         ``milestone_min_frame_separation``, ``n_milestones``, ``relax_steps``
@@ -198,6 +198,7 @@ class AutoPath:
         sMD_clust_selection:str = None,
         sMD_features: list | None = None,
         sMD_log_geom_features: bool | list = True,  # hybrid: log geom during pulling + merge into clustering
+        sMD_plateau_frac: float = 0.4,  # force-plateau TS boundary: fraction of peak |force| (higher -> boundary nearer rupture, off the tail)
         cluster_across_speeds: bool = False,
         sMD_min_replicas_per_path: int = 5,
         extract_milestones: bool = True,
@@ -261,6 +262,7 @@ class AutoPath:
         self.sMD_clust_selection = sMD_clust_selection
         self.sMD_features = sMD_features
         self.sMD_log_geom_features = sMD_log_geom_features
+        self.sMD_plateau_frac = sMD_plateau_frac
         self.cluster_across_speeds = cluster_across_speeds
         self.sMD_min_replicas_per_path = sMD_min_replicas_per_path
         # Milestones
@@ -583,6 +585,7 @@ class AutoPath:
                                 logs=log_files, speeds=[speed],
                                 min_replicas=reps,
                                 geom_features=bool(self.sMD_log_geom_features),
+                                plateau_frac=self.sMD_plateau_frac,
                             )
 
                             # conv_df is empty when replicas == reps (first PMF comparison
@@ -714,6 +717,7 @@ class AutoPath:
                                        features=self.sMD_features,
                                        ligand_sdf=ligand_file,
                                        geom_features=bool(self.sMD_log_geom_features),
+                                       plateau_frac=self.sMD_plateau_frac,
                                     #    r_range=(0, 1.75)
                                        )
 
@@ -729,6 +733,7 @@ class AutoPath:
                 merge_features=MERGE_CLUSTERING_FEATURES,
                 ligand_sdf=ligand_file,
                 geom_features=bool(self.sMD_log_geom_features),
+                plateau_frac=self.sMD_plateau_frac,
             )
             conv_df.to_csv(f"{sMD_analysis_outdir}/sMD_conv_vALL_metrics.csv", index=False)
             traces_df.to_csv(f"{sMD_analysis_outdir}/sMD_conv_vALL_traces.csv", index=False)
