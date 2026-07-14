@@ -549,6 +549,47 @@ class SMDData:
         """
         return SMDData.merge_feature_sets(geom_df, trace_df, tolerance_ps=tolerance_ps)
 
+    @staticmethod
+    def merge_geom_features(trace_df: pd.DataFrame,
+                            geom_df: pd.DataFrame,
+                            mode: str = "impute") -> pd.DataFrame:
+        """Merge geom sidecar features onto trace features.
+
+        mode='impute'  : merge_feature_sets nearest-fill (no NaN, full rows).
+        mode='aligned' : keep only exact (trajname, time) matches.
+        """
+        if mode == "impute":
+            return SMDData.merge_feature_sets(trace_df, geom_df)
+        if mode == "aligned":
+            geom_cols = [c for c in geom_df.columns if c.startswith("geom_")]
+            right = geom_df[["trajname", "time"] + geom_cols]
+            return trace_df.merge(right, on=["trajname", "time"], how="inner")
+        raise ValueError(f"geom_merge mode must be 'impute' or 'aligned', got {mode!r}")
+
+    def load_geom_features(self) -> pd.DataFrame:
+        """Load per-run geom sidecars (``sMD_*_geom.dat``) for the loaded logs.
+
+        Returns an empty DataFrame when no sidecars are present; never raises
+        on missing files. Columns: trajname, speed, step, time, geom_*.
+        """
+        rows = []
+        for log_fn in self.log_files:
+            geom_fn = log_fn[:-4] + "_geom.dat"      # replace trailing '.dat'
+            if not os.path.exists(geom_fn):
+                continue
+            try:
+                g = pd.read_csv(geom_fn, comment='#')
+            except Exception as e:
+                logger.warning(f"Could not read geom sidecar {geom_fn}: {e}")
+                continue
+            g["trajname"] = os.path.basename(log_fn)[:-4]
+            g["speed"] = self._speed_from_log(log_fn)
+            rows.append(g)
+        if not rows:
+            logger.info("No geom sidecars (_geom.dat) found; geom features unavailable.")
+            return pd.DataFrame()
+        return pd.concat(rows, ignore_index=True)
+
     def add_estimator_results(self, estimator_name: str, results_df: pd.DataFrame):
         """Append per-(speed, path, step) estimator output to ``self.results``.
 
