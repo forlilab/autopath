@@ -105,7 +105,8 @@ class AutoPath:
         ``sMD_time``, ``sMD_steps_per_move``, ``sMD_dx_per_move``,
         ``sMD_spring_cte``, ``sMD_ligand_anchor_mode``, ``sMD_max_replicas``,
         ``sMD_run_analysis``, ``sMD_clust_selection``, ``sMD_features``,
-        ``cluster_across_speeds``, ``sMD_min_replicas_per_path``
+        ``sMD_log_geom_features``, ``cluster_across_speeds``,
+        ``sMD_min_replicas_per_path``
     Milestone extraction
         ``extract_milestones``, ``milestone_mode``,
         ``milestone_min_frame_separation``, ``n_milestones``, ``relax_steps``
@@ -196,6 +197,7 @@ class AutoPath:
         sMD_run_analysis: bool = True,
         sMD_clust_selection:str = None,
         sMD_features: list | None = None,
+        sMD_log_geom_features: bool | list = True,  # hybrid: log geom during pulling + merge into clustering
         cluster_across_speeds: bool = False,
         sMD_min_replicas_per_path: int = 5,
         extract_milestones: bool = True,
@@ -258,6 +260,7 @@ class AutoPath:
         self.sMD_run_analysis = sMD_run_analysis
         self.sMD_clust_selection = sMD_clust_selection
         self.sMD_features = sMD_features
+        self.sMD_log_geom_features = sMD_log_geom_features
         self.cluster_across_speeds = cluster_across_speeds
         self.sMD_min_replicas_per_path = sMD_min_replicas_per_path
         # Milestones
@@ -544,6 +547,7 @@ class AutoPath:
                 autostop_nc_window=self.sMD_autostop_nc_window,
                 autostop_min_displacement=self.sMD_autostop_min_displacement,
                 save_freq=5,
+                log_geom_features=self.sMD_log_geom_features,
             )
 
             for speed, reps in self.sMD_pulling_speeds.items():
@@ -578,6 +582,7 @@ class AutoPath:
                             conv_df, traces_df = smdanalysis.check_convergence(
                                 logs=log_files, speeds=[speed],
                                 min_replicas=reps,
+                                geom_features=bool(self.sMD_log_geom_features),
                             )
 
                             # conv_df is empty when replicas == reps (first PMF comparison
@@ -708,6 +713,7 @@ class AutoPath:
                                        cluster_across_speeds=self.cluster_across_speeds,
                                        features=self.sMD_features,
                                        ligand_sdf=ligand_file,
+                                       geom_features=bool(self.sMD_log_geom_features),
                                     #    r_range=(0, 1.75)
                                        )
 
@@ -722,6 +728,7 @@ class AutoPath:
                 features=self.sMD_features,
                 merge_features=MERGE_CLUSTERING_FEATURES,
                 ligand_sdf=ligand_file,
+                geom_features=bool(self.sMD_log_geom_features),
             )
             conv_df.to_csv(f"{sMD_analysis_outdir}/sMD_conv_vALL_metrics.csv", index=False)
             traces_df.to_csv(f"{sMD_analysis_outdir}/sMD_conv_vALL_traces.csv", index=False)

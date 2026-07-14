@@ -342,7 +342,7 @@ class SMDAnalysis:
             cluster_across_speeds: bool = False,
             features: list[str] | None = None,
             ligand_sdf: str | None = None,
-            geom_features: bool = False,
+            geom_features: bool = True,
             geom_merge: str = "impute",
             ) -> SMDData:
         """
@@ -615,7 +615,7 @@ class SMDAnalysis:
         features: list | None = None,   # clustering feature list (mirrors run())
         merge_features: bool = False,   # merge trace + pocket-distance + ligand feats
         ligand_sdf: str | None = None,  # needed only if ligand-shape features requested
-        geom_features: bool = False,    # merge inline geom sidecars into clustering
+        geom_features: bool = True,     # merge inline geom sidecars into clustering (hybrid default)
         geom_merge: str = "impute",     # 'impute' (nearest-fill) or 'aligned' (exact)
         min_replicas: int = 5,
         trace_min_replicas: int = 3,  # start building PMF traces before convergence checking begins
