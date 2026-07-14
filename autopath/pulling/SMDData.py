@@ -372,53 +372,31 @@ class SMDData:
         
         return df
     
-    def calculate_pocket_distances(self, 
-                          group_A: str = None,
-                          group_B: str = None,
-                          recompute: bool = False,
-                          stride: int = 2,
-                          ) -> pd.DataFrame:
+    @staticmethod
+    def _speed_tag_from_trajname(traj_name: str) -> str:
+        """Speed token embedded in a trajectory name, e.g. 'v0.015'.
+
+        Trajectory names follow ``sMD_replica-<id>_v<speed>_<direction>``, so the
+        speed tag is the second-to-last underscore field (mirrors the parsing used
+        when building distance rows).
         """
-        Compute (or load) distance features between pocket and ligand.
+        return traj_name.split("_")[-2]
 
-        Parameters
-        ----------
-        group_A : str
-            MDAnalysis selection string for the **pocket** atoms.
-        group_B : str
-            MDAnalysis selection string for the **ligand** atoms.
-        recompute : bool, optional
-            If False (default), load from cache if available.
-        stride : int, optional
-            Frame stride for trajectory reading (default 2).
-
-        Returns a DataFrame with columns:
-            ['trajname', 'step', 'time'] + dist_* feature columns
-
-        'step' is the frame index; 'time' is taken from the trajectory if available,
-        otherwise time = step.
-        """
-        
-        distance_file = f"{self.outdir}/{self.sysname}_pocketDistances.csv"
-
-        if (not recompute) and os.path.exists(distance_file):
-            df = pd.read_csv(distance_file)
-            return df
-
+    def _pocket_distances_for_trajs(self, trajs, group_A, group_B, stride):
+        """Compute pocket→ligand distance rows for a list of trajectory files."""
         all_rows = []
-
-        for traj in tqdm.tqdm(self.traj_files, desc="Calculating distances.."):
+        for traj in tqdm.tqdm(trajs, desc="Calculating distances.."):
             u = mda.Universe(self.reference_pdb, traj)
-            
+
             pocket_atoms = u.select_atoms(group_A)
             ligand_atoms = u.select_atoms(group_B)
             if ligand_atoms.n_atoms == 0 or pocket_atoms.n_atoms == 0:
                 print(f"Warning: No atoms found for selection in trajectory {traj}. Skipping.")
                 continue
-            
+
             traj_name = self._traj_to_log_name(traj)
-            speed = traj_name.split("_")[-2].strip("v")
-        
+            speed = self._speed_tag_from_trajname(traj_name).strip("v")
+
             for ts in u.trajectory[::stride]:
                 distances = distance_array(
                     pocket_atoms, ligand_atoms,
@@ -437,9 +415,82 @@ class SMDData:
                     row[f"dist_{i}"] = v
                 all_rows.append(row)
 
-        df = pd.DataFrame(all_rows)
-        df.to_csv(distance_file, index=False)
-        return df
+        return pd.DataFrame(all_rows)
+
+    def calculate_pocket_distances(self,
+                          group_A: str = None,
+                          group_B: str = None,
+                          recompute: bool = False,
+                          stride: int = 2,
+                          ) -> pd.DataFrame:
+        """
+        Compute (or load) distance features between pocket and ligand.
+
+        Distances are persisted **per speed** to
+        ``{outdir}/{sysname}_pocketDistances_v{speed}.csv``. Because
+        ``check_convergence`` calls this once per speed (each with a per-speed
+        ``SMDData`` sharing the same ``outdir``), a single combined file was
+        previously overwritten by the last speed processed; per-speed files avoid
+        that. Results for all requested speeds are concatenated on return.
+
+        Parameters
+        ----------
+        group_A : str
+            MDAnalysis selection string for the **pocket** atoms.
+        group_B : str
+            MDAnalysis selection string for the **ligand** atoms.
+        recompute : bool, optional
+            If False (default), load each speed's cache file when present and
+            only compute the speeds that are missing. If True, recompute every
+            speed and overwrite its cache file.
+        stride : int, optional
+            Frame stride for trajectory reading (default 2).
+
+        Returns a DataFrame with columns:
+            ['trajname', 'speed', 'step', 'time'] + dist_* feature columns
+
+        'step' is the frame index; 'time' is taken from the trajectory if available,
+        otherwise time = step.
+        """
+        trajs_by_speed = defaultdict(list)
+        for traj in self.traj_files:
+            speed_tag = self._speed_tag_from_trajname(self._traj_to_log_name(traj))
+            trajs_by_speed[speed_tag].append(traj)
+
+        # Legacy single-file cache (pre per-speed scheme); reused per speed if present.
+        legacy_file = f"{self.outdir}/{self.sysname}_pocketDistances.csv"
+        legacy_df = None
+        if (not recompute) and os.path.exists(legacy_file):
+            try:
+                legacy_df = pd.read_csv(legacy_file)
+            except (OSError, pd.errors.ParserError):
+                legacy_df = None
+
+        frames = []
+        for speed_tag, trajs in trajs_by_speed.items():
+            per_speed_file = f"{self.outdir}/{self.sysname}_pocketDistances_{speed_tag}.csv"
+
+            if (not recompute) and os.path.exists(per_speed_file):
+                frames.append(pd.read_csv(per_speed_file))
+                continue
+
+            # Migrate this speed's rows out of the legacy combined file if available.
+            if legacy_df is not None and "speed" in legacy_df.columns:
+                speed_val = float(speed_tag.strip("v"))
+                sub = legacy_df[legacy_df["speed"] == speed_val]
+                if not sub.empty:
+                    sub.to_csv(per_speed_file, index=False)  # promote to per-speed cache
+                    frames.append(sub)
+                    continue
+
+            df_speed = self._pocket_distances_for_trajs(trajs, group_A, group_B, stride)
+            if not df_speed.empty:
+                df_speed.to_csv(per_speed_file, index=False)
+            frames.append(df_speed)
+
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True)
 
     @staticmethod
     def merge_feature_sets(*feature_dfs: pd.DataFrame,

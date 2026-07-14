@@ -58,7 +58,7 @@ class DTWPathModel(PathModel):
                  seed: int = 42,
                  do_plots: bool = True,
                  outdir: str = 'path_analysis',
-                 n_geom_pcs: int | None = 4,
+                 n_geom_pcs: int | None = 2,
                  geom_feature_prefix: str | tuple[str, ...] = ('dist_', 'geom_'),
                  pca_all_features: bool = True,
                  ):
@@ -176,6 +176,10 @@ class DTWPathModel(PathModel):
         all_path_mappings = {}
         all_medoid_names = set()  # Track medoids across all speeds
         medoid_to_path = {}  # Map medoid trajectory name -> path ID
+        # Per-speed medoid breakdown for this call, keyed by speed string
+        # ('all' when cluster_across_speeds). Merged into medoid_info.json so the
+        # file accumulates every speed instead of being overwritten by the last.
+        medoids_by_speed = {}
 
         for speed_key, speed_df in grouping_iter:
             speed_df_full = speed_df
@@ -314,7 +318,14 @@ class DTWPathModel(PathModel):
             all_path_mappings.update(path_mapping_dic)
 
             # Medoid → path is just the subset of path_mapping_dic for medoid trajectories
-            medoid_to_path.update({name: path_mapping_dic[name] for name in speed_medoid_names})
+            speed_medoid_to_path = {name: path_mapping_dic[name] for name in speed_medoid_names}
+            medoid_to_path.update(speed_medoid_to_path)
+
+            # Record this speed's medoid → path mapping so it can be merged into
+            # medoid_info.json (keyed by speed; 'all' for cluster_across_speeds where
+            # speed_key is None). The mapping is the only irreducible content — medoid
+            # names are its keys and the cross-speed union is derived on demand.
+            medoids_by_speed[str(speed_key) if speed_key is not None else "all"] = speed_medoid_to_path
 
             # Set per-speed attribute used by plot_clusters_PCA below
             self.medoid_names = speed_medoid_names
@@ -398,20 +409,41 @@ class DTWPathModel(PathModel):
                 except Exception as e:
                     logger.warning(f"Could not generate unbinding paths visualization: {e}")
 
-        # Persist medoid information as instance attributes (all speeds)
-        self.all_medoid_names = list(all_medoid_names)
-        self.medoid_names = self.all_medoid_names
-        self.medoid_to_path = medoid_to_path
-
-        # Save medoid info to disk for downstream use (e.g., milestone extraction)
-        medoid_info = {
-            "medoid_names": self.all_medoid_names,
-            "medoid_to_path": self.medoid_to_path,
-        }
+        # Persist medoid info to disk, merged by speed. fit_transform is called
+        # once with all speeds by run(), but per-speed in a loop by
+        # check_convergence(); merging by speed key means every speed accumulates
+        # instead of the last call overwriting the file. Only speeds computed in
+        # THIS call are refreshed — re-running with a reduced speed set leaves
+        # previously stored speeds in place.
         medoid_info_path = os.path.join(self.outdir, "path_analysis", "medoid_info.json")
+        by_speed = {}
+        if os.path.exists(medoid_info_path):
+            try:
+                with open(medoid_info_path) as f:
+                    by_speed = json.load(f).get("by_speed", {}) or {}
+            except (json.JSONDecodeError, OSError) as e:
+                logger.warning(f"Could not read existing {medoid_info_path} ({e}); overwriting.")
+        by_speed.update(medoids_by_speed)
+
+        # Cross-speed union, derived (not stored) — for consumers that want a
+        # single flat medoid → path map (e.g. autopath_core milestone extraction).
+        union_to_path = {}
+        for mapping in by_speed.values():
+            union_to_path.update(mapping)
+
+        # Instance attributes reflect the full merged set (all speeds on disk).
+        self.medoids_by_speed = by_speed
+        self.medoid_to_path = union_to_path
+        self.all_medoid_names = sorted(union_to_path)
+        self.medoid_names = self.all_medoid_names
+
+        os.makedirs(os.path.dirname(medoid_info_path), exist_ok=True)
         with open(medoid_info_path, "w") as f:
-            json.dump(medoid_info, f, indent=2)
-        logger.info(f"Saved medoid info to {medoid_info_path}")
+            json.dump({"by_speed": by_speed}, f, indent=2)
+        logger.info(
+            f"Saved medoid info to {medoid_info_path} "
+            f"({len(union_to_path)} medoids across {len(by_speed)} speed group(s))."
+        )
 
         return all_path_mappings
     
