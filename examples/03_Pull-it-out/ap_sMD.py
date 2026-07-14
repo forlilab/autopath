@@ -83,6 +83,13 @@ def main():
         dx_per_move=DX_PER_MOVE,
         max_displacement=2.5,
         sMD_spring_cte=sMD_spring_cte,
+        # Log per-frame geometry (contacts, min-distance, ligand shape) to
+        # sMD_<run_id>_geom.dat at the DCD cadence, reusing positions already
+        # pulled for autostop. These complement the trace features in
+        # clustering (AnalysisSMD.run(..., geom_features=True)) without a
+        # post-processing pass over the trajectories. Pass a list to select a
+        # subset, e.g. log_geom_features=["nc", "rog", "npr1", "npr2"].
+        log_geom_features=True,
     )
 
     for rep_idx in range(1, N_REPS+1):
