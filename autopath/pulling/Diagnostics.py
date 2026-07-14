@@ -192,6 +192,7 @@ def plot_profile(df: pd.DataFrame,
                  mask_negative_dG: bool = False,
                  sharey: bool = True,
                  ts_line: float | None = None,
+                 abs_line: float | None = None,
                  ):
     """Plot a single quantity vs reaction coordinate, faceted by speed.
 
@@ -271,12 +272,15 @@ def plot_profile(df: pd.DataFrame,
         y_label = ylabel if ylabel else value_col
         g.set_axis_labels('r_coord (nm)', y_label)
 
-        # Mark the detected transition state (force-plateau boundary).
-        if ts_line is not None:
-            g.refline(x=ts_line, color="0.25", linestyle="--", linewidth=1.2)
-            for ax in g.axes.flat:
-                ax.text(ts_line, 0.98, "TS", transform=ax.get_xaxis_transform(),
-                        va="top", ha="right", rotation=90, fontsize=8, color="0.25")
+        # Mark the transition state (force peak) and the Kramers absorbing
+        # boundary (force-plateau decay point) as dashed vertical lines.
+        for _x, _lab, _c in [(ts_line, "TS", "0.25"),
+                             (abs_line, "abs", "firebrick")]:
+            if _x is not None:
+                g.refline(x=_x, color=_c, linestyle="--", linewidth=1.2)
+                for ax in g.axes.flat:
+                    ax.text(_x, 0.98, _lab, transform=ax.get_xaxis_transform(),
+                            va="top", ha="right", rotation=90, fontsize=8, color=_c)
 
         if hue or style:
             g.add_legend(bbox_to_anchor=(1.01, 0.8), loc='upper left')
@@ -292,6 +296,7 @@ def plot_profile(df: pd.DataFrame,
 def plot_friction(df: pd.DataFrame,
                   outdir: str = 'analysis',
                   ts_line: float | None = None,
+                  abs_line: float | None = None,
                   ):
     """Plot friction profiles from FrictionEstimator output.
 
@@ -322,6 +327,7 @@ def plot_friction(df: pd.DataFrame,
             outfname=os.path.join(outdir, 'Gamma_local.svg'),
             sharey=False,
             ts_line=ts_line,
+            abs_line=abs_line,
         )
 
         # Plot 2: cumulative Γ — both methods combined (where available)
@@ -337,6 +343,7 @@ def plot_friction(df: pd.DataFrame,
                 outfname=os.path.join(outdir, 'Gamma_cumulative.svg'),
                 sharey=False,
                 ts_line=ts_line,
+                abs_line=abs_line,
             )
         return
 
@@ -582,6 +589,7 @@ def plot_extrapolated_param(df: pd.DataFrame = None,
                             outfname: str = None,
                             mask_negative_dG: bool = False,
                             ts_line: float | None = None,
+                            abs_line: float | None = None,
                             ):
     """Plot the v→0 extrapolated parameter vs r_coord with R² color mapping and error bands.
     
@@ -655,10 +663,12 @@ def plot_extrapolated_param(df: pd.DataFrame = None,
                     yerri = yerr[i:i+2]
                     ax.fill_between(xi, yi - yerri, yi + yerri, color=color, alpha=0.25)
 
-            if ts_line is not None:
-                ax.axvline(ts_line, color="0.25", linestyle="--", linewidth=1.2)
-                ax.text(ts_line, 0.98, "TS", transform=ax.get_xaxis_transform(),
-                        va="top", ha="right", rotation=90, fontsize=8, color="0.25")
+            for _x, _lab, _c in [(ts_line, "TS", "0.25"),
+                                 (abs_line, "abs", "firebrick")]:
+                if _x is not None:
+                    ax.axvline(_x, color=_c, linestyle="--", linewidth=1.2)
+                    ax.text(_x, 0.98, _lab, transform=ax.get_xaxis_transform(),
+                            va="top", ha="right", rotation=90, fontsize=8, color=_c)
 
             ax.set_xlabel('r_coord (nm)')
             # ax.set_ylabel(f'{param.split("_")[0]} (kJ/mol)')

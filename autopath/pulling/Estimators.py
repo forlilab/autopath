@@ -826,6 +826,24 @@ class KramersEstimator:
         frac : float
             Decay fraction of the peak mean |force| defining the boundary.
         """
+        prof = KramersEstimator._binned_mean_abs_force(force_df, speed, start_r, r_max)
+        if prof is None:
+            return None
+        r_bc, mF, pk = prof
+        after = np.where(mF[pk:] < frac * mF[pk])[0]
+        if len(after) == 0:
+            return None
+        return float(min(r_bc[pk + after[0]], r_max - 1e-6))
+
+    @staticmethod
+    def _binned_mean_abs_force(force_df, speed, start_r, r_max):
+        """Shared binning for the force-based boundaries.
+
+        Returns ``(r_centers, smoothed_mean_abs_force, peak_index)`` with
+        ``r_centers`` in absolute reaction-coordinate units
+        (``start_r`` + displacement), or ``None`` when the force profile is
+        unusable (missing columns, too few frames, degenerate range).
+        """
         if force_df is None or not {"r_coord", "force", "speed"}.issubset(force_df.columns):
             return None
         speeds = sorted(force_df["speed"].dropna().unique())
@@ -851,11 +869,21 @@ class KramersEstimator:
         mF = np.interp(np.arange(len(bc)), np.where(ok)[0], mF[ok])
         mF = pd.Series(mF).rolling(5, center=True, min_periods=1).mean().to_numpy()
         pk = int(np.argmax(mF))
-        after = np.where(mF[pk:] < frac * mF[pk])[0]
-        if len(after) == 0:
+        return (start_r + bc, mF, pk)
+
+    @staticmethod
+    def force_peak_r(force_df, speed, start_r, r_max):
+        """Reaction coordinate (nm) of the mean|force| peak — the rupture / TS.
+
+        This is the barrier the ligand crosses; the Kramers absorbing boundary
+        (:meth:`force_plateau_boundary`) sits past it. ``None`` if the force
+        profile is unusable.
+        """
+        prof = KramersEstimator._binned_mean_abs_force(force_df, speed, start_r, r_max)
+        if prof is None:
             return None
-        abs_r = start_r + float(bc[pk + after[0]])
-        return float(min(abs_r, r_max - 1e-6))
+        r_bc, _mF, pk = prof
+        return float(r_bc[pk])
 
     @staticmethod
     def kramers_mfpt(

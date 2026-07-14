@@ -59,9 +59,15 @@ TRACE_FEATURE_POOL = frozenset({
 # NOT requested as bare lig_* names (that would use the un-PCA'd post-processing
 # path). The pocket-distance dist_* PCA is a separate reference route and is
 # never merged into this set.
-_DEFAULT_TRACE_FEATURES = ("lag", "r_before")
-_DEFAULT_GEOM_FEATURES = ("geom_rog", #"geom_npr1", "geom_npr2",
-                          "geom_exit_1", "geom_exit_2", "geom_exit_3")
+_DEFAULT_TRACE_FEATURES = (
+                        #    "lag", 
+                        #    "r_before"
+                           )
+_DEFAULT_GEOM_FEATURES = (
+                        #   "geom_rog", 
+                          # "geom_npr1", "geom_npr2",
+                          "geom_exit_1", "geom_exit_2", "geom_exit_3"
+                          )
 DEFAULT_FEATURES = list(_DEFAULT_TRACE_FEATURES) + list(_DEFAULT_GEOM_FEATURES)
 
 assert TRACE_FEATURE_POOL.isdisjoint(LIGAND_FEATURE_POOL), (
@@ -222,7 +228,8 @@ class SMDAnalysis:
 
     def _build_cluster_feature_df(self, smd, group_A=None, group_B=None,
                                   features=None, merge_features=True, ligand_sdf=None,
-                                  geom_features=False, geom_merge="impute"):
+                                  geom_features=False, geom_merge="impute",
+                                  recompute_distances=False):
         """Build the clustering feature DataFrame for an ``SMDData``.
 
         Shared by :meth:`run` and :meth:`check_convergence` so both cluster on the
@@ -274,7 +281,7 @@ class SMDAnalysis:
             dist_feat_df = smd.calculate_pocket_distances(
                 group_A=group_A,
                 group_B=group_B,
-                recompute=True,
+                recompute=recompute_distances,
             )
 
         # Compute ligand trajectory features (RoG and/or RDKit 3D shape
@@ -368,10 +375,11 @@ class SMDAnalysis:
             features: list[str] | None = None,
             ligand_sdf: str | None = None,
             geom_features: bool = True,
-            geom_merge: str = "impute",
+            geom_merge: str = "aligned",
             plateau_frac: float = 0.4,
             cluster_to_boundary: bool = True,
             boundary_buffer_frac: float = 0.1,
+            recompute_distances: bool = False,
             ) -> SMDData:
         """
         Parameters
@@ -436,6 +444,7 @@ class SMDAnalysis:
             sMDDdata, group_A=group_A, group_B=group_B,
             features=features, merge_features=merge_features, ligand_sdf=ligand_sdf,
             geom_features=geom_features, geom_merge=geom_merge,
+            recompute_distances=recompute_distances,
         )
 
         # Apply the force-plateau boundary to the CLUSTERING matrix only. raw_data
@@ -623,7 +632,7 @@ class SMDAnalysis:
                         reference_pdb=self.reference_pdb,
                         ligand_select=self.ligand_select,
                         outdir=os.path.join(self.path_model.outdir, "path_analysis"),
-                        color_by_friction=True,
+                        color_by_friction=False,
                         friction_csv=friction_csv_path,
                         pocket_select=group_B if group_B is not None else self.pocket_select,
                     )
@@ -632,15 +641,16 @@ class SMDAnalysis:
                 logger.warning(f"Could not regenerate friction-coloured PSE: {_exc}")
 
         if self.do_plots:
-            # Detected transition state (force-plateau boundary) to mark on the
-            # energy/friction profiles as a dashed vertical line.
-            ts_r = None
+            # Two dashed markers on the profiles: the transition state (mean|force|
+            # peak / rupture) and the Kramers absorbing boundary (force-plateau
+            # decay point that the MFPT integrates to). Both from the same
+            # per-speed force profile as the kinetics.
+            ts_r = abs_r = None
             _rd = sMDDdata.raw_data
             if {'r_coord', 'force', 'speed'}.issubset(_rd.columns):
-                ts_r = KramersEstimator.force_plateau_boundary(
-                    _rd, 0.0, float(_rd['r_coord'].min()), float(_rd['r_coord'].max()),
-                    plateau_frac,
-                )
+                _lo, _hi = float(_rd['r_coord'].min()), float(_rd['r_coord'].max())
+                ts_r = KramersEstimator.force_peak_r(_rd, 0.0, _lo, _hi)
+                abs_r = KramersEstimator.force_plateau_boundary(_rd, 0.0, _lo, _hi, plateau_frac)
 
             for estimator in active_estimators:
                 plot_work_profiles(sMDDdata.results, estimator=estimator.name, outdir=self.outdir)
@@ -652,15 +662,17 @@ class SMDAnalysis:
                     ylabel='Energy (kJ/mol)',
                     outdir=self.outdir,
                     ts_line=ts_r,
+                    abs_line=abs_r,
                 )
             if friction_df is not None and not friction_df.empty:
-                plot_friction(friction_df, outdir=self.outdir, ts_line=ts_r)
+                plot_friction(friction_df, outdir=self.outdir, ts_line=ts_r, abs_line=abs_r)
             for pcol, v0_df in weighted_pmf_v0.items():
                 plot_extrapolated_param(
                     v0_df,
                     param=pcol,
                     outfname=os.path.join(self.outdir, f'{pcol}_extrapolated.svg'),
                     ts_line=ts_r,
+                    abs_line=abs_r,
                 )
 
         # Merge trajectory-derived features into raw_data so they appear in the CSV.
@@ -697,7 +709,7 @@ class SMDAnalysis:
         merge_features: bool = False,   # merge trace + pocket-distance + ligand feats
         ligand_sdf: str | None = None,  # needed only if ligand-shape features requested
         geom_features: bool = True,     # merge inline geom sidecars into clustering (hybrid default)
-        geom_merge: str = "impute",     # 'impute' (nearest-fill) or 'aligned' (exact)
+        geom_merge: str = "aligned",     # 'impute' (nearest-fill) or 'aligned' (exact)
         min_replicas: int = 5,
         trace_min_replicas: int = 3,  # start building PMF traces before convergence checking begins
         tol_rmsd: float = 4.0,     # kJ/mol
@@ -712,6 +724,7 @@ class SMDAnalysis:
         boundary_buffer_frac: float = 0.1,        # extend the boundary cap by this fraction of r_ts
         min_samples_per_step_conv: int = 3,
         min_trajs_per_path_conv: int = 2,
+        recompute_distances: bool = False,
     ):
         """Check PMF convergence as replica count grows, per pulling speed.
 
@@ -787,6 +800,7 @@ class SMDAnalysis:
                 smd, group_A=group_A, group_B=group_B,
                 features=features, merge_features=merge_features, ligand_sdf=ligand_sdf,
                 geom_features=geom_features, geom_merge=geom_merge,
+                recompute_distances=recompute_distances,
             )
 
             protocol_grid = smd.protocol_grids[speed].set_index('step')['r_target_protocol']

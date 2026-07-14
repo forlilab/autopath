@@ -53,3 +53,22 @@ def test_force_plateau_monotonic_returns_none():
     """A force that never decays below frac*peak -> None (caller falls back)."""
     df = _force_df(lambda r: 100.0 * r)   # monotonically increasing, peak at end
     assert KramersEstimator.force_plateau_boundary(df, 0.01, 0.5, 2.5, frac=0.3) is None
+
+
+def test_force_peak_is_before_absorbing_boundary():
+    """TS (force peak) sits before the Kramers absorbing boundary (decay point)."""
+    def f(r):
+        pk = 500.0
+        return np.where(r <= 1.0, pk * (r - 0.5) / 0.5,
+                        np.clip(pk * (2.0 - r) / 1.0, 20.0, None))
+    df = _force_df(f)
+    peak = KramersEstimator.force_peak_r(df, 0.01, 0.5, 2.5)
+    absb = KramersEstimator.force_plateau_boundary(df, 0.01, 0.5, 2.5, frac=0.4)
+    assert peak is not None and absb is not None
+    assert peak == pytest.approx(1.0, abs=0.1)   # rupture at the constructed peak
+    assert peak < absb                            # TS precedes the absorbing boundary
+
+
+def test_force_peak_none_when_unusable():
+    df = _force_df(lambda r: 100.0 * r, n=50)     # <100 frames -> unusable
+    assert KramersEstimator.force_peak_r(df, 0.01, 0.5, 2.5) is None
