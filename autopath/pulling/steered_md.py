@@ -102,6 +102,7 @@ class SteeredMD:
         sMD_spring_cte: float = 10000,     # kJ/mol/nm^2
         save_freq: int = 5,                # writes DCD every save_freq*steps_per_move
         verbose: int = 0,
+        log_geom_features: bool | list[str] = False,  # log per-frame geom scalars to a sidecar
     ):
 
         self.system = system
@@ -117,6 +118,9 @@ class SteeredMD:
         self.restart_velocities = restart_velocities
 
         self.verbose = verbose
+        self.log_geom_features = log_geom_features
+        self._shape_calc = None    # ShapeDescriptorCalculator, built once in run()
+        self._lig_heavy_idx = None # ligand heavy-atom indices for shape descriptors
         self.autostop_nc        = float(autostop_nc) if autostop_nc is not None else None
         self.autostop_nc_window = int(autostop_nc_window)
         self.autostop_min_displacement = float(autostop_min_displacement)
@@ -304,6 +308,23 @@ class SteeredMD:
 
         _buf: list[str] = []
 
+        # ── Inline geom-feature sidecar (opt-in) ───────────────────────────────
+        # Sampled at the same save_freq cadence as NC / DCD frames. Pocket-
+        # dependent features (nc/mindist) are skipped if pocket atoms are absent.
+        geom_feats = self._resolve_geom_features()
+        geom_cols = [f for f in geom_feats
+                     if f not in self._GEOM_POCKET or self.subset_protein_HA is not None]
+        geom_dropped = set(geom_feats) - set(geom_cols)
+        if geom_dropped:
+            logger.warning(
+                f"[geom] pocket atoms unavailable; skipping {sorted(geom_dropped)}."
+            )
+        geom_buf: list[str] = []
+        geom_fh = None
+        if geom_cols:
+            geom_fh = open(f"{self.out_dir}/sMD_{run_id}_geom.dat", "w")
+            geom_fh.write("step,time," + ",".join(f"geom_{c}" for c in geom_cols) + "\n")
+
         with open(f"{self.out_dir}/sMD_{run_id}.dat", "w") as f:
             f.write("step,time,r_target,r_before,r_after,force,U_cvpack,dW_protocol,lag_nm\n")
 
@@ -343,11 +364,21 @@ class SteeredMD:
                           f"{r_after_nm},{force_kjmnm},"
                           f"{U_cvpack_kjm},{dW_protocol_kjm},{lag_nm:.5f}\n")
 
-                # ── NC autostop (every save_freq moves) ───────────────────
+                # ── Sampled-frame diagnostics (every save_freq moves) ─────
+                # One positions fetch shared by NC autostop and the geom sidecar.
                 nc = None
-                if self.subset_protein_HA is not None and i % self.save_freq == 0:
+                grow = None
+                if i % self.save_freq == 0 and (self.subset_protein_HA is not None
+                                                or geom_fh is not None):
                     pos_nm = simulation.context.getState(getPositions=True).getPositions(asNumpy=True) / openmmunit.nanometers
-                    nc = self._compute_nc(pos_nm)
+                    if self.subset_protein_HA is not None:
+                        nc = self._compute_nc(pos_nm)
+                    if geom_fh is not None:
+                        grow = self._compute_geom_row(pos_nm)
+                        geom_buf.append(f"{i},{time_before}," +
+                                        ",".join(f"{grow[c]:.5f}" for c in geom_cols) + "\n")
+                        if len(geom_buf) >= self.save_freq:
+                            geom_fh.write(''.join(geom_buf)); geom_buf.clear()
 
                 if self.autostop_nc is not None and nc is not None and _nc_initial is not None:
                     _nc_buf.append(nc)
@@ -381,6 +412,11 @@ class SteeredMD:
 
             if _buf:
                 f.write(''.join(_buf))
+
+        if geom_fh is not None:
+            if geom_buf:
+                geom_fh.write(''.join(geom_buf))
+            geom_fh.close()
 
         # Save final positions
         final_positions = simulation.context.getState(getPositions=True).getPositions()
@@ -509,11 +545,30 @@ class SteeredMD:
         # system.setDefaultPeriodicBoxVectors(*PDBFile(pdb_file).topology.getPeriodicBoxVectors())
         # simulation.context.reinitialize(preserveState=True)
         
-        # Pocket atoms needed for NC autostop or verbose monitoring
-        if self.verbose > 0 or self.autostop_nc is not None:
+        # Pocket atoms needed for NC autostop, verbose monitoring, or geom
+        # features that depend on the pocket (nc/mindist).
+        geom_feats = self._resolve_geom_features()
+        needs_pocket = (self.verbose > 0 or self.autostop_nc is not None
+                        or bool(set(geom_feats) & self._GEOM_POCKET))
+        if needs_pocket:
             self.subset_protein_HA, _ = self._get_pocket_atoms(simulation, cutoff=0.5)
         else:
             self.subset_protein_HA = None
+
+        # Build the RDKit shape calculator once (elements-only, no SDF/bonds) for
+        # any requested shape descriptors. Heavy atoms only, matching the
+        # post-processing LigandFeatures convention. masses come from the elements.
+        self._shape_calc = None
+        self._lig_heavy_idx = None
+        shape_feats = [f for f in geom_feats if f not in self._GEOM_POCKET]
+        if shape_feats:
+            from autopath.pulling.geom_kernel import ShapeDescriptorCalculator
+            atoms = list(self.topology.atoms())
+            self._lig_heavy_idx = [i for i in self.groupA_atoms
+                                   if atoms[i].element is not None
+                                   and atoms[i].element.symbol != "H"]
+            elements = [atoms[i].element.symbol for i in self._lig_heavy_idx]
+            self._shape_calc = ShapeDescriptorCalculator(elements, shape_feats)
 
         # Reset velocities to temperature. Check https://github.com/openmm/openmm/pull/259
         if self.restart_velocities:
@@ -591,15 +646,65 @@ class SteeredMD:
         v = dx_target_nm * gammaL_ps / m_eff_dalton  # in nm/ps
         return min(max(v, v_min), v_max)
     
+    # Bare feature names supported by the geom-logging sidecar.
+    _GEOM_DEFAULT = ["nc", "mindist", "rog", "npr1", "npr2", "spherocity", "pbf"]
+    _GEOM_POCKET = {"nc", "mindist"}
+
+    def _resolve_geom_features(self) -> list[str]:
+        """Ordered list of geom feature names to log (empty when disabled)."""
+        from autopath.pulling.geom_kernel import SHAPE_FEATURES
+        if not self.log_geom_features:
+            return []
+        if self.log_geom_features is True:
+            feats = list(self._GEOM_DEFAULT)
+        else:
+            feats = list(self.log_geom_features)
+        allowed = set(SHAPE_FEATURES) | self._GEOM_POCKET
+        bad = sorted(set(feats) - allowed)
+        if bad:
+            raise ValueError(
+                f"Unsupported geom features {bad}. "
+                f"Supported: {sorted(allowed)}"
+            )
+        return feats
+
+    def _compute_geom_row(self, positions_nm) -> dict[str, float]:
+        """Compute the requested geom scalars for one frame.
+
+        positions_nm : (Natoms, 3) in nm. Shape descriptors need Angstrom, so
+        ligand heavy-atom coords are scaled by 10 before the RDKit calculator;
+        mindist stays in nm.
+        """
+        feats = self._resolve_geom_features()
+        row: dict[str, float] = {}
+        pocket_ok = self.subset_protein_HA is not None
+        if "nc" in feats and pocket_ok:
+            row["nc"] = self._compute_nc(positions_nm)
+        if "mindist" in feats and pocket_ok:
+            lig = positions_nm[self.groupA_atoms]
+            poc = positions_nm[self.subset_protein_HA]
+            diff = lig[:, np.newaxis, :] - poc[np.newaxis, :, :]
+            d2 = np.einsum('ijk,ijk->ij', diff, diff)
+            row["mindist"] = float(np.sqrt(d2.min()))
+        if self._shape_calc is not None:
+            lig_ang = positions_nm[self._lig_heavy_idx] * 10.0
+            row.update(self._shape_calc.compute(lig_ang))
+        return row
+
     def _compute_nc(self, positions_nm, threshold_nm=0.5):
         """Compute number of contacts via switching function 1/(1+(d/threshold)^6) using positions only.
-        Similar to what CVPack does
+        Similar to what CVPack does.
+
+        Uses squared distances: 1/(1+(d/r0)^6) = 1/(1+(d^2/r0^2)^3), so the
+        sqrt inside the norm is skipped (the result is immediately raised to
+        the 6th power). Numerically identical to the norm form.
         """
         lig_pos = positions_nm[self.groupA_atoms]
         pocket_pos = positions_nm[self.subset_protein_HA]
-        d = np.linalg.norm(lig_pos[:, np.newaxis, :] - pocket_pos[np.newaxis, :, :], axis=2)
-        x = d / threshold_nm
-        return float(np.sum(1.0 / (1.0 + x**6)))
+        diff = lig_pos[:, np.newaxis, :] - pocket_pos[np.newaxis, :, :]
+        d2 = np.einsum('ijk,ijk->ij', diff, diff)
+        x2 = d2 / (threshold_nm * threshold_nm)
+        return float(np.sum(1.0 / (1.0 + x2**3)))
 
     def _get_pocket_atoms(self, simulation, cutoff=0.6):
         """Return protein heavy atoms within *cutoff* nm of any ligand atom.
@@ -624,8 +729,9 @@ class SteeredMD:
         ligand_pos = positions[self.groupA_atoms]
         pocket_pos = positions[protein_HA]
 
-        distances = np.linalg.norm(ligand_pos[:, np.newaxis, :] - pocket_pos[np.newaxis, :, :], axis=2)
-        close_indices = np.any(distances < cutoff, axis=0)
+        diff = ligand_pos[:, np.newaxis, :] - pocket_pos[np.newaxis, :, :]
+        d2 = np.einsum('ijk,ijk->ij', diff, diff)
+        close_indices = np.any(d2 < cutoff * cutoff, axis=0)
         subset_protein_HA = np.array(protein_HA)[close_indices]
         subset_protein_residues = [atom.residue for atom in protein_atoms if atom.index in subset_protein_HA]
         

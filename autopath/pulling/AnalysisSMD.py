@@ -217,7 +217,8 @@ class SMDAnalysis:
         return
 
     def _build_cluster_feature_df(self, smd, group_A=None, group_B=None,
-                                  features=None, merge_features=True, ligand_sdf=None):
+                                  features=None, merge_features=True, ligand_sdf=None,
+                                  geom_features=False, geom_merge="impute"):
         """Build the clustering feature DataFrame for an ``SMDData``.
 
         Shared by :meth:`run` and :meth:`check_convergence` so both cluster on the
@@ -316,6 +317,20 @@ class SMDAnalysis:
                 feat_df = traces_feat_df
                 logger.info('Clustering will be performed using trace features only')
 
+        # Inline geom features logged during pulling (sMD_*_geom.dat sidecars).
+        # A near-free, pre-computed alternative to post-processing the DCDs.
+        if geom_features:
+            geom_df = smd.load_geom_features()
+            if geom_df.empty:
+                logger.warning(
+                    "geom_features requested but no _geom.dat sidecars found; "
+                    "proceeding without inline geom features."
+                )
+            else:
+                feat_df = SMDData.merge_geom_features(feat_df, geom_df, mode=geom_merge)
+                _gcols = [c for c in feat_df.columns if c.startswith("geom_")]
+                logger.info(f"Merged inline geom features ({geom_merge}): {_gcols}")
+
         return feat_df, ligand_feat_dfs
 
     def run(self,
@@ -327,6 +342,8 @@ class SMDAnalysis:
             cluster_across_speeds: bool = False,
             features: list[str] | None = None,
             ligand_sdf: str | None = None,
+            geom_features: bool = False,
+            geom_merge: str = "impute",
             ) -> SMDData:
         """
         Parameters
@@ -362,6 +379,7 @@ class SMDAnalysis:
         feat_df, ligand_feat_dfs = self._build_cluster_feature_df(
             sMDDdata, group_A=group_A, group_B=group_B,
             features=features, merge_features=merge_features, ligand_sdf=ligand_sdf,
+            geom_features=geom_features, geom_merge=geom_merge,
         )
 
         trajectory_files = {}
@@ -597,6 +615,8 @@ class SMDAnalysis:
         features: list | None = None,   # clustering feature list (mirrors run())
         merge_features: bool = False,   # merge trace + pocket-distance + ligand feats
         ligand_sdf: str | None = None,  # needed only if ligand-shape features requested
+        geom_features: bool = False,    # merge inline geom sidecars into clustering
+        geom_merge: str = "impute",     # 'impute' (nearest-fill) or 'aligned' (exact)
         min_replicas: int = 5,
         trace_min_replicas: int = 3,  # start building PMF traces before convergence checking begins
         tol_rmsd: float = 4.0,     # kJ/mol
@@ -682,6 +702,7 @@ class SMDAnalysis:
             feat_df, _ = self._build_cluster_feature_df(
                 smd, group_A=group_A, group_B=group_B,
                 features=features, merge_features=merge_features, ligand_sdf=ligand_sdf,
+                geom_features=geom_features, geom_merge=geom_merge,
             )
 
             clusterer = DTWPathModel(
