@@ -1,7 +1,6 @@
 import os
 import numpy as np
 import pandas as pd
-from dataclasses import dataclass, field
 from scipy.integrate import cumulative_trapezoid
 
 import MDAnalysis as mda
@@ -109,12 +108,11 @@ class SMDData:
         raw_data = self.build_analysis_coord(raw_data)
 
         raw_data['path'] = 1  # default single path
-                
+
         self.raw_data = raw_data
         self.results = None
-        
-        return None
-        
+
+
     def load_logs(self) -> pd.DataFrame:
         """Read all log files and return a concatenated DataFrame.
 
@@ -164,17 +162,11 @@ class SMDData:
         protocol_grids = {}
 
         for speed, g in raw_data.groupby("speed"):
-            # Use first trajectory as reference
-            ref = g.sort_values("step").iloc[0]
-
-            # Identify protocol parameters
             step0 = g["step"].min()
             stepN = g["step"].max()
-
-            # Initial r0 from first step
             r0 = g.loc[g["step"] == step0, "r_target"].iloc[0]
 
-            # Infer dx_per_move robustly
+            # Median step-to-step increment across replicas (robust to outliers).
             dx_vals = (
                 g.groupby("trajname")["r_target"]
                 .diff()
@@ -194,11 +186,11 @@ class SMDData:
         return protocol_grids
     
     def build_analysis_coord(self, raw_data: pd.DataFrame) -> pd.DataFrame:
-        """
-        Attach an analysis coordinate r_coord derived from r_target,
-        without redefining the protocol grid. In theory r_target should be the same
-        across replicas for a given speed, but in practice there are tiny numerical differences,
-        mostly because r0 is not exactly the same. Here we just take the median
+        """Attach r_coord: the per-(speed, step) median of r_target.
+
+        r_target should in theory match across replicas at a given speed, but
+        tiny numerical differences (mostly from r0 not being exact) mean it
+        doesn't; the median gives one shared coordinate for analysis/plotting.
         """
         df = raw_data.copy()
 
@@ -276,10 +268,10 @@ class SMDData:
         """
 
         logger.warning(f'Filtering data by x-range: {r_range}')
-        self.raw_data = self.raw_data[(self.raw_data[r_column] >= r_range[0]) & 
+        self.raw_data = self.raw_data[(self.raw_data[r_column] >= r_range[0]) &
                                         (self.raw_data[r_column] <= r_range[1])]
-        return
-        
+
+
     @staticmethod
     def _speed_from_log(fn):
         # Example log name: sMD_replica-182557_v0.005_forward.dat
@@ -423,15 +415,13 @@ class SMDData:
                           recompute: bool = False,
                           stride: int = 2,
                           ) -> pd.DataFrame:
-        """
-        Compute (or load) distance features between pocket and ligand.
+        """Compute (or load) pocket-ligand distance features.
 
-        Distances are persisted **per speed** to
-        ``{outdir}/{sysname}_pocketDistances_v{speed}.csv``. Because
-        ``check_convergence`` calls this once per speed (each with a per-speed
-        ``SMDData`` sharing the same ``outdir``), a single combined file was
-        previously overwritten by the last speed processed; per-speed files avoid
-        that. Results for all requested speeds are concatenated on return.
+        Persisted **per speed** to ``{outdir}/{sysname}_pocketDistances_v{speed}.csv``
+        — check_convergence calls this once per speed with per-speed SMDData
+        instances sharing the same outdir, so a single combined file was
+        previously clobbered by whichever speed ran last. Results for all
+        requested speeds are concatenated on return.
 
         Parameters
         ----------
@@ -440,17 +430,16 @@ class SMDData:
         group_B : str
             MDAnalysis selection string for the **ligand** atoms.
         recompute : bool, optional
-            If False (default), load each speed's cache file when present and
-            only compute the speeds that are missing. If True, recompute every
-            speed and overwrite its cache file.
+            If False (default), reuse each speed's cache file when present and
+            only compute missing speeds. If True, recompute and overwrite all.
         stride : int, optional
             Frame stride for trajectory reading (default 2).
 
-        Returns a DataFrame with columns:
-            ['trajname', 'speed', 'step', 'time'] + dist_* feature columns
-
-        'step' is the frame index; 'time' is taken from the trajectory if available,
-        otherwise time = step.
+        Returns
+        -------
+        pd.DataFrame
+            Columns ``['trajname', 'speed', 'step', 'time'] + dist_*``. ``step``
+            is the frame index; ``time`` falls back to ``step`` if unavailable.
         """
         trajs_by_speed = defaultdict(list)
         for traj in self.traj_files:
@@ -495,39 +484,16 @@ class SMDData:
     @staticmethod
     def merge_feature_sets(*feature_dfs: pd.DataFrame,
                            tolerance_ps: float | None = None) -> pd.DataFrame:
-        """
-        Merge N feature DataFrames using a nearest-time asof merge per trajectory.
+        """Merge N feature DataFrames via a nearest-time asof merge per trajectory.
 
-        The first DataFrame is the reference (left side); subsequent DataFrames
-        are merged onto it one by one.  This allows combining any number of
-        feature sources — e.g. trace features, pocket distances, 3D ligand
-        descriptors — into a single feature table for downstream clustering.
+        The first DataFrame is the reference (left side); the rest are merged
+        onto it one by one, e.g. combining trace features, pocket distances,
+        and ligand shape descriptors into one feature table for clustering.
+        All DataFrames must have ``trajname`` and ``time`` columns; shared
+        metadata columns are taken from the reference to avoid duplicates.
 
-        All DataFrames must contain ``trajname`` and ``time`` columns.
-        Metadata columns shared with the reference (trajname, step, speed, …)
-        are taken from the reference to avoid duplicate columns.
-
-        Parameters
-        ----------
-        *feature_dfs : pd.DataFrame
-            Two or more feature DataFrames.  The first is the reference.
-        tolerance_ps : float or None
-            Maximum allowed time gap (ps) for the asof match.  *None* always
-            keeps the nearest match.
-
-        Returns
-        -------
-        pd.DataFrame
-            One row per reference frame, augmented with columns from all
-            subsequent DataFrames.
-
-        Raises
-        ------
-        ValueError
-            If fewer than two DataFrames are provided, or required columns
-            are missing.
-        RuntimeError
-            If no trajectories could be merged.
+        ``tolerance_ps`` caps the allowed asof time gap (ps); ``None`` always
+        keeps the nearest match regardless of gap size.
         """
         if len(feature_dfs) < 2:
             raise ValueError("merge_feature_sets requires at least two DataFrames.")
@@ -652,7 +618,6 @@ class SMDData:
             self.results = pd.DataFrame()
         results_df['estimator'] = estimator_name
         self.results = pd.concat([self.results, results_df], ignore_index=True)
-        return None    
 
     @staticmethod
     def _compute_p_neq(path_traj_counts: dict) -> dict:
@@ -686,7 +651,6 @@ class SMDData:
 
         data = self.raw_data.copy()
 
-        # decide grouping strategy
         if byspeed:
             grouping_iter = data.groupby("speed")
         else:

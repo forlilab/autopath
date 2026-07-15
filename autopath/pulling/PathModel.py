@@ -9,7 +9,7 @@ import seaborn as sns
 import kmedoids
 from dtaidistance import dtw_ndim
 
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import silhouette_score
 from sklearn.decomposition import PCA
 
@@ -69,14 +69,12 @@ class DTWPathModel(PathModel):
         self.do_plots = do_plots
         self._use_silhouette = True
         self.n_geom_pcs = n_geom_pcs
-        # Prefix(es) whose columns form the geometric block that is PCA-reduced
-        # before DTW (pocket distances dist_* and inline geom features geom_*).
-        # str.startswith accepts a tuple, so multiple prefixes work directly.
+        # Prefix(es) of the geometric column block PCA-reduced before DTW
+        # (pocket distances dist_* and inline geom features geom_*).
         self.geom_feature_prefix = geom_feature_prefix
-        # When True (default), PCA the ENTIRE standardized feature matrix together
-        # (trace + geom) into n_geom_pcs components, rather than only the
-        # geom-prefixed block with trace passed through raw. This is the hybrid
-        # default; set False to keep trace raw and PCA only the geom block.
+        # Hybrid default: PCA the whole standardized matrix (trace + geom)
+        # together. If False, only the geom-prefixed block is PCA'd and trace
+        # features pass through raw.
         self.pca_all_features = pca_all_features
     
     def fit_transform(self,
@@ -153,21 +151,16 @@ class DTWPathModel(PathModel):
             if c not in ['trajname', 'time', 'step', 'speed', 'path']
         ]
         
-        # NaN values occasionally appear in DTW feature matrices, likely from
-        # trajectory frames with undefined geometry (e.g., PBC artifacts or
-        # extreme conformations). Drop them to avoid distance computation failures.
+        # NaN values occasionally appear (e.g. PBC artifacts, undefined geometry);
+        # drop them to avoid DTW distance computation failures.
         logger.info(f'Features used for clustering: {feature_cols}')
         if feature_df[feature_cols].isnull().any().any():
             logger.warning(
             "NaN values detected in features. "
             "DTW distance matrix will be unreliable. Please check your data."
             )
-            #drop rows with NaN values in feature columns
             feature_df = feature_df.dropna(subset=feature_cols)
-                                 
-        # logger.info(f"Feature matrix shape after NaN removal: {feature_df.shape}")
-              
-        # Decide grouping strategy
+
         if cluster_across_speeds:
             grouping_iter = [(None, feature_df)]
         else:
@@ -176,9 +169,9 @@ class DTWPathModel(PathModel):
         all_path_mappings = {}
         all_medoid_names = set()  # Track medoids across all speeds
         medoid_to_path = {}  # Map medoid trajectory name -> path ID
-        # Per-speed medoid breakdown for this call, keyed by speed string
-        # ('all' when cluster_across_speeds). Merged into medoid_info.json so the
-        # file accumulates every speed instead of being overwritten by the last.
+        # Per-speed breakdown, keyed by speed string ('all' if cluster_across_speeds);
+        # merged into medoid_info.json below so it accumulates across calls instead
+        # of being overwritten.
         medoids_by_speed = {}
 
         for speed_key, speed_df in grouping_iter:
@@ -221,13 +214,10 @@ class DTWPathModel(PathModel):
                 scaler.transform(arr) for arr in vectors_stacked
             ]
 
-            # Equalize geom vs trace feature contribution (see fit_transform Notes).
-            # PCA is applied whenever geometric (distance) features are present and
-            # n_geom_pcs is set — both in merged mode (geom + trace) and in
-            # distance-only mode (geom only, other_idx empty). An empty other_idx
-            # makes arr[:, other_idx] shape (n, 0), which np.hstack absorbs cleanly.
+            # Equalize geom vs trace feature contribution (see fit_transform docstring).
+            # An empty other_idx makes arr[:, other_idx] shape (n, 0), which
+            # np.hstack absorbs cleanly.
             if self.pca_all_features:
-                # PCA the entire standardized feature matrix together (trace + geom).
                 geom_idx = list(range(len(feature_cols)))
                 other_idx = []
             else:
@@ -321,10 +311,8 @@ class DTWPathModel(PathModel):
             speed_medoid_to_path = {name: path_mapping_dic[name] for name in speed_medoid_names}
             medoid_to_path.update(speed_medoid_to_path)
 
-            # Record this speed's medoid → path mapping so it can be merged into
-            # medoid_info.json (keyed by speed; 'all' for cluster_across_speeds where
-            # speed_key is None). The mapping is the only irreducible content — medoid
-            # names are its keys and the cross-speed union is derived on demand.
+            # Recorded per-speed for merging into medoid_info.json; the cross-speed
+            # union (medoid names as keys) is derived from this on demand.
             medoids_by_speed[str(speed_key) if speed_key is not None else "all"] = speed_medoid_to_path
 
             # Set per-speed attribute used by plot_clusters_PCA below
@@ -382,13 +370,10 @@ class DTWPathModel(PathModel):
                     pca_feature_names=feature_cols,
                 )
 
-        # Generate unbinding paths visualization if trajectories and reference PDB are available
+        # Unbinding paths visualization: one representative (medoid) per path.
         if self.do_plots and trajectory_files is not None and reference_pdb is not None and ligand_select is not None:
-            # Build paths dictionary: path_id -> [(topology, trajectory), ...] 
-            # Only include medoid trajectories (one representative per path)
             paths_dict = {}
             for trajname, path_id in all_path_mappings.items():
-                # Only include if this trajectory is a medoid
                 if trajname not in all_medoid_names:
                     continue
                 if path_id not in paths_dict:
@@ -409,12 +394,10 @@ class DTWPathModel(PathModel):
                 except Exception as e:
                     logger.warning(f"Could not generate unbinding paths visualization: {e}")
 
-        # Persist medoid info to disk, merged by speed. fit_transform is called
-        # once with all speeds by run(), but per-speed in a loop by
-        # check_convergence(); merging by speed key means every speed accumulates
-        # instead of the last call overwriting the file. Only speeds computed in
-        # THIS call are refreshed — re-running with a reduced speed set leaves
-        # previously stored speeds in place.
+        # Persist medoid info merged by speed: fit_transform runs once with all
+        # speeds (via run()) but per-speed in a loop (via check_convergence()), so
+        # merging lets every speed accumulate instead of the last call overwriting
+        # the file; speeds not in this call keep their previously stored values.
         medoid_info_path = os.path.join(self.outdir, "path_analysis", "medoid_info.json")
         by_speed = {}
         if os.path.exists(medoid_info_path):
@@ -462,8 +445,7 @@ class DTWPathModel(PathModel):
         plt.savefig(os.path.join(self.outdir, "path_analysis", f'cluster_dtw_heatmap_v{self.speed_name}.png'))
         plt.tight_layout()
         plt.close()
-        return
-    
+
     def plot_elbow(self, scores: dict, K: int):
         """Plot and save the elbow/silhouette curve used to select the number of clusters.
 
@@ -486,8 +468,8 @@ class DTWPathModel(PathModel):
         plt.tight_layout()
         plt.savefig(os.path.join(self.outdir, "path_analysis", f"cluster_elbowplot_v{self.speed_name}.png"))
         plt.close()
-        return
-        
+
+
     def plot_clusters_PCA(self,
                           feature_df: pd.DataFrame = None,
                           path_mapping_dic: dict = None,
@@ -591,4 +573,3 @@ class DTWPathModel(PathModel):
         plt.tight_layout()
         plt.savefig(os.path.join(self.outdir, "path_analysis", f"cluster_pca_v{self.speed_name}.png"), dpi=150)
         plt.close()
-        return

@@ -12,19 +12,9 @@ logger = logging.getLogger("autopath.pulling.LigandFeatures")
 
 
 def _rdkit_feature_fns() -> dict[str, Callable]:
-    """Lazily build the feature-name → RDKit descriptor callable mapping.
-
-    Construction is deferred to call time so that RDKit — an optional
-    dependency — is only imported when an RDKit feature is actually
-    requested.  Callers that only use ``"rog"`` never trigger the import.
-
-    Returns
-    -------
-    dict
-        Maps each supported RDKit feature name (e.g. ``"asphericity"``)
-        to its corresponding callable from ``rdkit.Chem.Descriptors3D``
-        or ``rdkit.Chem.rdMolDescriptors``.
-    """
+    """Feature name -> RDKit descriptor callable, built lazily so RDKit (an
+    optional dependency) is only imported when an RDKit feature is requested;
+    callers using only ``"rog"`` never trigger the import."""
     from rdkit.Chem import Descriptors3D, rdMolDescriptors
     return {
         "asphericity":    Descriptors3D.Asphericity,
@@ -46,56 +36,36 @@ SUPPORTED_FEATURES = frozenset({"rog"}) | RDKIT_FEATURE_NAMES
 
 
 class LigandTrajectoryFeatures:
-    """Per-frame ligand geometric features from sMD trajectories.
-
-    Computes quantities (radius of gyration, …) at a given stride and
-    returns a DataFrame that can be:
-      - merged into the clustering feature matrix (alongside work, lag, pocket distances)
-      - merged into sMD_processed_data.csv for downstream Bayesian analysis
-
-    Both uses go through SMDData.merge_feature_sets(), which handles stride
-    differences between log files and trajectory output via pd.merge_asof.
+    """Per-frame ligand geometric features (rog, RDKit 3D shape descriptors)
+    from sMD trajectories, post-processed from a DCD (contrast with
+    :mod:`geom_kernel`, which computes the same descriptors inline during
+    the pull). Output merges into the clustering feature matrix or
+    sMD_processed_data.csv via ``SMDData.merge_feature_sets``.
 
     Parameters
     ----------
     lig_resname : str
         MDAnalysis residue name for the ligand (default "UNK").
     sdf_file : str or None
-        Path to an SDF with correct bond orders.  Required when
-        ``"rdkit_3d"`` is in ``features``; used as the topology template
-        whose conformer is mutated per frame.  Also used by
-        :meth:`rdkit_descriptors_from_sdf` for topology-only descriptors.
+        SDF with correct bond orders; required whenever an RDKit descriptor
+        is requested (used as the mutated-per-frame conformer template).
     features : sequence of str
-        Per-frame features to compute. Each name maps 1:1 to one output
-        column ``lig_<name>``. Supported names:
-
-        - ``"rog"``: radius of gyration (mass-weighted COM, mass-weighted
-          spread). Matches the convention used by RDKit's
-          ``Descriptors3D.RadiusOfGyration``.
-        - RDKit 3D shape descriptors (any subset): ``"asphericity"``,
-          ``"eccentricity"``, ``"inertial_shape"``, ``"npr1"``, ``"npr2"``,
-          ``"spherocity"``, ``"pbf"``. Any of these requires ``sdf_file``.
-
-        ``rog`` alone does not require an SDF.
+        Names in :data:`SUPPORTED_FEATURES`, each mapping to output column
+        ``lig_<name>``. ``"rog"`` needs no SDF; the RDKit shape descriptors
+        (``asphericity``, ``eccentricity``, ``inertial_shape``, ``npr1``,
+        ``npr2``, ``spherocity``, ``pbf``) do.
     stride : int
         Sample every `stride`-th trajectory frame (default 2).
 
     Notes
     -----
-    For RDKit descriptors the SDF and the MDAnalysis selection must agree
-    on heavy-atom **element order**. The class validates this at the start
-    of :meth:`compute` and raises on mismatch.
-
-    **RDKit descriptor selection rationale**: all supported 3D descriptors
-    are either mass-weighted (PMI-based, e.g. asphericity, eccentricity,
-    NPR1/2) or purely geometric (e.g. PBF), so they are invariant under
-    permutation of same-element atoms.  This means element-level matching
-    between the SDF template and the MDAnalysis trajectory selection is
-    sufficient for correctness — atom-index identity is not required.
-    PMI1, PMI2, and PMI3 are deliberately excluded: they are absolute-scale
-    quantities (Å²·Da) and become redundant with the mass-weighted
-    RadiusOfGyration once the shape ratios (NPR1/2, asphericity, …) are
-    retained.
+    SDF and MDAnalysis selection must agree on heavy-atom **element order**
+    (validated at the start of :meth:`compute`). This is sufficient — not
+    atom-index identity — because every supported RDKit descriptor is either
+    mass-weighted (PMI-based: asphericity, eccentricity, NPR1/2) or purely
+    geometric (PBF), hence invariant to permutation of same-element atoms.
+    PMI1/2/3 themselves are excluded: they're absolute-scale (Å²·Da) and
+    redundant with RadiusOfGyration once the shape ratios are kept.
     """
 
     def __init__(
