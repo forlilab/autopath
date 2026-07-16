@@ -197,21 +197,16 @@ class SteeredMD:
         Writes ``{out_dir}/sMD_{run_id}.dat`` with a ``# key=value`` metadata
         header (spring_constant, requested/realized speed, steps_per_move,
         force_n_samples) followed by columns:
-        step, time, r_target, r_before, r_after, force, force_sem, force_inst,
+        step, time, r_target, r_before, r_after, force, force_sem,
         U_cvpack, dW_protocol, lag_nm
 
         ``force`` is the coherent quantity for the estimators: the within-move
         mean restraint force sampled from the dynamics under the current
         r_target (with ``force_sem`` its standard error). This is what feeds
-        Feq / friction / the mean-force-TI PMF.
-
-        ``force_inst`` is the single pre-step sample ``-k*(r_before - r_target)``
-        and is DIAGNOSTIC ONLY: it is taken before the system relaxes to the
-        moved restraint (wrong ensemble, biased high) so it must NOT be routed
-        into any mean-force/friction calculation. It is retained solely as a
-        diagnostic and because it satisfies the identity ``force = -k*delta``
-        exactly, which lets ``recover_spring_constant`` read k back when no
-        logged value is present.
+        Feq / friction / the mean-force-TI PMF. The pre-step "kick"
+        ``-k*(r_before - r_target)`` is intentionally NOT logged (it is the
+        wrong ensemble for the mean force, and is trivially reconstructable
+        from r_before, r_target and the header spring_constant if needed).
         """
                     
         add_reporters(simulation, self.out_dir, f"sMD_{run_id}",
@@ -363,7 +358,7 @@ class SteeredMD:
             f.write(f"# realized_speed_nm_per_ps={getattr(self, '_realized_speed', float('nan')):.10g}\n")
             f.write(f"# steps_per_move={self.steps_per_move}\n")
             f.write(f"# force_n_samples={n_sub}\n")
-            f.write("step,time,r_target,r_before,r_after,force,force_sem,force_inst,U_cvpack,dW_protocol,lag_nm\n")
+            f.write("step,time,r_target,r_before,r_after,force,force_sem,U_cvpack,dW_protocol,lag_nm\n")
 
             # Loop over the number of moves
             for i in range(n_moves):
@@ -381,9 +376,6 @@ class SteeredMD:
                     r_target = initial_r0 + (i + 1) * self.dx_per_move
 
                 simulation.context.setParameter("r0_smd", r_target)
-
-                delta = r_before - r_target
-                force_inst = -self.sMD_spring_cte * delta   # pre-step sample; DIAGNOSTIC ONLY (never feeds Feq/friction)
 
                 U_cvpack = self.com_force.getValue(simulation.context, allowReinitialization=False)
                 dW_protocol = U_cvpack - U_pre_old
@@ -407,12 +399,11 @@ class SteeredMD:
                 r_after_nm  = _r_last.value_in_unit(openmmunit.nanometers)
                 r_target_nm = r_target.value_in_unit(openmmunit.nanometers)
                 r_before_nm = r_before.value_in_unit(openmmunit.nanometers)
-                force_inst_kjmnm = force_inst.value_in_unit(_kunit)
                 U_cvpack_kjm     = U_cvpack.value_in_unit(openmmunit.kilojoules_per_mole)
                 dW_protocol_kjm  = dW_protocol.value_in_unit(openmmunit.kilojoules_per_mole)
                 lag_nm = r_target_nm - r_after_nm
                 _row   = (f"{i},{time_before},{r_target_nm},{r_before_nm},"
-                          f"{r_after_nm},{force_kjmnm},{force_sem},{force_inst_kjmnm},"
+                          f"{r_after_nm},{force_kjmnm},{force_sem},"
                           f"{U_cvpack_kjm},{dW_protocol_kjm},{lag_nm:.5f}\n")
 
                 # ── Sampled-frame diagnostics (every save_freq moves) ─────

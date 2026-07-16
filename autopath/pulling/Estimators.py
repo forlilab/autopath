@@ -1723,14 +1723,12 @@ def recover_spring_constant(raw_data: pd.DataFrame, logged_k: float | None = Non
     """
     if logged_k is not None and np.isfinite(logged_k) and logged_k > 0:
         return float(logged_k)
-    # force_inst is the exact pre-step sample (= -k*delta); the averaged `force`
-    # is a within-move mean and does NOT satisfy the identity per row. Prefer
-    # force_inst when present; fall back to `force` for the oldest single-sample
-    # logs (where `force` IS the pre-step sample).
-    fcol = 'force_inst' if 'force_inst' in raw_data.columns else 'force'
-    d = raw_data.dropna(subset=[fcol, 'r_before', 'r_target'])
+    # Fallback for older logs without a header: there the `force` column is the
+    # single pre-step sample, which satisfies force = -k*(r_before - r_target)
+    # exactly. (New logs always carry the logged k above, so never reach here.)
+    d = raw_data.dropna(subset=['force', 'r_before', 'r_target'])
     delta = (d['r_before'] - d['r_target']).to_numpy(dtype=float)
-    f = d[fcol].to_numpy(dtype=float)
+    f = d['force'].to_numpy(dtype=float)
     m = np.abs(delta) > 1e-12
     if not m.any():
         raise ValueError("recover_spring_constant: no rows with r_before != r_target")

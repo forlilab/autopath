@@ -21,16 +21,6 @@ def test_recover_spring_constant_ignores_invalid_logged_k(bad):
     assert recover_spring_constant(df, logged_k=bad) == pytest.approx(k, rel=1e-9)
 
 
-def test_recover_spring_constant_fallback_uses_force_inst():
-    # averaged `force` breaks the identity; exact `force_inst` recovers k.
-    k = 4200.0
-    rt = np.linspace(1.0, 2.0, 40); rb = rt - 0.03
-    df = pd.DataFrame({'r_target': rt, 'r_before': rb,
-                       'force': -k * (rb - rt) + np.random.default_rng(0).normal(0, 50, 40),
-                       'force_inst': -k * (rb - rt)})
-    assert recover_spring_constant(df) == pytest.approx(k, rel=1e-9)
-
-
 # ---------------------------------------------------- realized-speed regression
 def _linear_results(a, b, nominal, realized):
     """param = a + b*realized_speed, labelled by nominal speed, 3 shared steps."""
@@ -76,7 +66,7 @@ _HEADER = (
     "# steps_per_move=12\n"
     "# force_n_samples=3\n"
 )
-_COLS = "step,time,r_target,r_before,r_after,force,force_sem,force_inst,U_cvpack,dW_protocol,lag_nm\n"
+_COLS = "step,time,r_target,r_before,r_after,force,force_sem,U_cvpack,dW_protocol,lag_nm\n"
 
 
 def _write_dat(path, speed_token, realized, n=40, k=3765.6):
@@ -89,7 +79,7 @@ def _write_dat(path, speed_token, realized, n=40, k=3765.6):
         for i in range(n):
             force = -k * (r_before[i] - r_target[i])
             f.write(f"{i},{i*0.1},{r_target[i]},{r_before[i]},{r_after[i]},"
-                    f"{force},0.1,{force},0.0,0.0,0.0005\n")
+                    f"{force},0.1,0.0,0.0,0.0005\n")
 
 
 def test_parse_log_metadata(tmp_path):
@@ -101,13 +91,13 @@ def test_parse_log_metadata(tmp_path):
     assert meta['steps_per_move'] == 12
     # data still parses (comment lines skipped)
     df = pd.read_csv(p, comment='#')
-    assert len(df) == 40 and 'force_inst' in df.columns
+    assert len(df) == 40 and {'force', 'force_sem'} <= set(df.columns)
 
 
 def test_parse_log_metadata_absent_returns_empty(tmp_path):
     p = tmp_path / "sMD_replica-9_v0.02_forward.dat"
     with open(p, "w") as f:
-        f.write(_COLS); f.write("0,0.0,1.0,0.999,0.9995,3.7656,0,3.7656,0,0,0.0005\n")
+        f.write(_COLS); f.write("0,0.0,1.0,0.999,0.9995,3.7656,0,0,0,0.0005\n")
     assert SMDData.parse_log_metadata(str(p)) == {}
 
 
@@ -132,7 +122,7 @@ def test_smddata_backward_compat_without_header(tmp_path):
             f.write(_COLS)
             for i in range(40):
                 rt = 0.8 + 0.6 * i / 39
-                f.write(f"{i},{i*0.1},{rt},{rt-0.001},{rt-0.0005},3.7656,0.1,3.7656,0,0,0.0005\n")
+                f.write(f"{i},{i*0.1},{rt},{rt-0.001},{rt-0.0005},3.7656,0.1,0,0,0.0005\n")
         files.append(str(p))
     d = SMDData(log_files=files, completion_threshold_nm=0.0)
     assert d.spring_constant is None
