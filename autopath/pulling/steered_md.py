@@ -184,8 +184,7 @@ class SteeredMD:
         the within-move time-averaged restraint force ``force`` (with its SEM),
         the incremental protocol work ``dW_protocol`` (energy change due to the
         r0 shift *before* MD relaxation — distinct from the cumulative work),
-        the lag (r0 - r_after), and, every ``save_freq`` moves, the soft contact
-        count NC.
+        and, every ``save_freq`` moves, the soft contact count NC.
 
         NC autostop: the loop halts early when NC drops below
         ``autostop_nc × NC_initial`` for ``autostop_nc_window`` consecutive
@@ -198,7 +197,7 @@ class SteeredMD:
         header (spring_constant, requested/realized speed, steps_per_move,
         force_n_samples) followed by columns:
         step, time, r_target, r_before, r_after, force, force_sem,
-        U_cvpack, dW_protocol, lag_nm
+        U_cvpack, dW_protocol
 
         ``force`` is the coherent quantity for the estimators: the within-move
         mean restraint force sampled from the dynamics under the current
@@ -207,6 +206,11 @@ class SteeredMD:
         ``-k*(r_before - r_target)`` is intentionally NOT logged (it is the
         wrong ensemble for the mean force, and is trivially reconstructable
         from r_before, r_target and the header spring_constant if needed).
+
+        The instantaneous lag ``r_target - r_after`` is likewise not logged: it
+        is a finite-speed, single-endpoint quantity (equilibrium lag + friction
+        drag γv/k + thermal noise), derivable from the two position columns. The
+        coordinate deconvolution uses the equilibrium lag ``Feq/k`` instead.
         """
                     
         add_reporters(simulation, self.out_dir, f"sMD_{run_id}",
@@ -358,7 +362,7 @@ class SteeredMD:
             f.write(f"# realized_speed_nm_per_ps={getattr(self, '_realized_speed', float('nan')):.10g}\n")
             f.write(f"# steps_per_move={self.steps_per_move}\n")
             f.write(f"# force_n_samples={n_sub}\n")
-            f.write("step,time,r_target,r_before,r_after,force,force_sem,U_cvpack,dW_protocol,lag_nm\n")
+            f.write("step,time,r_target,r_before,r_after,force,force_sem,U_cvpack,dW_protocol\n")
 
             # Loop over the number of moves
             for i in range(n_moves):
@@ -401,10 +405,9 @@ class SteeredMD:
                 r_before_nm = r_before.value_in_unit(openmmunit.nanometers)
                 U_cvpack_kjm     = U_cvpack.value_in_unit(openmmunit.kilojoules_per_mole)
                 dW_protocol_kjm  = dW_protocol.value_in_unit(openmmunit.kilojoules_per_mole)
-                lag_nm = r_target_nm - r_after_nm
                 _row   = (f"{i},{time_before},{r_target_nm},{r_before_nm},"
                           f"{r_after_nm},{force_kjmnm},{force_sem},"
-                          f"{U_cvpack_kjm},{dW_protocol_kjm},{lag_nm:.5f}\n")
+                          f"{U_cvpack_kjm},{dW_protocol_kjm}\n")
 
                 # ── Sampled-frame diagnostics (every save_freq moves) ─────
                 # One positions fetch shared by NC autostop and the geom sidecar.
@@ -442,6 +445,7 @@ class SteeredMD:
 
                 # ── Progress reporting ─────────────────────────────────────
                 if i % print_interval == 0:
+                    lag_nm = r_target_nm - r_after_nm  # diagnostic only; not logged
                     if nc is not None and self.verbose > 0:
                         print(f"Move {i+1}/{n_moves}: r={r_after_nm:.3f} nm  lag={lag_nm:.4f} nm  NC={nc:.2f}")
                     else:
