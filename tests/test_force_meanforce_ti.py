@@ -63,3 +63,16 @@ def test_meanforce_ti_pmf_folded_falls_back(caplog):
     fr=pd.DataFrame(rows); w={sp:{'p0':1.0} for sp in speeds}
     mix,diag=FrictionEstimator().meanforce_ti_pmf(fr,w,k)
     assert 'p0' in diag['fell_back_paths']                 # fell back to lambda, no silent sort
+
+def test_meanforce_ti_pmf_sign_guard_raises():
+    speeds = [0.005, 0.01, 0.015]
+    rows = []
+    for step in range(10):
+        feq = -(100.0 + 10 * step)          # NEGATIVE mean force -> sign convention violated
+        for sp in speeds:
+            rows.append(dict(path='p0', step=step, speed=sp,
+                             r_coord=1.0 + 0.05 * step, Fmean=feq + 700 * sp))
+    fr = pd.DataFrame(rows)
+    w = {sp: {'p0': 1.0} for sp in speeds}
+    with pytest.raises(ValueError, match="sign convention"):
+        FrictionEstimator().meanforce_ti_pmf(fr, w, 9623.2)
