@@ -64,7 +64,7 @@ _DEFAULT_TRACE_FEATURES = (
                         #    "r_before"
                            )
 _DEFAULT_GEOM_FEATURES = (
-                        #   "geom_rog", 
+                          "geom_rog",
                           # "geom_npr1", "geom_npr2",
                           "geom_exit_1", "geom_exit_2", "geom_exit_3"
                           )
