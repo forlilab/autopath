@@ -1616,7 +1616,17 @@ def calculate_weighted_pmf(
         return pd.DataFrame()
 
     return pd.concat(weighted_pmfs, ignore_index=True)
-    
+
+def recover_spring_constant(raw_data: pd.DataFrame) -> float:
+    """Exact per-ligand SMD spring constant from the identity force = -k*(r_before - r_target)."""
+    d = raw_data.dropna(subset=['force', 'r_before', 'r_target'])
+    delta = (d['r_before'] - d['r_target']).to_numpy(dtype=float)
+    f = d['force'].to_numpy(dtype=float)
+    m = np.abs(delta) > 1e-12
+    if not m.any():
+        raise ValueError("recover_spring_constant: no rows with r_before != r_target")
+    return float(np.median(-f[m] / delta[m]))
+
 def extrapolate_to_v0(
     results: pd.DataFrame,
     param: str = 'dG_weighted',
