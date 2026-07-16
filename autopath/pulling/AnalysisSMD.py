@@ -543,7 +543,8 @@ class SMDAnalysis:
         if self.mixture_pmfs['speed'].nunique() >= 2:
             for pcol in ['dG', 'Wdiss']:
                 v0_df = extrapolate_to_v0(self.mixture_pmfs, param=pcol,
-                                           min_speeds=self.min_speeds_for_extrapolation)
+                                           min_speeds=self.min_speeds_for_extrapolation,
+                                           realized_speed_map=sMDDdata.realized_speed_map)
                 if not v0_df.empty:
                     weighted_pmf_v0[pcol] = v0_df
         else:
@@ -563,7 +564,8 @@ class SMDAnalysis:
 
         self.mixture_pmfs.to_csv(f'{self.outdir}/mixture_pmfs.csv', index=False)
 
-        friction_est = FrictionEstimator(use_spline=False)
+        friction_est = FrictionEstimator(use_spline=False,
+                                         realized_speed_map=sMDDdata.realized_speed_map)
         df = self.mixture_pmfs.copy()
 
         friction_deriv_results = []
@@ -586,7 +588,8 @@ class SMDAnalysis:
         if any(e.name == 'force' for e in active_estimators) and \
            sMDDdata.raw_data['speed'].nunique() >= 2:
             try:
-                _k = recover_spring_constant(sMDDdata.raw_data)
+                _k = recover_spring_constant(sMDDdata.raw_data,
+                                             logged_k=sMDDdata.spring_constant)
                 _force_rows = sMDDdata.results[sMDDdata.results['estimator'] == 'force']
                 _ti_df, _ti_diag = friction_est.meanforce_ti_pmf(_force_rows, ref_weights, _k)
                 if _ti_df is not None:

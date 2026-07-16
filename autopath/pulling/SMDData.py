@@ -74,6 +74,16 @@ class SMDData:
 
         raw_data = self.load_logs()
 
+        # Logged per-ligand spring constant (median over replicas that recorded a
+        # header); None when no log carried one (older data -> derived downstream).
+        _ks = [m['spring_constant_kJ_mol_nm2'] for m in self.log_metadata.values()
+               if isinstance(m.get('spring_constant_kJ_mol_nm2'), (int, float))]
+        self.spring_constant = float(np.median(_ks)) if _ks else None
+        # nominal (filename) speed -> realized speed, for v->0 / dF/dv regressions.
+        self.realized_speed_map = (
+            raw_data.groupby('speed')['realized_speed'].median().to_dict()
+            if raw_data is not None else {})
+
         # Build protocol grids before any filtering so all speeds are captured.
         self.protocol_grids = self.build_protocol_grids(raw_data)
 
@@ -127,12 +137,21 @@ class SMDData:
         """
         count = 0
         raw_data = []
+        self.log_metadata = {}
         for fn in self.log_files:
             try:
                 df = pd.read_csv(fn, comment='#')
-                df['trajname'] = os.path.basename(fn)[:-4]  # remove .dat extension
-                df['speed'] = self._speed_from_log(fn)
+                trajname = os.path.basename(fn)[:-4]  # remove .dat extension
+                df['trajname'] = trajname
+                nominal_speed = self._speed_from_log(fn)
+                df['speed'] = nominal_speed
                 df['repid'] = self._replica_idx_from_log(fn)
+                meta = self.parse_log_metadata(fn)
+                self.log_metadata[trajname] = meta
+                # realized pulling speed (steps_per_move rounding). Falls back to the
+                # nominal filename speed for logs written before k/speed logging.
+                df['realized_speed'] = float(
+                    meta.get('realized_speed_nm_per_ps', nominal_speed))
                 raw_data.append(df)
                 count += 1
             except Exception as e:
@@ -271,6 +290,34 @@ class SMDData:
         self.raw_data = self.raw_data[(self.raw_data[r_column] >= r_range[0]) &
                                         (self.raw_data[r_column] <= r_range[1])]
 
+
+    @staticmethod
+    def parse_log_metadata(fn) -> dict:
+        """Parse leading ``# key=value`` comment lines from an sMD .dat file.
+
+        These carry per-replica constants written by
+        :class:`SteeredMD` (spring_constant_kJ_mol_nm2, requested/realized
+        speed, steps_per_move, force_n_samples). Values are coerced to float
+        where possible. Returns an empty dict for older logs without a header.
+        """
+        meta = {}
+        try:
+            with open(fn) as fh:
+                for line in fh:
+                    if not line.startswith('#'):
+                        break  # header block ends at the first data/column line
+                    body = line[1:].strip()
+                    if '=' not in body:
+                        continue
+                    key, _, val = body.partition('=')
+                    key, val = key.strip(), val.strip()
+                    try:
+                        meta[key] = float(val)
+                    except ValueError:
+                        meta[key] = val
+        except OSError:
+            pass
+        return meta
 
     @staticmethod
     def _speed_from_log(fn):

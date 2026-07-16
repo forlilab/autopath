@@ -195,6 +195,7 @@ class FrictionEstimator(BaseEstimator):
         smooth_method: str = 'savgol',
         smooth_polyorder: int = 3,
         speeds: list[float] | None = None,
+        realized_speed_map: dict | None = None,
     ):
         self.w_col = w_col
         self.use_spline = use_spline
@@ -202,6 +203,16 @@ class FrictionEstimator(BaseEstimator):
         self.smooth_method = smooth_method
         self.smooth_polyorder = smooth_polyorder
         self.speeds = speeds
+        # {nominal filename speed -> realized pulling speed}. Used as the physical
+        # velocity in every dF/dv, per-speed /v, and v->0 regression so the
+        # steps_per_move rounding does not bias friction/PMF. None -> use nominal.
+        self.realized_speed_map = realized_speed_map or None
+
+    def _realized(self, speed: float) -> float:
+        """Realized pulling speed for a nominal speed (identity if no map)."""
+        if not self.realized_speed_map:
+            return float(speed)
+        return float(self.realized_speed_map.get(float(speed), speed))
 
     @property
     def name(self):
@@ -335,6 +346,7 @@ class FrictionEstimator(BaseEstimator):
             r = g['r_coord'].to_numpy(dtype=float)
             wdiss = g[self.w_col].to_numpy(dtype=float)
             speed = float(g['speed'].iloc[0])
+            v = self._realized(speed)  # physical velocity for dWdiss/dr / v
 
             # Detect pulling direction: if step at r_min > step at r_max, it's backward.
             if 'step' in g.columns:
@@ -343,7 +355,7 @@ class FrictionEstimator(BaseEstimator):
                 is_backward = wdiss[0] > wdiss[-1]
             direction_sign = -1.0 if is_backward else 1.0
 
-            gamma = self._compute_gamma_derivative(r, wdiss, speed) * direction_sign
+            gamma = self._compute_gamma_derivative(r, wdiss, v) * direction_sign
             gamma_int = self._cumulative_integral(r, gamma)
 
             out = g[['step', 'r_coord', 'speed']].copy() if 'step' in g.columns else g[['r_coord', 'speed']].copy()
@@ -409,6 +421,7 @@ class FrictionEstimator(BaseEstimator):
             results=data,
             param=self.w_col,
             speeds=self.speeds,
+            realized_speed_map=self.realized_speed_map,
         )
 
         if v0_df is None or v0_df.empty:
@@ -487,7 +500,8 @@ class FrictionEstimator(BaseEstimator):
         if fbar.empty or fbar['speed'].nunique() < 2:
             return pd.DataFrame()
 
-        v0 = extrapolate_to_v0(results=fbar, param='Fbar', speeds=self.speeds)
+        v0 = extrapolate_to_v0(results=fbar, param='Fbar', speeds=self.speeds,
+                               realized_speed_map=self.realized_speed_map)
         if v0 is None or v0.empty:
             return pd.DataFrame()
 
@@ -521,6 +535,7 @@ class FrictionEstimator(BaseEstimator):
         for speed, g in fbar.groupby('speed'):
             if speed <= 0:
                 continue
+            v = self._realized(speed)  # physical velocity for the /v division
             g = g.sort_values('r_coord')
             # Friction is undefined at steps the regression trimmed (no Feq);
             # drop them rather than zero-filling, which would bias the running
@@ -529,7 +544,7 @@ class FrictionEstimator(BaseEstimator):
             if g.empty:
                 continue
             r = g['r_coord'].to_numpy(dtype=float)
-            gamma = np.array([(fb - feq_by_step[st]) / speed
+            gamma = np.array([(fb - feq_by_step[st]) / v
                               for fb, st in zip(g['Fbar'], g['step'])], dtype=float)
             gamma_int = self._cumulative_integral(r, gamma)
             rows.append(pd.DataFrame({
@@ -546,7 +561,8 @@ class FrictionEstimator(BaseEstimator):
             fps = g.groupby('speed')['Fmean'].mean()
             if fps.index.nunique() < 2:
                 continue
-            lr = linregress(fps.index.values, fps.values)
+            xs = np.array([self._realized(s) for s in fps.index.values], dtype=float)
+            lr = linregress(xs, fps.values)
             rows.append((path, step, float(g['r_coord'].mean()), float(lr.intercept)))
         E = pd.DataFrame(rows, columns=['path', 'step', 'r_coord', 'Feq'])
         if E.empty:
@@ -1696,11 +1712,25 @@ def calculate_weighted_pmf(
 
     return pd.concat(weighted_pmfs, ignore_index=True)
 
-def recover_spring_constant(raw_data: pd.DataFrame) -> float:
-    """Exact per-ligand SMD spring constant from the identity force = -k*(r_before - r_target)."""
-    d = raw_data.dropna(subset=['force', 'r_before', 'r_target'])
+def recover_spring_constant(raw_data: pd.DataFrame, logged_k: float | None = None) -> float:
+    """Per-ligand SMD spring constant.
+
+    Prefers ``logged_k`` (the value SteeredMD wrote to the .dat header) when
+    available; otherwise recovers it from the identity
+    force = -k*(r_before - r_target). The averaged ``force`` column no longer
+    satisfies that identity exactly per row (it is a within-move mean, not the
+    pre-step sample), so the logged value is both exact and cheaper.
+    """
+    if logged_k is not None and np.isfinite(logged_k) and logged_k > 0:
+        return float(logged_k)
+    # force_inst is the exact pre-step sample (= -k*delta); the averaged `force`
+    # is a within-move mean and does NOT satisfy the identity per row. Prefer
+    # force_inst when present; fall back to `force` for the oldest single-sample
+    # logs (where `force` IS the pre-step sample).
+    fcol = 'force_inst' if 'force_inst' in raw_data.columns else 'force'
+    d = raw_data.dropna(subset=[fcol, 'r_before', 'r_target'])
     delta = (d['r_before'] - d['r_target']).to_numpy(dtype=float)
-    f = d['force'].to_numpy(dtype=float)
+    f = d[fcol].to_numpy(dtype=float)
     m = np.abs(delta) > 1e-12
     if not m.any():
         raise ValueError("recover_spring_constant: no rows with r_before != r_target")
@@ -1721,6 +1751,7 @@ def extrapolate_to_v0(
     speeds: list[float] | None = None,
     mixed_models: bool = False,
     min_speeds: int = 2,
+    realized_speed_map: dict | None = None,
 ) -> pd.DataFrame:
     """
     Extrapolate a single parameter to zero pulling speed (v → 0)
@@ -1789,10 +1820,19 @@ def extrapolate_to_v0(
             f"Available: {list(df.columns)}"
         )
 
-    # Optional speed filtering
+    # Optional speed filtering (uses the nominal speed label)
     if speeds is not None:
         speeds = [float(s) for s in speeds]
         df = df[df['speed'].isin(speeds)]
+
+    # Regression x-axis: realized pulling speed (nominal is only a label). The
+    # v->0 intercept and slope are taken against `_xspeed`; falls back to the
+    # nominal speed when no map is supplied (older data).
+    if realized_speed_map:
+        df['_xspeed'] = df['speed'].map(
+            lambda s: float(realized_speed_map.get(float(s), s))).astype(float)
+    else:
+        df['_xspeed'] = df['speed'].astype(float)
 
     if df['speed'].nunique() < 2:
         logger.error("Need at least two distinct speeds for extrapolation.")
@@ -1815,15 +1855,15 @@ def extrapolate_to_v0(
 
         if mixed_models:
             model = smf.mixedlm(
-                f"{param} ~ speed",
+                f"{param} ~ _xspeed",
                 sub,
                 groups=sub["step"],
-                re_formula="~speed",
+                re_formula="~_xspeed",
             )
             res = model.fit(reml=False)
 
             fe_int = res.fe_params["Intercept"]
-            fe_slope = res.fe_params["speed"]
+            fe_slope = res.fe_params["_xspeed"]
 
             for step, re in res.random_effects.items():
                 out_rows.append({
@@ -1831,7 +1871,7 @@ def extrapolate_to_v0(
                     "r_coord": step_r_coord.loc[step],
                     "estimator": estimator,
                     param: fe_int + re.get("Intercept", 0.0),
-                    f"{param}_slope": fe_slope + re.get("speed", 0.0),
+                    f"{param}_slope": fe_slope + re.get("_xspeed", 0.0),
                     f"{param}_se": np.nan,
                     f"{param}_slope_se": np.nan,
                     "R2": np.nan,
@@ -1844,7 +1884,7 @@ def extrapolate_to_v0(
                 if g['speed'].nunique() < 2:
                     continue
 
-                lr = linregress(g['speed'].values, g[param].values)
+                lr = linregress(g['_xspeed'].values, g[param].values)
 
                 out_rows.append({
                     "step": step,
