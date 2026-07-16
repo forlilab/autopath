@@ -181,10 +181,11 @@ class SteeredMD:
 
         Advances the spring centre r0 by ``dx_per_move`` each iteration and
         integrates ``steps_per_move`` MD steps. At each move the method records
-        instantaneous force, the incremental protocol work ``dW_protocol``
-        (energy change due to the r0 shift *before* MD relaxation — distinct
-        from the cumulative work), the lag (r0 - r_after), and, every
-        ``save_freq`` moves, the soft contact count NC.
+        the within-move time-averaged restraint force ``force`` (with its SEM),
+        the incremental protocol work ``dW_protocol`` (energy change due to the
+        r0 shift *before* MD relaxation — distinct from the cumulative work),
+        the lag (r0 - r_after), and, every ``save_freq`` moves, the soft contact
+        count NC.
 
         NC autostop: the loop halts early when NC drops below
         ``autostop_nc × NC_initial`` for ``autostop_nc_window`` consecutive
@@ -193,9 +194,24 @@ class SteeredMD:
 
         Output
         ------
-        Writes ``{out_dir}/sMD_{run_id}.dat`` with columns:
-        step, time, r_target, r_before, r_after, force, U_cvpack,
-        dW_protocol, lag_nm
+        Writes ``{out_dir}/sMD_{run_id}.dat`` with a ``# key=value`` metadata
+        header (spring_constant, requested/realized speed, steps_per_move,
+        force_n_samples) followed by columns:
+        step, time, r_target, r_before, r_after, force, force_sem, force_inst,
+        U_cvpack, dW_protocol, lag_nm
+
+        ``force`` is the coherent quantity for the estimators: the within-move
+        mean restraint force sampled from the dynamics under the current
+        r_target (with ``force_sem`` its standard error). This is what feeds
+        Feq / friction / the mean-force-TI PMF.
+
+        ``force_inst`` is the single pre-step sample ``-k*(r_before - r_target)``
+        and is DIAGNOSTIC ONLY: it is taken before the system relaxes to the
+        moved restraint (wrong ensemble, biased high) so it must NOT be routed
+        into any mean-force/friction calculation. It is retained solely as a
+        diagnostic and because it satisfies the identity ``force = -k*delta``
+        exactly, which lets ``recover_spring_constant`` read k back when no
+        logged value is present.
         """
                     
         add_reporters(simulation, self.out_dir, f"sMD_{run_id}",
@@ -367,7 +383,7 @@ class SteeredMD:
                 simulation.context.setParameter("r0_smd", r_target)
 
                 delta = r_before - r_target
-                force_inst = -self.sMD_spring_cte * delta   # instantaneous pre-step force (legacy semantics)
+                force_inst = -self.sMD_spring_cte * delta   # pre-step sample; DIAGNOSTIC ONLY (never feeds Feq/friction)
 
                 U_cvpack = self.com_force.getValue(simulation.context, allowReinitialization=False)
                 dW_protocol = U_cvpack - U_pre_old
