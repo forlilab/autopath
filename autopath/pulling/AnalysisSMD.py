@@ -21,6 +21,7 @@ from autopath.pulling.Estimators import (
     calculate_weighted_pmf,
     extrapolate_to_v0,
     _find_pmf_peak,
+    recover_spring_constant,
 )
 from autopath.pulling.Diagnostics import (
     plot_work_profiles,
@@ -580,6 +581,30 @@ class SMDAnalysis:
 
         friction_df = pd.concat(friction_deriv_results + friction_regress_results, ignore_index=True)
         friction_df.to_csv(os.path.join(self.outdir, 'friction.csv'), index=False)
+
+        # --- Mean-force TI PMF on the deconvolved coordinate z = lambda - Feq/k (force only) ---
+        if any(e.name == 'force' for e in active_estimators) and \
+           sMDDdata.raw_data['speed'].nunique() >= 2:
+            try:
+                _k = recover_spring_constant(sMDDdata.raw_data)
+                _force_rows = sMDDdata.results[sMDDdata.results['estimator'] == 'force']
+                _ti_df, _ti_diag = friction_est.meanforce_ti_pmf(_force_rows, ref_weights, _k)
+                if _ti_df is not None:
+                    _ti_df.to_csv(os.path.join(self.outdir, 'force_meanforce_ti.csv'), index=False)
+                    # lambda-vs-z endpoint diagnostic (finite-spring smearing)
+                    _lam_end = None
+                    _fv0 = self.mixture_pmfs[(self.mixture_pmfs['estimator'] == 'force') &
+                                             (self.mixture_pmfs['speed'] == 0.0)].sort_values('r_coord')
+                    if not _fv0.empty:
+                        _lam_end = float(_fv0['dG'].iloc[-1] - _fv0['dG'].iloc[0])
+                    logger.info(f"[meanforce_ti] k={_ti_diag['k']:.1f} | dG_z endpoint="
+                                f"{_ti_diag['dG_z_endpoint']:.0f} kJ/mol | dG_lambda endpoint="
+                                f"{_lam_end} | z-divergence median/max="
+                                f"{_ti_diag['z_divergence_nm_median']*1e3:.1f}/"
+                                f"{_ti_diag['z_divergence_nm_max']*1e3:.1f} pm | "
+                                f"fell_back_paths={_ti_diag['fell_back_paths']}")
+            except Exception as _exc:
+                logger.warning(f"[meanforce_ti] skipped: {_exc}")
 
         # --- Kramers / Pontryagin MFPT k_off ---
         _dG_v0 = weighted_pmf_v0.get('dG')   # v→0 extrapolated PMF (None if single speed)

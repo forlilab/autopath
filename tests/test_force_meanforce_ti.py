@@ -76,3 +76,12 @@ def test_meanforce_ti_pmf_sign_guard_raises():
     w = {sp: {'p0': 1.0} for sp in speeds}
     with pytest.raises(ValueError, match="sign convention"):
         FrictionEstimator().meanforce_ti_pmf(fr, w, 9623.2)
+
+
+def test_meanforce_ti_skipped_single_speed():
+    # meanforce_ti_pmf returns (None, {}) when <2 speeds -> per_path_feq empty
+    import pandas as pd
+    from autopath.pulling.Estimators import FrictionEstimator
+    fr=pd.DataFrame([dict(path='p0',step=s,speed=0.01,r_coord=1.0+0.05*s,Fmean=100.+10*s) for s in range(10)])
+    mix,diag=FrictionEstimator().meanforce_ti_pmf(fr,{0.01:{'p0':1.0}},9623.2)
+    assert mix is None
