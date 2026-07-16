@@ -539,6 +539,25 @@ class FrictionEstimator(BaseEstimator):
             }))
         return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
 
+    def per_path_feq(self, force_results: pd.DataFrame) -> pd.DataFrame:
+        """v->0 mean restraint force Feq(lambda) regressed across speeds, PER PATH, then smoothed."""
+        rows = []
+        for (path, step), g in force_results.groupby(['path', 'step']):
+            fps = g.groupby('speed')['Fmean'].mean()
+            if fps.index.nunique() < 2:
+                continue
+            lr = linregress(fps.index.values, fps.values)
+            rows.append((path, step, float(g['r_coord'].mean()), float(lr.intercept)))
+        E = pd.DataFrame(rows, columns=['path', 'step', 'r_coord', 'Feq'])
+        if E.empty:
+            return E
+        out = []
+        for path, gp in E.groupby('path'):
+            gp = gp.sort_values('r_coord').copy()
+            gp['Feq'] = self._smooth_profile(gp['Feq'].to_numpy(dtype=float))
+            out.append(gp)
+        return pd.concat(out, ignore_index=True)
+
 
 def _find_pmf_peak(
     r: np.ndarray,
