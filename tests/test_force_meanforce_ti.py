@@ -33,3 +33,33 @@ def test_per_path_feq_recovers_intercept():
     p0=out[out.path=='p0'].sort_values('step')
     np.testing.assert_allclose(p0['Feq'].to_numpy(), [100,120,140,160,180,200], atol=1.0)
     assert set(out.path)=={'p0','p1'}
+
+def test_meanforce_ti_pmf_two_path():
+    import numpy as np, pandas as pd
+    from autopath.pulling.Estimators import FrictionEstimator
+    speeds=[0.005,0.01,0.015]; k=9623.2; rows=[]
+    # monotone-in-lambda, well-behaved (dFeq/dlam << k) so z stays monotone
+    for path,feq0 in {'p0':80.,'p1':120.}.items():
+        for step in range(20):
+            lam=1.0+0.05*step; feq=feq0+50*step          # dFeq/dlam=1000 << k
+            for sp in speeds:
+                rows.append(dict(path=path,step=step,speed=sp,r_coord=lam,Fmean=feq+700*sp))
+    fr=pd.DataFrame(rows)
+    w={sp:{'p0':0.5,'p1':0.5} for sp in speeds}
+    mix,diag=FrictionEstimator().meanforce_ti_pmf(fr,w,k)
+    assert mix is not None and {'z','dG_z'} <= set(mix.columns)
+    assert mix['dG_z'].iloc[-1] > mix['dG_z'].iloc[0]      # rises outward
+    assert diag['fell_back_paths']==[]                    # z stayed monotone
+    assert diag['z_divergence_nm_max'] > 0                # paths differ
+
+def test_meanforce_ti_pmf_folded_falls_back(caplog):
+    import numpy as np, pandas as pd
+    from autopath.pulling.Estimators import FrictionEstimator
+    speeds=[0.005,0.01,0.015]; k=1000.0; rows=[]   # tiny k -> z folds
+    for step in range(20):
+        lam=1.0+0.05*step; feq=100.+5000*step             # dFeq/dlam=1e5 >> k
+        for sp in speeds:
+            rows.append(dict(path='p0',step=step,speed=sp,r_coord=lam,Fmean=feq+700*sp))
+    fr=pd.DataFrame(rows); w={sp:{'p0':1.0} for sp in speeds}
+    mix,diag=FrictionEstimator().meanforce_ti_pmf(fr,w,k)
+    assert 'p0' in diag['fell_back_paths']                 # fell back to lambda, no silent sort

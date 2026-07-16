@@ -558,6 +558,66 @@ class FrictionEstimator(BaseEstimator):
             out.append(gp)
         return pd.concat(out, ignore_index=True)
 
+    def meanforce_ti_pmf(self, force_results, weights, k,
+                         n_grid: int = 200, max_drop_frac: float = 0.3):
+        """Mean-force TI PMF G(z)=∫Feq dz on z=λ−Feq/k, per-path remap-then-mix.
+
+        Guards: sign check (Feq>0), monotone-z filter with λ fallback (never silent
+        sort), p_eq-weighted mix on a common z grid. Returns (mix_df[z,dG_z], diag)."""
+        if force_results is None or force_results.empty:
+            return None, {}
+        E = self.per_path_feq(force_results)
+        if E.empty:
+            return None, {}
+        paths = list(E['path'].unique())
+        if weights:
+            pw = {p: float(np.mean([weights.get(s, {}).get(p, 0.0) for s in weights])) for p in paths}
+        else:
+            pw = {p: 1.0 for p in paths}
+        tot = sum(pw.values()) or 1.0
+        pw = {p: w / tot for p, w in pw.items()}
+
+        per_path = []; fell_back = []
+        for path, gp in E.groupby('path'):
+            gp = gp.sort_values('r_coord')
+            lam = gp['r_coord'].to_numpy(dtype=float); Feq = gp['Feq'].to_numpy(dtype=float)
+            if np.nanmedian(Feq) <= 0:
+                raise ValueError(f"meanforce_ti_pmf: path {path} median Feq <= 0 — sign convention violated")
+            z = lam - Feq / k
+            keep = monotone_z_filter(z)
+            if keep.sum() < max(3, (1.0 - max_drop_frac) * len(z)):
+                logger.warning(f"[meanforce_ti] path {path}: z folded at "
+                               f"{100*(1-keep.mean()):.0f}% of steps — falling back to lambda")
+                z = lam; keep = np.ones(len(z), dtype=bool); fell_back.append(path)
+            zc = z[keep]; Fc = Feq[keep]
+            if len(zc) < 3:
+                continue
+            G = self._cumulative_integral(zc, Fc); G = G - G[0]
+            if G[-1] < G[0]:
+                logger.warning(f"[meanforce_ti] path {path}: G(z) falls outward — check signs")
+            per_path.append((path, zc, G))
+        if not per_path:
+            return None, {'fell_back_paths': fell_back}
+
+        z_lo = max(zc[0] for _, zc, _ in per_path)
+        z_hi = min(zc[-1] for _, zc, _ in per_path)
+        if not (z_hi > z_lo):
+            return None, {'fell_back_paths': fell_back}
+        zg = np.linspace(z_lo, z_hi, n_grid)
+        Gmix = np.zeros(n_grid)
+        for path, zc, G in per_path:
+            Gmix += pw[path] * np.interp(zg, zc, G)
+        Gmix = Gmix - Gmix[0]
+        mix_df = pd.DataFrame({'z': zg, 'dG_z': Gmix})
+
+        zdiv = (E.assign(_z=lambda d: d['r_coord'] - d['Feq'] / k)
+                  .groupby('step')['_z'].agg(lambda v: float(v.max() - v.min())))
+        diag = {'k': float(k), 'path_weights': pw, 'fell_back_paths': fell_back,
+                'z_divergence_nm_median': float(zdiv.median()) if len(zdiv) else 0.0,
+                'z_divergence_nm_max': float(zdiv.max()) if len(zdiv) else 0.0,
+                'dG_z_endpoint': float(Gmix[-1])}
+        return mix_df, diag
+
 
 def _find_pmf_peak(
     r: np.ndarray,
