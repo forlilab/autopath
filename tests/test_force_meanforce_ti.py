@@ -1,5 +1,5 @@
 import numpy as np, pandas as pd, pytest
-from autopath.pulling.Estimators import recover_spring_constant
+from autopath.pulling.Estimators import recover_spring_constant, monotone_z_filter
 
 def test_recover_spring_constant_exact():
     k=7531.2
@@ -12,3 +12,10 @@ def test_recover_spring_constant_ignores_bad_rows():
     df=pd.DataFrame({'r_target':[1.0,1.1,1.1],'r_before':[1.02,1.1,1.13],
                      'force':[-k*0.02, np.nan, -k*0.03]})
     assert recover_spring_constant(df)==pytest.approx(k, rel=1e-9)
+
+def test_monotone_z_filter():
+    np.testing.assert_array_equal(monotone_z_filter(np.array([0.,1,2,3])), [True]*4)
+    # folded step (index 2) dropped
+    np.testing.assert_array_equal(monotone_z_filter(np.array([0.,1,0.5,2])), [True,True,False,True])
+    # NaN dropped
+    np.testing.assert_array_equal(monotone_z_filter(np.array([0.,np.nan,1.])), [True,False,True])

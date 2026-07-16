@@ -1627,6 +1627,15 @@ def recover_spring_constant(raw_data: pd.DataFrame) -> float:
         raise ValueError("recover_spring_constant: no rows with r_before != r_target")
     return float(np.median(-f[m] / delta[m]))
 
+def monotone_z_filter(z: np.ndarray) -> np.ndarray:
+    """Greedy mask: keep points whose z strictly exceeds the last kept z (drops folds/NaN)."""
+    z = np.asarray(z, dtype=float)
+    keep = np.zeros(len(z), dtype=bool); last = -np.inf
+    for i, zi in enumerate(z):
+        if np.isfinite(zi) and zi > last:
+            keep[i] = True; last = zi
+    return keep
+
 def extrapolate_to_v0(
     results: pd.DataFrame,
     param: str = 'dG_weighted',
