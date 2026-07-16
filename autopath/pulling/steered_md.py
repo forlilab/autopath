@@ -101,6 +101,8 @@ class SteeredMD:
         max_displacement: float = 3.5,     # nm — total RC range
         sMD_spring_cte: float = 10000,     # kJ/mol/nm^2
         save_freq: int = 5,                # writes DCD every save_freq*steps_per_move
+        force_n_samples: int = 10,         # cap on restraint-force samples averaged per move (>=1)
+        force_sample_stride: int = 5,      # MD steps between force samples; n_samples adapts to move length
         verbose: int = 0,
         log_geom_features: bool | list[str] = False,  # log per-frame geom scalars to a sidecar
     ):
@@ -145,6 +147,8 @@ class SteeredMD:
         self.dx_per_move = float(dx_per_move) * openmmunit.nanometers                                   # Quantity
         self.sMD_spring_cte = float(sMD_spring_cte) * openmmunit.kilojoules_per_mole / openmmunit.nanometer**2
         self.save_freq = int(save_freq)
+        self.force_n_samples = max(1, int(force_n_samples))
+        self.force_sample_stride = max(1, int(force_sample_stride))
         self.sMD_moves = int(math.ceil(self.max_displacement / float(dx_per_move)))
 
         kB_kJ_per_mol_K = 0.0083144621
@@ -325,8 +329,25 @@ class SteeredMD:
             geom_fh = open(f"{self.out_dir}/sMD_{run_id}_geom.dat", "w")
             geom_fh.write("step,time," + ",".join(f"geom_{c}" for c in geom_cols) + "\n")
 
+        # Number of force samples averaged per move: adapt to the move length so
+        # short (fast-speed) moves take few samples (low overhead) and long
+        # (slow-speed) moves take up to the cap. Constant across a replica.
+        n_sub = min(self.force_n_samples,
+                    max(1, self.steps_per_move // self.force_sample_stride))
+
+        # Per-replica constants recorded as `# key=value` comment lines. pandas
+        # read_csv(comment='#') skips them; SMDData.parse_log_metadata reads them
+        # so downstream estimators can use the logged k and realized speed
+        # instead of re-deriving them.
+        _k_spring_val = self.sMD_spring_cte.value_in_unit(
+            openmmunit.kilojoules_per_mole / openmmunit.nanometer**2)
         with open(f"{self.out_dir}/sMD_{run_id}.dat", "w") as f:
-            f.write("step,time,r_target,r_before,r_after,force,U_cvpack,dW_protocol,lag_nm\n")
+            f.write(f"# spring_constant_kJ_mol_nm2={_k_spring_val:.10g}\n")
+            f.write(f"# requested_speed_nm_per_ps={getattr(self, '_requested_speed', float('nan')):.10g}\n")
+            f.write(f"# realized_speed_nm_per_ps={getattr(self, '_realized_speed', float('nan')):.10g}\n")
+            f.write(f"# steps_per_move={self.steps_per_move}\n")
+            f.write(f"# force_n_samples={n_sub}\n")
+            f.write("step,time,r_target,r_before,r_after,force,force_sem,force_inst,U_cvpack,dW_protocol,lag_nm\n")
 
             # Loop over the number of moves
             for i in range(n_moves):
@@ -346,22 +367,36 @@ class SteeredMD:
                 simulation.context.setParameter("r0_smd", r_target)
 
                 delta = r_before - r_target
-                force = -self.sMD_spring_cte * delta
+                force_inst = -self.sMD_spring_cte * delta   # instantaneous pre-step force (legacy semantics)
 
                 U_cvpack = self.com_force.getValue(simulation.context, allowReinitialization=False)
                 dW_protocol = U_cvpack - U_pre_old
 
-                simulation.step(self.steps_per_move)
+                # Integrate the move in n_sub chunks, sampling the restraint force over the
+                # move so the logged `force` is the time-averaged pulling force (much lower
+                # variance than a single pre-step sample -> cleaner Feq / friction / mean-force TI).
+                # Splitting step(N) into chunks summing to N is trajectory-identical in OpenMM.
+                _kunit = openmmunit.kilojoules_per_mole / openmmunit.nanometer
+                base, rem = divmod(self.steps_per_move, n_sub)
+                _fs = []
+                _r_last = None
+                for _j in range(n_sub):
+                    simulation.step(base + (1 if _j < rem else 0))
+                    _r_last = self.com_dist.getValue(simulation.context, allowReinitialization=False)
+                    _fs.append((-self.sMD_spring_cte * (_r_last - r_target)).value_in_unit(_kunit))
+                _fs = np.asarray(_fs, dtype=float)
+                force_kjmnm = float(_fs.mean())
+                force_sem   = float(_fs.std(ddof=1) / math.sqrt(_fs.size)) if _fs.size > 1 else 0.0
 
-                r_after_nm  = self.com_dist.getValue(simulation.context, allowReinitialization=False).value_in_unit(openmmunit.nanometers)
+                r_after_nm  = _r_last.value_in_unit(openmmunit.nanometers)
                 r_target_nm = r_target.value_in_unit(openmmunit.nanometers)
                 r_before_nm = r_before.value_in_unit(openmmunit.nanometers)
-                force_kjmnm      = force.value_in_unit(openmmunit.kilojoules_per_mole / openmmunit.nanometer)
+                force_inst_kjmnm = force_inst.value_in_unit(_kunit)
                 U_cvpack_kjm     = U_cvpack.value_in_unit(openmmunit.kilojoules_per_mole)
                 dW_protocol_kjm  = dW_protocol.value_in_unit(openmmunit.kilojoules_per_mole)
                 lag_nm = r_target_nm - r_after_nm
                 _row   = (f"{i},{time_before},{r_target_nm},{r_before_nm},"
-                          f"{r_after_nm},{force_kjmnm},"
+                          f"{r_after_nm},{force_kjmnm},{force_sem},{force_inst_kjmnm},"
                           f"{U_cvpack_kjm},{dW_protocol_kjm},{lag_nm:.5f}\n")
 
                 # ── Sampled-frame diagnostics (every save_freq moves) ─────
@@ -460,6 +495,11 @@ class SteeredMD:
         steps_per_move_float = dx_nm / pulling_speed / dt_ps
         self.steps_per_move = max(1, int(round(steps_per_move_float)))
         realized_speed = dx_nm / (self.steps_per_move * dt_ps)
+        # Recorded in the .dat header so downstream estimators regress on the
+        # realized pulling speed (steps_per_move rounding makes it differ from
+        # the requested speed), not the nominal request.
+        self._requested_speed = pulling_speed
+        self._realized_speed = realized_speed
 
         if steps_per_move_float < 1.5:
             logger.warning(

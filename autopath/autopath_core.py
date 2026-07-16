@@ -193,6 +193,8 @@ class AutoPath:
         sMD_steps_per_move: int = None,
         sMD_dx_per_move: float = 0.001,  # nm, this is the displacement per move
         sMD_spring_cte: float = None,  # KJ/mol/nm2
+        sMD_force_n_samples: int = 10,  # cap on restraint-force samples time-averaged per move (>=1); 1 = legacy single pre-step sample
+        sMD_force_sample_stride: int = 5,  # MD steps between force samples; samples-per-move adapts to move length (capped by sMD_force_n_samples)
         sMD_ligand_anchor_mode: str = 'murcko',
         sMD_max_replicas: int = 50,  # max replicas per speed in convergence mode
         sMD_run_analysis: bool = True,
@@ -259,6 +261,8 @@ class AutoPath:
         self.sMD_steps_per_move = sMD_steps_per_move
         self.sMD_dx_per_move = sMD_dx_per_move
         self.sMD_spring_cte = sMD_spring_cte
+        self.sMD_force_n_samples = sMD_force_n_samples
+        self.sMD_force_sample_stride = sMD_force_sample_stride
         self.sMD_ligand_anchor_mode = sMD_ligand_anchor_mode
         self.sMD_max_replicas = sMD_max_replicas
         self.sMD_run_analysis = sMD_run_analysis
@@ -554,6 +558,8 @@ class AutoPath:
                 autostop_nc_window=self.sMD_autostop_nc_window,
                 autostop_min_displacement=self.sMD_autostop_min_displacement,
                 save_freq=5,
+                force_n_samples=self.sMD_force_n_samples,
+                force_sample_stride=self.sMD_force_sample_stride,
                 log_geom_features=self.sMD_log_geom_features,
             )
 
