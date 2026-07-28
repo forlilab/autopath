@@ -409,6 +409,7 @@ class AutoPath:
 
         equilibrated_traj = f"{sys_name}/equilibration/equilibration_{sys_name}.dcd"
         equilibrated_chk = f"{sys_name}/equilibration/checkpoint_equil_{sys_name}.chk"
+        equilibrated_state_xml = f"{sys_name}/equilibration/checkpoint_equil_{sys_name}.xml"
         equilibrated_pdb = f"{sys_name}/equilibration/{sys_name}_equilibrated.pdb"
         equilibrated_system = f"{sys_name}/equilibration/system_equil_{sys_name}.xml"
 
@@ -637,6 +638,7 @@ class AutoPath:
                         try:
                             sMD.run(
                                 checkpoint_file=equilibrated_chk,
+                                state_xml_file=equilibrated_state_xml,
                                 pulling_speed=speed,  # nm/ps
                                 pulling_direction=self.sMD_pulling_dir,
                             )
@@ -669,6 +671,7 @@ class AutoPath:
                         try:
                             sMD.run(
                                 checkpoint_file=equilibrated_chk,
+                                state_xml_file=equilibrated_state_xml,
                                 pulling_speed=speed,  # nm/ps
                                 pulling_direction=self.sMD_pulling_dir,
                             )
@@ -734,6 +737,7 @@ class AutoPath:
                                        plateau_frac=self.sMD_plateau_frac,
                                        cluster_to_boundary=self.sMD_cluster_to_boundary,
                                        boundary_buffer_frac=self.sMD_boundary_buffer_frac,
+                                       recompute_distances=False,  # load precomputed pocket-distance caches
                                     #    r_range=(0, 1.75)
                                        )
 
@@ -753,6 +757,7 @@ class AutoPath:
                 cluster_to_boundary=self.sMD_cluster_to_boundary,
                 restrict_rmsd_to_boundary=self.sMD_cluster_to_boundary,
                 boundary_buffer_frac=self.sMD_boundary_buffer_frac,
+                recompute_distances=False,  # load precomputed pocket-distance caches
             )
             conv_df.to_csv(f"{sMD_analysis_outdir}/sMD_conv_vALL_metrics.csv", index=False)
             traces_df.to_csv(f"{sMD_analysis_outdir}/sMD_conv_vALL_traces.csv", index=False)
