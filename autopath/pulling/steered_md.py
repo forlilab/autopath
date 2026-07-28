@@ -12,6 +12,7 @@ from autopath.utils import *
 from autopath.customForces import (add_harmonic_restraints, remove_openmm_force)
 
 from openmm.app import *
+from openmm import XmlSerializer
 import openmm.unit as openmmunit
 
 import cvpack
@@ -316,7 +317,7 @@ class SteeredMD:
         # after the min-displacement guard is satisfied.
         _nc_buf: deque[float] = deque(maxlen=self.autostop_nc_window)
         _nc_initial = None
-        if self.autostop_nc is not None and self.subset_protein_HA is not None:
+        if self.autostop_nc is not None and self.subset_protein_CA is not None:
             pos_nm_init = simulation.context.getState(getPositions=True).getPositions(asNumpy=True) / openmmunit.nanometers
             _nc_initial = self._compute_nc(pos_nm_init)
             logger.info(
@@ -332,7 +333,7 @@ class SteeredMD:
         # dependent features (nc/mindist) are skipped if pocket atoms are absent.
         geom_feats = self._resolve_geom_features()
         geom_cols = [f for f in geom_feats
-                     if f not in self._GEOM_POCKET or self.subset_protein_HA is not None]
+                     if f not in self._GEOM_POCKET or self.subset_protein_CA is not None]
         geom_dropped = set(geom_feats) - set(geom_cols)
         if geom_dropped:
             logger.warning(
@@ -413,10 +414,10 @@ class SteeredMD:
                 # One positions fetch shared by NC autostop and the geom sidecar.
                 nc = None
                 grow = None
-                if i % self.save_freq == 0 and (self.subset_protein_HA is not None
+                if i % self.save_freq == 0 and (self.subset_protein_CA is not None
                                                 or geom_fh is not None):
                     pos_nm = simulation.context.getState(getPositions=True).getPositions(asNumpy=True) / openmmunit.nanometers
-                    if self.subset_protein_HA is not None:
+                    if self.subset_protein_CA is not None:
                         nc = self._compute_nc(pos_nm)
                     if geom_fh is not None:
                         grow = self._compute_geom_row(pos_nm)
@@ -477,6 +478,7 @@ class SteeredMD:
         run_id: str = None,
         checkpoint_file: str = None,
         pdb_file: str = None,
+        state_xml_file: str = None,
     ):
         """Run one steered MD replica at the requested speed.
 
@@ -563,8 +565,24 @@ class SteeredMD:
 
         #If the systems was equilibrated with a different integrator I get NaNs (even with same splitting)
         # so Im using the PDB instead of the checkpoint file
-        if checkpoint_file is None and pdb_file is None:
-            logger.error("Either pdb_file or checkpoint_file must be provided to set initial positions.")
+        if state_xml_file is not None:
+            # Portable OpenMM State (positions+velocities+box, XML-serialized) —
+            # unlike the binary .chk, this isn't tied to the Platform/GPU that
+            # created it, so it loads safely on any node. Prefer this over
+            # checkpoint_file when both are given.
+            logger.info(f"Setting state from portable XML state file {state_xml_file}")
+            with open(state_xml_file) as f:
+                state = XmlSerializer.deserialize(f.read())
+            # Restore positions/velocities/box only — not state.getParameters():
+            # those include equilibration-only restraint globals (e.g. k_ligand)
+            # that may no longer exist as Context parameters on the production
+            # system, which setState() restores unconditionally and errors on.
+            simulation.context.setPositions(state.getPositions())
+            simulation.context.setVelocities(state.getVelocities())
+            simulation.context.setPeriodicBoxVectors(*state.getPeriodicBoxVectors())
+            simulation.integrator = integrator  # Replace the integrator with the new one
+        elif checkpoint_file is None and pdb_file is None:
+            logger.error("Either pdb_file, checkpoint_file, or state_xml_file must be provided to set initial positions.")
             exit(1)
         elif checkpoint_file is None and pdb_file is not None:
             logger.info(f"Setting positions from PDB file {pdb_file}")
@@ -602,9 +620,9 @@ class SteeredMD:
         needs_pocket = (self.verbose > 0 or self.autostop_nc is not None
                         or bool(set(geom_feats) & self._GEOM_POCKET))
         if needs_pocket:
-            self.subset_protein_HA, _ = self._get_pocket_atoms(simulation, cutoff=0.5)
+            self.subset_protein_CA, _ = self._get_pocket_atoms(simulation, cutoff=0.6)
         else:
-            self.subset_protein_HA = None
+            self.subset_protein_CA = None
 
         # Build the RDKit shape calculator once (elements-only, no SDF/bonds) for
         # any requested shape descriptors. Heavy atoms only, matching the
@@ -733,12 +751,12 @@ class SteeredMD:
         """
         feats = self._resolve_geom_features()
         row: dict[str, float] = {}
-        pocket_ok = self.subset_protein_HA is not None
+        pocket_ok = self.subset_protein_CA is not None
         if "nc" in feats and pocket_ok:
             row["nc"] = self._compute_nc(positions_nm)
         if "mindist" in feats and pocket_ok:
             lig = positions_nm[self.groupA_atoms]
-            poc = positions_nm[self.subset_protein_HA]
+            poc = positions_nm[self.subset_protein_CA]
             diff = lig[:, np.newaxis, :] - poc[np.newaxis, :, :]
             d2 = np.einsum('ijk,ijk->ij', diff, diff)
             row["mindist"] = float(np.sqrt(d2.min()))
@@ -762,7 +780,7 @@ class SteeredMD:
         ligand and pocket COMs coincide.
         """
         lig = positions_nm[self.groupA_atoms]
-        poc = positions_nm[self.subset_protein_HA]
+        poc = positions_nm[self.subset_protein_CA]
         cA = lig.mean(0)
         cB = poc.mean(0)
         v = cA - cB
@@ -790,7 +808,7 @@ class SteeredMD:
         the 6th power). Numerically identical to the norm form.
         """
         lig_pos = positions_nm[self.groupA_atoms]
-        pocket_pos = positions_nm[self.subset_protein_HA]
+        pocket_pos = positions_nm[self.subset_protein_CA]
         diff = lig_pos[:, np.newaxis, :] - pocket_pos[np.newaxis, :, :]
         d2 = np.einsum('ijk,ijk->ij', diff, diff)
         x2 = d2 / (threshold_nm * threshold_nm)
@@ -804,26 +822,30 @@ class SteeredMD:
 
         Returns
         -------
-        subset_protein_HA : np.ndarray of int
+        subset_protein_CA : np.ndarray of int
             Indices of pocket heavy atoms within cutoff of the ligand.
         subset_protein_residues : list of Residue
             Corresponding residue objects.
+        subset_protein_CA : list of Atom
+            Corresponding alpha carbon atom objects.
         """
 
         protein_atoms = [atom for atom in self.topology.atoms() if atom.residue.name not in ["HOH", "WAT", "SOL", "NA", "CL", "K","MG", 'UNK']]
-        protein_HA = [atom.index for atom in protein_atoms if atom.element.symbol != "H"]  # Exclude hydrogens
+        # protein_HA = [atom.index for atom in protein_atoms if atom.element.symbol != "H"]  # Exclude hydrogens
         
-        # Find a subset of protein_HA that are cutoff nm away from groupA_atoms
+        protein_CA = [atom for atom in self.topology.atoms() if atom.name == "CA" and atom.element.symbol == "C"]  # Only alpha carbons
+        
+        # Find a subset of protein_CA that are cutoff nm away from groupA_atoms
         state = simulation.context.getState(getPositions=True, getVelocities=False)
         positions = state.getPositions(asNumpy=True) / openmmunit.nanometers
         ligand_pos = positions[self.groupA_atoms]
-        pocket_pos = positions[protein_HA]
+        pocket_pos = positions[protein_CA]
 
         diff = ligand_pos[:, np.newaxis, :] - pocket_pos[np.newaxis, :, :]
         d2 = np.einsum('ijk,ijk->ij', diff, diff)
         close_indices = np.any(d2 < cutoff * cutoff, axis=0)
-        subset_protein_HA = np.array(protein_HA)[close_indices]
-        subset_protein_residues = [atom.residue for atom in protein_atoms if atom.index in subset_protein_HA]
+        subset_protein_CA = np.array(protein_CA)[close_indices]
+        subset_protein_residues = [atom.residue for atom in protein_atoms if atom.index in subset_protein_CA]
         
-        return subset_protein_HA, subset_protein_residues
+        return subset_protein_CA, subset_protein_residues
 
