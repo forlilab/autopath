@@ -422,25 +422,61 @@ class SMDData:
         return traj_name.split("_")[-2]
 
     def _pocket_distances_for_trajs(self, trajs, group_A, group_B, stride):
-        """Compute pocket→ligand distance rows for a list of trajectory files."""
+        """Compute pocket→ligand distance rows for a list of trajectory files.
+
+        Both selections are periodic-image "no-jump" corrected before distances
+        are computed. sMD DCDs are written wrapped into the primary cell, so when
+        the ligand crosses a box face during unbinding its whole COM is teleported
+        by one lattice vector; without correction every pocket–ligand distance
+        would jump discontinuously (a pure PBC artifact, not real geometry). We
+        undo it by tracking each selection's COM and, whenever it moves more than
+        half the smallest box edge between consecutive frames, subtracting that
+        *observed* step from all later frames. Subtracting the observed step
+        (rather than a box-frame lattice vector, or relying on
+        ``distance_array(box=...)`` / MDAnalysis ``NoJump``) keeps it correct even
+        when the DCD is RMSD-aligned (rotated) with an unrotated triclinic box,
+        where box-based min-image is inconsistent. Both groups are corrected
+        because callers pass group_A/group_B in either order (e.g. run() passes
+        group_A=ligand, group_B=pocket); the static group's correction stays ~0,
+        and since the two groups start co-located (bound) staying continuous from
+        frame 0 keeps them in a common periodic image. No-wrap trajs are unchanged.
+        """
+        def _nojump(u, atoms):
+            """Per-frame cumulative shift undoing periodic-image teleports of `atoms`
+            (a COM step > half the min box edge is a wrap, not real motion here)."""
+            corr = np.zeros(3); prev = None; out = {}
+            for ts in u.trajectory:
+                box = ts.dimensions[:3]
+                half = 0.5 * float(np.min(box)) if np.all(box > 0) else np.inf
+                com = atoms.center_of_mass()
+                if prev is None:
+                    out[ts.frame] = corr.copy(); prev = com + corr; continue
+                cur = com + corr
+                if np.linalg.norm(cur - prev) > half:
+                    corr = corr - (cur - prev); cur = com + corr
+                out[ts.frame] = corr.copy(); prev = cur
+            return out
+
         all_rows = []
         for traj in tqdm.tqdm(trajs, desc="Calculating distances.."):
             u = mda.Universe(self.reference_pdb, traj)
 
-            pocket_atoms = u.select_atoms(group_A)
-            ligand_atoms = u.select_atoms(group_B)
-            if ligand_atoms.n_atoms == 0 or pocket_atoms.n_atoms == 0:
+            atoms_A = u.select_atoms(group_A)
+            atoms_B = u.select_atoms(group_B)
+            if atoms_A.n_atoms == 0 or atoms_B.n_atoms == 0:
                 print(f"Warning: No atoms found for selection in trajectory {traj}. Skipping.")
                 continue
 
             traj_name = self._traj_to_log_name(traj)
             speed = self._speed_tag_from_trajname(traj_name).strip("v")
 
+            corrA = _nojump(u, atoms_A)
+            corrB = _nojump(u, atoms_B)
+
             for ts in u.trajectory[::stride]:
-                distances = distance_array(
-                    pocket_atoms, ligand_atoms,
-                    result=np.ndarray((len(pocket_atoms), len(ligand_atoms)))
-                )
+                A_pos = atoms_A.positions + corrA[ts.frame]
+                B_pos = atoms_B.positions + corrB[ts.frame]
+                distances = distance_array(A_pos, B_pos)
                 dist_flat = distances.flatten() / 10.0  # nm
                 time_ps = getattr(ts, "time", ts.frame)  # ts.time in ps
 
