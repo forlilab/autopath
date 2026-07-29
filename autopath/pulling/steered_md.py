@@ -823,18 +823,19 @@ class SteeredMD:
         Returns
         -------
         subset_protein_CA : np.ndarray of int
-            Indices of pocket heavy atoms within cutoff of the ligand.
+            Atom indices of the pocket alpha carbons within cutoff of the ligand.
         subset_protein_residues : list of Residue
             Corresponding residue objects.
-        subset_protein_CA : list of Atom
-            Corresponding alpha carbon atom objects.
         """
 
         protein_atoms = [atom for atom in self.topology.atoms() if atom.residue.name not in ["HOH", "WAT", "SOL", "NA", "CL", "K","MG", 'UNK']]
         # protein_HA = [atom.index for atom in protein_atoms if atom.element.symbol != "H"]  # Exclude hydrogens
-        
-        protein_CA = [atom for atom in self.topology.atoms() if atom.name == "CA" and atom.element.symbol == "C"]  # Only alpha carbons
-        
+
+        # Only alpha carbons. The element check rejects Ca2+ ions, which are also named "CA".
+        protein_CA = np.array([atom.index for atom in self.topology.atoms()
+                               if atom.name == "CA" and atom.element is not None
+                               and atom.element.symbol == "C"], dtype=int)
+
         # Find a subset of protein_CA that are cutoff nm away from groupA_atoms
         state = simulation.context.getState(getPositions=True, getVelocities=False)
         positions = state.getPositions(asNumpy=True) / openmmunit.nanometers
@@ -844,8 +845,9 @@ class SteeredMD:
         diff = ligand_pos[:, np.newaxis, :] - pocket_pos[np.newaxis, :, :]
         d2 = np.einsum('ijk,ijk->ij', diff, diff)
         close_indices = np.any(d2 < cutoff * cutoff, axis=0)
-        subset_protein_CA = np.array(protein_CA)[close_indices]
-        subset_protein_residues = [atom.residue for atom in protein_atoms if atom.index in subset_protein_CA]
-        
+        subset_protein_CA = protein_CA[close_indices]
+        _subset = set(subset_protein_CA.tolist())
+        subset_protein_residues = [atom.residue for atom in protein_atoms if atom.index in _subset]
+
         return subset_protein_CA, subset_protein_residues
 
