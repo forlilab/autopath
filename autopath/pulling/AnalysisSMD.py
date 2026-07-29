@@ -61,12 +61,16 @@ TRACE_FEATURE_POOL = frozenset({
 # path). The pocket-distance dist_* PCA is a separate reference route and is
 # never merged into this set.
 _DEFAULT_TRACE_FEATURES = (
-                           "lag", 
-                        #    "r_before"
+                        #    "lag", 
+                           "r_before",
+                           'work',
                            )
 _DEFAULT_GEOM_FEATURES = (
                           "geom_rog",
-                          # "geom_npr1", "geom_npr2",
+                          "geom_npr1", "geom_npr2",
+                        #   "geom_spherocity", 
+                        #   "geom_pbf",
+                        #   'geom_mindist',
                           "geom_exit_1", "geom_exit_2", "geom_exit_3"
                           )
 DEFAULT_FEATURES = list(_DEFAULT_TRACE_FEATURES) + list(_DEFAULT_GEOM_FEATURES)
@@ -229,7 +233,7 @@ class SMDAnalysis:
 
     def _build_cluster_feature_df(self, smd, group_A=None, group_B=None,
                                   features=None, merge_features=True, ligand_sdf=None,
-                                  geom_features=False, geom_merge="impute",
+                                  geom_features=False, geom_merge="aligned",
                                   recompute_distances=False):
         """Build the clustering feature DataFrame for an ``SMDData``.
 
@@ -307,7 +311,8 @@ class SMDAnalysis:
                 if not lf.empty:
                     ligand_feat_dfs.append(lf)
 
-        if dist_feat_df is not None and not merge_features:
+        distance_only = dist_feat_df is not None and not merge_features
+        if distance_only:
             # Distance-only clustering: when a clustering selection is provided
             # but merge_features is False, cluster purely on the pocket–ligand
             # distance features (PCA-reduced downstream in DTWPathModel). Trace
@@ -338,7 +343,10 @@ class SMDAnalysis:
         # A near-free, pre-computed alternative to post-processing the DCDs. When
         # explicit geom_ names are given (geom_named), only those columns are used;
         # otherwise (geom_features=True with no names) all geom_ columns are merged.
-        if geom_features or geom_named:
+        # Skipped entirely in distance-only mode: geom features are computed on a
+        # different time stride than dist_feat_df, and merging them in would also
+        # contradict the "pure distance" clustering this mode is meant to provide.
+        if not distance_only and (geom_features or geom_named):
             geom_df = smd.load_geom_features()
             if geom_df.empty:
                 logger.warning(
@@ -1287,8 +1295,21 @@ class SMDAnalysis:
         Captures negative-dG counts, replica counts, dG endpoints and the
         final p_eq weight so the user can audit which paths the cumulant
         estimator is struggling with.
+
+        Cumulant reliability diagnostics (cumulant rows only — the jarzynski
+        ``Wdiss`` is ``<W> - dG_exp``, not a variance, and force reports NaN):
+
+        ``beta_sigma``
+            ``sqrt(2 * beta * Wdiss)``, the dimensionless work spread, since
+            ``Wdiss == beta*Var(W)/2`` for the cumulant.
+            ``beta_sigma_advisory_exceeded`` compares it to
+            a threshold.
+            ``Wdiss/Wmean``. Threshold-free and the more direct warning: since
+            ``dG = Wmean - Wdiss``, a ratio > 1 is identically ``dG < 0``, and a
+            ratio near 1 means dG is a difference of two large, near-equal numbers.
         """
         max_steps_per_speed = sMDDdata.results.groupby('speed')['step'].max().to_dict()
+        beta = sMDDdata.beta
         rows = []
         for est in self.estimators:
             df_est = sMDDdata.results[sMDDdata.results['estimator'] == est.name]
@@ -1309,6 +1330,17 @@ class SMDAnalysis:
                 last_row = gpath_sorted[gpath_sorted['step'] == last_step]
                 global_max = max_steps_per_speed.get(speed, last_step)
 
+                # Cumulant-only: Wdiss == beta*Var(W)/2  =>  beta*sigma_W.
+                bs_final = corr_ratio = float('nan')
+                if est.name == 'cumulant' and not last_row.empty:
+                    w_last = last_row['Wdiss'].iloc[0]
+                    wm_last = last_row['Wmean'].iloc[0]
+                    if np.isfinite(w_last):
+                        bs_final = float(np.sqrt(2.0 * beta * max(float(w_last), 0.0)))
+                        # Threshold-free: Wdiss/Wmean > 1 is identically dG < 0.
+                        if np.isfinite(wm_last) and float(wm_last) != 0.0:
+                            corr_ratio = float(w_last) / float(wm_last)
+
                 rows.append({
                     'estimator': est.name,
                     'speed': speed,
@@ -1324,6 +1356,8 @@ class SMDAnalysis:
                     'dG_final': float(dG[-1]),
                     'Wmean_final': float(last_row['Wmean'].iloc[0]) if not last_row.empty else float('nan'),
                     'Wdiss_final': float(last_row['Wdiss'].iloc[0]) if not last_row.empty else float('nan'),
+                    'beta_sigma': bs_final,
+                    'cumulant_correction_ratio': corr_ratio,
                     'n_steps_ratio': float(last_step / global_max) if global_max > 0 else float('nan'),
                     'p_eq': float(weights.get(speed, {}).get(path, 0.0)),
                 })
