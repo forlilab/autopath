@@ -134,31 +134,85 @@ def align_trajectory_pytraj(
     return
 
 
-def wrap_align_save_traj(traj_files, topology, remove_original=True, is_membrane=False):
+def wrap_align_save_traj(traj_files, topology, remove_original=True, is_membrane=False,
+                         reference=None, align_select="backbone", out_dir=None):
+    """Centre, image and superpose trajectories, writing ``*_aligned.dcd``.
+
+    Parameters
+    ----------
+    traj_files : str or list of str
+        Trajectory path(s). Each is processed independently.
+    topology : str
+        Topology for all of *traj_files*.
+    remove_original : bool
+        Delete each input after writing its aligned copy (default True). Set False
+        when the inputs are read-only or shared.
+    is_membrane : bool
+        Skip imaging: ``image_molecules`` is prohibitively slow for membrane systems
+        (hundreds of lipids), and centering is sufficient for sMD/metadynamics.
+    reference : str or mdtraj.Trajectory, optional
+        Structure whose first frame is the superposition target. Default (None)
+        superposes each trajectory onto its OWN first frame, which puts every
+        trajectory in a *different* frame — fine for single-trajectory analysis, but
+        an external reference is required when several trajectories must share one
+        Cartesian frame (e.g. pooling cosolvent density maps across replicas or
+        probes). Must have a topology compatible with *align_select*.
+    align_select : str
+        MDTraj selection used for the superposition (default ``"backbone"``).
+    out_dir : str, optional
+        Write aligned trajectories here instead of next to the inputs.
+
+    Returns
+    -------
+    list of str
+        Paths of the aligned trajectories.
+    """
     import mdtraj as md
     if isinstance(traj_files, str):
         traj_files = [traj_files]
+
+    ref_traj = None
+    if reference is not None:
+        ref_traj = reference if hasattr(reference, "xyz") else md.load(reference)
+
+    if out_dir is not None:
+        os.makedirs(out_dir, exist_ok=True)
+
     aligned_paths = []
     for traj_file in traj_files:
         traj = md.load(traj_file, top=topology)
         traj = traj.center_coordinates()
-        # image_molecules is prohibitively slow for membrane systems (hundreds of lipids,
-        # thousands of atoms); centering is sufficient for sMD/metadynamics analysis.
         if not is_membrane:
             traj = traj.image_molecules(make_whole=True)
-        backbone = traj.topology.select("backbone")
-        if len(backbone) > 0:
+        sel = traj.topology.select(align_select)
+        if len(sel) > 0:
             try:
-                traj = traj.superpose(traj[0], atom_indices=backbone)
-                # Re-image after superposition: rigid-body rotation can move the ligand
-                # into a distant periodic image in Cartesian space even though PBC
-                # distances are unchanged. A second imaging pass restores every
-                # molecule to the image closest to the (now-fixed) protein backbone.
-                if not is_membrane:
-                    traj = traj.image_molecules(make_whole=True)
+                if ref_traj is None:
+                    traj = traj.superpose(traj[0], atom_indices=sel)
+                    # Re-image after superposition: rigid-body rotation can move the
+                    # ligand into a distant periodic image in Cartesian space even
+                    # though PBC distances are unchanged. A second imaging pass
+                    # restores every molecule to the image closest to the (now-fixed)
+                    # protein backbone.
+                    if not is_membrane:
+                        traj = traj.image_molecules(make_whole=True)
+                else:
+                    ref_sel = ref_traj.topology.select(align_select)
+                    if len(ref_sel) != len(sel):
+                        raise ValueError(
+                            f"reference selection {align_select!r} has {len(ref_sel)} "
+                            f"atoms but the trajectory has {len(sel)}")
+                    # Aligning to an EXTERNAL frame: a uniform rigid transform cannot
+                    # move any molecule into a different image relative to the solute,
+                    # so no second imaging pass is needed (and re-imaging here would
+                    # re-wrap against a box that no longer matches the coordinates).
+                    traj = traj.superpose(ref_traj, frame=0, atom_indices=sel,
+                                          ref_atom_indices=ref_sel)
             except Exception as e:
                 logging.warning(f"Superposition failed for {traj_file}: {e}. Proceeding without superposition.")
-        out_path = traj_file.replace(".dcd", "_aligned.dcd")
+        base = os.path.basename(traj_file) if out_dir is not None else traj_file
+        out_path = os.path.join(out_dir, base) if out_dir is not None else base
+        out_path = out_path.replace(".dcd", "_aligned.dcd")
         traj.save(out_path)
         if remove_original:
             os.remove(traj_file)
