@@ -494,14 +494,21 @@ class AutoPath:
                                                         out_dir=sys_name,
                                                         ref_mol=lig_mol)
             logger.info(f"Ligand anchor atom indices are: {', '.join(map(str, ligand_atoms_indices))}")
-            # write out the protein/ligand/pocket PDBs and PyMOL session
+            # write out the protein/ligand/pocket PDBs and PyMOL session.
+            if self.pocket_selection is not None:
+                pocket_view_selection = self.pocket_selection
+            else:
+                pocket_view_selection = (
+                    f"(same residue as index {' '.join(map(str, pocket_atom_indices))})"
+                    " and name CA"
+                )
             try:
                 write_pocket_pymol(
                     u=u_eq,
                     out_dir=sys_name,
                     protein_selection="protein",
                     ligand_selection=ligand_selection,
-                    pocket_selection=self.pocket_selection,
+                    pocket_selection=pocket_view_selection,
                 )
             except Exception as e:
                 logger.error(f"Error writing pocket/ligand/protein pdbs: {e}")

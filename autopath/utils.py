@@ -629,7 +629,7 @@ def build_residue_mapping(original_pdb: str, system_pdb: str, chain: str = None)
 def get_pocket_atoms_idxs(u: mda.Universe = None,
                           pocket_selection: str = None,
                           ligand_selection: str = None,
-                          cutoff: float = 6.0
+                          cutoff: float = 8.0
                           ) -> List[int]:
     """Return atom indices defining the binding pocket.
 
