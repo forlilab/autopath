@@ -15,7 +15,7 @@ def test_compute_nc_squared_matches_norm():
     pocket_idx = np.arange(6, 25)
     smd = SteeredMD.__new__(SteeredMD)          # bypass __init__ (no OpenMM needed)
     smd.groupA_atoms = list(lig_idx)
-    smd.subset_protein_HA = pocket_idx
+    smd.subset_protein_CA = pocket_idx
     expected = _nc_norm_reference(positions[lig_idx], positions[pocket_idx], 0.5)
     got = smd._compute_nc(positions, threshold_nm=0.5)
     assert got == pytest.approx(expected, rel=1e-12, abs=1e-10)

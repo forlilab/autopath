@@ -1,5 +1,7 @@
 scratch/*
 examples/*/3ptb/*
+analysis/*
+tests/cfs_hsp90/
 *.err
 *.out
 
