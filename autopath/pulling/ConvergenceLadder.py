@@ -300,10 +300,13 @@ def force_convergence_ladder(sa, logs, speeds,
 
         # barrier/r_TS for the extrapolated PMF: boundary_method="pmf_peak"
         # (force_df=None) needs no force profile, unlike deployment's default
-        # "force_plateau". When no peak is found the value is NaN -- the
-        # NaN-aware delta logic in _compare_rung then waives the criterion
-        # (both NaN) or marks non-convergence (one NaN -> inf). No r_max
-        # fallback is introduced here.
+        # "force_plateau". When no peak is found, _compute_barrier_rts falls
+        # back to argmax(dG): r_ts becomes the position of the PMF maximum and
+        # barrier becomes dG[argmax] - dG[0] (not NaN, and not r_max -- for a
+        # monotonic profile this makes r_ts the profile endpoint and the
+        # barrier the total rise). The NaN-aware delta logic in _compare_rung
+        # (both NaN waives the criterion, one NaN -> inf) guards other NaN
+        # sources and is not exercised by this fallback.
         barrier, r_ts = sa._compute_barrier_rts(
             pmf_k, 1.0 / per_speed[min(speeds)]["smd"].beta, slow_grid,
             force_df=None, speed=0.0,
