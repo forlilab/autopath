@@ -838,7 +838,7 @@ rather than importing the scratch helper.
 
 Keep verbatim the two documented deviations, and keep their comments:
 - RMSD r-cap from the **slowest** speed's force-plateau boundary, because the extrapolated v→0 PMF has no force profile;
-- barrier/r_TS via `boundary_method="pmf_peak"`, with NaN (not an `r_max` fallback) when `detect_ts` finds no peak.
+- barrier/r_TS via `boundary_method="pmf_peak"`: when `_find_pmf_peak` finds no peak above the prominence threshold, `_compute_barrier_rts` falls back to `argmax(ΔG)` — not NaN, and not an end-of-range `r_max` fallback — returning that position as `r_ts` and `dG[argmax] - dG[0]` as the barrier; for a monotonic profile with no interior peak this makes `r_ts` the profile endpoint and the barrier the total rise.
 
 - [ ] **Step 3: Make the scratch lib delegate**
 
