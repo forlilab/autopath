@@ -84,6 +84,13 @@ class SystemPreparation:
         hydrogenMass: float = 1.5,  # in amu; 1.5 enables 4 fs timestep via HMR
         boxShape: str = "dodecahedron",
         padding: float = 1.2,
+        # addSolvent previously used its default (tip3p), so a 4-site water model could not be
+        # requested: the forcefield would carry e.g. amber19/opc.xml while the solvent added
+        # was 3-site, and createSystem then has no template for it. OPC has the same topology
+        # as TIP4P-Ew (O, H1, H2, M + one virtual site), so pass water_model="tip4pew" to
+        # build the right topology and let opc.xml supply the parameters. ff19SB is
+        # parameterised for OPC, so the two go together.
+        water_model: str = "tip3p",
         num_solvent: int = None,
         ionicStrength: float = 0.15,
         ions: tuple[str] = ("Na+", "Cl-"),  # positiveIon, negativeIon
@@ -103,6 +110,7 @@ class SystemPreparation:
         self.boxShape = boxShape  # cube, dodecahedron
 
         self.padding = padding
+        self.water_model = water_model
         self.num_solvent = num_solvent
         if self.padding is not None:
             self.padding = self.padding * openmmunit.nanometers
@@ -412,6 +420,15 @@ class SystemPreparation:
 
             modeller = Modeller(ligand_topology, ligand_positions)
 
+        # A 4-site water model needs its virtual site on EVERY water, including the
+        # crystallographic ones carried in from the input, and this has to happen BEFORE
+        # solvation: addSolvent computes the neutralising charge and therefore requires every
+        # residue to match a template, so 3-site input waters abort it with "matches HOH, but
+        # the residue is missing 1 extra site".
+        if self.water_model in ("tip4pew", "tip5p", "swm4ndp"):
+            logger.info(f"Adding extra particles for the {self.water_model} water model..")
+            modeller.addExtraParticles(self.forcefield)
+
         if self.is_membrane:
             logger.info(f"Adding a {os.path.basename(self.lipid_type)} membrane to the system..")
             if os.path.exists(self.lipid_type):
@@ -436,6 +453,7 @@ class SystemPreparation:
             logger.info(f"Solvating the system..")
             modeller.addSolvent(
                 self.forcefield,
+                model=self.water_model,
                 neutralize=True,
                 numAdded=self.num_solvent,
                 ionicStrength=self.ionicStrength,
