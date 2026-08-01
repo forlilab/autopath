@@ -954,3 +954,88 @@ def align_structures_on_site(
         logger.info("%s: fitted on %d site residues (%d rejected), site RMSD %.2f A",
                     Path(path).name, len(good), n_mismatch, rmsd)
     return out
+
+
+def normalize_ids_for_pdb(topology, warn: bool = True) -> dict:
+    """Make chain and residue identifiers survive a round trip through PDB format.
+
+    Two identifiers are silently corrupted when an OpenMM topology is written to PDB, and
+    both break any later ``resid X and segid Y`` lookup against the written file:
+
+    **Residue numbers outside 1-9999.** ``PDBPreprocessor.fix`` defaults to
+    ``ignore_terminal_missing_residues=False``, so PDBFixer models in unresolved terminal
+    residues -- typically an expression tag. Those are numbered downwards from the first
+    observed residue and go non-positive, and the PDB writer emits them modulo 10000. MAPK14
+    5WJJ is the worked example: PDBFixer reads it correctly starting at residue 5, models in a
+    GAMGS tag at -4..0, and the file comes back starting at 9996. Readers then "unwrap" the
+    apparent overflow and shift the whole chain by +10000, so V102 parses as resid 10102.
+
+    **Multi-character chain ids.** mmCIF allows them (7Q9Q uses ``BBB``); PDB has one column,
+    so they are truncated or replaced, and distinct chains can collide onto one letter.
+
+    This renumbers offending residues into a safe range and remaps chains to unique single
+    characters, returning the mapping so the original identity is recoverable rather than
+    lost. Call it before writing; the topology is modified in place.
+
+    Returns
+    -------
+    dict
+        ``{"residues": {(new_chain, new_resid): (old_chain, old_resid)}, "chains":
+        {new: old}, "n_renumbered": int, "n_rechained": int}``
+    """
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    chain_map, res_map = {}, {}
+    used = set()
+    n_renum = n_rechain = 0
+
+    for i, chain in enumerate(topology.chains()):
+        old_cid = chain.id
+        cid = old_cid if (len(str(old_cid)) == 1 and str(old_cid) not in used) else None
+        if cid is None:
+            cid = next((c for c in alphabet if c not in used), "X")
+            n_rechain += 1
+        used.add(cid)
+        chain.id = cid
+        chain_map[cid] = old_cid
+
+        # find the smallest id so the whole chain can be shifted rather than renumbered
+        ids = []
+        for res in chain.residues():
+            try:
+                ids.append(int(res.id))
+            except (TypeError, ValueError):
+                ids.append(None)
+        numeric = [v for v in ids if v is not None]
+        # Undo the modulo-10000 wrap first. PDBFixer numbers modelled terminal residues
+        # downwards from the first observed one, so an expression tag becomes -4..0 and is
+        # stored as 9996..9999 -- which sits BEFORE residue 1 in the chain and is therefore
+        # non-monotonic rather than out of range, so a plain min/max check misses it.
+        if len(numeric) > 1:
+            tail = [v for v in numeric[1:] if v < 1000]
+            if tail and numeric[0] >= 9000 and numeric[0] > max(tail):
+                for k, v in enumerate(ids):
+                    if v is not None and v >= 9000:
+                        ids[k] = v - 10000
+                numeric = [v for v in ids if v is not None]
+        shift = 0
+        if numeric and (min(numeric) < 1 or max(numeric) > 9999):
+            # keep the spacing (and therefore any author gaps) but move into range
+            shift = 1 - min(numeric) if min(numeric) < 1 else 0
+            if max(numeric) + shift > 9999:
+                shift = 1 - min(numeric)          # last resort: start the chain at 1
+        for res, old in zip(chain.residues(), ids):
+            if old is None:
+                continue
+            new = old + shift
+            if new != old:
+                n_renum += 1
+            res.id = str(new)
+            res_map[(cid, new)] = (old_cid, old)
+
+    if warn and (n_renum or n_rechain):
+        logger.warning(
+            "normalize_ids_for_pdb: renumbered %d residues and relabelled %d chains so they "
+            "survive PDB format; use the returned map to recover original identifiers",
+            n_renum, n_rechain)
+    return {"residues": res_map, "chains": chain_map,
+            "n_renumbered": n_renum, "n_rechained": n_rechain}
