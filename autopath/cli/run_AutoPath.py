@@ -127,6 +127,10 @@ def main():
             sMD_ligand_anchor_mode=config.sMD_ligand_anchor_mode,
             sMD_run_analysis=config.sMD_run_analysis,
             sMD_clust_selection=config.sMD_clust_selection,
+            sMD_conv_window=config.sMD_conv_window,
+            sMD_conv_streak=config.sMD_conv_streak,
+            sMD_autostop_estimator=config.sMD_autostop_estimator,
+            sMD_alternate_speeds=config.sMD_alternate_speeds,
             # Milestones
             extract_milestones=config.extract_milestones,
             milestone_mode=config.milestone_mode,
