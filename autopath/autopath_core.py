@@ -636,7 +636,12 @@ class AutoPath:
                             # speed — whose .dat files stay on disk — would freeze K
                             # at the replica count it died on and the force criterion
                             # could never fire again.
-                            live_speeds = [s for s in self.sMD_pulling_speeds if live[s]]
+                            live_speeds = [
+                                s for s in self.sMD_pulling_speeds
+                                if live[s] and glob(
+                                    f"{sMD_traj_outdir}/sMD_*_v{s}_{self.sMD_pulling_dir}.dat"
+                                )
+                            ]
                             if len(live_speeds) < 2:
                                 if not force_ladder_dead:
                                     force_ladder_dead = True
@@ -885,7 +890,8 @@ class AutoPath:
                 recompute_distances=False,  # load precomputed pocket-distance caches
             )
             conv_df.to_csv(f"{sMD_analysis_outdir}/sMD_conv_vALL_metrics.csv", index=False)
-            traces_df.to_csv(f"{sMD_analysis_outdir}/sMD_conv_vALL_traces.csv", index=False)
+            if not traces_df.empty:
+                traces_df.to_csv(f"{sMD_analysis_outdir}/sMD_conv_vALL_traces.csv", index=False)
 
             # delete per-speed convergence files written during the convergence loop;
             # vALL files contain all the same data
@@ -896,8 +902,9 @@ class AutoPath:
                 if not _f.endswith("vALL_traces.csv"):
                     os.remove(_f)
 
-            smd_conv_traces = glob(f"{sMD_analysis_outdir}/sMD_conv_vALL_traces.csv")
-            plot_convergence_traces(smd_conv_traces, outdir=sMD_analysis_outdir)
+            if not traces_df.empty:
+                smd_conv_traces = glob(f"{sMD_analysis_outdir}/sMD_conv_vALL_traces.csv")
+                plot_convergence_traces(smd_conv_traces, outdir=sMD_analysis_outdir)
             smd_conv_metrics = glob(f"{sMD_analysis_outdir}/sMD_conv_vALL_metrics.csv")
             plot_convergence_metrics(smd_conv_metrics, outdir=sMD_analysis_outdir, tolerances=CONVERGENCE_TOLERANCES)
 

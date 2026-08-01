@@ -385,6 +385,10 @@ def plot_convergence_traces(smd_conv_traces: list[str], outdir: str):
             continue
         all_data.append(df)
 
+    if not all_data:
+        logger.warning("No convergence traces data available for plotting.")
+        return
+
     traces_df = pd.concat(all_data, ignore_index=True)
 
     # define line styles for clusters
@@ -505,7 +509,7 @@ def plot_convergence_metrics(smd_conv_metrics: list[str], outdir: str, tolerance
     # metrics to plot
     metrics = [
         c for c in metrics_df.columns
-        if c not in ['speed', 'path', 'n_replicas', 'converged', 'decision_quantity', 'n_common_points', 'reason']
+        if c not in ['speed', 'path', 'n_replicas', 'converged', 'decision_quantity', 'n_common_points', 'reason', 'estimator']
     ]
 
     if len(metrics) == 0:
