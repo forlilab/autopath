@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from glob import glob
 from typing import Optional, Union
-from collections import defaultdict
+from collections import defaultdict, deque
 import logging
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import find_peaks
@@ -23,6 +23,7 @@ from autopath.pulling.Estimators import (
     _find_pmf_peak,
     recover_spring_constant,
 )
+from autopath.pulling.Convergence import window_mean_pmf, window_reference_scalar
 from autopath.pulling.Diagnostics import (
     plot_work_profiles,
     plot_profile,
@@ -753,6 +754,7 @@ class SMDAnalysis:
         tol_r_ts: float = 0.1,     # nm — 1 Å change in TS position
         trim_fraction: float = 0.1,      # drop steps where fewer than (1-trim_fraction) of replicas contributed; 0=no trimming
         min_common_points: int = 5,
+        conv_window: int = 5,      # rungs averaged to form the comparison reference; 1 == previous-rung
         boundary_method: str = "force_plateau",  # TS/barrier detector: "force_plateau" (restraint-force, default) or "pmf_peak"
         plateau_frac: float = 0.4,
         restrict_rmsd_to_boundary: bool = True,   # compute PMF-RMSD only up to the force-plateau boundary (+buffer), not the noisy solvent tail
@@ -766,9 +768,11 @@ class SMDAnalysis:
 
         For each speed, replicas are added one at a time in sorted order.
         After every addition the mixture PMF is rebuilt from the running
-        estimator statistics.  Consecutive PMFs (PMF(k) vs PMF(k-1)) are
-        compared on three criteria: RMSD over the common r-range, change
-        in barrier height, and change in transition-state position.
+        estimator statistics.  PMF(k) is compared against a reference formed
+        by averaging over the last ``conv_window`` rungs (``conv_window=1``
+        reduces to the previous rung) on three criteria: RMSD over the
+        common r-range, change in barrier height, and change in
+        transition-state position.
 
         Returns
         -------
@@ -907,9 +911,10 @@ class SMDAnalysis:
 
             rows = []
             pmf_records = []
-            prev_pmf = None
-            prev_barrier_height = None
-            prev_r_ts = None
+            _w = max(1, int(conv_window))
+            hist_pmf = deque(maxlen=_w)
+            hist_barrier = deque(maxlen=_w)
+            hist_r_ts = deque(maxlen=_w)
 
             for k, trajname in enumerate(traj_order, start=1):
                 traj_df = traj_data_map.get(trajname)
@@ -958,9 +963,9 @@ class SMDAnalysis:
                     policy=conv_policy,
                 )
 
-                # Empty PMF at this k: skip without touching prev_* — overwriting
-                # prev_pmf with an empty Series would make it non-None and bypass the
-                # initialization guard below, leaving prev_barrier_height unset (None).
+                # Empty PMF at this k: skip without touching the history — appending an
+                # empty Series would make hist_pmf non-empty and bypass the
+                # initialization guard below, leaving hist_barrier/hist_r_ts unset.
                 if pmf_k.empty:
                     continue
 
@@ -982,14 +987,16 @@ class SMDAnalysis:
                 force_k = (speed_data[speed_data['trajname'].isin(traj_order[:k])]
                            if boundary_method == "force_plateau" else None)
 
-                # Stage 3: first PMF in the trace window — initialize prev state, no comparison yet
-                if prev_pmf is None or prev_pmf.empty:
-                    prev_pmf = pmf_k
-                    prev_barrier_height, prev_r_ts = self._compute_barrier_rts(
+                # Stage 3: first PMF in the trace window — initialize history, no comparison yet
+                if not hist_pmf:
+                    b0, r0 = self._compute_barrier_rts(
                         pmf_k, 1.0/smd.beta, protocol_grid,
                         force_df=force_k, speed=speed,
                         boundary_method=boundary_method, plateau_frac=plateau_frac,
                     )
+                    hist_pmf.append(pmf_k)
+                    hist_barrier.append(b0)
+                    hist_r_ts.append(r0)
                     continue
 
                 # === convergence comparison (all k > trace_min_replicas) ===
@@ -1002,8 +1009,12 @@ class SMDAnalysis:
                     boundary_method=boundary_method, plateau_frac=plateau_frac,
                 )
 
-                # compare PMF(k) vs PMF(k-1)
-                common_r = pmf_k.index.intersection(prev_pmf.index)
+                # compare PMF(k) vs the window-averaged reference over the last _w rungs
+                ref_pmf = window_mean_pmf(hist_pmf)
+                ref_barrier = window_reference_scalar(hist_barrier)
+                ref_r_ts = window_reference_scalar(hist_r_ts)
+
+                common_r = pmf_k.index.intersection(ref_pmf.index)
 
                 # Cap the RMSD window at the force-plateau boundary (+buffer): drop
                 # steps past rupture whose noisy plateau otherwise dominates the RMSD.
@@ -1015,19 +1026,19 @@ class SMDAnalysis:
                 # - both NaN: no peak in either → criterion waived (True)
                 # - one NaN: peak appeared/disappeared → not converged (inf)
                 # - both finite: normal absolute difference
-                if np.isnan(barrier_height) and np.isnan(prev_barrier_height):
+                if np.isnan(barrier_height) and np.isnan(ref_barrier):
                     barrier_delta = np.nan
-                elif np.isnan(barrier_height) or np.isnan(prev_barrier_height):
+                elif np.isnan(barrier_height) or np.isnan(ref_barrier):
                     barrier_delta = np.inf
                 else:
-                    barrier_delta = abs(barrier_height - prev_barrier_height)
+                    barrier_delta = abs(barrier_height - ref_barrier)
 
-                if np.isnan(r_ts) and np.isnan(prev_r_ts):
+                if np.isnan(r_ts) and np.isnan(ref_r_ts):
                     r_ts_delta = np.nan
-                elif np.isnan(r_ts) or np.isnan(prev_r_ts):
+                elif np.isnan(r_ts) or np.isnan(ref_r_ts):
                     r_ts_delta = np.inf
                 else:
-                    r_ts_delta = abs(r_ts - prev_r_ts)
+                    r_ts_delta = abs(r_ts - ref_r_ts)
 
                 if len(common_r) < min_common_points:
                     rows.append({
@@ -1043,9 +1054,9 @@ class SMDAnalysis:
                         "reason": "insufficient_overlap",
                         "n_common_points": len(common_r),
                     })
-                    prev_pmf = pmf_k
-                    prev_barrier_height = barrier_height
-                    prev_r_ts = r_ts
+                    hist_pmf.append(pmf_k)
+                    hist_barrier.append(barrier_height)
+                    hist_r_ts.append(r_ts)
                     continue
 
                 # Trim to well-supported steps: keep only steps where the fraction
@@ -1076,13 +1087,13 @@ class SMDAnalysis:
                         "reason": "insufficient_support",
                         "n_common_points": len(common_r),
                     })
-                    prev_pmf = pmf_k
-                    prev_barrier_height = barrier_height
-                    prev_r_ts = r_ts
+                    hist_pmf.append(pmf_k)
+                    hist_barrier.append(barrier_height)
+                    hist_r_ts.append(r_ts)
                     continue
 
                 yN = pmf_k.loc[common_r].values
-                yNm1 = prev_pmf.loc[common_r].values
+                yNm1 = ref_pmf.loc[common_r].values
 
                 pmf_rmsd = np.sqrt(np.mean((yN - yNm1) ** 2))
 
@@ -1106,10 +1117,10 @@ class SMDAnalysis:
                     "n_common_points": len(common_r),
                 })
 
-                # overwrite previous state (incremental logic)
-                prev_pmf = pmf_k
-                prev_barrier_height = barrier_height
-                prev_r_ts = r_ts
+                # append to bounded history (window reference for next comparison)
+                hist_pmf.append(pmf_k)
+                hist_barrier.append(barrier_height)
+                hist_r_ts.append(r_ts)
 
             conv_df = pd.DataFrame(rows)
             convergence_all_speeds.append(conv_df)
