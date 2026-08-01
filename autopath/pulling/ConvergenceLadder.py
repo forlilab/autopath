@@ -1,7 +1,8 @@
 """Multi-speed convergence ladder for the force free-energy estimator.
 
 ``SMDAnalysis.check_convergence`` grows one pulling speed's replica count at a
-time and compares consecutive PMFs. The ``force`` estimator instead needs at
+time and compares each PMF against a windowed reference over the preceding
+rungs. The ``force`` estimator instead needs at
 least two speeds simultaneously, because its free energy comes from
 extrapolating per-speed weighted PMFs to v->0 (``extrapolate_to_v0``); there
 is no single-speed "force PMF" to grow a per-speed loop over.
@@ -9,9 +10,11 @@ is no single-speed "force PMF" to grow a per-speed loop over.
 This module implements that alternative growth axis: at rung k, every speed
 contributes its first k replicas, each speed's mixture PMF is rebuilt from
 running estimator statistics, the per-speed PMFs are extrapolated to v->0,
-and consecutive extrapolated PMFs are compared with deployment's three
-convergence criteria (RMSD, barrier-height delta, TS-position delta) via the
-exact same comparison arithmetic ``check_convergence`` uses.
+and the extrapolated PMF is compared against a reference averaged over the
+last ``conv_window`` rungs (``conv_window=1`` reduces to the previous rung)
+with deployment's three convergence criteria (RMSD, barrier-height delta,
+TS-position delta) via the exact same comparison arithmetic
+``check_convergence`` uses.
 
 Promoted from ``scratch/paper_figures/wdr5_conv_lib.py`` (validated against
 the deployed API by that scratch package's test suite); WDR5-specific
@@ -20,12 +23,13 @@ parameters / attributes of the caller-supplied ``SMDAnalysis`` instance.
 """
 import inspect
 import os
-from collections import defaultdict
+from collections import defaultdict, deque
 
 import numpy as np
 import pandas as pd
 
 from autopath.pulling.AnalysisSMD import SMDAnalysis
+from autopath.pulling.Convergence import window_mean_pmf, window_reference_scalar
 from autopath.pulling.Estimators import KramersEstimator, extrapolate_to_v0
 from autopath.pulling.PathModel import DTWPathModel
 from autopath.pulling.SMDData import SMDData
@@ -126,8 +130,18 @@ def _compare_rung(k, pmf_k, prev_pmf, barrier, prev_barrier, r_ts, prev_r_ts,
 
     Shared by the force ladder and by the single-speed validation harness, so
     the gate in validate_against_api exercises exactly this code.
+
+    The ``prev_*`` arguments are the *window reference* (see
+    ``window_mean_pmf`` / ``window_reference_scalar``); with ``conv_window=1``
+    that reference is literally the previous rung.
+
     NaN handling mirrors check_convergence: both NaN waives the criterion,
-    one NaN marks non-convergence (inf).
+    one NaN marks non-convergence (inf). Those NaN branches are defensive and
+    are currently unreachable: ``_compute_barrier_rts`` always returns finite
+    values (``force_plateau`` interpolates; ``pmf_peak`` falls back to
+    ``nanargmax(dG)``), and the extrapolated PMF is NaN-free, so
+    ``window_reference_scalar`` never sees an all-NaN window either. They are
+    kept in case a future TS detector is allowed to report "no peak".
     """
     if np.isnan(barrier) and np.isnan(prev_barrier):
         barrier_delta = np.nan
@@ -166,12 +180,14 @@ def _compare_rung(k, pmf_k, prev_pmf, barrier, prev_barrier, r_ts, prev_r_ts,
 def force_convergence_ladder(sa, logs, speeds,
                              trace_min_replicas: int = 3,
                              trim_fraction: float = 0.1,
-                             min_common_points: int = 5) -> pd.DataFrame:
+                             min_common_points: int = 5,
+                             conv_window: int = 5) -> pd.DataFrame:
     """Multi-speed convergence ladder for the force estimator.
 
     At rung k, each speed contributes its first k replicas; per-speed weighted
-    PMFs are extrapolated to v->0 and consecutive extrapolated PMFs compared
-    with deployment's three criteria.
+    PMFs are extrapolated to v->0 and the extrapolated PMF is compared against
+    the mean of the last ``conv_window`` rungs with deployment's three
+    criteria.
 
     Parameters
     ----------
@@ -182,6 +198,10 @@ def force_convergence_ladder(sa, logs, speeds,
         Forward sMD log paths spanning all ``speeds``.
     speeds : list[float]
         Pulling speeds to ladder together (>=2, for the v->0 extrapolation).
+    conv_window : int
+        Rungs averaged to form the comparison reference, exactly as in
+        ``check_convergence``. ``conv_window=1`` reproduces the pairwise
+        previous-rung comparison this ladder originally used.
 
     Returns
     -------
@@ -234,7 +254,13 @@ def force_convergence_ladder(sa, logs, speeds,
     slow_grid = per_speed[min(speeds)]["grid"]
 
     rows = []
-    prev_pmf = prev_barrier = prev_r_ts = None
+    # Bounded rung histories forming the comparison reference, mirroring
+    # check_convergence exactly (deque(maxlen=w) + window_mean_pmf /
+    # window_reference_scalar). w=1 keeps the original pairwise behaviour.
+    _w = max(1, int(conv_window))
+    hist_pmf = deque(maxlen=_w)
+    hist_barrier = deque(maxlen=_w)
+    hist_r_ts = deque(maxlen=_w)
 
     for k in range(1, K + 1):
         frames = []
@@ -313,11 +339,18 @@ def force_convergence_ladder(sa, logs, speeds,
             boundary_method="pmf_peak", plateau_frac=plateau_frac,
         )
 
-        if prev_pmf is None:
-            prev_pmf, prev_barrier, prev_r_ts = pmf_k, barrier, r_ts
+        # First usable rung: seed the history, no comparison yet.
+        if not hist_pmf:
+            hist_pmf.append(pmf_k)
+            hist_barrier.append(barrier)
+            hist_r_ts.append(r_ts)
             continue
 
-        common = pmf_k.index.intersection(prev_pmf.index)
+        ref_pmf = window_mean_pmf(hist_pmf)
+        ref_barrier = window_reference_scalar(hist_barrier)
+        ref_r_ts = window_reference_scalar(hist_r_ts)
+
+        common = pmf_k.index.intersection(ref_pmf.index)
         if slow_cap is not None and len(common):
             r_of_step = slow_grid.reindex(common).to_numpy(dtype=float)
             common = common[r_of_step <= slow_cap]
@@ -326,12 +359,15 @@ def force_convergence_ladder(sa, logs, speeds,
         common = _support_trim_common(common, combined_res, trim_fraction)
 
         rows.append(_compare_rung(
-            k=k, pmf_k=pmf_k, prev_pmf=prev_pmf,
-            barrier=barrier, prev_barrier=prev_barrier,
-            r_ts=r_ts, prev_r_ts=prev_r_ts,
+            k=k, pmf_k=pmf_k, prev_pmf=ref_pmf,
+            barrier=barrier, prev_barrier=ref_barrier,
+            r_ts=r_ts, prev_r_ts=ref_r_ts,
             common=common, tol=tol, min_common_points=min_common_points,
             extra={"estimator": "force", "speed": "ALL"},
         ))
-        prev_pmf, prev_barrier, prev_r_ts = pmf_k, barrier, r_ts
+        # append to the bounded history (reference for the next comparison)
+        hist_pmf.append(pmf_k)
+        hist_barrier.append(barrier)
+        hist_r_ts.append(r_ts)
 
     return pd.DataFrame(rows)

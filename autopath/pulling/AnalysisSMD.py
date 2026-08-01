@@ -824,6 +824,7 @@ class SMDAnalysis:
                 trace_min_replicas=trace_min_replicas,
                 trim_fraction=trim_fraction,
                 min_common_points=min_common_points,
+                conv_window=conv_window,
             )
             return conv_df, pd.DataFrame()
 
@@ -1039,10 +1040,19 @@ class SMDAnalysis:
                     _r_of_step = protocol_grid.reindex(common_r).to_numpy()
                     common_r = common_r[_r_of_step <= rmsd_r_cap]
 
-                # NaN-aware barrier/r_ts deltas between consecutive estimates:
+                # NaN-aware barrier/r_ts deltas between PMF(k) and the window
+                # reference (the median over the last conv_window rungs; with
+                # conv_window=1 that reference is the previous rung):
                 # - both NaN: no peak in either → criterion waived (True)
                 # - one NaN: peak appeared/disappeared → not converged (inf)
                 # - both finite: normal absolute difference
+                # The two NaN branches are defensive only and are currently
+                # unreachable: _compute_barrier_rts always returns finite values
+                # (force_plateau interpolates onto the PMF; pmf_peak falls back to
+                # nanargmax(dG) when no prominent peak is found), and the PMF
+                # itself is NaN-free, so window_reference_scalar never sees an
+                # all-NaN window either. They are kept in case a future TS
+                # detector is allowed to report "no peak".
                 if np.isnan(barrier_height) and np.isnan(ref_barrier):
                     barrier_delta = np.nan
                 elif np.isnan(barrier_height) or np.isnan(ref_barrier):
