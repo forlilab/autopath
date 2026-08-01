@@ -810,11 +810,11 @@ def make_unbinding_paths_visualization(
     ligand_select: str,
     outdir: str = "path_analysis",
     align_sel: str = "protein and backbone",
-    grid_spacing: float = 0.5,
+    grid_spacing: float = 0.375,
     cartoon_color: str = "grey90",
     sample_stride: int = 2,
     pocket_select: str = None,
-    n_lig_conformations: int = 20,
+    n_lig_conformations: int = 5,
     output_format: str = "pse",
     color_by_friction: bool = False,
     friction_csv: str = None,
@@ -868,9 +868,9 @@ def make_unbinding_paths_visualization(
         raise ValueError(f"output_format must be 'pse' or 'pml', got '{output_format}'")
 
     level = 0.000002
-    surface_transparency = 0.45
-    cartoon_transparency = 0.25
-    stick_transparency = 0.25
+    surface_transparency = 0.2
+    cartoon_transparency = 0.1
+    stick_transparency = 0.15
 
     os.makedirs(outdir, exist_ok=True)
     outdir = Path(outdir)
@@ -1094,7 +1094,7 @@ def make_unbinding_paths_visualization(
                 cmd = pymol.cmd
                 cmd.bg_color("white")
                 cmd.set("antialias", 2)
-                cmd.set("specular", 0.2)
+                cmd.set("specular", 0.3)
                 cmd.set("ray_shadow", 0)
                 cmd.set("ray_opaque_background", 0)
                 cmd.set("cartoon_transparency", cartoon_transparency)
