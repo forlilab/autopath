@@ -39,7 +39,8 @@ from autopath.metadynamics import (
     write_funnel_pymol,
 )
 from autopath.pulling import SMDData, SMDAnalysis
-from autopath.pulling.Convergence import first_streak, validate_autostop_options, round_robin_order
+from autopath.pulling.Convergence import (tail_converged, validate_autostop_options,
+                                          round_robin_order)
 from autopath.pulling.PathModel import DTWPathModel
 from autopath.pulling.Diagnostics import plot_convergence_traces, plot_convergence_metrics
 
@@ -268,7 +269,9 @@ class AutoPath:
         self.sMD_autostop_estimator = sMD_autostop_estimator
         self.sMD_alternate_speeds = sMD_alternate_speeds
         validate_autostop_options(sMD_autostop_estimator, sMD_alternate_speeds,
-                                  list(sMD_pulling_speeds.keys()))
+                                  list(sMD_pulling_speeds.keys()),
+                                  conv_window=sMD_conv_window,
+                                  conv_streak=sMD_conv_streak)
         self.sMD_steps_per_move = sMD_steps_per_move
         self.sMD_dx_per_move = sMD_dx_per_move
         self.sMD_spring_cte = sMD_spring_cte
@@ -591,6 +594,7 @@ class AutoPath:
                 # once when the joint ladder converges.
                 live = {s: True for s in self.sMD_pulling_speeds}
                 failures = {s: 0 for s in live}
+                force_ladder_dead = False   # log the "<2 live speeds" ERROR once
                 while any(live.values()):
                     for speed in round_robin_order(live):
                         reps = self.sMD_pulling_speeds[speed]
@@ -626,20 +630,52 @@ class AutoPath:
                             continue
                         # decision: per-speed estimators check that speed; force
                         # checks the joint ladder and retires every speed at once
-                        conv_df, _ = self._check_speed(
-                            sMD_analysis_outdir, sys_name, _lig_sel_ha, reps,
-                            speed=None if self.sMD_autostop_estimator == "force" else speed)
+                        if self.sMD_autostop_estimator == "force":
+                            # Only *live* speeds may feed the ladder. Its depth K is
+                            # min(replicas) over the speeds it is given, so a retired
+                            # speed — whose .dat files stay on disk — would freeze K
+                            # at the replica count it died on and the force criterion
+                            # could never fire again.
+                            live_speeds = [s for s in self.sMD_pulling_speeds if live[s]]
+                            if len(live_speeds) < 2:
+                                if not force_ladder_dead:
+                                    force_ladder_dead = True
+                                    logger.error(
+                                        f"Only {len(live_speeds)} live pulling speed(s) remain "
+                                        f"({live_speeds}); the 'force' convergence criterion needs "
+                                        f">=2 speeds for its v->0 extrapolation and can no longer "
+                                        f"be evaluated. The remaining speed(s) will run to the "
+                                        f"replica cap ({self.sMD_max_replicas}) without an autostop "
+                                        f"decision."
+                                    )
+                                continue
+                            conv_df, _ = self._check_speed(
+                                sMD_analysis_outdir, sys_name, _lig_sel_ha, reps,
+                                speeds=live_speeds)
+                        else:
+                            conv_df, _ = self._check_speed(
+                                sMD_analysis_outdir, sys_name, _lig_sel_ha, reps,
+                                speed=speed)
                         if conv_df is None or conv_df.empty:
                             continue
-                        if len(conv_df) >= self.sMD_conv_streak and np.isfinite(
-                                first_streak(conv_df, k_consec=self.sMD_conv_streak)):
+                        # Tail-anchored, not first_streak: the question here is
+                        # "are we converged right now", and conv_df is rebuilt from
+                        # scratch each call (not append-only).
+                        if tail_converged(conv_df, k_consec=self.sMD_conv_streak):
+                            n_conv = float(conv_df["n_replicas"].max())
                             if self.sMD_autostop_estimator == "force":
-                                logger.warning("sMD pulling CONVERGED (force ladder, all speeds).")
+                                logger.warning(
+                                    f"sMD pulling CONVERGED (force ladder, all speeds; "
+                                    f"trailing streak of {self.sMD_conv_streak} through rung "
+                                    f"{n_conv:.0f}, window {self.sMD_conv_window})."
+                                )
                                 live = {s: False for s in live}
                             else:
                                 logger.warning(
                                     f"sMD pulling for speed {speed} nm/ps CONVERGED after "
-                                    f"{len(log_files) + 1} replicas."
+                                    f"{len(log_files) + 1} replicas (trailing streak of "
+                                    f"{self.sMD_conv_streak} through rung {n_conv:.0f}, "
+                                    f"window {self.sMD_conv_window})."
                                 )
                                 live[speed] = False
             else:
@@ -694,9 +730,15 @@ class AutoPath:
                                 # passes are not evidence: on WDR5 the per-rung flag
                                 # flickers with a pass rate around 0.13, so a pair
                                 # arises by chance.
+                                # The streak must be the TAIL of the history, not any
+                                # streak in it (first_streak): conv_df is rebuilt from
+                                # scratch on every call, so an old streak followed by a
+                                # failing latest rung — a restarted campaign, or a
+                                # re-clustering that flipped an earlier rung — must not
+                                # stop the run.
                                 if len(conv_df) >= self.sMD_conv_streak:
-                                    n_conv = first_streak(conv_df, k_consec=self.sMD_conv_streak)
-                                    CONVERGED = bool(np.isfinite(n_conv))
+                                    CONVERGED = tail_converged(conv_df, k_consec=self.sMD_conv_streak)
+                                    n_conv = float(conv_df["n_replicas"].max())
                                 else:
                                     logger.info(
                                         f"Only {len(conv_df)} convergence comparisons available for "
@@ -705,8 +747,9 @@ class AutoPath:
                                 if CONVERGED:
                                     logger.warning(
                                         f"sMD pulling for speed {speed} nm/ps CONVERGED after "
-                                        f"{current_replica} replicas (streak of {self.sMD_conv_streak} "
-                                        f"at rung {n_conv:.0f}, window {self.sMD_conv_window})."
+                                        f"{current_replica} replicas (trailing streak of "
+                                        f"{self.sMD_conv_streak} through rung {n_conv:.0f}, "
+                                        f"window {self.sMD_conv_window})."
                                     )
                                     continue
 
@@ -821,8 +864,14 @@ class AutoPath:
             self._smdanalysis = smdanalysis
 
             # check convergence regardless of speed and autopstop.
-            # Cluster with the same feature config as the main analysis run() above
+            # Cluster with the same feature config as the main analysis run() above.
+            # conv_window/estimator_name must mirror the deployment loop's autostop
+            # settings: this vALL frame (plus its plots) is the only surviving
+            # convergence artefact, so it has to be the criterion that actually
+            # made the stopping decision, not the function defaults.
             conv_df, traces_df = smdanalysis.check_convergence(logs=logs,
+                estimator_name=self.sMD_autostop_estimator,
+                conv_window=self.sMD_conv_window,
                 group_A=_lig_sel_ha,
                 group_B=self.sMD_clust_selection,
                 features=self.sMD_features,
@@ -1311,19 +1360,30 @@ class AutoPath:
 
         return
 
-    def _check_speed(self, outdir, sys_name, lig_sel, min_replicas, speed=None):
+    def _check_speed(self, outdir, sys_name, lig_sel, min_replicas, speed=None,
+                     speeds=None):
         """Build the analysis and run the convergence check for one speed.
 
-        speed=None means "all speeds jointly", which is what the force ladder needs.
+        ``speed=None`` and ``speeds=None`` mean "every speed on disk jointly",
+        which is what the force ladder needs. Pass ``speeds=[...]`` to restrict
+        the joint check to a subset (the still-live speeds): the ladder's depth
+        is min(replicas) over the speeds it is handed, so a retired speed left
+        on disk would otherwise cap it forever.
         `min_replicas` is passed explicitly rather than derived from
         sMD_pulling_speeds, whose values are None in the Config default
         (`config.py:46`) and would raise on min().
         Returns (convergence_df, traces_df); convergence_df is empty when it
         cannot be computed yet.
         """
-        speeds = None if speed is None else [speed]
-        logs = glob(f"{self.sMD_outdir}/trajectories/sMD_*_{self.sMD_pulling_dir}.dat") if speed is None \
-            else glob(f"{self.sMD_outdir}/trajectories/sMD_*_v{speed}_{self.sMD_pulling_dir}.dat")
+        if speeds is not None:
+            speeds = list(speeds)
+        elif speed is not None:
+            speeds = [speed]
+        if speeds is None:
+            logs = glob(f"{self.sMD_outdir}/trajectories/sMD_*_{self.sMD_pulling_dir}.dat")
+        else:
+            logs = sorted({fn for s in speeds for fn in
+                           glob(f"{self.sMD_outdir}/trajectories/sMD_*_v{s}_{self.sMD_pulling_dir}.dat")})
         smdanalysis = SMDAnalysis(sysname=sys_name, path_model='dtw',
                                   estimators=[self.sMD_autostop_estimator],
                                   do_plots=False, seed=self.random_state,
