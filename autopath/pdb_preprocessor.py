@@ -772,3 +772,185 @@ def assign_bondOrders(mol: Chem.Mol = None, template_smiles: str = None):
         return mol
 
     return new_mol
+
+
+def align_structures_on_site(
+    structures: List[str],
+    site_resid: int,
+    site_chain: str = None,
+    site_resname: str = None,
+    site_anchor_xyz: dict = None,
+    radius: float = 14.0,
+    reference: str = None,
+    out_dir: str = None,
+    suffix: str = "_aligned",
+    require_same_resname: bool = True,
+) -> List[dict]:
+    """Superpose several structures of the same protein onto a common *site* frame.
+
+    ``align_trajectory_pytraj`` and ``wrap_align_save_traj`` align frames of one trajectory;
+    this handles the other case -- a set of separate crystal forms of the same protein that
+    must share one coordinate frame so that a single docking box, and a pose docked into any
+    of them, is transferable across the whole ensemble.
+
+    Why the fit is restricted to the site
+    -------------------------------------
+    A global backbone superposition lets distant, often more mobile, regions dominate the
+    least-squares fit and can leave the binding site displaced by several tenths of an
+    angstrom -- which is precisely the error that matters when a box is shared. Fitting on the
+    residues around the site puts the error where it does no harm (far from the ligand) instead
+    of in the pocket. The transform is nonetheless applied to *every* atom, so the output
+    structures remain complete and simulation-ready.
+
+    Why residue identity is checked
+    -------------------------------
+    Matching purely on residue number silently superposes non-identical sequences: different
+    constructs, point mutants, or polymorphic loci (an HLA site can differ at 7 residues
+    between entries), and SIFTS indel cases where one entry is offset by a residue. With
+    ``require_same_resname`` a position only enters the fit when both structures agree on the
+    residue, and the number of rejected positions is reported so the disagreement is visible
+    rather than silently absorbed into the RMSD.
+
+    Parameters
+    ----------
+    structures : list of str
+        Paths to the PDB files to align. All must contain the site residue.
+    site_resid : int
+        Residue number of the site (author/PDB numbering).
+    site_chain : str, optional
+        Preferred chain of the site residue. Treated as a HINT, not a requirement: PDBFixer
+        and OpenMM relabel chains on write (a site on chain ``B``, or on a multi-character
+        mmCIF chain such as ``BBB``, comes back as ``A``), so insisting on the original label
+        makes the lookup fail on structures that are otherwise fine. If the hint does not
+        match, any chain carrying the residue is used and a warning is logged.
+    site_resname : str, optional
+        Expected residue name (e.g. ``"THR"``). Used to disambiguate when the chain hint fails
+        and several chains contain the residue number -- and to catch the case where the
+        numbering does not mean what the caller thinks it does.
+    site_anchor_xyz : dict, optional
+        ``{structure_path: (x, y, z)}`` giving the approximate site CA position in each
+        structure's own frame; the nearest CA is used as the anchor. This is the ROBUST way to
+        identify the site, because neither chain labels nor residue numbers reliably survive
+        preparation. Chains are relabelled on write (a site on chain ``B``, or on a
+        multi-character mmCIF chain ``BBB``, returns as ``A``), and residue numbers above 9999
+        overflow the 4-character PDB column -- MAPK14 5WJJ comes back numbered 9996-10360, so
+        its V102 is parsed as resid 10102. Coordinates survive both, since fixing only adds
+        atoms. Falls back to the resid/resname lookup when not supplied.
+    radius : float
+        Residues with a CA within this distance of the site residue's CA define the fit.
+        The default of 14 A matches the reach of a typical small-molecule probe.
+    reference : str, optional
+        Structure to align onto. Defaults to the first entry of ``structures``.
+    out_dir : str, optional
+        Where to write the aligned copies. Defaults to alongside each input.
+    suffix : str
+        Appended to the output stem.
+    require_same_resname : bool
+        Only use positions where both structures agree on the residue name.
+
+    Returns
+    -------
+    list of dict
+        One record per structure: ``path``, ``n_fit_atoms``, ``n_resname_mismatch``,
+        ``rmsd`` (site RMSD to the reference, A) and ``is_reference``.
+    """
+    from MDAnalysis.analysis import align as mda_align
+
+    if not structures:
+        return []
+    reference = reference or structures[0]
+
+    def site_map(u, path=None):
+        """{resid offset: (CA position, resname)} for residues near the site."""
+        # geometric anchor first: immune to chain relabelling and resid overflow
+        if site_anchor_xyz and path and path in site_anchor_xyz:
+            cas = u.select_atoms("name CA")
+            if len(cas):
+                ref_xyz = np.asarray(site_anchor_xyz[path], dtype=float)
+                d = np.linalg.norm(cas.positions - ref_xyz, axis=1)
+                j = int(np.argmin(d))
+                if d[j] <= 2.0:                     # same atom, allowing for added atoms
+                    anchor = cas[j:j + 1]
+                    near = u.select_atoms(
+                        f"name CA and point {anchor.positions[0][0]} "
+                        f"{anchor.positions[0][1]} {anchor.positions[0][2]} {radius}")
+                    off = anchor.resids[0]
+                    return {a.resid - off: (a.position, a.resname) for a in near}, anchor
+                logger.warning("nearest CA is %.1f A from the supplied anchor in %s", d[j], path)
+        base = f"resid {site_resid} and name CA"
+        if site_resname:
+            base += f" and resname {site_resname}"
+        anchor = None
+        for sel in ([f"{base} and segid {site_chain}",
+                     f"{base} and chainID {site_chain}"] if site_chain else []):
+            try:
+                hit = u.select_atoms(sel)
+            except Exception:
+                continue
+            if len(hit):
+                anchor = hit
+                break
+        if anchor is None or len(anchor) == 0:
+            # chain hint failed -- PDBFixer/OpenMM relabel chains, so fall back to any chain
+            anchor = u.select_atoms(base)
+            if len(anchor) > 1 and site_chain:
+                logger.warning(
+                    "chain %s not found for resid %s; using chain %s instead",
+                    site_chain, site_resid, anchor.chainIDs[0]
+                    if hasattr(anchor, "chainIDs") else "?")
+            if len(anchor) > 1:
+                anchor = anchor[:1]                # first copy; NCS mates are equivalent
+        if len(anchor) == 0:
+            return None, None
+        near = u.select_atoms(
+            f"name CA and point {anchor.positions[0][0]} {anchor.positions[0][1]} "
+            f"{anchor.positions[0][2]} {radius}")
+        return {a.resid - site_resid: (a.position, a.resname) for a in near}, anchor
+
+    ref_u = mda.Universe(reference)
+    ref_map, ref_anchor = site_map(ref_u, reference)
+    if ref_map is None:
+        raise ValueError(f"site residue {site_resid} not found in reference {reference}")
+
+    out = []
+    for path in structures:
+        is_ref = os.path.abspath(path) == os.path.abspath(reference)
+        u = mda.Universe(path)
+        here, _ = site_map(u, path)
+        if here is None:
+            logger.warning("site residue %s not found in %s, skipped", site_resid, path)
+            continue
+
+        shared = [k for k in here if k in ref_map]
+        if require_same_resname:
+            good = [k for k in shared if here[k][1] == ref_map[k][1]]
+        else:
+            good = shared
+        n_mismatch = len(shared) - len(good)
+        if len(good) < 3:
+            logger.warning("%s: only %d identity-matched site residues, skipped",
+                           path, len(good))
+            continue
+
+        rmsd = 0.0
+        if not is_ref:
+            mob = np.array([here[k][0] for k in good], dtype=np.float64)
+            ref = np.array([ref_map[k][0] for k in good], dtype=np.float64)
+            mob_c, ref_c = mob.mean(axis=0), ref.mean(axis=0)
+            R, rmsd = mda_align.rotation_matrix(mob - mob_c, ref - ref_c)
+            # applied to EVERY atom, not just the fitted subset
+            u.atoms.translate(-mob_c)
+            u.atoms.rotate(R)
+            u.atoms.translate(ref_c)
+
+        stem = Path(path).stem + suffix + ".pdb"
+        dest = str(Path(out_dir) / stem) if out_dir else str(Path(path).with_name(stem))
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        u.atoms.write(dest)
+        out.append(dict(path=dest, source=path, n_fit_atoms=len(good),
+                        n_resname_mismatch=n_mismatch, rmsd=float(rmsd),
+                        is_reference=is_ref))
+        logger.info("%s: fitted on %d site residues (%d rejected), site RMSD %.2f A",
+                    Path(path).name, len(good), n_mismatch, rmsd)
+    return out
