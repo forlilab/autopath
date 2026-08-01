@@ -85,3 +85,8 @@ def validate_autostop_options(estimator: str, alternate_speeds: bool,
                 "sMD_autostop_estimator='force' requires at least two speeds in "
                 f"sMD_pulling_speeds; got {len(speeds)}."
             )
+
+
+def round_robin_order(live: dict) -> list:
+    """Speeds still accepting replicas, slowest first, retired ones dropped."""
+    return [s for s in sorted(live) if live[s]]

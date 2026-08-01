@@ -39,7 +39,7 @@ from autopath.metadynamics import (
     write_funnel_pymol,
 )
 from autopath.pulling import SMDData, SMDAnalysis
-from autopath.pulling.Convergence import first_streak, validate_autostop_options
+from autopath.pulling.Convergence import first_streak, validate_autostop_options, round_robin_order
 from autopath.pulling.PathModel import DTWPathModel
 from autopath.pulling.Diagnostics import plot_convergence_traces, plot_convergence_metrics
 
@@ -582,7 +582,68 @@ class AutoPath:
                 log_geom_features=self.sMD_log_geom_features,
             )
 
-            for speed, reps in self.sMD_pulling_speeds.items():
+            if self.sMD_alternate_speeds and self.sMD_converge_speeds:
+                # Round-robin: run one replica per live speed in turn so that
+                # the 'force' estimator always has >=2 speeds advancing
+                # together (it needs a joint v->0 extrapolation, not a single
+                # speed's running PMF). Per-speed estimators still retire
+                # each speed independently; 'force' retires all of them at
+                # once when the joint ladder converges.
+                live = {s: True for s in self.sMD_pulling_speeds}
+                failures = {s: 0 for s in live}
+                while any(live.values()):
+                    for speed in round_robin_order(live):
+                        reps = self.sMD_pulling_speeds[speed]
+                        log_files = glob(f"{sMD_traj_outdir}/sMD_*_v{speed}_{self.sMD_pulling_dir}.dat")
+                        if len(log_files) >= self.sMD_max_replicas:
+                            logger.warning(
+                                f"Reached maximum number of replicas ({self.sMD_max_replicas}) "
+                                f"for speed {speed} nm/ps without convergence. Stopping."
+                            )
+                            live[speed] = False
+                            continue
+                        try:
+                            sMD.run(
+                                checkpoint_file=equilibrated_chk,
+                                state_xml_file=equilibrated_state_xml,
+                                pulling_speed=speed,
+                                pulling_direction=self.sMD_pulling_dir,
+                            )
+                            failures[speed] = 0
+                        except Exception as e:
+                            failures[speed] += 1
+                            logger.error(
+                                f"Error during sMD pulling for speed {speed} nm/ps: {e} "
+                                f"(consecutive failure {failures[speed]}/5)"
+                            )
+                            if failures[speed] >= 5:
+                                logger.error(
+                                    f"Aborting speed {speed} nm/ps after 5 consecutive failures."
+                                )
+                                live[speed] = False
+                            continue
+                        if len(log_files) + 1 < reps:
+                            continue
+                        # decision: per-speed estimators check that speed; force
+                        # checks the joint ladder and retires every speed at once
+                        conv_df, _ = self._check_speed(
+                            sMD_analysis_outdir, sys_name, _lig_sel_ha, reps,
+                            speed=None if self.sMD_autostop_estimator == "force" else speed)
+                        if conv_df is None or conv_df.empty:
+                            continue
+                        if len(conv_df) >= self.sMD_conv_streak and np.isfinite(
+                                first_streak(conv_df, k_consec=self.sMD_conv_streak)):
+                            if self.sMD_autostop_estimator == "force":
+                                logger.warning("sMD pulling CONVERGED (force ladder, all speeds).")
+                                live = {s: False for s in live}
+                            else:
+                                logger.warning(
+                                    f"sMD pulling for speed {speed} nm/ps CONVERGED after "
+                                    f"{len(log_files) + 1} replicas."
+                                )
+                                live[speed] = False
+            else:
+              for speed, reps in self.sMD_pulling_speeds.items():
                 if self.sMD_converge_speeds:
                     logger.info(f"Running sMD for speed {speed} nm/ps until convergence (min {reps} replicas).")
                     CONVERGED = False
@@ -602,27 +663,9 @@ class AutoPath:
                             break
 
                         if len(log_files) >= reps:
-                            # loads the sMD data
-                            smdanalysis = SMDAnalysis(sysname=sys_name, path_model='dtw',
-                                                    estimators=[self.sMD_autostop_estimator],
-                                                    do_plots=False, seed=self.random_state,
-                                                    temperature=self.temperature,
-                                                    outdir=sMD_analysis_outdir,
-                                                    ligand_select=_lig_sel_ha,
-                                                    )
-
                             # check convergence for this speed
-                            conv_df, traces_df = smdanalysis.check_convergence(
-                                logs=log_files, speeds=[speed],
-                                min_replicas=reps,
-                                geom_features=bool(self.sMD_log_geom_features),
-                                plateau_frac=self.sMD_plateau_frac,
-                                cluster_to_boundary=self.sMD_cluster_to_boundary,
-                                restrict_rmsd_to_boundary=self.sMD_cluster_to_boundary,
-                                boundary_buffer_frac=self.sMD_boundary_buffer_frac,
-                                conv_window=self.sMD_conv_window,
-                                estimator_name=self.sMD_autostop_estimator,
-                            )
+                            conv_df, traces_df = self._check_speed(
+                                sMD_analysis_outdir, sys_name, _lig_sel_ha, reps, speed=speed)
 
                             # conv_df is empty when replicas == reps (first PMF comparison
                             # needs one more replica); skip writing/plotting until data is available
@@ -711,7 +754,7 @@ class AutoPath:
                         except Exception as e:
                             logger.error(f"Error during sMD pulling for speed {speed} nm/ps, replica {i+1}: {e}")
                             continue
-                        
+
         # Load and align sMD trajectories
         sMD_trajs = glob(f"{sMD_traj_outdir}/sMD_replica-*_*_*.dcd")
         sMD_trajs = [f for f in sMD_trajs if "aligned" not in f]  # only process unaligned trajectories
@@ -1267,7 +1310,38 @@ class AutoPath:
         logger.info(f"Finished AutoPath simulation in {simulation_time/60:.2f} min.")
 
         return
-    
+
+    def _check_speed(self, outdir, sys_name, lig_sel, min_replicas, speed=None):
+        """Build the analysis and run the convergence check for one speed.
+
+        speed=None means "all speeds jointly", which is what the force ladder needs.
+        `min_replicas` is passed explicitly rather than derived from
+        sMD_pulling_speeds, whose values are None in the Config default
+        (`config.py:46`) and would raise on min().
+        Returns (convergence_df, traces_df); convergence_df is empty when it
+        cannot be computed yet.
+        """
+        speeds = None if speed is None else [speed]
+        logs = glob(f"{self.sMD_outdir}/trajectories/sMD_*_{self.sMD_pulling_dir}.dat") if speed is None \
+            else glob(f"{self.sMD_outdir}/trajectories/sMD_*_v{speed}_{self.sMD_pulling_dir}.dat")
+        smdanalysis = SMDAnalysis(sysname=sys_name, path_model='dtw',
+                                  estimators=[self.sMD_autostop_estimator],
+                                  do_plots=False, seed=self.random_state,
+                                  temperature=self.temperature, outdir=outdir,
+                                  ligand_select=lig_sel)
+        conv_df, traces_df = smdanalysis.check_convergence(
+            logs=logs, speeds=speeds,
+            min_replicas=min_replicas,
+            estimator_name=self.sMD_autostop_estimator,
+            conv_window=self.sMD_conv_window,
+            geom_features=bool(self.sMD_log_geom_features),
+            plateau_frac=self.sMD_plateau_frac,
+            cluster_to_boundary=self.sMD_cluster_to_boundary,
+            restrict_rmsd_to_boundary=self.sMD_cluster_to_boundary,
+            boundary_buffer_frac=self.sMD_boundary_buffer_frac,
+        )
+        return conv_df, traces_df
+
     @staticmethod
     def _replica_idx_from_log(fn):
         """Extract the integer replica index from an sMD log filename.

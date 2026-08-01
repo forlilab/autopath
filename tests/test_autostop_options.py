@@ -36,3 +36,16 @@ def test_force_is_legal_with_alternation_and_two_speeds():
 def test_unknown_estimator_is_rejected():
     with pytest.raises(ValueError, match="Unknown autostop estimator"):
         validate_autostop_options("mbar", False, [0.005, 0.01])
+
+
+def test_round_robin_visits_every_live_speed_before_repeating():
+    """Ordering contract for alternate_speeds=True, tested on the pure helper."""
+    from autopath.pulling.Convergence import round_robin_order
+
+    live = {0.005: True, 0.01: True, 0.015: True}
+    assert round_robin_order(live) == [0.005, 0.01, 0.015]
+
+    live[0.01] = False          # retired
+    assert round_robin_order(live) == [0.005, 0.015]
+
+    assert round_robin_order({0.005: False}) == []
