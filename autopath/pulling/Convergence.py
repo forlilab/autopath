@@ -55,3 +55,33 @@ def window_reference_scalar(values: Sequence[float]) -> float:
     if finite.size == 0:
         return float("nan")
     return float(np.median(finite))
+
+
+AUTOSTOP_ESTIMATORS = ("cumulant", "jarzynski", "force")
+
+
+def validate_autostop_options(estimator: str, alternate_speeds: bool,
+                              speeds: Sequence[float]) -> None:
+    """Reject illegal autostop option combinations. Raises, never repairs.
+
+    ``force`` has no single-speed v->0 intercept, so it needs at least two
+    speeds and needs them advancing together — which only happens when speeds
+    are alternated rather than run to completion one at a time.
+    """
+    if estimator not in AUTOSTOP_ESTIMATORS:
+        raise ValueError(
+            f"Unknown autostop estimator '{estimator}'. "
+            f"Allowed: {sorted(AUTOSTOP_ESTIMATORS)}"
+        )
+    if estimator == "force":
+        if not alternate_speeds:
+            raise ValueError(
+                "sMD_autostop_estimator='force' requires sMD_alternate_speeds=True: "
+                "the force estimator needs >=2 speeds advancing together to form a "
+                "v->0 intercept, which the one-speed-at-a-time loop cannot provide."
+            )
+        if len(speeds) < 2:
+            raise ValueError(
+                "sMD_autostop_estimator='force' requires at least two speeds in "
+                f"sMD_pulling_speeds; got {len(speeds)}."
+            )

@@ -59,6 +59,8 @@ class Config(object):
         sMD_max_replicas: int = 50,
         sMD_conv_window: int = 5,
         sMD_conv_streak: int = 3,
+        sMD_autostop_estimator: str = "cumulant",
+        sMD_alternate_speeds: bool = False,
         sMD_run_analysis: bool = True,
         sMD_clust_selection: str = None,
         extract_milestones: bool = True,
@@ -300,6 +302,8 @@ class Config(object):
         self.sMD_max_replicas = sMD_max_replicas
         self.sMD_conv_window = sMD_conv_window
         self.sMD_conv_streak = sMD_conv_streak
+        self.sMD_autostop_estimator = sMD_autostop_estimator
+        self.sMD_alternate_speeds = sMD_alternate_speeds
         self.sMD_run_analysis = sMD_run_analysis
         self.sMD_clust_selection = sMD_clust_selection
 

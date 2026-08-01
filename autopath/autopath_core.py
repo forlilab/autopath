@@ -39,7 +39,7 @@ from autopath.metadynamics import (
     write_funnel_pymol,
 )
 from autopath.pulling import SMDData, SMDAnalysis
-from autopath.pulling.Convergence import first_streak
+from autopath.pulling.Convergence import first_streak, validate_autostop_options
 from autopath.pulling.PathModel import DTWPathModel
 from autopath.pulling.Diagnostics import plot_convergence_traces, plot_convergence_metrics
 
@@ -192,6 +192,8 @@ class AutoPath:
         sMD_converge_speeds: bool = True,
         sMD_conv_window: int = 5,
         sMD_conv_streak: int = 3,
+        sMD_autostop_estimator: str = "cumulant",
+        sMD_alternate_speeds: bool = False,
         sMD_time: int = None,  # ns
         sMD_steps_per_move: int = None,
         sMD_dx_per_move: float = 0.001,  # nm, this is the displacement per move
@@ -263,6 +265,10 @@ class AutoPath:
         self.sMD_autostop_min_displacement = sMD_autostop_min_displacement
         self.sMD_time = sMD_time
         self.sMD_pulling_speeds = sMD_pulling_speeds
+        self.sMD_autostop_estimator = sMD_autostop_estimator
+        self.sMD_alternate_speeds = sMD_alternate_speeds
+        validate_autostop_options(sMD_autostop_estimator, sMD_alternate_speeds,
+                                  list(sMD_pulling_speeds.keys()))
         self.sMD_steps_per_move = sMD_steps_per_move
         self.sMD_dx_per_move = sMD_dx_per_move
         self.sMD_spring_cte = sMD_spring_cte
@@ -597,7 +603,8 @@ class AutoPath:
 
                         if len(log_files) >= reps:
                             # loads the sMD data
-                            smdanalysis = SMDAnalysis(sysname=sys_name, path_model='dtw', estimators=['cumulant'],
+                            smdanalysis = SMDAnalysis(sysname=sys_name, path_model='dtw',
+                                                    estimators=[self.sMD_autostop_estimator],
                                                     do_plots=False, seed=self.random_state,
                                                     temperature=self.temperature,
                                                     outdir=sMD_analysis_outdir,
@@ -614,6 +621,7 @@ class AutoPath:
                                 restrict_rmsd_to_boundary=self.sMD_cluster_to_boundary,
                                 boundary_buffer_frac=self.sMD_boundary_buffer_frac,
                                 conv_window=self.sMD_conv_window,
+                                estimator_name=self.sMD_autostop_estimator,
                             )
 
                             # conv_df is empty when replicas == reps (first PMF comparison
