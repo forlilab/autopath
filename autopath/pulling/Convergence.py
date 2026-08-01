@@ -29,6 +29,26 @@ def first_streak(df: pd.DataFrame, k_consec: int = 3) -> float:
     return float("nan")
 
 
+def tail_converged(df: pd.DataFrame, k_consec: int) -> bool:
+    """True when the LAST ``k_consec`` rungs, in replica order, all passed.
+
+    This is the *deployment* predicate: "are we converged right now?".  It is
+    deliberately not ``first_streak``, which answers the offline-calibration
+    question "at which rung would we first have stopped?".  ``first_streak``
+    finds a streak anywhere in the history, so it would stop a restarted
+    campaign whose latest rung failed (rungs 46/47 pass, 48 fails), and it
+    would fire whenever re-clustering retroactively flips an older rung —
+    ``conv_df`` is rebuilt from scratch on every call and is not append-only.
+
+    Returns False when there are fewer than ``k_consec`` rows, i.e. the
+    criterion cannot yet be evaluated.
+    """
+    if df is None or k_consec < 1 or len(df) < k_consec:
+        return False
+    d = df.sort_values("n_replicas")
+    return bool(d["converged"].astype(bool).to_numpy()[-k_consec:].all())
+
+
 def window_mean_pmf(pmfs: Sequence[pd.Series]) -> pd.Series:
     """Elementwise mean of PMF series over the index they share.
 
@@ -61,12 +81,19 @@ AUTOSTOP_ESTIMATORS = ("cumulant", "jarzynski", "force")
 
 
 def validate_autostop_options(estimator: str, alternate_speeds: bool,
-                              speeds: Sequence[float]) -> None:
+                              speeds: Sequence[float],
+                              conv_window: int = 5,
+                              conv_streak: int = 3) -> None:
     """Reject illegal autostop option combinations. Raises, never repairs.
 
     ``force`` has no single-speed v->0 intercept, so it needs at least two
     speeds and needs them advancing together — which only happens when speeds
     are alternated rather than run to completion one at a time.
+
+    The numeric knobs are validated too: ``conv_streak=0`` makes the stopping
+    predicate vacuously true (a zero-length tail is trivially all-True), which
+    would stop the campaign after a single rung; ``conv_window=0`` would leave
+    the comparison reference undefined.
     """
     if estimator not in AUTOSTOP_ESTIMATORS:
         raise ValueError(
@@ -85,6 +112,16 @@ def validate_autostop_options(estimator: str, alternate_speeds: bool,
                 "sMD_autostop_estimator='force' requires at least two speeds in "
                 f"sMD_pulling_speeds; got {len(speeds)}."
             )
+    if int(conv_window) < 1:
+        raise ValueError(
+            f"sMD_conv_window must be >= 1 (1 == compare against the previous "
+            f"rung); got {conv_window}."
+        )
+    if int(conv_streak) < 1:
+        raise ValueError(
+            f"sMD_conv_streak must be >= 1; got {conv_streak}. A streak of 0 "
+            f"would make the stopping predicate pass immediately."
+        )
 
 
 def round_robin_order(live: dict) -> list:

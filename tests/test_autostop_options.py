@@ -49,3 +49,30 @@ def test_round_robin_visits_every_live_speed_before_repeating():
     assert round_robin_order(live) == [0.005, 0.015]
 
     assert round_robin_order({0.005: False}) == []
+
+
+# --- numeric knobs ----------------------------------------------------------
+
+
+def test_conv_streak_zero_is_rejected():
+    """A zero-length tail is trivially all-True: the run would stop at rung 1."""
+    with pytest.raises(ValueError, match="sMD_conv_streak must be >= 1"):
+        validate_autostop_options("cumulant", False, [0.005, 0.01], conv_streak=0)
+
+
+def test_conv_window_zero_is_rejected():
+    with pytest.raises(ValueError, match="sMD_conv_window must be >= 1"):
+        validate_autostop_options("cumulant", False, [0.005, 0.01], conv_window=0)
+
+
+def test_negative_numeric_knobs_are_rejected():
+    with pytest.raises(ValueError, match="sMD_conv_window must be >= 1"):
+        validate_autostop_options("cumulant", False, [0.005, 0.01], conv_window=-3)
+    with pytest.raises(ValueError, match="sMD_conv_streak must be >= 1"):
+        validate_autostop_options("cumulant", False, [0.005, 0.01], conv_streak=-1)
+
+
+def test_minimal_legal_numeric_knobs_are_accepted():
+    """conv_window=1 (pairwise reference) + streak of 1 is legal, if permissive."""
+    validate_autostop_options("cumulant", False, [0.005, 0.01],
+                              conv_window=1, conv_streak=1)
