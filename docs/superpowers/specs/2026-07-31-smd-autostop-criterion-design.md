@@ -184,6 +184,75 @@ WDR5 runs, reusing `wdr5_conv_lib`, and reports per setting:
 Defaults ship only from a setting that passes the gate. If none passes at
 acceptable cost, that is the finding and is reported rather than smoothed away.
 
+## Calibration outcome
+
+No setting reached the ≥90% gate. Shipped defaults are unchanged from the
+Configuration section above: `sMD_autostop_estimator="cumulant"`,
+`sMD_alternate_speeds=False`, `sMD_conv_window=5`, `sMD_conv_streak=3`. The
+user chose to keep `cumulant` deliberately, to demonstrate in the paper that
+it can be converged given enough replicas — not because it scored best.
+
+### Gate results
+
+With the corrected honest denominator (censored runs counted, not dropped),
+the best full-population pass rate found anywhere was 0.306.
+
+| estimator, streak | gate_pass_frac (converged-only) | full_pop_pass_frac | censored / total |
+|---|---|---|---|
+| cumulant, streak 2 | 0.410 | 0.231 | 47 / 108 |
+| cumulant, streak 3 | 0.545 | 0.111 | 86 / 108 |
+| jarzynski, streak 3 | 0.276 | 0.269 | 3 / 108 |
+| force, streak 3 | 0.333 | 0.278 | 6 / 108 |
+
+`gate_pass_frac` computed over converged-only runs is misleading reported
+alone: cumulant/streak-3 reads 0.545 that way but 0.111 honestly. Both
+columns are now always reported together.
+
+### Two spec assumptions tested and failed
+
+- **Reference window.** The gate as specified compares the stop point against
+  the single final rung. It was rebuilt against a 3-rung tail mean
+  (`REF_TAIL=3`) on the theory that the single-rung reference was too noisy.
+  The effect was small and mixed in direction. This hypothesis is largely
+  refuted — the dominant distortion was the denominator (censored runs),
+  not the reference.
+- **Converged-only reporting.** See `gate_pass_frac` note above.
+
+### The window is what works
+
+A pilot on 6dy7_A/murcko compared `conv_window=1` (mathematically the old
+pairwise behaviour) against `conv_window=5`. Total passing rungs halved,
+93 → 46:
+
+- cumulant at 0.005 nm/ps: 8/31 → 0/31
+- cumulant at 0.015 nm/ps: 10/47 → 2/47
+- jarzynski at 0.015 nm/ps: 35/47 → 17/47
+
+Median PMF-RMSD and barrier delta were roughly 2–3× larger at `w=5`. This is
+the only change that moved the criterion materially.
+
+A known confound was checked and did not occur: `window_mean_pmf` inner-joins
+across all `w` rungs, which could shrink the shared index and inflate
+`insufficient_overlap` rows, masquerading as slower convergence. `n_common_points`
+was byte-identical at `w=1` and `w=5` (861/1242/1203) and the `reason` column
+was 100% NaN in both, i.e. zero overlap rejections. The added strictness comes
+from the numerator, as designed. Caveat: verified on one (system, mode) pair
+only.
+
+### Open item: `sMD_max_replicas` is unresolved
+
+With cumulant + `w=5` + streak 3, essentially nothing converges within the
+current 50-replica cap. Running longer is the user's stated intent. The pilot
+cannot size the required `sMD_max_replicas`: cumulant produced only 0–2
+passing rungs out of 22–47, giving no convergence point to extrapolate from.
+This number must come from a longer run and has not been determined; no value
+is guessed here.
+
+### Cost correction
+
+The plan estimated ~4 h per window for the 36-pair grid. Measured wall clock
+was 4 min 37 s for one pair, implying roughly 2.8 h per window.
+
 ## Tests
 
 - **Backward-compatibility gate.** `conv_window=1, k_consec=2` reproduces the
