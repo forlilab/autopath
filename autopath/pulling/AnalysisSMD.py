@@ -800,6 +800,7 @@ class SMDAnalysis:
         allowed_estimators = {
             'jarzynski',
             'cumulant',
+            'force',
         }
         if estimator_name not in allowed_estimators:
             raise ValueError(
@@ -809,6 +810,22 @@ class SMDAnalysis:
 
         if speeds is None:
             speeds = sorted(set(SMDData._speed_from_log(fn) for fn in logs))
+
+        # 'force' needs >=2 speeds simultaneously for its v->0 extrapolation,
+        # so it cannot use the per-speed loop below; dispatch to the
+        # multi-speed ladder instead. No per-rung PMF traces are produced
+        # (the ladder mixes speeds, not a single-speed running PMF), so the
+        # traces frame returned here is deliberately empty rather than
+        # fabricated.
+        if estimator_name == 'force':
+            from .ConvergenceLadder import force_convergence_ladder
+            conv_df = force_convergence_ladder(
+                self, logs, speeds,
+                trace_min_replicas=trace_min_replicas,
+                trim_fraction=trim_fraction,
+                min_common_points=min_common_points,
+            )
+            return conv_df, pd.DataFrame()
 
         convergence_all_speeds = []
         traces_all_speeds = []
