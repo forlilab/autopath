@@ -45,11 +45,11 @@ def test_window_mean_pmf_of_one_series_is_that_series():
 
 
 def test_window_mean_pmf_averages_on_the_shared_index():
-    a = pd.Series([1.0, 3.0, 3.0], index=[10, 11, 12])
+    a = pd.Series([1.0, 2.0, 3.0], index=[10, 11, 12])
     b = pd.Series([3.0, 4.0], index=[11, 12])
     out = window_mean_pmf([a, b])
     assert list(out.index) == [11, 12]
-    assert out.tolist() == [3.0, 3.5]
+    assert out.tolist() == [2.5, 3.5]
 
 
 def test_window_reference_scalar_single_value_is_itself():
