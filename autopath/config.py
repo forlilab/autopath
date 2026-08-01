@@ -57,6 +57,8 @@ class Config(object):
         sMD_spring_cte: float = None,  # KJ/mol/nm2
         sMD_ligand_anchor_mode: str = "lig_ha",
         sMD_max_replicas: int = 50,
+        sMD_conv_window: int = 5,
+        sMD_conv_streak: int = 3,
         sMD_run_analysis: bool = True,
         sMD_clust_selection: str = None,
         extract_milestones: bool = True,
@@ -296,6 +298,8 @@ class Config(object):
         self.sMD_spring_cte = sMD_spring_cte  # KJ/mol/nm2
         self.sMD_ligand_anchor_mode = sMD_ligand_anchor_mode
         self.sMD_max_replicas = sMD_max_replicas
+        self.sMD_conv_window = sMD_conv_window
+        self.sMD_conv_streak = sMD_conv_streak
         self.sMD_run_analysis = sMD_run_analysis
         self.sMD_clust_selection = sMD_clust_selection
 

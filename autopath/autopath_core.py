@@ -39,6 +39,7 @@ from autopath.metadynamics import (
     write_funnel_pymol,
 )
 from autopath.pulling import SMDData, SMDAnalysis
+from autopath.pulling.Convergence import first_streak
 from autopath.pulling.PathModel import DTWPathModel
 from autopath.pulling.Diagnostics import plot_convergence_traces, plot_convergence_metrics
 
@@ -189,6 +190,8 @@ class AutoPath:
         sMD_autostop_nc_window: int = 5,
         sMD_autostop_min_displacement: float = 0.5,
         sMD_converge_speeds: bool = True,
+        sMD_conv_window: int = 5,
+        sMD_conv_streak: int = 3,
         sMD_time: int = None,  # ns
         sMD_steps_per_move: int = None,
         sMD_dx_per_move: float = 0.001,  # nm, this is the displacement per move
@@ -253,6 +256,8 @@ class AutoPath:
         self.sMD_max_pulling_dist = sMD_max_pulling_dist
         self.sMD_max_r_offset = sMD_max_r_offset
         self.sMD_converge_speeds = sMD_converge_speeds
+        self.sMD_conv_window = sMD_conv_window
+        self.sMD_conv_streak = sMD_conv_streak
         self.sMD_autostop_nc = sMD_autostop_nc
         self.sMD_autostop_nc_window = sMD_autostop_nc_window
         self.sMD_autostop_min_displacement = sMD_autostop_min_displacement
@@ -608,6 +613,7 @@ class AutoPath:
                                 cluster_to_boundary=self.sMD_cluster_to_boundary,
                                 restrict_rmsd_to_boundary=self.sMD_cluster_to_boundary,
                                 boundary_buffer_frac=self.sMD_boundary_buffer_frac,
+                                conv_window=self.sMD_conv_window,
                             )
 
                             # conv_df is empty when replicas == reps (first PMF comparison
@@ -632,13 +638,25 @@ class AutoPath:
                                 plot_convergence_traces(conv_traces, outdir=sMD_analysis_outdir)
                                 plot_convergence_metrics(conv_metrics, outdir=sMD_analysis_outdir, tolerances=CONVERGENCE_TOLERANCES)
 
-                                # Check convergence. Two last replicas must be converged
-                                if len(conv_df) >= 2:
-                                    CONVERGED = conv_df['converged'].iloc[-2] and conv_df['converged'].iloc[-1]
+                                # Convergence = the readouts hold a plateau for
+                                # sMD_conv_streak consecutive rungs. Two adjacent
+                                # passes are not evidence: on WDR5 the per-rung flag
+                                # flickers with a pass rate around 0.13, so a pair
+                                # arises by chance.
+                                if len(conv_df) >= self.sMD_conv_streak:
+                                    n_conv = first_streak(conv_df, k_consec=self.sMD_conv_streak)
+                                    CONVERGED = bool(np.isfinite(n_conv))
                                 else:
-                                    logger.info(f"Only {len(conv_df)} convergence comparison available for speed {speed} nm/ps; need 2 to declare convergence.")
+                                    logger.info(
+                                        f"Only {len(conv_df)} convergence comparisons available for "
+                                        f"speed {speed} nm/ps; need {self.sMD_conv_streak}."
+                                    )
                                 if CONVERGED:
-                                    logger.warning(f"sMD pulling for speed {speed} nm/ps CONVERGED after {current_replica} replicas.")
+                                    logger.warning(
+                                        f"sMD pulling for speed {speed} nm/ps CONVERGED after "
+                                        f"{current_replica} replicas (streak of {self.sMD_conv_streak} "
+                                        f"at rung {n_conv:.0f}, window {self.sMD_conv_window})."
+                                    )
                                     continue
 
                         # Run the next replica
