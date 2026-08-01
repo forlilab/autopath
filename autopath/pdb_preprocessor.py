@@ -856,6 +856,21 @@ def align_structures_on_site(
     """
     from MDAnalysis.analysis import align as mda_align
 
+    def _same_segment(near, anchor):
+        """Keep only fit residues from the anchor's OWN chain.
+
+        The fit must not include partner chains. Biological partners are deliberately retained
+        in these systems -- ARL2, RPGR and KRAS complete the pocket, and removing them collapses
+        it -- but that means an unrestricted radial selection puts partner CAs into the
+        alignment frame. Apo entries have no partner, so complexed and apo structures would be
+        fitted on different atom sets and their RMSDs would not be comparable. Matching on
+        segindex rather than segid because ids are not unique after preparation.
+        """
+        try:
+            return near[near.segindices == anchor.segindices[0]]
+        except Exception:
+            return near
+
     if not structures:
         return []
     reference = reference or structures[0]
@@ -874,6 +889,7 @@ def align_structures_on_site(
                     near = u.select_atoms(
                         f"name CA and point {anchor.positions[0][0]} "
                         f"{anchor.positions[0][1]} {anchor.positions[0][2]} {radius}")
+                    near = _same_segment(near, anchor)
                     off = anchor.resids[0]
                     return {a.resid - off: (a.position, a.resname) for a in near}, anchor
                 logger.warning("nearest CA is %.1f A from the supplied anchor in %s", d[j], path)
@@ -905,6 +921,7 @@ def align_structures_on_site(
         near = u.select_atoms(
             f"name CA and point {anchor.positions[0][0]} {anchor.positions[0][1]} "
             f"{anchor.positions[0][2]} {radius}")
+        near = _same_segment(near, anchor)      # partner chains must not enter the fit
         return {a.resid - site_resid: (a.position, a.resname) for a in near}, anchor
 
     ref_u = mda.Universe(reference)
