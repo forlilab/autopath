@@ -52,7 +52,11 @@ class TestConvergenceSupportGate(unittest.TestCase):
 
         def weighted(*a, **k):
             call["n"] += 1
-            return pd.Series(dtype=float) if call["n"] == 1 else good.copy()
+            series = pd.Series(dtype=float) if call["n"] == 1 else good.copy()
+            if k.get("return_paths"):
+                per_path = {int(s): {"p0": v} for s, v in series.items()}
+                return series, per_path, (0 if series.empty else 1)
+            return series
 
         with mock.patch.object(A, "SMDData", StubSMD), \
              mock.patch.object(A, "DTWPathModel", StubDTW), \
@@ -62,7 +66,7 @@ class TestConvergenceSupportGate(unittest.TestCase):
                                return_value=pd.DataFrame({"step": STEPS, "path": "p0",
                                                           "n_samples": 6})), \
              mock.patch.object(A.SMDAnalysis, "_weighted_series_from_results",
-                               autospec=True, side_effect=lambda *a, **k: weighted()):
+                               autospec=True, side_effect=weighted):
             return ana.check_convergence(
                 logs=logs, speeds=[SPEED], estimator_name="cumulant",
                 min_replicas=5, trace_min_replicas=3, trim_fraction=0.0,

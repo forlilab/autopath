@@ -972,13 +972,14 @@ class SMDAnalysis:
                     policy=conv_policy,
                 )
 
-                pmf_k = self._weighted_series_from_results(
+                pmf_k, per_path_pmf_k, n_paths_k = self._weighted_series_from_results(
                     results_df=results_df,
                     path_traj_counts=path_traj_counts,
                     value_col=value_col,
                     beta=smd.beta,
                     trim_fraction=trim_fraction,
                     policy=conv_policy,
+                    return_paths=True,
                 )
 
                 # Empty PMF at this k: skip without touching the history — appending an
@@ -999,6 +1000,21 @@ class SMDAnalysis:
                         "quantity": main_quantity,
                         "value": val,
                     })
+                    # Per-path PMF at this step, one row per path that actually
+                    # contributed weight to the mixture value above (same
+                    # gating as _weighted_series_from_results). Lets a stalled
+                    # RMSD be diagnosed as genuine under-sampling vs. a DTW
+                    # path-model relabeling between rungs.
+                    for path_label, path_val in per_path_pmf_k.get(step, {}).items():
+                        pmf_records.append({
+                            "step": step,
+                            "r_coord": r_coord,
+                            "speed": speed,
+                            "path": path_label,
+                            "n_replicas": k,
+                            "quantity": main_quantity,
+                            "value": path_val,
+                        })
 
                 # Running per-k restraint-force profile (first k replicas) for the
                 # force-plateau TS detector; None when using the PMF-peak method.
@@ -1080,6 +1096,7 @@ class SMDAnalysis:
                         "converged": False,
                         "reason": "insufficient_overlap",
                         "n_common_points": len(common_r),
+                        "n_paths": n_paths_k,
                     })
                     hist_pmf.append(pmf_k)
                     hist_barrier.append(barrier_height)
@@ -1113,6 +1130,7 @@ class SMDAnalysis:
                         "converged": False,
                         "reason": "insufficient_support",
                         "n_common_points": len(common_r),
+                        "n_paths": n_paths_k,
                     })
                     hist_pmf.append(pmf_k)
                     hist_barrier.append(barrier_height)
@@ -1142,6 +1160,7 @@ class SMDAnalysis:
                     "converged": converged,
                     "decision_quantity": main_quantity,
                     "n_common_points": len(common_r),
+                    "n_paths": n_paths_k,
                 })
 
                 # append to bounded history (window reference for next comparison)
@@ -1259,9 +1278,26 @@ class SMDAnalysis:
         beta: float,
         trim_fraction: float = 0.0,
         policy: "SupportPolicy | None" = None,
-    ) -> pd.Series:
+        return_paths: bool = False,
+    ) -> "pd.Series | tuple[pd.Series, dict, int]":
+        """Build the mixture PMF series (unchanged default behaviour).
+
+        ``return_paths=False`` (default) reproduces the original single-Series
+        return exactly, so existing callers (``ConvergenceLadder``, scratch
+        notebooks) are unaffected.
+
+        ``return_paths=True`` additionally returns ``(per_path, n_paths)``:
+        ``per_path`` is ``{step: {path: value}}`` for every path that carries
+        non-zero equilibrium weight (``p_eq > 0``) at that step — the same set
+        used to build the mixture value — and ``n_paths`` is the count of such
+        paths overall (paths that survived the count-based support policy
+        *and* contribute non-zero weight to the mixture, i.e. excludes paths
+        whose dG is entirely negative and therefore Zk=0).
+        """
+        empty = (pd.Series(dtype=float), {}, 0) if return_paths else pd.Series(dtype=float)
+
         if results_df.empty or value_col not in results_df.columns:
-            return pd.Series(dtype=float)
+            return empty
 
         if policy is not None:
             # Belt-and-suspenders: _results_from_running_stats skips below-threshold
@@ -1270,15 +1306,15 @@ class SMDAnalysis:
             # is authoritative for weighting computation downstream.
             results_df, path_traj_counts = policy.apply(results_df, path_traj_counts)
             if results_df.empty or not path_traj_counts:
-                return pd.Series(dtype=float)
+                return empty
 
         p_neq = SMDData._compute_p_neq(path_traj_counts)
         if not p_neq:
-            return pd.Series(dtype=float)
+            return empty
 
         p_eq = SMDAnalysis._compute_p_eq(results_df, p_neq, beta)
         if not p_eq:
-            return pd.Series(dtype=float)
+            return empty
 
         # Restrict to the shortest path's extent so all convergence traces
         # are compared over the same r-range at every replica count.
@@ -1302,7 +1338,13 @@ class SMDAnalysis:
                 supported = step_support[step_support / n_ref >= (1.0 - trim_fraction)].index
                 grid_steps = [s for s in grid_steps if s in supported]
 
+        # Paths with non-zero equilibrium weight are the ones that actually move
+        # the mixture value (a p_eq==0 path — e.g. all-negative dG, Zk=0 — is
+        # still gated-in above but contributes nothing to any weighted sum).
+        contributing_paths = {p for p, w in p_eq.items() if w > 0}
+
         out = {}
+        per_path_out: dict = {}
         for step in grid_steps:
             slice_step = results_df[results_df['step'] == step]
             vals = []
@@ -1317,11 +1359,16 @@ class SMDAnalysis:
                     continue
                 vals.append(float(val))
                 ws.append(float(p_eq[path]))
+                if return_paths and path in contributing_paths:
+                    per_path_out.setdefault(int(step), {})[path] = float(val)
 
             if vals and sum(ws) > 0:
                 out[int(step)] = float(np.sum(np.array(vals) * np.array(ws)) / np.sum(ws))
 
-        return pd.Series(out).sort_index()
+        series = pd.Series(out).sort_index()
+        if return_paths:
+            return series, per_path_out, len(contributing_paths)
+        return series
     
     def _write_path_quality(
         self,

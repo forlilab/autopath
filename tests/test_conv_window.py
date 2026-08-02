@@ -118,7 +118,11 @@ def _drifting_conv_df(conv_window, outdir):
 
     def _pmf(*a, **k):
         calls["n"] += 1
-        return shape + _DRIFT * (calls["n"] - 1)
+        series = shape + _DRIFT * (calls["n"] - 1)
+        if k.get("return_paths"):
+            per_path = {int(s): {"p0": v} for s, v in series.items()}
+            return series, per_path, 1
+        return series
 
     with mock.patch.object(A, "SMDData", _StubSMD), \
          mock.patch.object(A, "DTWPathModel", _StubDTW), \
@@ -129,7 +133,7 @@ def _drifting_conv_df(conv_window, outdir):
                                                       "path": "p0",
                                                       "n_samples": _N_LOGS})), \
          mock.patch.object(A.SMDAnalysis, "_weighted_series_from_results",
-                           autospec=True, side_effect=lambda *a, **k: _pmf()):
+                           autospec=True, side_effect=_pmf):
         conv_df, _ = ana.check_convergence(
             logs=logs, speeds=[_SPEED], estimator_name="cumulant",
             min_replicas=5, trace_min_replicas=3, trim_fraction=0.0,
