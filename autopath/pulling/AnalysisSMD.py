@@ -763,6 +763,7 @@ class SMDAnalysis:
         min_samples_per_step_conv: int = 3,
         min_trajs_per_path_conv: int = 2,
         recompute_distances: bool = False,
+        trace_per_path: bool = False,  # emit per-path PMF trace rows alongside "mixture" (expensive on disk; opt-in)
     ):
         """Check PMF convergence as replica count grows, per pulling speed.
 
@@ -783,7 +784,10 @@ class SMDAnalysis:
             (when convergence criteria cannot be evaluated).
         traces_df : pd.DataFrame
             Long-form PMF traces — one row per (speed, k, step) — for
-            plotting PMF evolution with increasing replica count.
+            plotting PMF evolution with increasing replica count. Contains
+            only ``path="mixture"`` rows unless ``trace_per_path=True``, in
+            which case per-path rows are added alongside the mixture rows
+            (expensive on disk — see ``trace_per_path``).
         """
 
         if isinstance(quantities, str):
@@ -1004,17 +1008,20 @@ class SMDAnalysis:
                     # contributed weight to the mixture value above (same
                     # gating as _weighted_series_from_results). Lets a stalled
                     # RMSD be diagnosed as genuine under-sampling vs. a DTW
-                    # path-model relabeling between rungs.
-                    for path_label, path_val in per_path_pmf_k.get(step, {}).items():
-                        pmf_records.append({
-                            "step": step,
-                            "r_coord": r_coord,
-                            "speed": speed,
-                            "path": path_label,
-                            "n_replicas": k,
-                            "quantity": main_quantity,
-                            "value": path_val,
-                        })
+                    # path-model relabeling between rungs. Opt-in: doubles (or
+                    # more) the size of the traces frame, so gated behind
+                    # trace_per_path (default False).
+                    if trace_per_path:
+                        for path_label, path_val in per_path_pmf_k.get(step, {}).items():
+                            pmf_records.append({
+                                "step": step,
+                                "r_coord": r_coord,
+                                "speed": speed,
+                                "path": path_label,
+                                "n_replicas": k,
+                                "quantity": main_quantity,
+                                "value": path_val,
+                            })
 
                 # Running per-k restraint-force profile (first k replicas) for the
                 # force-plateau TS detector; None when using the PMF-peak method.

@@ -65,7 +65,7 @@ class _StubDTWTwoPaths:
 
 
 class TestNPathsDiagnostics(unittest.TestCase):
-    def _run(self):
+    def _run(self, trace_per_path=False):
         logs = [f"traj{i}.log" for i in range(NLOGS)]
         ana = A.SMDAnalysis(sysname="t", temperature=300.0,
                             outdir="/tmp/npaths_diag_test", do_plots=False)
@@ -77,27 +77,44 @@ class TestNPathsDiagnostics(unittest.TestCase):
                 logs=logs, speeds=[SPEED], estimator_name="cumulant",
                 min_replicas=5, trace_min_replicas=3, trim_fraction=0.0,
                 boundary_method="pmf_peak",
+                trace_per_path=trace_per_path,
             )
 
     def test_n_paths_present_and_positive_on_metric_rows(self):
-        conv_df, _ = self._run()
-        self.assertIn("n_paths", conv_df.columns)
-        self.assertGreater(len(conv_df), 0)
-        # Every emitted metric row must carry a positive path count.
-        self.assertTrue((conv_df["n_paths"] > 0).all())
-        # p1 needs 3 replicas to clear min_samples_per_step_conv (default 3);
-        # that lands at n_replicas=8 (traj5,6,7). From then on both paths
-        # are estimable and non-negative, so both should contribute.
-        late = conv_df[conv_df["n_replicas"] >= 8]
-        self.assertGreater(len(late), 0)
-        self.assertTrue((late["n_paths"] == 2).all())
-        # Before p1 clears the floor, only p0 contributes.
-        early = conv_df[conv_df["n_replicas"] == 4]
-        if len(early) > 0:
-            self.assertTrue((early["n_paths"] == 1).all())
+        # n_paths on the metrics rows is unconditional: identical assertions
+        # must hold whether or not trace_per_path (the expensive per-path
+        # trace rows) is enabled.
+        for trace_per_path in (False, True):
+            with self.subTest(trace_per_path=trace_per_path):
+                conv_df, _ = self._run(trace_per_path=trace_per_path)
+                self.assertIn("n_paths", conv_df.columns)
+                self.assertGreater(len(conv_df), 0)
+                # Every emitted metric row must carry a positive path count.
+                self.assertTrue((conv_df["n_paths"] > 0).all())
+                # p1 needs 3 replicas to clear min_samples_per_step_conv
+                # (default 3); that lands at n_replicas=8 (traj5,6,7). From
+                # then on both paths are estimable and non-negative, so both
+                # should contribute.
+                late = conv_df[conv_df["n_replicas"] >= 8]
+                self.assertGreater(len(late), 0)
+                self.assertTrue((late["n_paths"] == 2).all())
+                # Before p1 clears the floor, only p0 contributes.
+                early = conv_df[conv_df["n_replicas"] == 4]
+                if len(early) > 0:
+                    self.assertTrue((early["n_paths"] == 1).all())
+
+    def test_traces_default_mixture_only(self):
+        """trace_per_path=False (the default): only 'mixture' rows, ever."""
+        _, traces_df = self._run(trace_per_path=False)
+        self.assertFalse(traces_df.empty)
+        expected_cols = {"step", "r_coord", "speed", "path", "n_replicas",
+                         "quantity", "value"}
+        self.assertTrue(expected_cols.issubset(traces_df.columns))
+        self.assertTrue((traces_df["path"] == "mixture").all())
 
     def test_traces_have_mixture_and_per_path_rows_for_same_step(self):
-        _, traces_df = self._run()
+        """trace_per_path=True: mixture rows keep their companion per-path rows."""
+        _, traces_df = self._run(trace_per_path=True)
         self.assertFalse(traces_df.empty)
         expected_cols = {"step", "r_coord", "speed", "path", "n_replicas",
                          "quantity", "value"}
