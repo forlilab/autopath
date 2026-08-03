@@ -183,7 +183,11 @@ class SMDData:
         for speed, g in raw_data.groupby("speed"):
             step0 = g["step"].min()
             stepN = g["step"].max()
-            r0 = g.loc[g["step"] == step0, "r_target"].iloc[0]
+            # Median across replicas, not the first row: r_target at step0 is
+            # not perfectly reproducible across replicas (see
+            # build_analysis_coord below), and .iloc[0] would make the grid
+            # depend on the arbitrary order log files were concatenated in.
+            r0 = g.loc[g["step"] == step0, "r_target"].median()
 
             # Median step-to-step increment across replicas (robust to outliers).
             dx_vals = (
