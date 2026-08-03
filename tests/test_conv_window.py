@@ -27,23 +27,67 @@ def test_window_of_one_reproduces_the_pairwise_reference():
 
 @pytest.mark.slow
 def test_conv_window_1_reproduces_the_deployment_fixture(tmp_path):
-    """Backward-compatibility gate. Real data; ~60 s."""
+    """Backward-compatibility gate. Real data; ~60 s.
+
+    Provenance of the hardcoded numbers
+    -----------------------------------
+    Re-pinned 2026-08-03, after two reproducibility fixes:
+
+    1. ``build_protocol_grids`` now takes r0 as the *median* r_target across
+       replicas at step0 instead of ``.iloc[0]``, so the grid no longer
+       depends on the order log files were concatenated in.
+    2. Replicas are now ordered chronologically (``_replica_start_datetime``)
+       instead of by the bare HHMMSS in the filename, so rung k really is
+       "the first k replicas run".
+
+    Fix 1 shifts ``protocol_grid`` against a ``boundary_cap`` derived
+    independently from ``r_coord``, which flips steps in and out of the fit
+    set. That is a deliberate, accepted behaviour change, not a regression.
+
+    The superseded pre-fix values, recorded for provenance only:
+        k=46: rmsd 2.077676, barrier_delta 2.677670, r_ts_delta 0.000619
+        k=47: rmsd 1.880280, converged True
+
+    The numbers are pinned to an explicit 50-log subset (the original
+    2026-07-18 batch) so they do not drift as replicas are added.
+    """
     import sys
     sys.path.insert(0, "scratch/paper_figures")
     import wdr5_conv_lib as lib
+    from autopath.pulling.SMDData import SMDData
+
+    # Pin to a fixed 50-replica subset instead of "whatever is on disk":
+    # 6dy7_A/murcko at v=0.015 has since grown from 50 to 100 replicas as
+    # more campaigns landed, and check_convergence walks rungs k=4..N, so
+    # letting N float would change both the row count AND (because the DTW
+    # path model is refit on whatever replicas it is given) the clustering
+    # -- and therefore the PMF -- at every rung. This is a fixed-data
+    # invariant: it must reproduce the numbers below regardless of how much
+    # new data is added later. check_convergence itself filters `logs` by
+    # speed and sorts by _replica_start_datetime before building rung k from
+    # the first k replicas, so replicating that ordering here selects exactly
+    # the replica set the API would have used when there were 50 -- namely
+    # the original 2026-07-18 batch.
+    all_logs = lib.logs_for("6dy7_A", "murcko")
+    v015_logs = sorted(
+        (f for f in all_logs if SMDData._speed_from_log(f) == 0.015),
+        key=SMDData._replica_start_datetime,
+    )
+    logs = v015_logs[:50]
 
     df = lib.conv_api("6dy7_A", "murcko", "cumulant",
-                      outdir=str(tmp_path), speeds=[0.015], conv_window=1)
+                      outdir=str(tmp_path), speeds=[0.015], logs=logs,
+                      conv_window=1)
     assert len(df) == 47
     r46 = df[df["n_replicas"] == 46].iloc[0]
     r47 = df[df["n_replicas"] == 47].iloc[0]
     r48 = df[df["n_replicas"] == 48].iloc[0]
-    assert abs(r46["dG_weighted-rmsd"] - 2.077676) < 1e-4
-    assert abs(r46["barrier_delta"] - 2.677670) < 1e-4
+    assert abs(r46["dG_weighted-rmsd"] - 1.471416) < 1e-4
+    assert abs(r46["barrier_delta"] - 1.795663) < 1e-4
     assert abs(r46["r_ts_delta"] - 0.000619) < 1e-4
     assert bool(r46["converged"]) is True
-    assert abs(r47["dG_weighted-rmsd"] - 1.880280) < 1e-4
-    assert bool(r47["converged"]) is True
+    assert abs(r47["dG_weighted-rmsd"] - 18.065981) < 1e-4
+    assert bool(r47["converged"]) is False
     assert bool(r48["converged"]) is False
 
 
