@@ -226,8 +226,11 @@ def force_convergence_ladder(sa, logs, speeds,
     # Per-speed state: clustering, ordering, protocol grid, boundary.
     per_speed = {}
     for speed in speeds:
+        # Chronological, not by filename ID: the ID is a bare HHMMSS with no
+        # date, so it would order multi-day cells by time of day and rung k
+        # would not be "the first k replicas run".
         speed_logs = sorted([f for f in logs if SMDData._speed_from_log(f) == speed],
-                            key=SMDData._replica_idx_from_log)
+                            key=SMDData._replica_start_datetime)
         smd = SMDData(speed_logs, sysname=sa.sysname, temperature=sa.temperature,
                       reference_pdb=sa.reference_pdb)
         protocol_grid, boundary_cap, speed_data = _speed_state(

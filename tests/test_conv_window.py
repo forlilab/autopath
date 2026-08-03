@@ -93,6 +93,12 @@ class _StubSMD:
     def _replica_idx_from_log(fn):
         return int("".join(c for c in os.path.basename(fn) if c.isdigit()) or 0)
 
+    @staticmethod
+    def _replica_start_datetime(fn):
+        # check_convergence sorts replicas chronologically; these synthetic
+        # logs have no real mtime, so reuse the filename index as the key.
+        return _StubSMD._replica_idx_from_log(fn)
+
 
 class _StubDTW:
     def __init__(self, *a, **k):

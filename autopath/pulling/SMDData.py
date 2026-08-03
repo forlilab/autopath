@@ -1,4 +1,6 @@
 import os
+from datetime import datetime, timedelta
+
 import numpy as np
 import pandas as pd
 from scipy.integrate import cumulative_trapezoid
@@ -343,6 +345,46 @@ class SMDData:
         base = os.path.basename(fn)[:-4]
         rep = base.split("_")[-3]
         return int(rep.split("-")[1])
+
+    @staticmethod
+    def _replica_start_datetime(fn):
+        """Chronological sort key for a replica log: its start ``datetime``.
+
+        Why the filesystem is needed
+        ----------------------------
+        The replica ID in the filename is a bare ``HHMMSS`` clock time with
+        **no date**, and the log header records only physical parameters --
+        neither carries a calendar date.  So ``_replica_idx_from_log`` is a
+        valid *identifier* but not a valid *ordering*: for any cell whose
+        replicas were produced over more than one day it sorts by time of
+        day, so "the first k replicas" becomes "the k with the earliest
+        wall-clock time of day" rather than "the k run first".
+
+        The missing date is recovered from the file's mtime, which marks
+        when the replica finished writing.  Combining that date with the
+        ``HHMMSS`` start time from the filename reconstructs the start
+        instant (rolling back one day if the run crossed midnight).  This
+        mirrors ``scratch/paper_figures/wdr5_conv_lib.py:_wall_seconds``.
+
+        Caveat
+        ------
+        This relies on mtimes being preserved.  Copy sMD data with ``cp -a``
+        / ``rsync -a``; a plain ``cp`` restamps every log to the copy time
+        and collapses the ordering back to time-of-day within that instant.
+
+        Falls back to the plain integer ID (as a ``datetime`` offset from the
+        epoch, so the key type stays comparable) if the mtime cannot be read.
+        """
+        idx = SMDData._replica_idx_from_log(fn)
+        try:
+            end = datetime.fromtimestamp(os.path.getmtime(fn))
+        except OSError:
+            return datetime.fromtimestamp(0) + timedelta(seconds=idx)
+        hh, mm, ss = idx // 10000, (idx // 100) % 100, idx % 100
+        start = end.replace(hour=hh, minute=mm, second=ss, microsecond=0)
+        if start > end:  # the run crossed midnight
+            start -= timedelta(days=1)
+        return start
 
     @staticmethod
     def _traj_to_log_name(traj_path: str) -> str:

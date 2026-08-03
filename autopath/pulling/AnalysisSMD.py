@@ -845,7 +845,10 @@ class SMDAnalysis:
                     f"Not enough replicas for speed={speed}: {len(speed_logs)}"
                 )
 
-            speed_logs = sorted(speed_logs, key=SMDData._replica_idx_from_log)
+            # Chronological, not by filename ID: the ID is a bare HHMMSS with
+            # no date, so it would order multi-day cells by time of day and
+            # rung k would not be "the first k replicas run".
+            speed_logs = sorted(speed_logs, key=SMDData._replica_start_datetime)
             logger.info(f"Checking convergence for speed={speed} with {len(speed_logs)} replicas")
 
             smd = SMDData(
