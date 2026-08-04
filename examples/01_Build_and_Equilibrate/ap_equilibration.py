@@ -197,8 +197,11 @@ def main():
                                           )
     rmsd_equilibration.to_csv(f"{sys_name}/equilibration/RMSD_{sys_name}.csv", index=False)
     if ligands is not None:
-        _rmsf = calculate_ligand_rmsf(u_eq, lig_resname)
-        plot_atomic_property(u_eq, _rmsf, lig_resname=lig_resname,
+        # both take a full MDAnalysis selection string, not a bare residue name:
+        # passing "UNK" raises SelectionError: Unknown selection token
+        lig_sel = f"resname {lig_resname}"
+        _rmsf = calculate_ligand_rmsf(u_eq, lig_sel)
+        plot_atomic_property(u_eq, _rmsf, lig_resname=lig_sel,
                              outname=f"{sys_name}/equilibration/RMSF_{sys_name}.png")
     return
 
