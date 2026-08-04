@@ -349,13 +349,22 @@ def fetch_smiles(ligand_name: str) -> str:
     """
     url = f"https://data.rcsb.org/rest/v1/core/chemcomp/{ligand_name}"
     response = requests.get(url)
-    if response.status_code == 200:
-        data = response.json()
-        smiles = data['rcsb_chem_comp_descriptor']['smiles']
-        logger.debug(f"SMILES for {ligand_name}: {smiles}")
-    else:
+    if response.status_code != 200:
         response.raise_for_status()
-
+    data = response.json()
+    desc = data.get("rcsb_chem_comp_descriptor", {})
+    # RCSB returns SMILES / SMILES_stereo (upper case).
+    # SMILES_stereo is preferred: it carries the stereochemistry.
+    smiles = None
+    for key in ("SMILES_stereo", "SMILES", "smiles_stereo", "smiles"):
+        if desc.get(key):
+            smiles = desc[key]
+            break
+    if not smiles:
+        raise KeyError(
+            f"no SMILES for {ligand_name} in rcsb_chem_comp_descriptor "
+            f"(keys: {sorted(desc)})")
+    logger.debug(f"SMILES for {ligand_name}: {smiles}")
     return smiles
 
 
