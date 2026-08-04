@@ -91,6 +91,15 @@ class ProteinLigandAnalyzer:
         Trajectory slicing (``traj_start``/``traj_end``/``traj_step``) is not
         applied here; slicing is currently handled at the point of analysis.
         """
+        # A coordinate-only topology (PDB/GRO) gives MDAnalysis no atom types, so the
+        # RDKit conversion ProLIF depends on perceives the ligand poorly: on these systems
+        # system.pdb yields ~1.5 interactions/frame (VdWContact only) where system.prmtop
+        # yields ~17.6 including Hydrophobic. Prefer a prmtop/psf.
+        if str(self.top).lower().endswith((".pdb", ".gro", ".cif")):
+            logger.warning(
+                f"Topology {os.path.basename(str(self.top))} carries no atom types; ProLIF "
+                "interaction detection will be incomplete. Use the .prmtop (or .psf) instead."
+            )
         self.replicas = {}
         for t in self.traj_paths:
             try:
@@ -286,6 +295,10 @@ class ProteinLigandAnalyzer:
         -------
         important_resids : list of int
             Sorted residue IDs whose interaction frequency exceeds ``frequency_cutoff``.
+            These are numbered as in the TOPOLOGY that was loaded. A prmtop renumbers
+            sequentially from 1, so they are generally offset from the original PDB author
+            numbering (e.g. 5 for a structure whose first modelled residue is 6) -- convert
+            before comparing against crystal-structure residue numbers.
         persistence_byRes : pd.DataFrame
             Interaction persistence grouped by residue (all interaction types merged).
         persistence_byRes_byType : pd.DataFrame
@@ -319,9 +332,12 @@ class ProteinLigandAnalyzer:
                 ligand_sel = u.select_atoms(self.ligand_mda_selection)
                 logger.info(f"Ligand selection has {ligand_sel.n_atoms} atoms.")
                 
+                # ProLIF's signature is run(traj, lig, prot). Passing the protein first put
+                # protein residues under the "ligand" level and reduced detection to
+                # VdWContact only (no Hydrophobic, no H-bonds).
                 fp = fp.run(u.trajectory,
-                            protein_sel,
                             ligand_sel,
+                            protein_sel,
                             n_jobs=n_jobs,
                             )
                 fp.to_pickle(fp_fname)
@@ -349,8 +365,12 @@ class ProteinLigandAnalyzer:
             
             # Filter residues by frequency
             selected_residues = persistence_byRes[persistence_byRes["%"] >= frequency_cutoff/100].index.tolist()
-            selected_resnames = [res[1] for res in selected_residues]
-            selected_resids = [int(res[3:]) for res in selected_resnames]
+            # groupby(level=["protein", "ligand"]) puts the protein residue first; the old
+            # code read res[1] (the ligand) and sliced res[3:], which breaks on ProLIF's
+            # chain-suffixed labels such as "ALA50.A" -> int("50.A").
+            selected_resnames = [res[0] for res in selected_residues]
+            selected_resids = [int(re.search(r"(\d+)", r).group(1))
+                               for r in selected_resnames if re.search(r"(\d+)", r)]
             important_resids.update(selected_resids)
 
         return sorted(list(important_resids)), persistence_byRes, persistence_byRes_byType
