@@ -20,6 +20,14 @@ from abc import ABC, abstractmethod
 import logging
 logger = logging.getLogger("autopath.PathModel")
 
+# Trace features whose magnitude scales with the pulling speed. Reported when
+# clustering across speeds, where that offset would otherwise swamp the pathway
+# signal (see the per-speed standardization in DTWPathModel.fit_transform).
+SPEED_DEPENDENT_FEATURES = frozenset({
+    "work", "lag", "force", "dW_protocol", "U_cvpack",
+})
+
+
 class PathModel(ABC):
     """Abstract base class for path models in pulling."""
     def __init__(self):
@@ -207,11 +215,54 @@ class DTWPathModel(PathModel):
             trajnames = list(data_struct.keys())
             vectors_stacked = [data_struct[name] for name in trajnames]
 
-            # Scale features across all frames / trajectories
-            scaler = StandardScaler(with_mean=True, with_std=True)
-            scaler.fit(np.vstack(vectors_stacked))
+            # Scale features across all frames / trajectories.
+            #
+            # When clustering ACROSS speeds, standardize within each speed group
+            # instead. Speed-dependent features carry a large systematic offset
+            # between speeds (<F> = Feq + Gamma*v, so work/force/lag all scale with
+            # v).Per-speed standardization removes the offset (and equalizes
+            # the within-speed scale)
+            traj_speed = (
+                speed_df_cluster.groupby('trajname')['speed'].first().to_dict()
+                if 'speed' in speed_df_cluster.columns else {}
+            )
+            speeds_present = {traj_speed.get(n) for n in trajnames}
+            per_speed_scaling = (
+                speed_key is None
+                and len(speeds_present) > 1
+                and None not in speeds_present
+            )
+
+            scaler = None
+            scalers = None
+            if per_speed_scaling:
+                scalers = {}
+                for sp in sorted(speeds_present):
+                    idx = [i for i, n in enumerate(trajnames)
+                           if traj_speed.get(n) == sp]
+                    sc = StandardScaler(with_mean=True, with_std=True)
+                    sc.fit(np.vstack([vectors_stacked[i] for i in idx]))
+                    scalers[sp] = sc
+                sd_present = sorted(set(feature_cols) & SPEED_DEPENDENT_FEATURES)
+                logger.info(
+                    f"Cross-speed clustering: standardizing features within each of "
+                    f"{len(scalers)} speed groups ({sorted(speeds_present)}) rather than "
+                    f"globally, so speed-dependent features do not dominate the DTW "
+                    f"metric. Speed-dependent features present: "
+                    f"{sd_present if sd_present else 'none'}."
+                )
+            else:
+                scaler = StandardScaler(with_mean=True, with_std=True)
+                scaler.fit(np.vstack(vectors_stacked))
+
+            def _scale(trajname, arr):
+                """Standardize one trajectory with its speed-matched scaler."""
+                if scalers is not None:
+                    return scalers[traj_speed[trajname]].transform(arr)
+                return scaler.transform(arr)
+
             vectors_stacked_scaled = [
-                scaler.transform(arr) for arr in vectors_stacked
+                _scale(name, arr) for name, arr in zip(trajnames, vectors_stacked)
             ]
 
             # Equalize geom vs trace feature contribution (see fit_transform docstring).
@@ -342,7 +393,8 @@ class DTWPathModel(PathModel):
                         .sort_values('step')[feature_cols].to_numpy()
                         for name in trajnames
                     ]
-                    vectors_plot = [scaler.transform(arr) for arr in vectors_full]
+                    vectors_plot = [_scale(name, arr)
+                                    for name, arr in zip(trajnames, vectors_full)]
                     if geom_idx and self.n_geom_pcs is not None:
                         vectors_plot = [
                             np.hstack([
