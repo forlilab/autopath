@@ -80,6 +80,7 @@ class VanillaMD:
         self,
         checkpoint_file: str = None,
         pdb_file: str = None,
+        state_file: str = None,
         run_id: str = None,
         MD_time: int = 10,
         restart_velocities: bool = False,
@@ -97,6 +98,16 @@ class VanillaMD:
             simulation continues directly from that state (positions,
             velocities, box vectors). Takes precedence over ``pdb_file``
             when both are supplied.
+
+            Note that OpenMM checkpoints are tied to the platform and device
+            they were written on; restarting on a different GPU can abort the
+            process at context creation. Prefer ``state_file`` when the
+            equilibration and production stages may land on different hardware.
+        state_file : str, optional
+            Path to an OpenMM State XML (as written alongside the checkpoint by
+            ``save_simulation``). Portable across platforms and devices, and
+            carries positions, velocities and box vectors at full precision.
+            Takes precedence over both other options when supplied.
         pdb_file : str, optional
             Path to a PDB file used to set initial positions and box vectors
             when no checkpoint is available. Velocities are initialised at
@@ -134,8 +145,11 @@ class VanillaMD:
 
         simulation = Simulation(self.topology, self.system, integrator, self.platform)
 
-        if checkpoint_file is None and pdb_file is None:
-            raise ValueError("Either pdb_file or checkpoint_file must be provided to set initial positions.")
+        if state_file is not None:
+            logger.info(f"Loading state from {state_file}")
+            simulation.loadState(state_file)
+        elif checkpoint_file is None and pdb_file is None:
+            raise ValueError("Either pdb_file, checkpoint_file or state_file must be provided to set initial positions.")
         elif checkpoint_file is None and pdb_file is not None:
             logger.info(f"Setting positions and box vectors from PDB file {pdb_file}")
             pdb = PDBFile(pdb_file)
