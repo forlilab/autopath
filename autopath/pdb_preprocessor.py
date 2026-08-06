@@ -19,7 +19,6 @@ from pymol import cmd
 from rdkit import Chem
 from rdkit.Chem import AllChem
 
-from molscrub import Scrub
 
 
 class PDBPreprocessor:
@@ -31,12 +30,24 @@ class PDBPreprocessor:
 
     Parameters
     ----------
-    pdbfile : str
-        Path to the input PDB file.
+    pdbfile : str or file-like, optional
+        Path to the input PDB file, or an already-open file object / StringIO.
+    pdbxfile : str or file-like, optional
+        Same for PDBx/mmCIF input. Mutually exclusive with *pdbfile*.
     """
 
-    def __init__(self, pdbfile: str):
-        self.fixer = PDBFixer(str(pdbfile))
+    def __init__(self, pdbfile=None, pdbxfile=None):
+        if (pdbfile is None) == (pdbxfile is None):
+            raise ValueError("supply exactly one of pdbfile or pdbxfile")
+        # PDBFixer takes a path positionally but needs a FILE OBJECT for its pdbfile/pdbxfile
+        # keywords, so route by input type. str() on a StringIO would yield a repr, not content.
+        if pdbxfile is not None:
+            src = pdbxfile if hasattr(pdbxfile, "read") else open(pdbxfile)
+            self.fixer = PDBFixer(pdbxfile=src)
+        elif hasattr(pdbfile, "read"):
+            self.fixer = PDBFixer(pdbfile=pdbfile)
+        else:
+            self.fixer = PDBFixer(str(pdbfile))
 
     # ------------------------------------------------------------------
     # Public API
@@ -384,6 +395,11 @@ def get_scrubbed_smile(ligand_name: str) -> str:
     str
         Canonical SMILES of the dominant protonation state at pH 7.4.
     """
+    # Imported here rather than at module scope: molscrub is only needed by this one function,
+    # and a top-level import made PDBPreprocessor unimportable in environments without it
+    # (e.g. cosolvkit-pro, which uses the preprocessor but never scrubs ligand SMILES).
+    from molscrub import Scrub
+
     smiles = fetch_smiles(ligand_name)
     scrub = Scrub(ph_low=7.4, ph_high=7.4)
     scrubbed_mol = scrub(Chem.MolFromSmiles(smiles))[0]
