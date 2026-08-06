@@ -19,7 +19,8 @@ from pymol import cmd
 from rdkit import Chem
 from rdkit.Chem import AllChem
 
-
+#TODO Add there the function to crop and cap a binding site from a PDB file, 
+# given a ligand or x,y,z coords and a radius. Capping can use the chain vector to place ACE/NME caps, or use the PDBPreprocessor's _apply_caps method.
 
 class PDBPreprocessor:
     """Prepare a PDB for MD simulation using PDBFixer and MDAnalysis.
@@ -380,10 +381,10 @@ def fetch_smiles(ligand_name: str) -> str:
 
 
 def get_scrubbed_smile(ligand_name: str) -> str:
-    """Fetch a CCD SMILES and return the dominant tautomer/protonation state at pH 7.4.
+    """Fetch a CCD SMILES and return the FIRST protonation/tautomer state at pH 7.4.
 
-    Uses ``molscrub.Scrub`` to enumerate protonation states and selects the first
-    (highest-scoring) tautomer, which is appropriate for physiological conditions.
+    Uses ``molscrub.Scrub``. Be careful cuause this will just give you the first protonmer/tautomer
+    No guarantee that this is the most relevant one for your system.
 
     Parameters
     ----------
@@ -396,8 +397,8 @@ def get_scrubbed_smile(ligand_name: str) -> str:
         Canonical SMILES of the dominant protonation state at pH 7.4.
     """
     # Imported here rather than at module scope: molscrub is only needed by this one function,
-    # and a top-level import made PDBPreprocessor unimportable in environments without it
-    # (e.g. cosolvkit-pro, which uses the preprocessor but never scrubs ligand SMILES).
+    # and a top-level import made PDBPreprocessor unimportable in other places.
+    # #TODO consider chainging this
     from molscrub import Scrub
 
     smiles = fetch_smiles(ligand_name)
