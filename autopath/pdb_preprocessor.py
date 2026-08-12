@@ -155,61 +155,128 @@ class PDBPreprocessor:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _get_ace_pos(end_residue):
+    def _place_atom(prev_pos, base_pos, bond, angle_deg, others, n_steps=72):
+        """Position an atom bonded to base_pos, at `bond` A and `angle_deg` from prev_pos.
+
+        The torsion about prev->base is unconstrained for a cap, so it is spent on clash
+        avoidance: every rotamer is scored by its closest approach to `others` and the
+        roomiest is taken.
+
+        This replaces straight-line extrapolation along a backbone axis, which is what the
+        earlier code did (a 180 deg bond angle). Whenever a terminus folded back against its
+        own chain the cap was extruded into it: across 8 PDE6D crystal forms that put ACE/NME
+        methyl carbons 1.57-2.17 A from unrelated residues in 6 of them, close enough that
+        meeko refused the receptor and only energy minimisation pulled the MD systems apart
+        again.
+        """
+        u = base_pos - prev_pos
+        u = u / np.linalg.norm(u)
+        ref = np.array([1.0, 0.0, 0.0]) if abs(u[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+        p1 = np.cross(u, ref)
+        p1 /= np.linalg.norm(p1)
+        p2 = np.cross(u, p1)
+        th = np.radians(angle_deg)
+
+        best, best_score = None, -np.inf
+        for phi in np.linspace(0.0, 2.0 * np.pi, n_steps, endpoint=False):
+            w = np.cos(phi) * p1 + np.sin(phi) * p2
+            pos = base_pos + bond * (-np.cos(th) * u + np.sin(th) * w)
+            score = (np.linalg.norm(others - pos, axis=1).min()
+                     if others is not None and len(others) else np.inf)
+            if score > best_score:
+                best, best_score = pos, score
+        return best
+
+    # Atom names whose position relative to a cap is fixed by the cap's own bond geometry,
+    # so they carry no information for the torsion scan. Everything else in the capped
+    # residue does move relative to the cap and must stay in the clash set -- including
+    # proline's CD, which is bonded to N and sits exactly where ACE wants to go.
+    _ACE_FIXED_TO_C   = ("N", "CA", "H", "HN", "H1", "H2", "H3", "HN1", "HN2", "HN3")
+    _ACE_FIXED_TO_O   = ("N", "H", "HN", "H1", "H2", "H3", "HN1", "HN2", "HN3")
+    _NME_FIXED_TO_CH3 = ("C", "OXT")
+
+    @staticmethod
+    def _own_residue_others(end_residue, keep_out_of):
+        """Positions of the capped residue's own atoms that the cap must still avoid."""
+        mask = [i for i, n in enumerate(end_residue.names) if n not in keep_out_of]
+        return end_residue.positions[mask] if mask else np.empty((0, 3))
+
+    @staticmethod
+    def _get_ace_pos(end_residue, others=None):
         """Return (C, CH3, O) positions for an ACE cap at the N-terminus.
 
-        Geometry is derived deterministically from the CA–N backbone axis
-        and the CA–N–C1 plane, avoiding random perpendicular vectors.
+        The carbonyl carbon sits at a real CA-N-C angle (121 deg), not collinear with CA-N,
+        and its torsion is chosen to keep the cap out of the protein. O and CH3 then follow
+        from sp2 geometry at that carbon, again with the remaining rotation spent on clearance.
+
+        `others` excludes the capped residue (the caller cannot know which of its atoms are
+        legitimately close), so the subset that the cap can still collide with is added back
+        here. Rotating about CA-N leaves the cap's distance to N and CA fixed but not its
+        distance to the other N substituent, so on an N-terminal proline the scan was blind
+        to CD and put the carbonyl O 0.97 A inside the pyrrolidine ring.
         """
         ca_pos = end_residue.positions[np.where(end_residue.names == "CA")[0][0]]
         n_pos  = end_residue.positions[np.where(end_residue.names == "N" )[0][0]]
 
-        v_can = (n_pos - ca_pos) / np.linalg.norm(n_pos - ca_pos)
-        C1_pos = n_pos + 1.36 * v_can  # ACE carbonyl C
+        base = others if others is not None else np.empty((0, 3))
+        others_c = np.vstack([base, PDBPreprocessor._own_residue_others(
+            end_residue, PDBPreprocessor._ACE_FIXED_TO_C)])
+        others_o = np.vstack([base, PDBPreprocessor._own_residue_others(
+            end_residue, PDBPreprocessor._ACE_FIXED_TO_O)])
 
-        # Deterministic in-plane perpendicular via CA–N–C1 normal
-        v_c1n  = (n_pos  - C1_pos) / np.linalg.norm(n_pos  - C1_pos)
-        v_c1ca = (ca_pos - C1_pos) / np.linalg.norm(ca_pos - C1_pos)
-        n_plane = np.cross(v_c1n, v_c1ca)
-        if np.linalg.norm(n_plane) < 1e-6:  # degenerate: fall back to any perpendicular
-            ref = np.array([1., 0., 0.]) if abs(v_c1n[0]) < 0.9 else np.array([0., 1., 0.])
-            n_plane = np.cross(v_c1n, ref)
-        n_plane /= np.linalg.norm(n_plane)
-        v_perp = np.cross(n_plane, v_c1n)
-        v_perp /= np.linalg.norm(v_perp)
+        C1_pos = PDBPreprocessor._place_atom(ca_pos, n_pos, 1.36, 121.0, others_c)
+        others = others_o
 
-        # sp2: O and CH3 at ±120° from C1–N axis; correct bond lengths
-        O_pos   = C1_pos + 1.23 * (-0.5 * v_c1n + 0.866 * v_perp)  # C=O  1.23 Å
-        CH3_pos = C1_pos + 1.52 * (-0.5 * v_c1n - 0.866 * v_perp)  # C–CH3 1.52 Å
+        # sp2 at C1: O and CH3 are coplanar with N, 120 deg apart on either side
+        v_c1n = (n_pos - C1_pos) / np.linalg.norm(n_pos - C1_pos)
+        ref = np.array([1.0, 0.0, 0.0]) if abs(v_c1n[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+        q1 = np.cross(v_c1n, ref)
+        q1 /= np.linalg.norm(q1)
+        q2 = np.cross(v_c1n, q1)
+
+        best, best_score = None, -np.inf
+        for phi in np.linspace(0.0, 2.0 * np.pi, 72, endpoint=False):
+            perp = np.cos(phi) * q1 + np.sin(phi) * q2
+            o = C1_pos + 1.23 * (-0.5 * v_c1n + 0.866 * perp)
+            ch3 = C1_pos + 1.52 * (-0.5 * v_c1n - 0.866 * perp)
+            if others is not None and len(others):
+                score = min(np.linalg.norm(others - o, axis=1).min(),
+                            np.linalg.norm(others - ch3, axis=1).min())
+            else:
+                score = np.inf
+            if score > best_score:
+                best, best_score = (o, ch3), score
+        O_pos, CH3_pos = best
 
         return C1_pos, CH3_pos, O_pos  # order matches ace_names = ["C", "CH3", "O"]
 
     @staticmethod
-    def _get_nme_pos(end_residue):
-        """Return (N, C) positions for an NME cap at the C-terminus.
+    def _get_nme_pos(end_residue, others=None):
+        """Return (N, CH3) positions for an NME cap at the C-terminus.
 
-        When OXT is present it is used as a guide (original behaviour).
-        When OXT is absent, sp2 geometry at the carbonyl C is used instead
-        of the less accurate midpoint(O, CA) fallback.
+        The amide N is fully determined by sp2 geometry at the terminal carbonyl carbon: it
+        is the third substituent, anti to both O and CA. OXT is deliberately NOT used as a
+        guide even when present.
         """
-        if "OXT" in end_residue.names:
-            oxt_pos = end_residue.positions[np.where(end_residue.names == "OXT")[0][0]]
-            c_pos   = end_residue.positions[np.where(end_residue.names == "C"  )[0][0]]
-            vector  = (oxt_pos - c_pos) / np.linalg.norm(oxt_pos - c_pos)
-            N_position = oxt_pos
-            C_position = N_position + vector * 1.47  # NME CH3 along C–N axis
-        else:
-            # sp2 geometry: NME N is placed symmetrically to the carbonyl O
-            # relative to the terminal C (mirrors OXT placement logic).
-            c_pos  = end_residue.positions[np.where(end_residue.names == "C" )[0][0]]
-            o_pos  = end_residue.positions[np.where(end_residue.names == "O" )[0][0]]
-            ca_pos = end_residue.positions[np.where(end_residue.names == "CA")[0][0]]
-            v_co  = (o_pos  - c_pos) / np.linalg.norm(o_pos  - c_pos)
-            v_cca = (ca_pos - c_pos) / np.linalg.norm(ca_pos - c_pos)
-            n_dir = -(v_co + v_cca)
-            n_dir /= np.linalg.norm(n_dir)
-            N_position = c_pos + 1.36 * n_dir
-            C_position = N_position + 1.47 * n_dir   # NME CH3 along C–N axis
+        c_pos  = end_residue.positions[np.where(end_residue.names == "C" )[0][0]]
+        o_pos  = end_residue.positions[np.where(end_residue.names == "O" )[0][0]]
+        ca_pos = end_residue.positions[np.where(end_residue.names == "CA")[0][0]]
+
+        v_co  = (o_pos  - c_pos) / np.linalg.norm(o_pos  - c_pos)
+        v_cca = (ca_pos - c_pos) / np.linalg.norm(ca_pos - c_pos)
+        n_dir = -(v_co + v_cca)
+        n_dir /= np.linalg.norm(n_dir)
+        N_position = c_pos + 1.33 * n_dir            # amide C-N
+
+        # As in _get_ace_pos, the capped residue's own atoms are added back to the clash
+        # set: rotating the methyl about C-N keeps it equidistant from C but not from O,
+        # CA or the side chain.
+        base = others if others is not None else np.empty((0, 3))
+        others = np.vstack([base, PDBPreprocessor._own_residue_others(
+            end_residue, PDBPreprocessor._NME_FIXED_TO_CH3)])
+
+        # methyl at a real 120 deg C-N-CH3 angle; torsion chosen for clearance
+        C_position = PDBPreprocessor._place_atom(c_pos, N_position, 1.45, 120.0, others)
         return N_position, C_position
 
     @staticmethod
@@ -280,9 +347,14 @@ class PDBPreprocessor:
 
             parts = []
 
+            # everything the cap must not run into (its own residue excluded, since the cap
+            # is bonded to it and is legitimately close)
+            all_pos = protein_u.atoms.positions
+
             if not skip_ace:
                 first_res    = seg.residues[0].atoms
-                ace_positions = self._get_ace_pos(first_res)
+                ace_positions = self._get_ace_pos(
+                    first_res, np.delete(all_pos, first_res.indices, axis=0))
                 ace_names    = ["C", "CH3", "O"]
                 ace_universe = self._create_cap_universe(
                     n_atoms=len(ace_positions),
@@ -297,7 +369,12 @@ class PDBPreprocessor:
             parts.append(Chain)
 
             if not skip_nme:
-                nme_positions = self._get_nme_pos(last_res)
+                nme_positions = self._get_nme_pos(
+                    last_res, np.delete(all_pos, last_res.indices, axis=0))
+                # "C" for the methyl carbon is PDBFixer's own NME naming, and fix() re-runs
+                # PDBFixer after capping, so any other name here is silently normalised back
+                # to this one. Tools that expect the Amber name must
+                # rename downstream -- it cannot be fixed from here.
                 nme_names    = ["N", "C"]
                 nme_universe = self._create_cap_universe(
                     n_atoms=len(nme_names),
@@ -818,24 +895,7 @@ def align_structures_on_site(
     this handles the other case -- a set of separate crystal forms of the same protein that
     must share one coordinate frame so that a single docking box, and a pose docked into any
     of them, is transferable across the whole ensemble.
-
-    Why the fit is restricted to the site
-    -------------------------------------
-    A global backbone superposition lets distant, often more mobile, regions dominate the
-    least-squares fit and can leave the binding site displaced by several tenths of an
-    angstrom -- which is precisely the error that matters when a box is shared. Fitting on the
-    residues around the site puts the error where it does no harm (far from the ligand) instead
-    of in the pocket. The transform is nonetheless applied to *every* atom, so the output
-    structures remain complete and simulation-ready.
-
-    Why residue identity is checked
-    -------------------------------
-    Matching purely on residue number silently superposes non-identical sequences: different
-    constructs, point mutants, or polymorphic loci (an HLA site can differ at 7 residues
-    between entries), and SIFTS indel cases where one entry is offset by a residue. With
-    ``require_same_resname`` a position only enters the fit when both structures agree on the
-    residue, and the number of rejected positions is reported so the disagreement is visible
-    rather than silently absorbed into the RMSD.
+    Matching purely on residue number silently superposes non-identical sequences
 
     Parameters
     ----------
@@ -885,10 +945,8 @@ def align_structures_on_site(
     def _same_segment(near, anchor):
         """Keep only fit residues from the anchor's OWN chain.
 
-        The fit must not include partner chains. Biological partners are deliberately retained
-        in these systems -- ARL2, RPGR and KRAS complete the pocket, and removing them collapses
-        it -- but that means an unrestricted radial selection puts partner CAs into the
-        alignment frame. Apo entries have no partner, so complexed and apo structures would be
+        The fit must not include partner chains.
+        Apo entries have no partner, so complexed and apo structures would be
         fitted on different atom sets and their RMSDs would not be comparable. Matching on
         segindex rather than segid because ids are not unique after preparation.
         """
@@ -1008,10 +1066,7 @@ def normalize_ids_for_pdb(topology, warn: bool = True) -> dict:
     **Residue numbers outside 1-9999.** ``PDBPreprocessor.fix`` defaults to
     ``ignore_terminal_missing_residues=False``, so PDBFixer models in unresolved terminal
     residues -- typically an expression tag. Those are numbered downwards from the first
-    observed residue and go non-positive, and the PDB writer emits them modulo 10000. MAPK14
-    5WJJ is the worked example: PDBFixer reads it correctly starting at residue 5, models in a
-    GAMGS tag at -4..0, and the file comes back starting at 9996. Readers then "unwrap" the
-    apparent overflow and shift the whole chain by +10000, so V102 parses as resid 10102.
+    observed residue and go non-positive, and the PDB writer emits them modulo 10000.
 
     **Multi-character chain ids.** mmCIF allows them (7Q9Q uses ``BBB``); PDB has one column,
     so they are truncated or replaced, and distinct chains can collide onto one letter.
