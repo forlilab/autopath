@@ -8,6 +8,7 @@ tests/cfs_hsp90/
 *.dcd
 *.xtc
 .github/
+.superpowers/
 
 # Byte-compiled / optimized / DLL files
 *.pyc
