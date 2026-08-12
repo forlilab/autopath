@@ -41,7 +41,7 @@ from autopath.metadynamics import (
 from autopath.pulling import SMDData, SMDAnalysis
 from autopath.pulling.Convergence import (tail_converged, validate_autostop_options,
                                           round_robin_order)
-from autopath.pulling.PathModel import DTWPathModel
+from autopath.pulling.PathModel import DTWPathModel, NullPathModel
 from autopath.pulling.Diagnostics import plot_convergence_traces, plot_convergence_metrics
 
 import logging
@@ -205,6 +205,9 @@ class AutoPath:
         sMD_max_replicas: int = 50,  # max replicas per speed in convergence mode
         sMD_run_analysis: bool = True,
         sMD_clust_selection:str = None,
+        sMD_path_model: str = 'dtw',   # 'dtw' | 'null' ('null' = no clustering: one path)
+        sMD_n_paths: int | None = None,  # fixed number of paths; None = silhouette-selected
+        sMD_max_frac_neg_dG_first_half: float = 0.25,  # pass-3 binding-well filter; <=0 disables
         sMD_features: list | None = None,
         sMD_log_geom_features: bool | list = True,  # hybrid: log geom during pulling + merge into clustering
         sMD_plateau_frac: float = 0.4,  # force-plateau TS boundary: fraction of peak |force| (higher -> boundary nearer rupture, off the tail)
@@ -281,6 +284,11 @@ class AutoPath:
         self.sMD_max_replicas = sMD_max_replicas
         self.sMD_run_analysis = sMD_run_analysis
         self.sMD_clust_selection = sMD_clust_selection
+        self.sMD_path_model = str(sMD_path_model).lower()
+        self.sMD_n_paths = sMD_n_paths
+        self.sMD_max_frac_neg_dG_first_half = float(sMD_max_frac_neg_dG_first_half)
+        if self.sMD_path_model not in ('dtw', 'null'):
+            raise ValueError(f"sMD_path_model must be 'dtw' or 'null', got {sMD_path_model!r}")
         self.sMD_features = sMD_features
         self.sMD_log_geom_features = sMD_log_geom_features
         self.sMD_plateau_frac = sMD_plateau_frac
@@ -831,8 +839,15 @@ class AutoPath:
                                reference_pdb=equilibrated_pdb)
             
             # cluster trajectories into pathways
-            cluster_model = DTWPathModel(seed=self.random_state, do_plots=True,
-                                        outdir=sMD_analysis_outdir)
+            # 'null' bypasses clustering entirely (all trajectories -> one path); it is the
+            # no-clustering reference for isolating what the path split actually buys.
+            if self.sMD_path_model == 'null':
+                cluster_model = NullPathModel()
+                logger.info("sMD_path_model='null': clustering bypassed, all trajectories "
+                            "assigned to a single path.")
+            else:
+                cluster_model = DTWPathModel(seed=self.random_state, do_plots=True,
+                                            outdir=sMD_analysis_outdir)
 
             smdanalysis = SMDAnalysis(sys_name, cluster_model,
                                     estimators=['cumulant', 'jarzynski', 'force'],
@@ -845,8 +860,9 @@ class AutoPath:
                                     min_samples_per_step=5,
                                     min_support_ratio=1.0,
                                     min_replicas_per_path=self.sMD_min_replicas_per_path,
+                                    n_paths=self.sMD_n_paths,
                                     min_path_steps_ratio=0.6,
-                                    max_frac_neg_dG_first_half=0.25,
+                                    max_frac_neg_dG_first_half=self.sMD_max_frac_neg_dG_first_half,
                                     min_speeds_for_extrapolation=2,
                                     )
 
@@ -1391,7 +1407,7 @@ class AutoPath:
         else:
             logs = sorted({fn for s in speeds for fn in
                            glob(f"{self.sMD_outdir}/trajectories/sMD_*_v{s}_{self.sMD_pulling_dir}.dat")})
-        smdanalysis = SMDAnalysis(sysname=sys_name, path_model='dtw',
+        smdanalysis = SMDAnalysis(sysname=sys_name, path_model=self.sMD_path_model,
                                   estimators=[self.sMD_autostop_estimator],
                                   do_plots=False, seed=self.random_state,
                                   temperature=self.temperature, outdir=outdir,
