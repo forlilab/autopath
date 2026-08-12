@@ -133,12 +133,14 @@ class SMDAnalysis:
         min_support_ratio: float = 1.0,
         min_samples_per_step: int = 5,
         min_replicas_per_path: int = 5,
+        n_paths: int | None = None,   # fixed K; None = silhouette-selected (deployment default)
         min_path_steps_ratio: float = 0.6,
         max_frac_neg_dG_first_half: float = 0.25,
         min_speeds_for_extrapolation: int = 2,
         replica_imbalance_threshold: float = 3.0,
     ):
         self.sysname = sysname
+        self.n_paths = n_paths
         self.seed = seed
         self.temperature = temperature
         self.do_plots = do_plots
@@ -481,7 +483,8 @@ class SMDAnalysis:
             ligand_select=self.ligand_select,
             trajectory_files=trajectory_files,
             cluster_across_speeds=cluster_across_speeds,
-            pocket_select=group_B
+            pocket_select=group_B,
+            n_paths=self.n_paths,      # None -> silhouette search (deployment default)
         )
 
         sMDDdata.raw_data['path'] = sMDDdata.raw_data['trajname'].map(path_mappings)
