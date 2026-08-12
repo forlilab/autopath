@@ -2,6 +2,8 @@
 import os
 import time
 import numpy as np
+import openmm as _openmm
+from contextlib import contextmanager, nullcontext
 from typing import Union, List
 
 # OpenMM imports
@@ -29,6 +31,50 @@ from autopath.utils import assign_bondOrders, add_variants, save_pdb, save_syste
 
 import logging
 logger = logging.getLogger("autopath.preparation")
+
+
+@contextmanager
+def relaxed_membrane_packing(min_iterations: int = 200):
+    """Minimise between ``addMembrane``'s solute re-expansion increments.
+
+    ``Modeller.addMembrane`` packs lipids by compressing the solute to 50% in x/y,
+    discarding the lipids that overlap it, then re-expanding it over ~10*max(x,y)
+    increments with 20 fs of Langevin dynamics in between. It minimises once, for 30
+    iterations, before the loop and never again. For a large channel that is far too
+    little for the lipids to get out of the way
+
+    Patching is scoped to the ``addMembrane`` call: the only Context created and the only
+    integrator stepping inside that window belong to addMembrane itself. Costs roughly
+    20 min on a 500k-atom system, against ~2 min for the unrelaxed path.
+    """
+    captured = {}
+    orig_ctx_init = _openmm.Context.__init__
+    orig_min = _openmm.LocalEnergyMinimizer.minimize
+    orig_step = _openmm.LangevinIntegrator.step
+
+    def ctx_init(self, *args, **kwargs):
+        orig_ctx_init(self, *args, **kwargs)
+        captured["context"] = self
+
+    def patched_min(context, tolerance=10.0, maxIterations=0, reporter=None):
+        return orig_min(context, tolerance, max(maxIterations, min_iterations))
+
+    def patched_step(self, steps):
+        context = captured.get("context")
+        if context is not None:
+            orig_min(context, 10.0, min_iterations)
+        return orig_step(self, steps)
+
+    _openmm.Context.__init__ = ctx_init
+    _openmm.LocalEnergyMinimizer.minimize = patched_min
+    _openmm.LangevinIntegrator.step = patched_step
+    try:
+        yield
+    finally:
+        _openmm.Context.__init__ = orig_ctx_init
+        _openmm.LocalEnergyMinimizer.minimize = orig_min
+        _openmm.LangevinIntegrator.step = orig_step
+
 
 class SystemPreparation:
     """Prepare a solvated or membrane-embedded simulation system for OpenMM MD.
@@ -69,6 +115,11 @@ class SystemPreparation:
     lipid_type : str, optional
         Lipid residue name (e.g. ``"POPC"``) or path to a custom PDB patch.
         Required when ``is_membrane=True``.
+    membrane_relax_iterations : int, optional
+        Minimisation iterations run after each of ``addMembrane``'s solute
+        re-expansion increments. Stock OpenMM minimises only once for 30 iterations,
+        which is not enough for a large membrane protein and lets the lipids blow up
+        (see :func:`relaxed_membrane_packing`). Set to 0 for stock behaviour.
     out_dir : str, optional
         Directory where all output files are written.
     """
@@ -84,18 +135,15 @@ class SystemPreparation:
         hydrogenMass: float = 1.5,  # in amu; 1.5 enables 4 fs timestep via HMR
         boxShape: str = "dodecahedron",
         padding: float = 1.2,
-        # addSolvent previously used its default (tip3p), so a 4-site water model could not be
-        # requested: the forcefield would carry e.g. amber19/opc.xml while the solvent added
-        # was 3-site, and createSystem then has no template for it. OPC has the same topology
-        # as TIP4P-Ew (O, H1, H2, M + one virtual site), so pass water_model="tip4pew" to
-        # build the right topology and let opc.xml supply the parameters. ff19SB is
-        # parameterised for OPC, so the two go together.
+        # OPC has the same topology as TIP4P-Ew (O, H1, H2, M + one virtual site), so pass water_model="tip4pew" to
+        # build the right topology and let opc.xml supply the parameters. ff19SB is parameterised for OPC, so the two go together.
         water_model: str = "tip3p",
         num_solvent: int = None,
         ionicStrength: float = 0.15,
         ions: tuple[str] = ("Na+", "Cl-"),  # positiveIon, negativeIon
         is_membrane: bool = False,
         lipid_type: str = 'POPC',
+        membrane_relax_iterations: int = 0, #200
         out_dir: str = "system",
     ) -> None:
 
@@ -129,6 +177,8 @@ class SystemPreparation:
 
         self.is_membrane = is_membrane
         self.lipid_type = lipid_type
+        # 0 disables the relaxation and restores stock addMembrane behaviour
+        self.membrane_relax_iterations = membrane_relax_iterations
         self._available_lipids = [
             "POPC",
             "POPE",
@@ -423,28 +473,60 @@ class SystemPreparation:
         # A 4-site water model needs its virtual site on EVERY water, including the
         # crystallographic ones carried in from the input, and this has to happen BEFORE
         # solvation: addSolvent computes the neutralising charge and therefore requires every
-        # residue to match a template, so 3-site input waters abort it with "matches HOH, but
-        # the residue is missing 1 extra site".
+        # residue to match a template.
         if self.water_model in ("tip4pew", "tip5p", "swm4ndp"):
             logger.info(f"Adding extra particles for the {self.water_model} water model..")
             modeller.addExtraParticles(self.forcefield)
 
         if self.is_membrane:
+            # Drop a unit cell that is smaller than the solute it supposedly encloses.
+            # OpenMM's PDBFile writes a placeholder "CRYST1 1.000 1.000 1.000" for any
+            # topology that has no box, so reading such a file back yields a real 0.1 nm
+            # cell. addMembrane then sizes the box from it (boxSizeZ = max(patch_z, cell_z + 2*minimumPadding)) and never consults the
+            # solute's own z-extent, so a tall membrane protein ends up taller than its
+            # box
+            cell = modeller.topology.getUnitCellDimensions()
+            if cell is not None:
+                cell_nm = np.array(cell.value_in_unit(openmmunit.nanometer))
+                solute = np.array(
+                    modeller.positions.value_in_unit(openmmunit.nanometer)
+                )
+                extent = solute.max(axis=0) - solute.min(axis=0)
+                if np.any(cell_nm < extent):
+                    logger.warning(
+                        f"Ignoring unit cell {np.round(cell_nm, 3)} nm: smaller than the "
+                        f"solute extent {np.round(extent, 3)} nm, so it cannot be a real "
+                        "periodic box. Letting addMembrane size the box from the solute."
+                    )
+                    modeller.topology.setPeriodicBoxVectors(None)
+
             logger.info(f"Adding a {os.path.basename(self.lipid_type)} membrane to the system..")
             if os.path.exists(self.lipid_type):
                 lipid_patch = PDBFile(self.lipid_type)
             else:
                 lipid_patch = self.lipid_type
             try:
-                modeller.addMembrane(
-                    forcefield=self.forcefield,
-                    lipidType=lipid_patch,
-                    neutralize=True,
-                    ionicStrength=self.ionicStrength,
-                    positiveIon=self.ions[0],
-                    negativeIon=self.ions[1],
-                    minimumPadding=self.padding + max_length,
-                )
+                if self.membrane_relax_iterations:
+                    logger.info(
+                        "Relaxing the lipid packing between solute re-expansion "
+                        f"increments ({self.membrane_relax_iterations} minimisation "
+                        "iterations each); this is slow but keeps large membrane "
+                        "proteins from blowing up."
+                    )
+                    packing = relaxed_membrane_packing(self.membrane_relax_iterations)
+                else:
+                    packing = nullcontext()
+
+                with packing:
+                    modeller.addMembrane(
+                        forcefield=self.forcefield,
+                        lipidType=lipid_patch,
+                        neutralize=True,
+                        ionicStrength=self.ionicStrength,
+                        positiveIon=self.ions[0],
+                        negativeIon=self.ions[1],
+                        minimumPadding=self.padding + max_length,
+                    )
 
             except OpenMMException as e:
                 raise RuntimeError(f"Something went wrong while building the membrane.\n{e}") from e
