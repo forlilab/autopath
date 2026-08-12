@@ -13,7 +13,7 @@ from autopath.customForces import *
 import datetime
 
 import logging
-logger = logging.getLogger("autopath")
+logger = logging.getLogger("autopath.equilibration")
 
 @dataclass
 class EquilibrationStep:
@@ -442,8 +442,9 @@ class Equilibration:
                                         self.timestep)
         
         pdb = PDBFile(pdb_file)
+        prmtop = f"{os.path.splitext(pdb_file)[0]}.prmtop"
         initial_positions = pdb.positions
-        u = mda.Universe(pdb_file)
+        u = mda.Universe(prmtop)
 
         simulation = Simulation(self.topology, self.system, integrator, self.platform)
         simulation.context.setPositions(initial_positions)
