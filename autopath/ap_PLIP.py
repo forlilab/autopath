@@ -28,6 +28,36 @@ plt.rcParams["axes.facecolor"] = 'white'
 import logging
 logger = logging.getLogger("autopath")
 
+def environment_resids(topology,
+                       ligand_amber_selection: str = ":UNK",
+                       exclude_amber_selection: Optional[str] = ':Na+,Cl-,NA,CL,K,K+',
+                       cutoff: float = 6.0) -> List[int]:
+    """Residues within *cutoff* of the ligand, as 1-based Amber residue numbers.
+
+    ``Atom.resid`` is 0-BASED while an Amber ``:N`` mask is 1-BASED, so the raw
+    attribute cannot be pasted into a mask. Doing so shifts the whole environment by
+    one residue: on a 6E22 benzene box the neighbours of ``:810`` are resid
+    183/184/185/202 (ASN, PRO, PRO, THR) but the mask ``:183,184,185,202`` selects
+    ASP, ASN, PRO, ALA, and the resulting LIE total moves 2.2 kcal/mol (29%).
+
+    Water is deliberately NOT excluded: LIE scores the ligand against its whole
+    surroundings, and the solvent term is what makes the alpha/beta form approximate
+    binding rather than a bare contact energy.
+
+    :param topology: a pytraj Topology with a reference frame already set.
+    :param ligand_amber_selection: Amber mask for the ligand, e.g. ``":UNK"``.
+    :param exclude_amber_selection: Amber mask removed from the environment.
+    :param cutoff: distance cutoff in Angstrom.
+    :return: sorted 1-based residue numbers, ready to paste into a ``:`` mask.
+    """
+    sel = f"({ligand_amber_selection}<:{cutoff})"
+    if exclude_amber_selection:
+        sel += f" & !({exclude_amber_selection})"
+    sel += f" & !({ligand_amber_selection})"
+    idx = topology.select(sel)
+    return sorted({topology[i].resid + 1 for i in idx})
+
+
 class ProteinLigandAnalyzer:
     """
     Simple analysis class for protein-ligand or protein-protein MD simulations.
@@ -510,8 +540,12 @@ class ProteinLigandAnalyzer:
                 ref = pt.iterload(traj, prmtop)[0]
                 ptraj.top.set_reference(ref)
 
-                idx = ptraj.top.select(f"({ligand_amber_selection}<:{cutoff}) & !({exclude_amber_selection}) & !({ligand_amber_selection})")
-                resids = sorted({ptraj.top[i].resid for i in idx})
+                resids = environment_resids(
+                    ptraj.top,
+                    ligand_amber_selection=ligand_amber_selection,
+                    exclude_amber_selection=exclude_amber_selection,
+                    cutoff=cutoff,
+                )
                 res_string = ",".join(str(r) for r in resids)
 
             mask = f"LIE {ligand_amber_selection} :{res_string}"
@@ -556,9 +590,9 @@ class ProteinLigandAnalyzer:
         for component, ax in zip(["Total", "EELEC", "VDW"], axes.flatten()):
             mean_ = lie_df[component].mean()
             std_ = lie_df[component].std()
-            sns.lineplot(data=lie_df, x=lie_df.index, y=component, ax=ax, label=f"Mean: {mean_:.2f} kJ/mol\nStd: {std_:.2f} kJ/mol")
+            sns.lineplot(data=lie_df, x=lie_df.index, y=component, ax=ax, label=f"Mean: {mean_:.2f} kcal/mol\nStd: {std_:.2f} kcal/mol")
             ax.set_title(f"{component.upper()}")
-            ax.set_xlabel("Frame") ;    ax.set_ylabel("LIE Energy (kJ/mol)")
+            ax.set_xlabel("Frame") ;    ax.set_ylabel("LIE Energy (kcal/mol)")
             
         plt.tight_layout()
         plt.savefig(os.path.join(self.outdir, "LIE_components.png"))
