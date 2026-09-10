@@ -36,13 +36,7 @@ def environment_resids(topology,
 
     ``Atom.resid`` is 0-BASED while an Amber ``:N`` mask is 1-BASED, so the raw
     attribute cannot be pasted into a mask. Doing so shifts the whole environment by
-    one residue: on a 6E22 benzene box the neighbours of ``:810`` are resid
-    183/184/185/202 (ASN, PRO, PRO, THR) but the mask ``:183,184,185,202`` selects
-    ASP, ASN, PRO, ALA, and the resulting LIE total moves 2.2 kcal/mol (29%).
-
-    Water is deliberately NOT excluded: LIE scores the ligand against its whole
-    surroundings, and the solvent term is what makes the alpha/beta form approximate
-    binding rather than a bare contact energy.
+    one residue. Water is deliberately NOT excluded.
 
     :param topology: a pytraj Topology with a reference frame already set.
     :param ligand_amber_selection: Amber mask for the ligand, e.g. ``":UNK"``.
@@ -122,9 +116,7 @@ class ProteinLigandAnalyzer:
         applied here; slicing is currently handled at the point of analysis.
         """
         # A coordinate-only topology (PDB/GRO) gives MDAnalysis no atom types, so the
-        # RDKit conversion ProLIF depends on perceives the ligand poorly: on these systems
-        # system.pdb yields ~1.5 interactions/frame (VdWContact only) where system.prmtop
-        # yields ~17.6 including Hydrophobic. Prefer a prmtop/psf.
+        # RDKit conversion ProLIF depends on perceives the ligand poorly. Prefer a prmtop/psf.
         if str(self.top).lower().endswith((".pdb", ".gro", ".cif")):
             logger.warning(
                 f"Topology {os.path.basename(str(self.top))} carries no atom types; ProLIF "
@@ -362,9 +354,7 @@ class ProteinLigandAnalyzer:
                 ligand_sel = u.select_atoms(self.ligand_mda_selection)
                 logger.info(f"Ligand selection has {ligand_sel.n_atoms} atoms.")
                 
-                # ProLIF's signature is run(traj, lig, prot). Passing the protein first put
-                # protein residues under the "ligand" level and reduced detection to
-                # VdWContact only (no Hydrophobic, no H-bonds).
+                # ProLIF's signature is run(traj, lig, prot)
                 fp = fp.run(u.trajectory,
                             ligand_sel,
                             protein_sel,
@@ -395,9 +385,7 @@ class ProteinLigandAnalyzer:
             
             # Filter residues by frequency
             selected_residues = persistence_byRes[persistence_byRes["%"] >= frequency_cutoff/100].index.tolist()
-            # groupby(level=["protein", "ligand"]) puts the protein residue first; the old
-            # code read res[1] (the ligand) and sliced res[3:], which breaks on ProLIF's
-            # chain-suffixed labels such as "ALA50.A" -> int("50.A").
+            # groupby(level=["protein", "ligand"]) puts the protein residue first
             selected_resnames = [res[0] for res in selected_residues]
             selected_resids = [int(re.search(r"(\d+)", r).group(1))
                                for r in selected_resnames if re.search(r"(\d+)", r)]
