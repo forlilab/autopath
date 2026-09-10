@@ -69,6 +69,9 @@ class DTWPathModel(PathModel):
                  n_geom_pcs: int | None = 3,
                  geom_feature_prefix: str | tuple[str, ...] = ('dist_', 'geom_'),
                  pca_all_features: bool = True,
+                 viz_output_format: str = "pse",
+                 viz_n_lig_conformations: int = 5,
+                 viz_stick_transparency_ladder: tuple[float, float] | None = None,
                  ):
 
         self.seed = seed
@@ -84,6 +87,12 @@ class DTWPathModel(PathModel):
         # together. If False, only the geom-prefixed block is PCA'd and trace
         # features pass through raw.
         self.pca_all_features = pca_all_features
+        # Unbinding-paths figure settings, forwarded to
+        # make_unbinding_paths_visualization. Defaults reproduce the legacy
+        # session (self-contained .pse, 5 snapshots, uniform stick alpha).
+        self.viz_output_format = viz_output_format
+        self.viz_n_lig_conformations = viz_n_lig_conformations
+        self.viz_stick_transparency_ladder = viz_stick_transparency_ladder
     
     def fit_transform(self,
                     feature_df: pd.DataFrame,
@@ -440,7 +449,10 @@ class DTWPathModel(PathModel):
                         reference_pdb=reference_pdb,
                         ligand_select=ligand_select,
                         outdir=os.path.join(self.outdir, "path_analysis"),
-                        pocket_select=pocket_select
+                        pocket_select=pocket_select,
+                        output_format=self.viz_output_format,
+                        n_lig_conformations=self.viz_n_lig_conformations,
+                        stick_transparency_ladder=self.viz_stick_transparency_ladder,
                     )
                     logger.info(f"Unbinding paths visualization generated in {self.outdir}")
                 except Exception as e:

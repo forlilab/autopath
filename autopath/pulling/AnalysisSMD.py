@@ -675,6 +675,13 @@ class SMDAnalysis:
                         color_by_friction=False,
                         friction_csv=friction_csv_path,
                         pocket_select=group_B if group_B is not None else self.pocket_select,
+                        # Mirror the path model's figure settings so this rebuild
+                        # does not silently revert to the legacy PSE defaults.
+                        output_format=getattr(self.path_model, 'viz_output_format', 'pse'),
+                        n_lig_conformations=getattr(
+                            self.path_model, 'viz_n_lig_conformations', 5),
+                        stick_transparency_ladder=getattr(
+                            self.path_model, 'viz_stick_transparency_ladder', None),
                     )
                     logger.info("Friction-coloured unbinding paths PSE regenerated.")
             except Exception as _exc:
