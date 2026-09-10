@@ -124,6 +124,7 @@ class SteeredMD:
         self.log_geom_features = log_geom_features
         self._shape_calc = None    # ShapeDescriptorCalculator, built once in run()
         self._lig_heavy_idx = None # ligand heavy-atom indices for shape descriptors
+        self._exit_ref = None      # (centred pocket geometry, its principal axes)
         self.autostop_nc        = float(autostop_nc) if autostop_nc is not None else None
         self.autostop_nc_window = int(autostop_nc_window)
         self.autostop_min_displacement = float(autostop_min_displacement)
@@ -621,6 +622,10 @@ class SteeredMD:
                         or bool(set(geom_feats) & self._GEOM_POCKET))
         if needs_pocket:
             self.subset_protein_CA, _ = self._get_pocket_atoms(simulation, cutoff=0.6)
+            if any(f in geom_feats for f in self._GEOM_EXIT):
+                _st = simulation.context.getState(getPositions=True)
+                self._set_exit_reference(
+                    _st.getPositions(asNumpy=True) / openmmunit.nanometers)
         else:
             self.subset_protein_CA = None
 
@@ -769,16 +774,63 @@ class SteeredMD:
             row.update(self._shape_calc.compute(lig_ang))
         return row
 
-    def _exit_direction(self, positions_nm):
-        """Ligand->pocket COM unit vector in the pocket's principal-axis frame.
+    def _set_exit_reference(self, positions_nm):
+        """Freeze the pocket frame used by :meth:`_exit_direction`.
 
-        Returns (e1, e2, e3), the components of the unit exit vector projected
-        onto the pocket heavy-atom principal axes. Rotation/translation
-        invariant (the axes co-rotate with the pocket), so it is comparable
-        across replicas even without global alignment. Direction only — the
-        magnitude (~r) is already captured by r_before. Returns None if the
-        ligand and pocket COMs coincide.
+        Called once during setup, from the same context positions that select
+        the pocket atoms. Storing one reference geometry (and one set of axes)
+        for the whole run is what makes the exit vector continuous in time and
+        comparable across replicas: every frame is expressed in *this* frame,
+        so no per-frame sign choice is ever made.
+
+        The eigenvector signs of the reference itself are still arbitrary, but
+        they are chosen exactly once, and every replica starts from the same
+        equilibrated structure, so the choice agrees run to run.
         """
+        poc = np.asarray(positions_nm, dtype=float)[self.subset_protein_CA]
+        cB = poc.mean(0)
+        Xp = poc - cB
+        _, V = np.linalg.eigh(Xp.T @ Xp)      # columns: pocket principal axes
+        for j in range(3):                    # one-off deterministic sign pick
+            k = int(np.argmax(np.abs(V[:, j])))
+            if V[k, j] < 0:
+                V[:, j] = -V[:, j]
+        self._exit_ref = (Xp, V)
+
+    def _exit_direction(self, positions_nm):
+        """Ligand->pocket COM unit vector in the *reference* pocket frame.
+
+        Returns (e1, e2, e3): the unit exit vector rotated into the pocket
+        reference frame captured by :meth:`_set_exit_reference` and projected
+        onto that reference's principal axes. Direction only — the magnitude
+        (~r) is already carried by r_before. Returns None if the ligand and
+        pocket COMs coincide, or if the pocket is too small to superpose.
+
+        Purely per-frame: it uses only the coordinates handed to it, so it runs
+        inside the pulling loop with no trajectory and no second pass.
+
+        Why not diagonalise per frame
+        -----------------------------
+        Eigenvectors are defined up to a sign. The previous implementation
+        diagonalised the pocket every frame and fixed the sign by making the
+        largest *Cartesian* component positive. That rule lives in the lab
+        frame, so it is not rotation invariant — rotating the whole system,
+        which changes no physics, flipped the reported signs. Since the protein
+        tumbles freely during a pull, the convention flipped mid-trajectory:
+        the feature became bimodal with a hard gap at zero and took single-step
+        jumps of ~1.4 in a unit-vector component, which showed up downstream as
+        a spurious detached cluster in the path PCA.
+
+        Rotating each frame onto a fixed reference removes the choice entirely
+        rather than trying to make it deterministic. Cost is one 3x3 SVD,
+        replacing the 3x3 eigendecomposition it supersedes.
+        """
+        # getattr, not attribute access: instances built without __init__ (the
+        # geom-logging tests do this) must still self-heal rather than raise.
+        if getattr(self, '_exit_ref', None) is None:
+            self._set_exit_reference(positions_nm)   # first frame becomes the reference
+        ref_pocket, ref_axes = self._exit_ref
+
         lig = positions_nm[self.groupA_atoms]
         poc = positions_nm[self.subset_protein_CA]
         cA = lig.mean(0)
@@ -788,15 +840,19 @@ class SteeredMD:
         if nrm < 1e-9:
             return None
         u = v / nrm
+
         Xp = poc - cB
-        _, V = np.linalg.eigh(Xp.T @ Xp)      # columns: pocket principal axes
-        # Deterministic eigenvector signs (svd_flip convention: largest-|loading|
-        # component positive) so projections are comparable frame-to-frame.
-        for j in range(3):
-            k = int(np.argmax(np.abs(V[:, j])))
-            if V[k, j] < 0:
-                V[:, j] = -V[:, j]
-        e = u @ V
+        if Xp.shape[0] < 3:
+            return None
+
+        # Kabsch: proper rotation R with (Xp @ R) ~= reference pocket.
+        H = Xp.T @ ref_pocket
+        U, _, Wt = np.linalg.svd(H)
+        D = np.eye(3)
+        D[2, 2] = np.sign(np.linalg.det(U @ Wt)) or 1.0
+        R = U @ D @ Wt
+
+        e = (u @ R) @ ref_axes
         return float(e[0]), float(e[1]), float(e[2])
 
     def _compute_nc(self, positions_nm, threshold_nm=0.5):
