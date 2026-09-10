@@ -730,7 +730,11 @@ class ProteinLigandAnalyzer:
         with open(mmpbsa_in, 'r') as file:
             mmpbsa_template = file.readlines()
         
-        u = mda.Universe(prmtop, traj_fname, in_memory=True)
+        # in_memory is only needed by the persistent-water search, which revisits frames
+        # repeatedly. Loading unconditionally costs ~15 GB on a 500k-atom membrane system
+        # with 2500 frames, purely to read len(u.trajectory).
+        u = mda.Universe(prmtop, traj_fname,
+                         in_memory=persistent_waters_cutoff is not None)
         start, end, step = None, None, None
 
         if traj_slice is not None:
