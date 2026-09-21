@@ -28,19 +28,37 @@ plt.rcParams["axes.facecolor"] = 'white'
 import logging
 logger = logging.getLogger("autopath")
 
+#: Bulk environment removed from the LIE surroundings by default: ions, water and lipids.
+#: What is left is the biomolecular binding partner, which is what a single-trajectory
+#: LIE can actually report. See :func:`environment_resids` for why.
+DEFAULT_LIE_EXCLUDE = (
+    ':Na+,Cl-,NA,CL,K,K+,MG,Mg+,'                       # ions
+    'WAT,HOH,SOL,T3P,T4P,'                              # water
+    'POP,POPC,POPE,POPS,PA,OL,PC,PE,PS,CHL,DPPC'        # lipids
+)
+
+
 def environment_resids(topology,
                        ligand_amber_selection: str = ":UNK",
-                       exclude_amber_selection: Optional[str] = ':Na+,Cl-,NA,CL,K,K+',
+                       exclude_amber_selection: Optional[str] = DEFAULT_LIE_EXCLUDE,
                        cutoff: float = 6.0) -> List[int]:
     """Residues within *cutoff* of the ligand, as 1-based Amber residue numbers.
 
-    ``Atom.resid`` is 0-BASED while an Amber ``:N`` mask is 1-BASED, so the raw
-    attribute cannot be pasted into a mask. Doing so shifts the whole environment by
-    one residue. Water is deliberately NOT excluded.
+    ``Atom.resid`` is 0-BASED while an Amber ``:N`` mask is 1-BASED, so the raw attribute
+    cannot be pasted into a mask without shifting the whole environment by one residue.
+
+    Bulk solvent, ions and lipids are excluded by default. Cannonical LIE relies on the
+    ligand-solvent term cancelling between the bound and free-ligand states; a
+    single-trajectory calculation has no free state, so keeping solvent in the mask only
+    adds a non-cancelling offset. cpptraj's ``lie`` defaults its second mask to "everything
+    else" but that is a fallback, not a recommendation -- the mask is the caller's choice.
+    Pass ``exclude_amber_selection=None`` to restore it, which is only correct if the free
+    ligand is also simulated.
 
     :param topology: a pytraj Topology with a reference frame already set.
     :param ligand_amber_selection: Amber mask for the ligand, e.g. ``":UNK"``.
     :param exclude_amber_selection: Amber mask removed from the environment.
+        Defaults to :data:`DEFAULT_LIE_EXCLUDE` (ions + water + lipids).
     :param cutoff: distance cutoff in Angstrom.
     :return: sorted 1-based residue numbers, ready to paste into a ``:`` mask.
     """
@@ -466,7 +484,7 @@ class ProteinLigandAnalyzer:
                     prmtop: Optional[str] = None,
                     use_residues: Optional[List[int]] = None,
                     ligand_amber_selection: str = ":UNK",
-                    exclude_amber_selection: Optional[str] = ':Na+,Cl-,NA,CL,K,K+',
+                    exclude_amber_selection: Optional[str] = DEFAULT_LIE_EXCLUDE,
                     cutoff: float = 6.0,
                     stride: int = 1,
                     lie_options:str = 'nopbc cutvdw 10.0 cutelec 10.0' # dielec 2
@@ -481,19 +499,36 @@ class ProteinLigandAnalyzer:
         - https://pubs.acs.org/doi/10.1021/acs.jcim.9b00609
         - https://pmc.ncbi.nlm.nih.gov/articles/PMC7311763/
 
+        .. important::
+           Bound state only, so what is returned is a ligand/partner interaction energy
+           suitable for *ranking*, not a binding free energy. Solvent, ions and lipids are
+           excluded from the surroundings by default (:data:`DEFAULT_LIE_EXCLUDE`); see
+           :func:`environment_resids`. Explicit solvent must still be present in the
+           trajectory.
+
+        .. note::
+           With ``use_residues=None`` the environment is picked once from frame 0 and held
+           fixed, which is only sound for residues that stay put. Passing ``use_residues``
+           explicitly avoids both the cutoff and the frame-0 dependence.
+
         Parameters
         ----------
         prmtop : str or None
             Amber PRMTOP topology for pytraj. Defaults to ``self.top``.
         use_residues : list of int or None
-            Explicit list of residue numbers to include in the LIE environment
-            mask. If None, residues within ``cutoff`` Å of the ligand are
-            selected automatically.
+            Explicit list of 1-based residue numbers to include in the LIE
+            environment mask. If None, residues within ``cutoff`` Å of the ligand
+            are selected automatically from frame 0. Passing the binding partner's
+            residues explicitly is the most defensible option: no cutoff, no
+            frame-0 dependence.
         ligand_amber_selection : str
             Amber mask for the ligand (e.g. ``":UNK"``).
         exclude_amber_selection : str or None
-            Amber mask of atoms to exclude from the auto-selected environment
-            (ions, counter-ions, etc.).
+            Amber mask removed from the auto-selected environment. Defaults to
+            :data:`DEFAULT_LIE_EXCLUDE` (ions + water + lipids), leaving the
+            biomolecular binding partner. Pass None to include everything else,
+            which is only correct if you also simulate the free ligand and
+            subtract. Ignored when ``use_residues`` is given.
         cutoff : float
             Distance cutoff (Å) used to auto-select environment residues when
             ``use_residues`` is None.

@@ -1,16 +1,19 @@
-"""LIE environment selection: 0-based Atom.resid vs 1-based Amber masks.
+"""LIE environment selection: two wrong-answer bugs are pinned here.
 
-pytraj exposes ``Atom.resid`` 0-based, but an Amber ``:N`` mask is 1-based. Pasting the
-raw attribute into a mask shifts the whole environment by one residue. Measured on a
-6E22 benzene box, that moved the LIE total from -9.78 to -7.58 kcal/mol (29%), so this
-is a wrong-answer bug rather than a cosmetic one.
+1. 0-based vs 1-based. pytraj exposes ``Atom.resid`` 0-based, an Amber ``:N`` mask is
+   1-based, so pasting the raw attribute in shifts the whole environment by one residue.
+   Where the environment is mostly solvent, that replaces nearly all of it.
+
+2. Bulk environment in the surroundings mask. ``compute_LIE`` is bound-state only, so the
+   ligand-solvent term Aqvist LIE relies on cancelling has nothing to cancel against;
+   water, ions and lipids are excluded by default.
 
 The helper is exercised against a stub topology so the test needs no prmtop.
 """
 
 import pytest
 
-from autopath.ap_PLIP import environment_resids
+from autopath.ap_PLIP import DEFAULT_LIE_EXCLUDE, environment_resids
 
 
 class _Atom:
@@ -60,15 +63,33 @@ def test_mask_includes_cutoff_ligand_and_exclusion():
     assert "!(:810)" in mask
 
 
-def test_water_is_not_excluded_by_default():
-    """LIE scores the ligand against its whole surroundings; solvent belongs in it."""
+def test_bulk_environment_is_excluded_by_default():
+    """compute_LIE is bound-state only, so the ligand-solvent term never cancels.
+
+    Water, ions and lipids are therefore not part of the surroundings; what is left is
+    the biomolecular binding partner.
+    """
     top = _StubTopology([0], selected=[0])
     environment_resids(top)
     for water in ("WAT", "HOH", "SOL"):
-        assert water not in top.last_mask
+        assert water in top.last_mask
+    for ion in ("Na+", "Cl-", "K+"):
+        assert ion in top.last_mask
+    for lipid in ("POP", "CHL", "OL"):
+        assert lipid in top.last_mask
+
+
+def test_default_exclusion_is_applied_as_a_negation():
+    """The default must land inside a !(...) term, not be silently concatenated."""
+    top = _StubTopology([0], selected=[0])
+    environment_resids(top)
+    assert f"!({DEFAULT_LIE_EXCLUDE})" in top.last_mask
 
 
 def test_no_exclusion_mask_is_allowed():
+    """Opting back in to 'everything else' is only correct with a free-ligand reference."""
     top = _StubTopology([0], selected=[0])
     environment_resids(top, exclude_amber_selection=None)
     assert "!()" not in top.last_mask
+    for water in ("WAT", "HOH", "SOL"):
+        assert water not in top.last_mask
