@@ -1,4 +1,5 @@
 import os
+import math
 import time
 import json
 from dataclasses import dataclass
@@ -98,18 +99,22 @@ def warm_up_system(
     logger.debug(f"Timestep set to {integrator.getStepSize()}")
     simulation.context.reinitialize(preserveState=True)
 
-    # Calculate the number of temperature steps
-    nT = int((Tend - Tstart) / Tstep)
+    # Temperature increments, inclusive of both endpoints.
+    nT = max(1, math.ceil((Tend - Tstart) / Tstep) + 1) if Tend > Tstart else 1
 
     # Set initial velocities and temperature
     simulation.context.setVelocitiesToTemperature(Tstart)
 
-    # Warm up the system gradually
-    for i in range(nT + 1):
-        temperature = Tstart + i * Tstep
+    # Warm up the system gradually. Steps are apportioned cumulatively so the ramp
+    # spends exactly warming_steps rather than nT * int(warming_steps / nT).
+    taken = 0
+    for i in range(nT):
+        temperature = min(Tstart + i * Tstep, Tend)
         integrator.setTemperature(temperature)
         logger.debug(f"Temperature set to {temperature} K.")
-        simulation.step(int(warming_steps / nT))
+        target = round(warming_steps * (i + 1) / nT)
+        simulation.step(target - taken)
+        taken = target
 
     return None
 
