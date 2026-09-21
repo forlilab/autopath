@@ -153,3 +153,49 @@ def test_ligand_is_held_through_minimization(protocol):
 @pytest.mark.parametrize("protocol", ALL_PROTOCOLS)
 def test_shipped_protocols_document_their_scope(protocol):
     assert _load(protocol).get("_comment", "").strip(), protocol
+
+
+def _lipid_resnames_and_head(raw):
+    """Pull the resname list and head atom-name list out of the lipid_head selection."""
+    parts = [p.strip() for p in _selection(raw, "lipid_head").split(" and ")]
+    resnames = next(p[len("resname "):].split() for p in parts if p.startswith("resname "))
+    head = next(p[len("name "):].split() for p in parts if p.startswith("name "))
+    return resnames, head
+
+
+def _lipid21_templates():
+    import xml.etree.ElementTree as ET
+    import openmm.app
+    path = os.path.join(os.path.dirname(openmm.app.__file__),
+                        "data", "amber19", "lipid21.xml")
+    if not os.path.exists(path):
+        return None
+    root = ET.parse(path).getroot()
+    return {r.get("name"): [a.get("name") for a in r.findall("Atom")]
+            for r in root.iter("Residue")}
+
+
+def test_head_names_cover_every_non_acyl_atom_in_lipid21():
+    """Anything not captured by the head list is restrained as a tail, i.e. freed early.
+
+    Lipid21 uses CHARMM-style atom names, so the head list is checked against the
+    force field's own templates rather than against a naming convention.
+    """
+    import re
+
+    templates = _lipid21_templates()
+    if templates is None:
+        pytest.skip("lipid21.xml not available")
+
+    resnames, head = _lipid_resnames_and_head(_load(MEMB_10NS))
+    acyl = re.compile(r"^C[23]\d+$")          # sn-1 / sn-2 chain carbons
+    checked = 0
+    for resname in resnames:
+        atoms = templates.get(resname)
+        if atoms is None:                      # e.g. the truncated "POP" label
+            continue
+        checked += 1
+        heavy = [a for a in atoms if not a.startswith("H")]
+        missed = [a for a in heavy if a not in head and not acyl.match(a)]
+        assert not missed, f"{resname}: {missed} would be restrained as tail, not head"
+    assert checked > 0

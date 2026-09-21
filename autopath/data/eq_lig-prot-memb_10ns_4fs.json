@@ -6,10 +6,10 @@
     "protein_SC": "protein and not name CA C N O H*",
     "ligand": "resname UNK and not name H*",
     "lipid_head": {
-      "selection": "resname POP POPC POPE POPS DOPC DOPE DPPC DMPC and name N C11 C12 C13 C14 C15 P O11 O12 O13 O14 C1 C2 C3 O21 C21 O22 O31 C31 O32 and not name H*",
+      "selection": "resname POP POPC POPE POPS DOPC DOPE DPPC DMPC and name N C11 C12 C13 C14 C15 P O11 O12 O13 O14 C1 C2 C3 O21 C21 O22 O31 C31 O32 O13A O13B OC2 OC3 and not name H*",
       "type": "harmonic_z"
     },
-    "lipid_tail": "resname POP POPC POPE POPS DOPC DOPE DPPC DMPC and not name H* and not name N C11 C12 C13 C14 C15 P O11 O12 O13 O14 C1 C2 C3 O21 C21 O22 O31 C31 O32"
+    "lipid_tail": "resname POP POPC POPE POPS DOPC DOPE DPPC DMPC and not name H* and not name N C11 C12 C13 C14 C15 P O11 O12 O13 O14 C1 C2 C3 O21 C21 O22 O31 C31 O32 O13A O13B OC2 OC3"
   },
 
   "minimization": [
