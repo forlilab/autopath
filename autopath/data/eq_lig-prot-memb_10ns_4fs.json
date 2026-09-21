@@ -1,0 +1,42 @@
+{
+  "_comment": "Default for membrane protein + ligand. 10 ns total at 4 fs (needs HMR). Lipid tails are freed early so the protein-lipid can repack; headgroups are restrained in z only, holding leaflet registry while leaving lateral diffusion and area-per-lipid free for the semi-isotropic barostat. Lipid selections default to POPC in CHARMM atom naming; edit them for other lipids.",
+
+  "components_lookup": {
+    "protein_BB": "protein and name CA C N O",
+    "protein_SC": "protein and not name CA C N O H*",
+    "ligand": "resname UNK and not name H*",
+    "lipid_head": {
+      "selection": "resname POP POPC POPE POPS DOPC DOPE DPPC DMPC and name N C11 C12 C13 C14 C15 P O11 O12 O13 O14 C1 C2 C3 O21 C21 O22 O31 C31 O32 and not name H*",
+      "type": "harmonic_z"
+    },
+    "lipid_tail": "resname POP POPC POPE POPS DOPC DOPE DPPC DMPC and not name H* and not name N C11 C12 C13 C14 C15 P O11 O12 O13 O14 C1 C2 C3 O21 C21 O22 O31 C31 O32"
+  },
+
+  "minimization": [
+    { "name": "Stage 1", "forces": [50.0, 50.0, 50.0, 50.0, 50.0] },
+    { "name": "Stage 2", "forces": [25.0, 5.00, 25.0, 10.0, 0.00] },
+    { "name": "Stage 3", "forces": [10.0, 0.00, 10.0, 5.00, 0.00] },
+    { "name": "Stage 4", "forces": [0.00, 0.00, 1.00, 2.50, 0.00] }
+  ],
+
+  "warmup": {
+    "forces": [10.0, 5.00, 10.0, 2.50, 0.00],
+    "T_initial": 100.0,
+    "T_final": 310.0,
+    "T_step": 5.0,
+    "npt_flag": false,
+    "nsteps": 100000,
+    "stepsize": 0.001
+  },
+
+  "equilibration": [
+    { "name": "Stage 1", "forces": [10.0, 5.00, 10.0, 2.50, 0.00], "npt_flag": false, "nsteps": 125000,  "stepsize": 0.002 },
+    { "name": "Stage 2", "forces": [5.00, 2.50, 5.00, 1.00, 0.00], "npt_flag": true,  "nsteps": 62500,   "stepsize": 0.004 },
+    { "name": "Stage 3", "forces": [2.50, 1.25, 2.50, 0.50, 0.00], "npt_flag": true,  "nsteps": 100000,  "stepsize": 0.004 },
+    { "name": "Stage 4", "forces": [1.00, 0.75, 1.00, 0.25, 0.00], "npt_flag": true,  "nsteps": 125000,  "stepsize": 0.004 },
+    { "name": "Stage 5", "forces": [0.50, 0.50, 0.50, 0.10, 0.00], "npt_flag": true,  "nsteps": 187500,  "stepsize": 0.004 },
+    { "name": "Stage 6", "forces": [0.25, 0.25, 0.25, 0.00, 0.00], "npt_flag": true,  "nsteps": 250000,  "stepsize": 0.004 },
+    { "name": "Stage 7", "forces": [0.10, 0.00, 0.10, 0.00, 0.00], "npt_flag": true,  "nsteps": 375000,  "stepsize": 0.004 },
+    { "name": "Stage 8", "forces": [0.00, 0.00, 0.00, 0.00, 0.00], "npt_flag": true,  "nsteps": 1312500, "stepsize": 0.004 }
+  ]
+}

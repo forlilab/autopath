@@ -25,7 +25,7 @@
 
     "equilibration": {
         "run_equilibration": true,
-        "protocol_fname": "autopath/data/equilibration_lig_prot_memb.json"
+        "protocol_fname": "autopath/data/eq_lig-prot_5ns_4fs.json"
     },
 
     "sMD": {

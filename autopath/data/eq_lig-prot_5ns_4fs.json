@@ -1,4 +1,6 @@
 {
+  "_comment": "Default for soluble protein + ligand in water. 5 ns total at 4 fs (needs HMR). Restraints release solvent first, then sidechains, then backbone; the ligand tracks the backbone so the pocket never breathes more than the ligand it encloses.",
+
   "components_lookup": {
     "protein_BB": "protein and name CA C N O",
     "protein_SC": "protein and not name CA C N O H*",
@@ -7,12 +9,13 @@
   
   "minimization": [
     { "name": "Stage 1", "forces": [50.0, 50.0, 50.0] },
-    { "name": "Stage 2", "forces": [5.00, 1.00, 0.00] },
-    { "name": "Stage 3", "forces": [1.00, 0.00, 0.00] },
-    { "name": "Stage 4", "forces": [0.00, 0.00, 0.00] }
+    { "name": "Stage 2", "forces": [5.00, 1.00, 5.00] },
+    { "name": "Stage 3", "forces": [1.00, 0.00, 1.00] },
+    { "name": "Stage 4", "forces": [0.00, 0.00, 1.00] }
   ],
   
   "warmup": {
+    "forces": [15.0, 7.50, 15.0],
     "T_initial": 50.0,
     "T_final": 300.0,
     "T_step": 5.0,
@@ -22,12 +25,12 @@
   },
   
   "equilibration": [
-    { "name": "Stage 1", "forces": [10.0, 5.00, 5.00], "npt_flag": false, "nsteps": 125000, "stepsize": 0.002 },
-    { "name": "Stage 2", "forces": [5.00, 2.50, 4.00], "npt_flag": true, "nsteps": 62500, "stepsize": 0.004 },
-    { "name": "Stage 3", "forces": [2.50, 1.25, 3.00], "npt_flag": true, "nsteps": 62500, "stepsize": 0.004 },
-    { "name": "Stage 4", "forces": [1.00, 0.75, 1.50], "npt_flag": true, "nsteps": 125000, "stepsize": 0.004 },
-    { "name": "Stage 5", "forces": [0.50, 0.50, 1.00], "npt_flag": true, "nsteps": 125000, "stepsize": 0.004 },
-    { "name": "Stage 6", "forces": [0.25, 0.00, 0.50], "npt_flag": true, "nsteps": 250000, "stepsize": 0.004 },
+    { "name": "Stage 1", "forces": [10.0, 5.00, 10.0], "npt_flag": false, "nsteps": 125000, "stepsize": 0.002 },
+    { "name": "Stage 2", "forces": [5.00, 2.50, 5.00], "npt_flag": true, "nsteps": 62500, "stepsize": 0.004 },
+    { "name": "Stage 3", "forces": [2.50, 1.25, 2.50], "npt_flag": true, "nsteps": 62500, "stepsize": 0.004 },
+    { "name": "Stage 4", "forces": [1.00, 0.75, 1.00], "npt_flag": true, "nsteps": 125000, "stepsize": 0.004 },
+    { "name": "Stage 5", "forces": [0.50, 0.50, 0.50], "npt_flag": true, "nsteps": 125000, "stepsize": 0.004 },
+    { "name": "Stage 6", "forces": [0.25, 0.00, 0.25], "npt_flag": true, "nsteps": 250000, "stepsize": 0.004 },
     { "name": "Stage 7", "forces": [0.00, 0.00, 0.00], "npt_flag": true, "nsteps": 250000, "stepsize": 0.004 },
     { "name": "Stage 8", "forces": [0.00, 0.00, 0.00], "npt_flag": true, "nsteps": 287500, "stepsize": 0.004 }
   ]
