@@ -22,7 +22,7 @@
   "warmup": {
     "forces": [10.0, 5.00, 10.0, 2.50, 0.00],
     "T_initial": 100.0,
-    "T_final": 310.0,
+    "T_final": 300.0,
     "T_step": 5.0,
     "npt_flag": false,
     "nsteps": 100000,
