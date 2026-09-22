@@ -11,7 +11,7 @@ import openmm.unit as openmmunit
 
 # AutoPath imports
 from autopath.utils import *
-from autopath.customForces import add_flatbottom_COM_restraints, add_harmonic_restraints, print_current_forces
+from autopath.customForces import add_flatbottom_COM_restraints, add_harmonic_restraints, print_current_forces, remove_openmm_force
 from autopath.equilibration import warm_up_system
 
 try:
@@ -204,16 +204,37 @@ class RelaxMD:
 
         simulation.step(npt_steps)  # 0.1 ns at default settings
 
-        # Remove temporary harmonic restraints before returning the system.
-        forces_to_remove = []
-        for f_idx in range(system.getNumForces()):
-            force = system.getForce(f_idx)
-            if force.getName().startswith("k_harmonic_restrain"):
-                logger.info(f"Removing force {force.getName()} at index {f_idx}.")
-                forces_to_remove.append(f_idx)
+        simulation, system = self._save_outputs(simulation, system, run_id)
 
-        for f_idx in sorted(forces_to_remove, reverse=True):
-            system.removeForce(f_idx)
+        finaldist = get_COM_dist(simulation, self.ligand_atoms, self.pocket_atoms)
+
+        logger.info(f"{run_id} - Initial:{startdist:.3f} nm - Final:{finaldist:.3f} nm")
+
+        simulation_time = time.monotonic() - start_time
+        logger.info(f"Finished {run_id} relaxation in {simulation_time/60:.2f} min.")
+        return system
+
+    def _save_outputs(self, simulation, system: System, run_id: str):
+        """Remove the temporary restraints and write the relaxation outputs.
+
+        Parameters
+        ----------
+        simulation : openmm.app.Simulation
+            Simulation at the end of the NPT run.
+        system : System
+            System the run was carried out on; the restraints are removed in-place.
+        run_id : str
+            Prefix of the checkpoint, state, system XML and PDB written to ``self.out_dir``.
+
+        Returns
+        -------
+        tuple
+            The simulation holding the final state and the restraint-free system.
+        """
+        system = remove_openmm_force(system, "k_harmonic_restrain")
+        # A context keeps the global parameters of a removed force, and saveState would write
+        # them into a state that the saved system can no longer load. Rebuilding drops them.
+        simulation = rebuild_simulation(simulation, system)
 
         final_positions = simulation.context.getState(getPositions=True).getPositions()
         # Persist correct box vectors to the PDB so downstream tools read the right unit cell.
@@ -224,10 +245,4 @@ class RelaxMD:
         save_system(system, f"{self.out_dir}/{run_id}_relax_system.xml")
         save_pdb(self.topology, final_positions, f"{self.out_dir}/{run_id}_relax.pdb")
 
-        finaldist = get_COM_dist(simulation, self.ligand_atoms, self.pocket_atoms)
-
-        logger.info(f"{run_id} - Initial:{startdist:.3f} nm - Final:{finaldist:.3f} nm")
-
-        simulation_time = time.monotonic() - start_time
-        logger.info(f"Finished {run_id} relaxation in {simulation_time/60:.2f} min.")
-        return system
+        return simulation, system
