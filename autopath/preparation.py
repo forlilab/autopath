@@ -32,6 +32,49 @@ from autopath.utils import assign_bondOrders, add_variants, save_pdb, save_syste
 import logging
 logger = logging.getLogger("autopath.preparation")
 
+# Water models whose residue carries an extra site beyond O/H/H.
+FOUR_SITE_WATER_MODELS = ("tip4pew", "tip5p", "swm4ndp")
+
+# 3-site stand-in for each extra-site water XML, used only to place a membrane.
+THREE_SITE_WATER_XML = {
+    "opc.xml": "opc3.xml",
+    "tip4pew.xml": "tip3p.xml",
+    "tip4pfb.xml": "tip3pfb.xml",
+    "tip5p.xml": "tip3p.xml",
+    "swm4ndp.xml": "tip3p.xml",
+}
+
+
+def substitute_three_site_water(forcefield_files: list) -> tuple[list, list]:
+    """Replace extra-site water XMLs in a force field list with 3-site counterparts.
+
+    The directory prefix is preserved, so the substitute comes from the same force field
+    release as the original.
+
+    Parameters
+    ----------
+    forcefield_files : list of str
+        OpenMM ForceField XML paths.
+
+    Returns
+    -------
+    files : list of str
+        The input list with every extra-site water XML substituted.
+    swapped : list of tuple
+        The ``(original, substitute)`` pairs that were applied.
+    """
+    files = []
+    swapped = []
+    for xml in forcefield_files:
+        directory, name = os.path.split(xml)
+        substitute = THREE_SITE_WATER_XML.get(name)
+        if substitute is None:
+            files.append(xml)
+            continue
+        files.append(os.path.join(directory, substitute))
+        swapped.append((xml, files[-1]))
+    return files, swapped
+
 
 @contextmanager
 def relaxed_membrane_packing(min_iterations: int = 200):
@@ -152,7 +195,9 @@ class SystemPreparation:
         self.out_dir = out_dir
         os.makedirs(out_dir, exist_ok=True)
 
+        self.forcefield_files = list(forcefield)
         self.forcefield = ForceField(*forcefield)
+        self._template_generators = []
 
         self.hydrogenMass = (hydrogenMass * openmmunit.amu if hydrogenMass is not None else None)
         self.boxShape = boxShape  # cube, dodecahedron
@@ -251,6 +296,44 @@ class SystemPreparation:
                 f"Supported: openff-*, espaloma-*, gaff-*."
             )
         return lig_ff, family_aliases[family_prefix]
+
+    def _three_site_forcefield(self) -> ForceField:
+        """Rebuild the force field with its extra-site water swapped for a 3-site one.
+
+        ``Modeller.addMembrane`` takes no water-model argument and parametrizes both its
+        bundled lipid patch and the solute with the force field it is handed, so an
+        extra-site water model fails there before any virtual site could be added. The
+        substitute only places lipids, waters and ions; every particle is parametrized
+        afterwards from the real force field.
+
+        Returns
+        -------
+        openmm.app.ForceField
+            The configured force field with 3-site water, carrying the same ligand
+            template generators.
+
+        Raises
+        ------
+        ValueError
+            If no file in the force field list is a known extra-site water XML.
+        """
+        files, swapped = substitute_three_site_water(self.forcefield_files)
+        if not swapped:
+            raise ValueError(
+                f"Water model {self.water_model!r} needs an extra site, but none of "
+                f"{self.forcefield_files} is a known extra-site water XML "
+                f"({sorted(THREE_SITE_WATER_XML)}), so no 3-site force field can be "
+                "derived to build the membrane with."
+            )
+
+        logger.info(
+            "Building the membrane with 3-site water "
+            f"({', '.join(f'{a} -> {b}' for a, b in swapped)}).."
+        )
+        forcefield = ForceField(*files)
+        for generator in self._template_generators:
+            forcefield.registerTemplateGenerator(generator)
+        return forcefield
 
     def _ligand_to_mol(self, lig_fname: str = None, lig_smiles: str = None, lig_from_xray: bool = False):
         """Load a ligand file and return an OpenFF ``Molecule``.
@@ -354,6 +437,7 @@ class SystemPreparation:
             )
 
         self.forcefield.registerTemplateGenerator(template_generator.generator)
+        self._template_generators.append(template_generator.generator)
 
         ligand_off_topology = offTopology.from_molecules(molecules=[ligand])
         ligand_omm_topology = ligand_off_topology.to_openmm()
@@ -471,10 +555,12 @@ class SystemPreparation:
             modeller = Modeller(ligand_topology, ligand_positions)
 
         # A 4-site water model needs its virtual site on EVERY water, including the
-        # crystallographic ones carried in from the input, and this has to happen BEFORE
-        # solvation: addSolvent computes the neutralising charge and therefore requires every
-        # residue to match a template.
-        if self.water_model in ("tip4pew", "tip5p", "swm4ndp"):
+        # crystallographic ones carried in from the input. On the solvation path that has to
+        # happen BEFORE addSolvent, which computes the neutralising charge and therefore
+        # requires every residue to match a template. addMembrane cannot take a 4-site force
+        # field at all, so on the membrane path the promotion is deferred until after it.
+        needs_extra_particles = self.water_model in FOUR_SITE_WATER_MODELS
+        if needs_extra_particles and not self.is_membrane:
             logger.info(f"Adding extra particles for the {self.water_model} water model..")
             modeller.addExtraParticles(self.forcefield)
 
@@ -501,6 +587,9 @@ class SystemPreparation:
                     modeller.topology.setPeriodicBoxVectors(None)
 
             logger.info(f"Adding a {os.path.basename(self.lipid_type)} membrane to the system..")
+            membrane_forcefield = (
+                self._three_site_forcefield() if needs_extra_particles else self.forcefield
+            )
             if os.path.exists(self.lipid_type):
                 lipid_patch = PDBFile(self.lipid_type)
             else:
@@ -519,7 +608,7 @@ class SystemPreparation:
 
                 with packing:
                     modeller.addMembrane(
-                        forcefield=self.forcefield,
+                        forcefield=membrane_forcefield,
                         lipidType=lipid_patch,
                         neutralize=True,
                         ionicStrength=self.ionicStrength,
@@ -530,6 +619,10 @@ class SystemPreparation:
 
             except OpenMMException as e:
                 raise RuntimeError(f"Something went wrong while building the membrane.\n{e}") from e
+
+            if needs_extra_particles:
+                logger.info(f"Adding extra particles for the {self.water_model} water model..")
+                modeller.addExtraParticles(self.forcefield)
 
         else:
             logger.info(f"Solvating the system..")
