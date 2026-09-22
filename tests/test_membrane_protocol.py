@@ -155,14 +155,6 @@ def test_shipped_protocols_document_their_scope(protocol):
     assert _load(protocol).get("_comment", "").strip(), protocol
 
 
-def _lipid_resnames_and_head(raw):
-    """Pull the resname list and head atom-name list out of the lipid_head selection."""
-    parts = [p.strip() for p in _selection(raw, "lipid_head").split(" and ")]
-    resnames = next(p[len("resname "):].split() for p in parts if p.startswith("resname "))
-    head = next(p[len("name "):].split() for p in parts if p.startswith("name "))
-    return resnames, head
-
-
 def _lipid21_templates():
     import xml.etree.ElementTree as ET
     import openmm.app
@@ -175,27 +167,59 @@ def _lipid21_templates():
             for r in root.iter("Residue")}
 
 
-def test_head_names_cover_every_non_acyl_atom_in_lipid21():
-    """Anything not captured by the head list is restrained as a tail, i.e. freed early.
+def _template_universe(residues):
+    """One residue per (resname, atom names) pair, no coordinates."""
+    mda = pytest.importorskip("MDAnalysis")
+    names, resindex, resnames = [], [], []
+    for i, (resname, atoms) in enumerate(residues):
+        names += atoms
+        resindex += [i] * len(atoms)
+        resnames.append(resname)
+    u = mda.Universe.empty(len(names), n_residues=len(residues),
+                           atom_resindex=resindex, trajectory=False)
+    u.add_TopologyAttr("name", names)
+    u.add_TopologyAttr("resname", resnames)
+    u.add_TopologyAttr("resid", list(range(1, len(residues) + 1)))
+    return u
 
-    Lipid21 uses CHARMM-style atom names, so the head list is checked against the
-    force field's own templates rather than against a naming convention.
-    """
-    import re
 
+@pytest.fixture(scope="module")
+def lipid_universe():
+    """Every lipid21 template, plus POPC under the truncated "POP" label."""
     templates = _lipid21_templates()
     if templates is None:
         pytest.skip("lipid21.xml not available")
+    residues = sorted(templates.items()) + [("POP", templates["POPC"])]
+    return _template_universe(residues)
 
-    resnames, head = _lipid_resnames_and_head(_load(MEMB_10NS))
+
+def _split(u, raw, resname):
+    res = u.select_atoms(f"resname {resname}")
+    heavy = {a.name for a in res if not a.name.startswith("H")}
+    head = {a.name for a in u.select_atoms(_selection(raw, "lipid_head")) if a.resname == resname}
+    tail = {a.name for a in u.select_atoms(_selection(raw, "lipid_tail")) if a.resname == resname}
+    return heavy, head, tail
+
+
+@pytest.mark.parametrize("resname", ["POP", "POPC", "POPE", "POPS", "DOPC", "DOPE", "DPPC", "DMPC"])
+def test_phospholipid_heads_and_tails_partition_the_template(lipid_universe, resname):
+    """Lipid21 uses CHARMM-style atom names, so the split is checked against the
+    force field's own templates. Any polar atom missed by the head list would be
+    restrained as a tail, i.e. freed early."""
+    import re
+
+    heavy, head, tail = _split(lipid_universe, _load(MEMB_10NS), resname)
+    assert head and tail
+    assert not head & tail
+    assert head | tail == heavy
     acyl = re.compile(r"^C[23]\d+$")          # sn-1 / sn-2 chain carbons
-    checked = 0
-    for resname in resnames:
-        atoms = templates.get(resname)
-        if atoms is None:                      # e.g. the truncated "POP" label
-            continue
-        checked += 1
-        heavy = [a for a in atoms if not a.startswith("H")]
-        missed = [a for a in heavy if a not in head and not acyl.match(a)]
-        assert not missed, f"{resname}: {missed} would be restrained as tail, not head"
-    assert checked > 0
+    assert all(acyl.match(a) for a in tail), sorted(a for a in tail if not acyl.match(a))
+
+
+def test_cholesterol_is_anchored_by_its_hydroxyl_only(lipid_universe):
+    """CHARMM sterol names reuse C1-C3/C11-C15/C21; only O3 may be z-restrained and
+    the sterol body stays free like the acyl tails."""
+    heavy, head, tail = _split(lipid_universe, _load(MEMB_10NS), "CHL1")
+    assert head == {"O3"}
+    assert not tail
+    assert len(heavy) == 28

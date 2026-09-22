@@ -1,12 +1,12 @@
 {
-  "_comment": "Default for membrane protein + ligand. 10 ns total at 4 fs (needs HMR). Lipid tails are freed early so the protein-lipid can repack; headgroups are restrained in z only, holding leaflet registry while leaving lateral diffusion and area-per-lipid free for the semi-isotropic barostat. Lipid selections default to POPC in CHARMM atom naming; edit them for other lipids.",
+  "_comment": "Default for membrane protein + ligand. 10 ns total at 4 fs (needs HMR). Lipid tails are freed early so the protein-lipid can repack; headgroups are restrained in z only, holding leaflet registry while leaving lateral diffusion and area-per-lipid free for the semi-isotropic barostat. Cholesterol (CHL1) is anchored by its O3 hydroxyl only. Lipid selections use Lipid21 (CHARMM-style) atom names; edit them for other lipids.",
 
   "components_lookup": {
     "protein_BB": "protein and name CA C N O",
     "protein_SC": "protein and not name CA C N O H*",
     "ligand": "resname UNK and not name H*",
     "lipid_head": {
-      "selection": "resname POP POPC POPE POPS DOPC DOPE DPPC DMPC and name N C11 C12 C13 C14 C15 P O11 O12 O13 O14 C1 C2 C3 O21 C21 O22 O31 C31 O32 O13A O13B OC2 OC3 and not name H*",
+      "selection": "(resname POP POPC POPE POPS DOPC DOPE DPPC DMPC and name N C11 C12 C13 C14 C15 P O11 O12 O13 O14 C1 C2 C3 O21 C21 O22 O31 C31 O32 O13A O13B OC2 OC3 and not name H*) or (resname CHL1 and name O3)",
       "type": "harmonic_z"
     },
     "lipid_tail": "resname POP POPC POPE POPS DOPC DOPE DPPC DMPC and not name H* and not name N C11 C12 C13 C14 C15 P O11 O12 O13 O14 C1 C2 C3 O21 C21 O22 O31 C31 O32 O13A O13B OC2 OC3"
