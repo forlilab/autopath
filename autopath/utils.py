@@ -323,6 +323,41 @@ def save_simulation(simulation, out_path: str) -> None:
     return
 
 
+def rebuild_simulation(simulation, system: System):
+    """Rebuild a simulation on a modified system, carrying the current state over.
+
+    ``Context.reinitialize(preserveState=True)`` restores global parameters by name, so
+    the parameters of a removed force stay in the context and leak into saved states.
+    A fresh context only knows the parameters the given system still defines.
+
+    Parameters
+    ----------
+    simulation : openmm.app.Simulation
+        Simulation holding the state to carry over; its context is left untouched.
+    system : System
+        System the new simulation is built on.
+
+    Returns
+    -------
+    openmm.app.Simulation
+        New simulation with the positions, velocities, box vectors and time of the old one.
+    """
+    state = simulation.context.getState(getPositions=True, getVelocities=True)
+    # An integrator can only drive one context, so hand the new one a copy.
+    integrator = XmlSerializer.deserialize(XmlSerializer.serialize(simulation.integrator))
+
+    new_simulation = app.Simulation(
+        simulation.topology, system, integrator, simulation.context.getPlatform()
+    )
+    new_simulation.context.setPeriodicBoxVectors(*state.getPeriodicBoxVectors())
+    new_simulation.context.setPositions(state.getPositions())
+    new_simulation.context.setVelocities(state.getVelocities())
+    new_simulation.context.setTime(state.getTime())
+    new_simulation.currentStep = simulation.currentStep
+
+    return new_simulation
+
+
 def load_system(system_path: str) -> System:
     """Loads the desired system.
 

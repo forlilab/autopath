@@ -697,7 +697,10 @@ class Equilibration:
 
         # remove the restraint forces after equilibration
         self.system = remove_openmm_force(self.system, "k_")
-        simulation.context.reinitialize(preserveState=True)
+        # reinitialize(preserveState=True) would keep the removed forces' global parameters
+        # in the context and write them into the saved state, which then cannot be loaded
+        # back against the saved system. A fresh simulation carries only what remains.
+        simulation = rebuild_simulation(simulation, self.system)
 
         final_positions = simulation.context.getState(getPositions=True).getPositions()
         self.topology.setPeriodicBoxVectors(simulation.context.getState(getPositions=True).getPeriodicBoxVectors()) #saves correct box vectors to the pdb
