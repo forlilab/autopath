@@ -1,7 +1,7 @@
 {
     "general": {
         "VS_mode": false,
-        "pdb_path": null,
+        "pdb_path": "examples/data/3ptb.pdb",
         "do_fix_pdb": true,
         "pocket_selection": "same residue as protein and (around 4 resname UNK) and (not name H*)",
         "temperature": 300,
@@ -11,9 +11,9 @@
     "preparation": {
         "run_preparation": true,
         "forcefield": ["amber14/protein.ff14SB.xml", "amber14/tip3pfb.xml", "amber/tip3pfb_HFE_multivalent.xml"],
-        "hydrogenMass": 3.0,
+        "hydrogenMass": 1.5,
         "timestep": 0.004,
-        "lig_ff": "espaloma",
+        "lig_ff": "openff-2.3.0",
         "boxShape": "dodecahedron",
         "padding": 1.2,
         "ionicStrength": 0.15,
@@ -37,10 +37,7 @@
         },
         "sMD_max_pulling_dist": 2.0,
         "sMD_max_r_offset": 3.0,
-        "sMD_autostop_nc": false,
-        "sMD_autostop_nc_threshold": 1.0,
-        "sMD_autostop_lag_sigma": 5.0,
-        "sMD_autostop_lag_window": 20,
+        "sMD_autostop_nc": null,
         "sMD_autostop_min_displacement": 0.5,
         "sMD_time": null,
         "sMD_steps_per_move": null,
