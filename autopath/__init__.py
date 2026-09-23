@@ -34,6 +34,7 @@ def __getattr__(name):
         If *name* is not registered in the lazy-import table.
     """
     _lazy_imports = {
+        "AutoPath":             ".autopath_core",
         "Config":               ".config",
         "Equilibration":        ".equilibration",
         "SystemPreparation":    ".preparation",
@@ -54,6 +55,7 @@ def __getattr__(name):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
+    "AutoPath",
     "Config",
     "Equilibration",
     "SystemPreparation",
