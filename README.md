@@ -25,10 +25,10 @@ AutoPath is designed for the practical middle ground:
 ## ⚙️ Core Features
 
 - **End-to-end pipeline**: fully automated 6-stage workflow from raw PDB to ΔG°_b, driven by a single JSON config file — no manual handoffs between stages.
-- **Force field flexibility**: protein parametrized with AMBER14 by default; ligand force field selectable per run from OpenFF 2.x, GAFF2, or Espaloma 0.3.x to match your accuracy vs. speed trade-off.
-- **Membrane support**: solvation in explicit water or embedding in lipid bilayer systems, with support for CHARMM-GUI-compatible lipid types for membrane-associated targets.
-- **Steered MD with path analysis**: multi-speed, multi-replica COM-distance pulling; DTW-based clustering separates distinct unbinding pathways; Jarzynski and cumulant free-energy estimators give thermodynamic profiles from nonequilibrium trajectories.
-- **Kinetics from nonequilibrium work**: friction profile Γ(r) built from dissipated work along the pulling coordinate; k_off estimated via Kramers/Pontryagin mean-first-passage-time theory.
+- **Force field flexibility**: protein parametrized with AMBER14 by default; ligand force field selectable per run from OpenFF, Espaloma, or GAFF (e.g. `"openff-2.3.0"`, `"espaloma-0.3.2"`, `"gaff-2.11"`) to match your accuracy vs. speed trade-off.
+- **Membrane support**: solvation in explicit water or embedding in a lipid bilayer (POPC, POPE, DLPC, DLPE, DMPC, DOPC, DPPC, or a custom lipid patch PDB) for membrane-associated targets, with a dedicated membrane equilibration protocol.
+- **Steered MD with path analysis**: multi-speed, multi-replica COM-distance pulling with an automatic per-speed convergence ladder; DTW-based clustering separates distinct unbinding pathways (or disable clustering entirely for a single path); Jarzynski, cumulant, and force/raw-work estimators give thermodynamic profiles from nonequilibrium trajectories.
+- **Kinetics from nonequilibrium work**: friction profile Γ(r) built from dissipated (or raw) work along the pulling coordinate; k_off estimated via Kramers/Pontryagin mean-first-passage-time theory.
 - **Well-tempered funnel metadynamics**: multi-walker metadynamics (Limongelli 2013) seeded from sMD pathway milestones; optional funnel restraint derived from trajectory PCA confines sampling to the relevant unbinding channel; automatic stuck-walker detection and retry keep runs productive.
 - **Standard-state correction**: Limongelli funnel volume correction converts the raw free energy profile to ΔG°_b and pK_d directly comparable to experimental binding affinities.
 - **Modular and scriptable**: each stage can be run independently via the CLI or imported as a Python library, so you can drop AutoPath classes into your own workflows.
@@ -41,7 +41,7 @@ AutoPath orchestrates a complete workflow, from protein–ligand complexes to ac
 
 ### 1. System Preparation (`SystemPreparation`)
 
-Fixes and completes the input PDB using PDBFixer, then assigns force field parameters to the protein (AMBER14 by default) and ligand (OpenFF 2.x, GAFF2, or Espaloma template generators — selectable at runtime). The prepared system is solvated in explicit water or embedded in a lipid bilayer for membrane targets. Stage outputs are a serialized `system.xml` and a `system.pdb` ready for simulation.
+Fixes and completes the input PDB using PDBFixer, then assigns force field parameters to the protein (AMBER14 by default) and ligand (OpenFF, Espaloma, or GAFF template generators — selectable at runtime). The prepared system is solvated in explicit water or embedded in a lipid bilayer for membrane targets. Stage outputs are a serialized `system.xml` and a `system.pdb` ready for simulation.
 
 ### 2. Equilibration (`Equilibration`)
 
@@ -81,7 +81,7 @@ micromamba activate autopath
 ```bash
 micromamba install -c conda-forge \
   openmm openmmtools espaloma pdbfixer parmed mdanalysis ambertools \
-  rdkit pandas deeptime kmedoids dtaidistance pymol-open-source \
+  rdkit pandas deeptime kmedoids dtaidistance pymol-open-source prolif \
   "openff-toolkit>=0.17" "openff-forcefields==2026.01.0" \
   molscrub meeko -y
 
@@ -111,20 +111,18 @@ pip install -e .
 
 ## ⚡ Quickstart
 
-Run the full integrated workflow with a single receptor–ligand pair:
+Run the full integrated workflow with a single receptor–ligand pair. The receptor path is set via `pdb_path` inside the JSON config — there is no `--rec` flag; only `--config` and `--lig` are read from the command line:
 
 ```bash
 python autopath/cli/run_AutoPath.py \
   --config autopath/data/config.json \
-  --rec examples/data/3ptb.pdb \
   --lig examples/data/3ptb.sdf
 ```
 
-Required inputs:
+`autopath/data/config.json` ships pointing at `examples/data/3ptb.pdb`, so the command above runs out of the box. Required inputs:
 
-- `--config`: path to a JSON configuration file covering all pipeline stages
-- `--rec`: receptor PDB file
-- `--lig`: ligand SDF file
+- `--config`: path to a JSON configuration file covering all pipeline stages (including `pdb_path`, the receptor PDB)
+- `--lig`: ligand SDF file, or a directory of `*.sdf` files to run in sequence
 
 Below is a minimal `config.json` skeleton with the most commonly adjusted parameters. All section keys and their defaults match the `Config` class exactly:
 
@@ -147,24 +145,24 @@ Below is a minimal `config.json` skeleton with the most commonly adjusted parame
     "protocol_fname": "autopath/data/eq_lig-prot_5ns_4fs.json"
   },
   "sMD": {
-    "sMD_pulling_speeds": {"0.001": 3, "0.002": 3, "0.005": 3},
-    "sMD_max_pulling_dist": 2.0,
+    "sMD_pulling_speeds": {"0.005": 5, "0.0025": 5, "0.001": 5},
+    "sMD_max_pulling_dist": 3.5,
     "sMD_time": null
   },
   "milestones": {
     "n_milestones": 5,
-    "milestone_mode": "per_path"
+    "milestone_mode": "all_medoids"
   },
   "metadynamics": {
     "mMD_bias_factor": 15,
     "mMD_hill_height": 1.2,
-    "mMD_time": 10,
-    "mMD_use_funnel_potential": true
+    "mMD_time": 5,
+    "mMD_use_funnel_potential": false
   }
 }
 ```
 
-A complete list of configuration options with defaults is in the `Config` class docstring (`autopath/config.py`).
+A complete list of configuration options with defaults is in the `Config` class docstring (`autopath/config.py`), which is kept 1-to-1 in sync with the `AutoPath` constructor.
 
 ---
 
@@ -187,7 +185,7 @@ AutoPath configuration files use a nested JSON structure: each top-level key is 
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `lig_ff` | str | `"openff-2.3.0"` | OpenFF force field version for small-molecule parameterisation (also accepts `"espaloma"`, `"gaff2"`) |
+| `lig_ff` | str | `"openff-2.3.0"` | Ligand force field as `"<family>-<version>"`: `"openff-*"`, `"espaloma-*"`, or `"gaff-*"` (e.g. `"espaloma-0.3.2"`, `"gaff-2.11"`) |
 | `forcefield` | list | AMBER14 + TIP3P-FB | OpenMM XML force-field files for protein and solvent |
 | `boxShape` | str | `"dodecahedron"` | Simulation box shape: `"dodecahedron"` or `"cube"` |
 | `padding` | float | `1.2` | Minimum distance (nm) between solute and box face |
@@ -206,12 +204,15 @@ AutoPath configuration files use a nested JSON structure: each top-level key is 
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `sMD_pulling_speeds` | dict | `{"0.001": null, "0.002": null, "0.003": null}` | Mapping of pulling speed (nm/ps) to replica count (`null` = adaptive) |
-| `sMD_max_pulling_dist` | float | `2.0` | Maximum COM displacement from the binding site in nm |
+| `sMD_pulling_speeds` | dict | `{0.005: 5, 0.0025: 5, 0.001: 5}` | Mapping of pulling speed (nm/ps) to replica count; the count is a minimum-replicas floor when `sMD_converge_speeds=true`, or the total count otherwise |
+| `sMD_max_pulling_dist` | float | `3.5` | Maximum COM displacement from the binding site in nm |
 | `sMD_time` | int | `null` | Maximum pulling time in ns (overrides step-count calculation when set) |
+| `sMD_converge_speeds` | bool | `true` | Keep adding replicas per speed (up to `sMD_max_replicas`) until convergence, instead of a fixed replica count |
 | `sMD_max_replicas` | int | `50` | Hard cap on replicas per speed to prevent unbounded convergence loops |
 | `sMD_clust_selection` | str | `null` | Additional MDAnalysis selection for clustering features beyond ligand COM distance |
-| `sMD_autostop_nc` | bool | `false` | Stop a replica automatically when native contacts drop below threshold |
+| `sMD_path_model` | str | `"dtw"` | Path-clustering model: `"dtw"` (DTW + k-medoids) or `"null"` (no clustering, a single path) |
+| `sMD_autostop_nc` | float | `0.01` | Stop a replica once native contacts drop below this fraction of their initial value; `null` disables the check |
+| `sMD_autostop_estimator` | str | `"cumulant"` | Free-energy estimator used to judge convergence: `"cumulant"`, `"jarzynski"`, or `"force"` |
 
 **`milestones`**
 
@@ -219,19 +220,22 @@ AutoPath configuration files use a nested JSON structure: each top-level key is 
 |-----------|------|---------|-------------|
 | `extract_milestones` | bool | `true` | Extract representative frames from sMD trajectories as metadynamics starting points |
 | `n_milestones` | int | `5` | Number of milestones to extract per path |
-| `milestone_mode` | str | `"per_path"` | Extraction strategy: `"per_path"` or `"all_medoids"` |
+| `milestone_mode` | str | `"all_medoids"` | Extraction strategy: `"all_medoids"` (pool all path medoids) or `"per_path"` |
 | `relax_steps` | int | `25000` | MD steps for milestone relaxation before metadynamics launch |
 
 **`metadynamics`**
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `mMD_bias_factor` | int | `10` | Well-tempered bias factor (gamma); higher values flatten barriers more aggressively |
+| `mMD_bias_factor` | int | `15` | Well-tempered bias factor (gamma); higher values flatten barriers more aggressively |
 | `mMD_hill_height` | float | `1.2` | Initial Gaussian hill height in kJ/mol (~0.5 kBT at 300 K) |
-| `mMD_time` | int | `10` | Metadynamics simulation time per walker in ns |
-| `mMD_use_funnel_potential` | bool | `true` | Add a funnel restraint along the sMD-derived exit path to suppress unproductive sampling |
+| `mMD_time` | int | `5` | Metadynamics simulation time per walker in ns |
+| `mMD_use_funnel_potential` | bool | `false` | Add a funnel restraint along the sMD-derived exit path to suppress unproductive sampling |
 | `mMD_hill_width` | float | `0.05` | Gaussian hill width (sigma) along the path collective variable |
 | `mMD_bias_frequency` | int | `2` | Interval (ps) at which Gaussian hills are deposited |
+| `mMD_milestone_seeding` | bool | `true` | Start each walker from its own milestone's relaxed checkpoint, instead of all walkers sharing the first milestone |
+| `mMD_multiple_walkers` | bool | `false` | Share one bias directory across all walkers (true multi-walker metadynamics) instead of independent per-walker bias |
+| `mMD_preseed_bias` | bool | `false` | Pre-seed the metadynamics bias from the sMD PMF before launching walkers |
 
 All parameters, including equilibration and milestone extraction options, are documented in `autopath/config.py`.
 
@@ -245,7 +249,7 @@ All major pipeline components are importable as a Python library for custom work
 
 | Class | Import | Role |
 |-------|--------|------|
-| `AutoPath` | `from autopath import AutoPath` | Main orchestrator; runs the full 6-stage pipeline end-to-end |
+| `AutoPath` | `from autopath import AutoPath` | Main orchestrator; runs the full 6-stage pipeline end-to-end (also `from autopath.autopath_core import AutoPath`) |
 | `Config` | `from autopath import Config` | Configuration container; reads a JSON file or accepts keyword args |
 | `SystemPreparation` | `from autopath import SystemPreparation` | Parametrizes the ligand and solvates (or embeds in membrane) the system |
 | `Equilibration` | `from autopath import Equilibration` | JSON-driven multi-stage NPT/NVT equilibration with progressive restraint release |
@@ -280,7 +284,7 @@ A flat container that maps all pipeline parameters to attributes, providing a si
 
 **`SystemPreparation`**
 
-Handles the full system-assembly workflow prior to simulation. It runs PDBFixer on the receptor, assigns ligand partial charges and bonded parameters using OpenFF 2.x, GAFF2, or an Espaloma template generator, combines the components under a chosen protein force field, and either solvates the complex in a cubic or dodecahedral box or embeds it in a lipid bilayer. The stage produces `system.xml` and `system.pdb` files consumed by downstream stages.
+Handles the full system-assembly workflow prior to simulation. It runs PDBFixer on the receptor, assigns ligand partial charges and bonded parameters using an OpenFF, Espaloma, or GAFF template generator, combines the components under a chosen protein force field, and either solvates the complex in a cubic or dodecahedral box or embeds it in a lipid bilayer. The stage produces `system.xml` and `system.pdb` files consumed by downstream stages.
 
 **`Equilibration`**
 
