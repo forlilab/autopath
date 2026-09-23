@@ -7,8 +7,8 @@ import mdtraj as md
 
 from autopath import SystemPreparation, Equilibration
 from autopath.ap_PLIP import plot_atomic_property, calculate_ligand_rmsf
-from autopath.utils import fetch_pdb, save_receptor_and_ligand_from_pdb, save_receptor_and_ligand_from_openmm, save_pdb, save_receptor_w_colig, load_system, setup_logging, compute_rmsd
-from autopath.pdb_preprocessor import PDBPreprocessor
+from autopath.utils import save_pdb, save_receptor_w_colig, load_system, setup_logging, compute_rmsd
+from autopath.pdb_preprocessor import PDBPreprocessor, fetch_pdb, save_receptor_and_ligand_from_pdb, save_receptor_and_ligand_from_openmm
 from openmm.app import PDBFile
 
 def cmd_lineparser():
@@ -428,8 +428,12 @@ def main():
                                               plots_outdir=f"{save_dir}/equilibration"
                                               )
         lig_rmsd_equilibration.to_csv(f"{save_dir}/equilibration/{sys_name}_ligand_rmsd.csv", index=False)
-        _rmsf = calculate_ligand_rmsf(u_eq)
-        plot_atomic_property(u_eq, _rmsf, outname=f"{save_dir}/equilibration/{sys_name}_RMSF.png")
+        # both take a full MDAnalysis selection string, not a bare residue name:
+        # passing "UNK" raises SelectionError: Unknown selection token
+        lig_sel = f"resname {lig_resname}"
+        _rmsf = calculate_ligand_rmsf(u_eq, lig_sel)
+        plot_atomic_property(u_eq, _rmsf, lig_resname=lig_sel,
+                             outname=f"{save_dir}/equilibration/{sys_name}_RMSF.png")
 
     return
 
