@@ -137,8 +137,12 @@ def main():
     rmsd_df.to_csv(f"{sys_name}/MD/{run_id}_rmsd.csv", index=False)
     
     if lig_resname is not None:
-        _rmsf = calculate_ligand_rmsf(u)
-        plot_atomic_property(u, _rmsf, outname=f"{sys_name}/MD/{run_id}_RMSF.png")
+        # both take a full MDAnalysis selection string, not a bare residue name:
+        # passing "UNK" raises SelectionError: Unknown selection token
+        lig_sel = f"resname {lig_resname}"
+        _rmsf = calculate_ligand_rmsf(u, lig_sel)
+        plot_atomic_property(u, _rmsf, lig_resname=lig_sel,
+                             outname=f"{sys_name}/MD/{run_id}_RMSF.png")
 
     return
 
