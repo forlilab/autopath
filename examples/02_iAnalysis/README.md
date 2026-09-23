@@ -92,7 +92,8 @@ bash run_mmgbsa_batch.sh
    - A `run_LIE_batch.sh` batch submission script
 2. Submit all jobs: `bash run_LIE_batch.sh`
 3. Each SLURM job runs `run_LIE.py -s {sysname}`, which:
-   - Auto-selects protein residues within 6 Å of the ligand
+   - Identifies the most persistent protein-ligand contacts via ProLIF (frequency cutoff 0.5) and computes LIE restricted to those residues (`LIE_importance05.csv`)
+   - Computes LIE again auto-selecting protein residues within 6 Å of the ligand from frame 0 (`LIE_ALL.csv`)
    - Computes van der Waals and electrostatic interaction energies using pytraj
    - Saves results and plots
 
@@ -115,10 +116,10 @@ LIE (Linear Interaction Energy) estimates the binding energy by computing the va
 
 ```
 {sysname}/
-└── equilibration/
-    └── lie/
-        ├── LIE_ALL.csv            # Per-frame VDW, EELEC, and Total energies for all replicas
-        └── LIE_components.png     # Time series plot of Total, EELEC, and VDW components
+└── lie/
+    ├── LIE_importance05.csv   # LIE restricted to ProLIF-persistent contact residues
+    ├── LIE_ALL.csv            # Per-frame VDW, EELEC, and Total energies for all replicas
+    └── LIE_components.png     # Time series plot of Total, EELEC, and VDW components
 
 qfiles_LIE/
 └── {sysname}_LIE.q                # Generated SLURM queue file

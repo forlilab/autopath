@@ -59,7 +59,7 @@ If the user specified structural waters to be retained with the receptor, the fo
 
 * Same example except structural waters included
 
-```python ap_prep.py --protocol equilibration_redock.json --save_dir ./1G9V_RQ3 --restrained_minimization_only --fetch_pdb --pdb_id 1G9V --pdb_lig_name RQ3 --pdb_lig_resid 801_A --water_resids 918 948 983 1000 water_chainids A C```
+```python ap_prep.py --protocol equilibration_redock.json --save_dir ./1G9V_RQ3 --restrained_minimization_only --fetch_pdb --pdb_id 1G9V --pdb_lig_name RQ3 --pdb_lig_resid 801_A --water_resids 918 948 983 1000 --water_chainids A C```
 
 * Fetching a receptor (only chain A+B) with its corresponding ligand
 

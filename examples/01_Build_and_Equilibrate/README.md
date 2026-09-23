@@ -35,7 +35,7 @@ Protein+Ligand | Protein | Ligand systems.
 
 * If your target is embedded in a membrane, set `is_membrane=True` and `lipid_type` to the desired lipid. Only pure bilayers are supported (OpenMM). For complex lipid mixtures, you can pass the path to a custom membrane patch PDB.
 
-* Force-field assignment (default: AMBER14SB + TIP3P-FB + Espaloma). All options available in OpenMM are supported. For small molecules, Espaloma, OpenFF, and GAFF are supported.
+* Force-field assignment (default: AMBER14SB + TIP3P-FB + OpenFF 2.3.0). All options available in OpenMM are supported. For small molecules, OpenFF, Espaloma, and GAFF are supported.
 
 ## Equilibration
 The overall equilibration protocol is orchestrated by a JSON config file, which enables a detailed control over the process. The JSON file has the following subsections:
@@ -79,7 +79,7 @@ WARNING: Residue numbering in this PRMTOP might differ from the PDB, so be caref
 
 ### Equilibration outputs
 
-* `{sys_name}/equilibration/equilibration_{sys_name}_aligned.xtc`
+* `{sys_name}/equilibration/equilibration_{sys_name}_aligned.dcd`
 Wrapped, imaged, and aligned equilibration trajectory
 
 * `{sys_name}/equilibration/RMSD_{sys_name}.csv`
