@@ -992,6 +992,24 @@ def reduce_to_murcko_scaffold(u, lig_selection: str, img_name: str = None):
         logging.warning(f"Could not extract Murcko scaffold: {e}")
         return u.select_atoms(f'({lig_selection}) and not name H*'), [], mol
 
+def _count_pocket_contacts(u, ligand, pocket, frames: int, cutoff: float = 3.5) -> np.ndarray:
+    """Per-atom count of frames with a pocket atom within *cutoff* Å.
+
+    Samples up to *frames* evenly spaced frames from the second half of the
+    trajectory, using minimum-image distances. Leaves the trajectory at the
+    last frame.
+    """
+    n_frames = u.trajectory.n_frames
+    start = n_frames // 2
+    n_sample = min(frames, n_frames - start)
+    sample = np.unique(np.linspace(start, n_frames - 1, n_sample).astype(int))
+    counts = np.zeros(len(ligand))
+    for ts in u.trajectory[sample]:
+        dmat = distance_array(ligand.positions, pocket.positions, box=ts.dimensions)
+        counts += (dmat < cutoff).any(axis=1)
+    return counts
+
+
 def get_ligand_anchor_atoms(
     u,
     lig_selection: str,
@@ -1028,7 +1046,8 @@ def get_ligand_anchor_atoms(
         * ``"inertia"``     — atoms along the principal inertia axis.
         * ``"weighted_com"``— COM of the top-contact atoms.
     frames : int
-        Number of trajectory frames to sample for contact-based modes.
+        Number of frames to sample, evenly spaced over the second half of the
+        trajectory, for contact-based modes.
     n_atoms : int
         Maximum number of anchor atoms for COM/contact/inertia modes.
     reduce_before : bool
@@ -1126,11 +1145,7 @@ def get_ligand_anchor_atoms(
         anchor = ligand.atoms[np.argsort(dists)[:n_atoms]].indices
 
     elif mode == "contacts":
-        contact_counts = np.zeros(len(ligand))
-        for ts in u.trajectory:#[:frames]:
-            dmat = distance_array(ligand.positions, pocket.positions)
-            contacts = (dmat < 3.5).any(axis=1)
-            contact_counts += contacts
+        contact_counts = _count_pocket_contacts(u, ligand, pocket, frames)
         top_indices = np.argsort(contact_counts)[-n_atoms:]
         anchor = ligand.atoms[top_indices].indices
 
@@ -1143,11 +1158,7 @@ def get_ligand_anchor_atoms(
         anchor = ligand.atoms[np.argsort(projections)[:n_atoms]].indices
 
     elif mode == "weighted_com":
-        contact_counts = np.zeros(len(ligand))
-        for ts in u.trajectory[:frames]:
-            dmat = distance_array(ligand.positions, pocket.positions)
-            contacts = (dmat < 3.5).any(axis=1)
-            contact_counts += contacts
+        contact_counts = _count_pocket_contacts(u, ligand, pocket, frames)
         top_indices = np.argsort(contact_counts)[-n_atoms:]
         anchor_coords = ligand.positions[top_indices]
         anchor_com = anchor_coords.mean(axis=0)
