@@ -281,18 +281,18 @@ class SteeredMD:
             v -= np.round(v / L) * L  # minimum-image (orthorhombic only; triclinic triggers a warning above)
             v_norm = float(np.linalg.norm(v))
             if abs(v_norm - initial_r0_nm) > 0.05:
-                logger.warning(
+                raise RuntimeError(
                     f"PBC cap: |v|={v_norm:.3f} nm differs from cvpack initial_r0="
                     f"{initial_r0_nm:.3f} nm. Check that protein/ligand are not split "
-                    f"across a periodic boundary at t=0; cap may be unreliable."
+                    f"across a periodic boundary at t=0; cap would be unreliable."
                 )
             abs_v = np.abs(v)
             with np.errstate(divide='ignore', invalid='ignore'):
                 r_max_per_axis = np.where(abs_v > 1e-6, (L / 2.0) * v_norm / abs_v, np.inf)
             r_max_pbc      = float(np.min(r_max_per_axis)) - self.pbc_safety_nm
-            r_max_offset   = initial_r0_nm + self.sMD_max_r_offset
+            r_max_offset   = v_norm + self.sMD_max_r_offset
             r_max          = min(r_max_pbc, r_max_offset)
-            moves_safe     = max(1, int((r_max - initial_r0_nm) / dx_nm))
+            moves_safe     = max(1, int((r_max - v_norm) / dx_nm))
             if n_moves > moves_safe:
                 if r_max == r_max_pbc:
                     dom_axis = int(np.argmin(r_max_per_axis))
