@@ -746,20 +746,25 @@ Compare against the Global Constraints list; node names drift. Update the templa
 
 ```bash
 #!/bin/bash
-#SBATCH --job-name=smd
-#SBATCH --array=1-75
+# Mirrors the project's proven qfiles/rep_ARRAY.q: same partition, exclude list,
+# cpus, absolute log paths, nvcc export and bashrc-based env activation.
+#SBATCH -e /gpfs/group/forli/mllanos/peter/minibinders/logs/smd_%x_%a.err
+#SBATCH -o /gpfs/group/forli/mllanos/peter/minibinders/logs/smd_%x_%a.out
+#SBATCH --gres=gpu:1
+#SBATCH --time=1-0
 #SBATCH --partition=forli,alphafold,gpu,forli-pro
 #SBATCH --exclude=nodea0110,nodea0111,nodeb0417,nodeb0419,nodeb0423,nodeb0425,nodeb0427,nodeb0429,nodeb0431,nodeb0433,nodeb1201,nodeb1203,nodeb1205,nodeb1207,nodeb1209,nodeb1215,nodeb1217
-#SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=4
-#SBATCH --time=12:00:00
-#SBATCH --output=logs/smd_%x_%A_%a.out
-set -euo pipefail
+#SBATCH --cpus-per-task=8
+#SBATCH --array=1-75
+
+# submit with:  sbatch --job-name=slc_m2 qfiles/smd_ARRAY.q
+export OPENMM_CUDA_COMPILER=$(which nvcc)
+
+source ~/.bashrc
+micromamba activate autopath
 
 PROJ=/gpfs/group/forli/mllanos/peter/minibinders
 SYS="${SLURM_JOB_NAME}"
-eval "$(micromamba shell hook -s bash)"
-micromamba activate autopath
 cd "$PROJ/prep"
 
 read -r SEED SPEED < <(python -c "
@@ -769,8 +774,9 @@ print(s, v)")
 
 echo "task ${SLURM_ARRAY_TASK_ID}: $SYS seed $SEED speed $SPEED on $(hostname)"
 nvidia-smi --query-gpu=name --format=csv,noheader
-
+echo "start $(date)"
 python run_smd.py -n "$SYS" -k "$SEED" -v "$SPEED"
+echo "end $(date)"
 ```
 
 The throughput guard lives in `SteeredMD` itself only for the continuation
