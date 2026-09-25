@@ -626,7 +626,7 @@ import argparse, os, sys, warnings
 
 import smd_campaign as sc
 from autopath.pulling.steered_md import SteeredMD
-from autopath.utils import load_system, select_platform
+from autopath.utils import load_system
 from openmm.app import PDBFile
 
 warnings.filterwarnings("ignore")
@@ -672,7 +672,7 @@ def main():
         groupA_atoms=groupA, groupB_atoms=groupB,
         restart_velocities=True,
         timestep=sc.TIMESTEP, temperature=sc.TEMPERATURE,
-        out_dir=out_dir, platform=select_platform(),
+        out_dir=out_dir, platform="fastest",   # SteeredMD calls select_platform itself
         dx_per_move=sc.DX_PER_MOVE,
         max_displacement=sc.MAX_DISPLACEMENT,
         sMD_spring_cte=k,
