@@ -114,8 +114,13 @@ consistently −z direction. It costs pull length: slc_m2 binds at 2.82 nm.
 
 ## 4. Geometry and the pull budget
 
-Equilibrated box 12.67 × 13.30 × 9.84 nm (slc_m1 rep_01; the others differ by
-<1% and `SteeredMD` re-evaluates the cap from each seed's own box at runtime).
+Equilibrated box 12.67 × 13.30 × 9.84 nm (slc_m1 rep_01). Measured across all
+175 seed end-point states, box z ranges **9.343–10.236 nm** — a ±4.6% spread, so
+no single box is representative and `SteeredMD` re-evaluates the cap from each
+seed's own box at runtime. **The binding case is slc_m7 seed 04**: thinnest box
+(9.343 nm) combined with a small r₀ (1.378 nm), giving **2.865 nm** of usable
+travel — 6% of headroom over the 2.7 nm protocol. Every one of the 175 seeds is
+checked by `preflight` before any GPU time is spent.
 **z is the thin axis and the pull is
 essentially pure −z in all 7 systems** (dir_z −0.94 to −1.00 with the union
 selection), so the PBC cap is set by z.
@@ -260,8 +265,12 @@ cumulant as sensitivity.
 
 ## 8. Pilot — slc_m2, seeds 01–05, 3 speeds
 
-15 replicas, 18.3 ns, ~2–4 h on one fast GPU. slc_m2 because it is the
-PBC-tightest system (2.82 nm usable): if 2.7 nm works there it works everywhere.
+15 replicas, 18.3 ns, ~2–4 h on one fast GPU. slc_m2 was chosen as the PBC-tightest
+system on a single-box estimate; the full 175-seed survey later showed **slc_m7
+is the true extreme** (2.865 nm usable at seed 04 vs slc_m2's 2.82 nm estimate,
+which used slc_m1's box). Both clear 2.7 nm, so slc_m2 remains a valid stress
+case and the pilot stays there; the per-seed `preflight` check, not the choice of
+pilot system, is what guarantees the protocol fits.
 
 Force mode has never been run, and the receptor is unrestrained during the pull
 (`autopath_core` hardwires `restrained_atoms=None`), so nothing but the membrane
