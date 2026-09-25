@@ -443,7 +443,11 @@ def preflight(prmtop, state_xml, sel, sysname):
     box, pos = _state_box_and_positions(state_xml)
     # CA atoms: equal masses, so the mass-weighted centroid is the mean
     r0, u, r_max = pbc_cap(pos[a_idx].mean(axis=0), pos[b_idx].mean(axis=0), box)
-    moves = max(0, int((min(r_max, r0 + MAX_DISPLACEMENT) - r0) / DX_PER_MOVE))
+    # min(r_max - r0, MAX_DISPLACEMENT), never (r0 + MAX) - r0: the latter loses a
+    # ULP for some r0 (e.g. 1.355 -> 2.6999999999999997) and int() then truncates a
+    # full move. The 1e-6 tolerance is 1e-9 nm, far below any real shortfall.
+    avail = min(r_max - r0, MAX_DISPLACEMENT)
+    moves = max(0, int(avail / DX_PER_MOVE + 1e-6))
     return {"r0": r0, "dir_z": float(u[2]), "r_max": r_max,
             "moves_available": moves, "ok": moves >= EXPECTED_MOVES}
 ```
