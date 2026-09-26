@@ -86,3 +86,53 @@ def test_get_pocket_atoms_returns_integer_indices():
     # and the subset must be usable as a numpy index (what _compute_nc does)
     np.testing.assert_allclose(pos[subset], pos[[0]])
     assert [r.name for r in residues] == ["ALA"]
+
+
+def _make_protein_protein_system():
+    """A two-residue pulled peptide (groupA = its own CAs), plus a near and a
+    far receptor residue. The pulled CAs sit right next to each other, so
+    before the fix every pulled atom is trivially "within cutoff of itself".
+    """
+    rA0, rA1 = _Residue("GLY", 0), _Residue("GLY", 1)
+    rNear, rFar = _Residue("ALA", 2), _Residue("LEU", 3)
+    atoms = [
+        _Atom(0, "CA", "C", rA0),   # pulled group (groupA)
+        _Atom(1, "CA", "C", rA1),   # pulled group (groupA)
+        _Atom(2, "CA", "C", rNear),  # receptor, within cutoff
+        _Atom(3, "CA", "C", rFar),   # receptor, outside cutoff
+    ]
+    pos = np.array([
+        [0.00, 0.0, 0.0],
+        [0.05, 0.0, 0.0],
+        [0.20, 0.0, 0.0],
+        [5.00, 0.0, 0.0],
+    ])
+    state = SimpleNamespace(
+        getPositions=lambda asNumpy=False: pos * openmmunit.nanometers)
+    sim = SimpleNamespace(context=SimpleNamespace(
+        getState=lambda **kw: state))
+    smd = SimpleNamespace(topology=_Topology(atoms), groupA_atoms=[0, 1])
+    return smd, sim, pos
+
+
+def test_get_pocket_atoms_excludes_self_for_protein_protein_pull():
+    smd, sim, pos = _make_protein_protein_system()
+    subset, residues = SteeredMD._get_pocket_atoms(smd, sim, cutoff=0.6)
+
+    subset = np.asarray(subset)
+    # the pulled group's own CAs must never appear in its own pocket
+    assert set(subset.tolist()).isdisjoint(smd.groupA_atoms)
+    assert subset.tolist() == [2]
+    min_dist = np.min(np.linalg.norm(
+        pos[smd.groupA_atoms][:, np.newaxis, :] - pos[subset][np.newaxis, :, :], axis=-1))
+    assert min_dist > 0.0
+    assert [r.name for r in residues] == ["ALA"]
+
+
+def test_get_pocket_atoms_unaffected_for_small_molecule_pull():
+    # small-molecule case: groupA shares no residue with any protein_CA atom,
+    # so exclusion must be a no-op and the result byte-identical to before.
+    smd, sim, pos = _make_system()
+    subset, residues = SteeredMD._get_pocket_atoms(smd, sim, cutoff=0.6)
+    assert subset.tolist() == [0]
+    assert [r.name for r in residues] == ["ALA"]

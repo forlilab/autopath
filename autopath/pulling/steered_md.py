@@ -887,10 +887,20 @@ class SteeredMD:
         protein_atoms = [atom for atom in self.topology.atoms() if atom.residue.name not in ["HOH", "WAT", "SOL", "NA", "CL", "K","MG", 'UNK']]
         # protein_HA = [atom.index for atom in protein_atoms if atom.element.symbol != "H"]  # Exclude hydrogens
 
+        # Exclude the pulled group's own residues so a protein-protein/peptide
+        # pull (e.g. CA-anchored) can't select itself as its own pocket.
+        groupA_atom_set = set(self.groupA_atoms)
+        groupA_residues = {atom.residue.index for atom in self.topology.atoms()
+                           if atom.index in groupA_atom_set}
+
         # Only alpha carbons. The element check rejects Ca2+ ions, which are also named "CA".
         protein_CA = np.array([atom.index for atom in self.topology.atoms()
                                if atom.name == "CA" and atom.element is not None
-                               and atom.element.symbol == "C"], dtype=int)
+                               and atom.element.symbol == "C"
+                               and atom.residue.index not in groupA_residues], dtype=int)
+        if protein_CA.size == 0:
+            logger.warning("_get_pocket_atoms: no alpha carbons remain after excluding "
+                            "groupA's own residues; the pulled group may span the entire protein.")
 
         # Find a subset of protein_CA that are cutoff nm away from groupA_atoms
         state = simulation.context.getState(getPositions=True, getVelocities=False)
