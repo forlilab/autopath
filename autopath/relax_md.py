@@ -105,6 +105,7 @@ class RelaxMD:
         system: str = None,
         checkpoint_file: str = None,
         pdb_file: str = None,
+        state_xml_file: str = None,
         run_id: str = None,
         npt_steps: int = 25000,
     ) -> System:
@@ -122,10 +123,17 @@ class RelaxMD:
             in-place (barostat added, temporary restraints removed).
         checkpoint_file : str, optional
             Path to a binary OpenMM checkpoint file from a previous run.
-            Takes precedence over ``pdb_file`` when both are supplied.
+            Takes precedence over ``state_xml_file`` and ``pdb_file`` when
+            more than one is supplied.
         pdb_file : str, optional
             Path to a PDB file used to set initial positions when no
             checkpoint is available.
+        state_xml_file : str, optional
+            Path to a portable OpenMM ``State`` XML (e.g. written by
+            ``Clustering``). Box, positions and velocities are set
+            individually from the deserialized state, since a stripped
+            system may no longer define global parameters the saved
+            state carries.
         run_id : str, optional
             Label used as a prefix for all output files written to
             ``self.out_dir``.
@@ -163,6 +171,13 @@ class RelaxMD:
         if checkpoint_file is not None:
             logger.debug("Loading simulation checkpoint..")
             simulation.loadCheckpoint(checkpoint_file)
+        elif state_xml_file is not None:
+            logger.info(f"Setting state from portable XML state file {state_xml_file}")
+            with open(state_xml_file) as f:
+                state = XmlSerializer.deserialize(f.read())
+            simulation.context.setPeriodicBoxVectors(*state.getPeriodicBoxVectors())
+            simulation.context.setPositions(state.getPositions())
+            simulation.context.setVelocities(state.getVelocities())
         else:
             initial_positions = PDBFile(pdb_file).positions
             simulation.context.setPositions(initial_positions)
@@ -244,5 +259,9 @@ class RelaxMD:
         save_simulation(simulation, f"{self.out_dir}/{run_id}_relax_checkpoint")
         save_system(system, f"{self.out_dir}/{run_id}_relax_system.xml")
         save_pdb(self.topology, final_positions, f"{self.out_dir}/{run_id}_relax.pdb")
+
+        _st = simulation.context.getState(getPositions=True, getVelocities=True)
+        with open(f"{self.out_dir}/{run_id}_relax_state.xml", "w") as _f:
+            _f.write(XmlSerializer.serialize(_st))
 
         return simulation, system

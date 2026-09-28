@@ -144,6 +144,7 @@ class MetadynamicsMD:
         pdb_file: str = None,
         system: str = None,
         checkpoint_file: str = None,
+        state_xml_file: str = None,
         run_id: str = None,
         cv_specs: list[CVSpec] = None,
         mMD_time: int = 10,
@@ -161,12 +162,19 @@ class MetadynamicsMD:
         ----------
         pdb_file : str, optional
             Path to a PDB file used to set initial positions and box vectors.
-            Mutually exclusive with ``checkpoint_file``; if both are given,
-            the checkpoint takes precedence with a warning.
         system : openmm.System
             Prepared OpenMM System object (forces already added before calling).
         checkpoint_file : str, optional
             Path to an OpenMM binary checkpoint to resume from.
+        state_xml_file : str, optional
+            Path to a portable OpenMM ``State`` XML (e.g. written by
+            ``Clustering``). Box, positions and velocities are set
+            individually from the deserialized state, since a stripped
+            system may no longer define global parameters the saved
+            state carries.
+
+            Precedence when more than one of the three is given:
+            ``checkpoint_file`` > ``state_xml_file`` > ``pdb_file``.
         run_id : str, optional
             Label for all output files.  Auto-generated from wall-clock time
             when ``None`` (format ``W-HHMMSS``).
@@ -219,7 +227,8 @@ class MetadynamicsMD:
         Raises
         ------
         ValueError
-            If neither ``pdb_file`` nor ``checkpoint_file`` is supplied.
+            If none of ``pdb_file``, ``checkpoint_file``, or ``state_xml_file``
+            is supplied.
         AssertionError
             If ``cv_specs`` is ``None`` or empty.
         """
@@ -260,22 +269,29 @@ class MetadynamicsMD:
         logging.debug(f"Creating the simulation for {run_id}")
         simulation = Simulation(self.topology, system, integrator, self.platform)
 
-        if checkpoint_file is None and pdb_file is None:
-            raise ValueError("Either pdb_file or checkpoint_file must be provided to set initial positions.")
-        elif checkpoint_file is None and pdb_file is not None:
+        # Precedence: checkpoint_file > state_xml_file > pdb_file.
+        if checkpoint_file is not None:
+            logging.info(f"Setting positions from checkpoint {checkpoint_file}")
+            simulation.loadCheckpoint(checkpoint_file)
+            simulation.integrator = integrator
+        elif state_xml_file is not None:
+            logging.info(f"Setting state from portable XML state file {state_xml_file}")
+            with open(state_xml_file) as f:
+                state = XmlSerializer.deserialize(f.read())
+            simulation.context.setPeriodicBoxVectors(*state.getPeriodicBoxVectors())
+            simulation.context.setPositions(state.getPositions())
+            simulation.context.setVelocities(state.getVelocities())
+        elif pdb_file is not None:
             logging.info(f"Setting positions from PDB file {pdb_file}")
             pdb = PDBFile(pdb_file)
             simulation.context.setPositions(pdb.getPositions())
             simulation.context.setPeriodicBoxVectors(*pdb.topology.getPeriodicBoxVectors())
             simulation.context.setVelocitiesToTemperature(self.temperature)
-        elif checkpoint_file is not None and pdb_file is None:
-            logging.info(f"Setting positions from checkpoint {checkpoint_file}")
-            simulation.loadCheckpoint(checkpoint_file)
-            simulation.integrator = integrator
         else:
-            logging.warning("Both checkpoint_file and pdb_file are provided. Using checkpoint_file.")
-            simulation.loadCheckpoint(checkpoint_file)
-            simulation.integrator = integrator
+            raise ValueError(
+                "One of pdb_file, checkpoint_file, or state_xml_file must be "
+                "provided to set initial positions."
+            )
 
         input_positions = simulation.context.getState(getPositions=True).getPositions()
 

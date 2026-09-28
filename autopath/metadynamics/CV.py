@@ -7,6 +7,8 @@ import cvpack
 import openmm.unit as openmmunit
 from openmm.app import PDBFile
 
+from autopath.Clustering import read_positions
+
 logger = logging.getLogger("autopath.cv")
 
 
@@ -242,8 +244,9 @@ def pathCV_cv(
     sigma controls the Gaussian kernel width (in nm); tune it so adjacent milestones overlap
     (a good rule of thumb: sigma ≈ half the minimum spacing between milestone COM distances).
 
-    Atom indices in pocket_atoms/ligand_atoms must match the PDB atom ordering in the milestone
-    files, which is guaranteed when milestones are extracted from the same solvated system.
+    Milestones may be ``.pdb`` or ``.xml`` (serialized OpenMM State) files. Atom indices in
+    pocket_atoms/ligand_atoms must match the atom ordering in the milestone files, which is
+    guaranteed when milestones are extracted from the same solvated system.
     """
     def factory(input_positions, n_atoms, topology, sigma=sigma):
         pocket_masses = np.array([
@@ -256,10 +259,8 @@ def pathCV_cv(
         ])
 
         milestones_array = []
-        for milestone_pdb in milestones:
-            positions = np.array(
-                PDBFile(milestone_pdb).positions.value_in_unit(openmmunit.nanometers)
-            )
+        for milestone_path in milestones:
+            positions = read_positions(milestone_path)
             pocket_com = np.average(positions[pocket_atoms], axis=0, weights=pocket_masses)
             ligand_com = np.average(positions[ligand_atoms], axis=0, weights=ligand_masses)
             com_dist = float(np.linalg.norm(ligand_com - pocket_com))
