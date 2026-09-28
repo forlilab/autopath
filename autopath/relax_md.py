@@ -179,8 +179,11 @@ class RelaxMD:
             simulation.context.setPositions(state.getPositions())
             simulation.context.setVelocities(state.getVelocities())
         else:
-            initial_positions = PDBFile(pdb_file).positions
-            simulation.context.setPositions(initial_positions)
+            simulation.context.setPositions(PDBFile(pdb_file).positions)
+
+        # Read positions back from the context so every branch above (checkpoint,
+        # state XML, PDB) supplies the restraint reference.
+        initial_positions = simulation.context.getState(getPositions=True).getPositions()
 
         startdist = get_COM_dist(simulation, self.ligand_atoms, self.pocket_atoms)
 
