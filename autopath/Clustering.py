@@ -162,6 +162,14 @@ class Clustering:
         """Serialized State per frame. Velocities are drawn fresh at
         `temperature`: a trajectory frame carries none."""
         os.makedirs(out_dir, exist_ok=True)
+        # The Universe, Topology and System must describe the same particles;
+        # a mismatch otherwise surfaces as an opaque error from setPositions.
+        n_u, n_sys = u.atoms.n_atoms, system.getNumParticles()
+        n_top = topology.getNumAtoms()
+        if not (n_u == n_sys == n_top):
+            raise ValueError(
+                f"atom-count mismatch: Universe has {n_u}, System has {n_sys}, "
+                f"Topology has {n_top} — they must describe the same particles")
         integ = mm.LangevinMiddleIntegrator(
             temperature * ommunit.kelvin, 1 / ommunit.picosecond,
             0.002 * ommunit.picoseconds)
@@ -169,6 +177,12 @@ class Clustering:
         out = []
         for i, fi in enumerate(int(f) for f in frames):
             ts = u.trajectory[fi]
+            if ts.triclinic_dimensions is None:
+                raise ValueError(
+                    f"frame {fi} carries no unit cell. Falling back to the System's "
+                    "default box would silently restart at the wrong density, so "
+                    "this is refused. Supply a trajectory with box information "
+                    "(e.g. MDAnalysis transformations.boxdimensions.set_dimensions).")
             ctx.setPeriodicBoxVectors(*ts.triclinic_dimensions / 10.0
                                       * ommunit.nanometer)
             ctx.setPositions(u.atoms.positions / 10.0 * ommunit.nanometer)
