@@ -96,8 +96,77 @@ def test_degenerate_pc1_raises_and_names_the_alternative():
         cc.select(5, strategy="centroid")
 
 
-def test_centroid_uses_pc1_not_full_matrix(c):
-    """Review Focus #1: selection runs on the 1-D PC1 column."""
+def test_centroid_uses_pc1_not_full_matrix(c, monkeypatch):
+    """Review Focus #1: selection runs on the 1-D PC1 column.
+
+    Pins the argument actually handed to match_cluster_centroids_unique;
+    asserting on centers_ alone passes even if the full matrix is passed.
+    """
+    import autopath.utils as U
+    real = U.match_cluster_centroids_unique
+    seen = {}
+
+    def spy(X, centers, **kw):
+        seen["X"] = np.asarray(X)
+        return real(X, centers, **kw)
+
+    monkeypatch.setattr(U, "match_cluster_centroids_unique", spy)
     f = c.select(4, strategy="centroid")
+    assert seen["X"].shape == (c.X_reduced.shape[0], 1)
+    np.testing.assert_allclose(seen["X"][:, 0], c.X_reduced[:, 0])
     assert c.centers_.shape[1] == 1
     assert len(f) <= 4
+
+
+def test_centroid_frames_are_returned_in_pc1_order(c):
+    """B2: centroids are sorted bound -> unbound along PC1, and select() must
+    preserve that order; re-sorting by frame index scrambles the path CV."""
+    f = c.select(5, strategy="centroid")
+    pc1 = c.X_reduced[f, 0]
+    assert np.all(np.diff(pc1) > 0), pc1
+
+
+def test_pc1_order_differs_from_frame_order():
+    """The regression only bites when PC1 is non-monotone in frame index,
+    which is the normal case for pooled medoid trajectories."""
+    from autopath.Clustering import Clustering as _C, Featurizer as _F
+
+    rng = np.random.default_rng(0)
+    vals = rng.permutation(60).astype(float)
+
+    class _Perm(_F):
+        def compute(self, u):
+            return np.column_stack([vals, 0.01 * np.arange(60.0)])
+
+    cc = _C(_Perm(), scale=False).fit(mda.Universe(PSF, DCD))
+    f = cc.select(6, strategy="centroid")
+    assert not np.array_equal(f, np.sort(f)), "PC1 order collapsed to frame order"
+    assert np.all(np.diff(cc.X_reduced[f, 0]) > 0)
+
+
+def test_stride_maps_selected_indices_back_to_trajectory_frames():
+    """I4: select() indexes the strided feature matrix; the writers index the
+    trajectory. Without the *stride mapping every written frame is wrong."""
+    u = mda.Universe(PSF, DCD)
+    lig, poc = "resid 1-5 and name CA", "resid 20-30 and name CA"
+    c1 = Clustering(PairwiseDistances(lig, poc)).fit(u)
+    c3 = Clustering(PairwiseDistances(lig, poc, stride=3)).fit(u)
+
+    for strategy in ("time_spaced", "centroid"):
+        f = c3.select(4, strategy=strategy)
+        assert all(int(x) % 3 == 0 for x in f), (strategy, f)
+        assert f.max() < len(u.trajectory)
+        rows = (f // 3)
+        # feature row r must describe trajectory frame 3*r
+        for r, fr in zip(rows, f):
+            np.testing.assert_allclose(c3.X[int(r)], c1.X[int(fr)],
+                                       rtol=0, atol=1e-8)
+
+
+def test_plot_after_time_spaced_has_no_labels(c, tmp_path):
+    """M2: select() clears labels_; plot() must still render."""
+    import os
+    f = c.select(4, strategy="time_spaced")
+    assert c.labels_ is None
+    png = c.plot(str(tmp_path), "ms", frames=f)
+    assert os.path.exists(png)

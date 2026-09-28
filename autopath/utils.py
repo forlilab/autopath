@@ -1825,15 +1825,21 @@ def _plot_pca_milestones(
     prefix: str,
     pca: PCA,
 ) -> None:
-    """Save a 2D PCA scatter plot coloured by cluster label with milestone frames annotated."""
-    n_clusters = int(labels.max()) + 1
-    palette = plt.cm.get_cmap("tab10", n_clusters)
+    """Save a 2D PCA scatter plot coloured by cluster label with milestone frames annotated.
 
+    `labels` may be None (no clustering, e.g. time-spaced selection); the
+    scatter is then drawn in a single colour without a cluster legend.
+    """
     fig, ax = plt.subplots(figsize=(6, 5))
-    for k in range(n_clusters):
-        mask = labels == k
-        ax.scatter(X_pca[mask, 0], X_pca[mask, 1],
-                   color=palette(k), s=10, alpha=0.5, label=f"milestone {k+1}")
+    if labels is None:
+        ax.scatter(X_pca[:, 0], X_pca[:, 1], color="grey", s=10, alpha=0.5)
+    else:
+        n_clusters = int(labels.max()) + 1
+        palette = plt.cm.get_cmap("tab10", n_clusters)
+        for k in range(n_clusters):
+            mask = labels == k
+            ax.scatter(X_pca[mask, 0], X_pca[mask, 1],
+                       color=palette(k), s=10, alpha=0.5, label=f"milestone {k+1}")
 
     for i, fi in enumerate(milestone_frame_indices):
         ax.scatter(X_pca[fi, 0], X_pca[fi, 1],
@@ -1844,7 +1850,8 @@ def _plot_pca_milestones(
     ax.set_xlabel(f"PC1 ({pca.explained_variance_ratio_[0]*100:.1f}%)")
     ax.set_ylabel(f"PC2 ({pca.explained_variance_ratio_[1]*100:.1f}%)")
     ax.set_title("Milestone clustering")
-    ax.legend(fontsize=15)#, markerscale=1.5)
+    if labels is not None:
+        ax.legend(fontsize=15)#, markerscale=1.5)
     plt.tight_layout()
     plt.savefig(os.path.join(out_dir, f"{prefix}_pca_clusters.png"), dpi=300)
     plt.close()

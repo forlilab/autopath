@@ -140,3 +140,69 @@ def test_read_positions_rejects_unknown_extension(tmp_path):
     p.write_text("nope")
     with pytest.raises(ValueError, match="extension"):
         read_positions(str(p))
+
+
+def _six_atom_universe():
+    """Universe whose 'ligand' sits one box away from the 'protein'."""
+    import MDAnalysis as mda
+    from MDAnalysis.transformations.boxdimensions import set_dimensions
+    u = mda.Universe.empty(6, n_residues=2, atom_resindex=[0, 0, 0, 1, 1, 1],
+                           residue_segindex=[0, 0], trajectory=True)
+    u.add_TopologyAttr("name", ["CA", "CB", "CG", "C1", "C2", "C3"])
+    u.add_TopologyAttr("type", ["C"] * 6)
+    u.add_TopologyAttr("element", ["C"] * 6)
+    u.add_TopologyAttr("resname", ["ALA", "UNK"])
+    u.add_TopologyAttr("resid", [1, 2])
+    u.add_TopologyAttr("segid", ["A"])
+    u.atoms.positions = np.array([[5., 5., 5.], [6., 5., 5.], [5., 6., 5.],
+                                  [34., 5., 5.], [35., 5., 5.], [34., 6., 5.]])
+    u.trajectory.add_transformations(set_dimensions([40., 40., 40., 90., 90., 90.]))
+    return u
+
+
+def _six_atom_system_and_topology():
+    system = mm.System()
+    for _ in range(6):
+        system.addParticle(12.0)
+    top = app.Topology()
+    ch = top.addChain()
+    for _ in range(6):
+        r = top.addResidue("UNK", ch)
+        top.addAtom("C", app.Element.getBySymbol("C"), r)
+    return system, top
+
+
+def test_write_states_reimages_the_ligand_when_asked(tmp_path):
+    """I1: backbone superposition can leave the ligand a box away, and the
+    State inherits the frame's coordinates verbatim, so write_states needs the
+    same re-imaging write_pdbs does."""
+    from autopath.Clustering import Clustering, PairwiseDistances
+    u = _six_atom_universe()
+    system, top = _six_atom_system_and_topology()
+    # write_states needs no fit; a 1-frame Universe cannot be PCA'd anyway.
+    c = Clustering(PairwiseDistances("resname UNK", "resname ALA"))
+
+    plain = c.write_states(u, [0], top, system, str(tmp_path / "a"), "ms")
+    got = mm.XmlSerializer.deserialize(open(plain[0]).read()).getPositions(
+        asNumpy=True).value_in_unit(ommunit.nanometer)
+    assert got[3][0] == pytest.approx(3.4, abs=1e-4)      # still a box away
+
+    u = _six_atom_universe()                               # fresh coordinates
+    fixed = c.write_states(u, [0], top, system, str(tmp_path / "b"), "ms",
+                           ligand_sel="resname UNK")
+    got = mm.XmlSerializer.deserialize(open(fixed[0]).read()).getPositions(
+        asNumpy=True).value_in_unit(ommunit.nanometer)
+    assert got[3][0] == pytest.approx(-0.6, abs=1e-4)      # minimum image
+    np.testing.assert_allclose(got[0], [0.5, 0.5, 0.5], atol=1e-5)  # protein untouched
+
+
+def test_write_pdbs_reindexes(tmp_path):
+    """M4: extract_milestones wrote with reindex=True; the replacement must
+    stay output-compatible."""
+    import MDAnalysis as mda
+    from autopath.Clustering import Clustering, PairwiseDistances
+    u = _six_atom_universe()
+    c = Clustering(PairwiseDistances("resname UNK", "resname ALA"))
+    out = c.write_pdbs(u, [0], str(tmp_path), "ms")
+    serials = [int(l[6:11]) for l in open(out[0]) if l.startswith(("ATOM", "HETATM"))]
+    assert serials == list(range(1, 7))

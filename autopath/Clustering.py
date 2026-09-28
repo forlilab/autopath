@@ -80,8 +80,12 @@ class Clustering:
         self.labels_ = None
         self.centers_ = None
         self._pca = None
+        self._stride = 1
 
     def fit(self, u):
+        # Feature rows are strided samples of the trajectory; row i is frame
+        # i*stride. select() maps back so its indices address u.trajectory.
+        self._stride = max(1, int(getattr(self.featurizer, "stride", 1) or 1))
         X = self.featurizer.compute(u)
         if X.ndim != 2:
             raise ValueError("featurizer must return a 2D (n_frames, n_features) array")
@@ -106,12 +110,14 @@ class Clustering:
             raise RuntimeError("call fit() before select()/plot()")
 
     def select(self, n: int, strategy: str, min_frame_separation: int = 0):
-        """Representative frame indices.
+        """Representative trajectory frame indices (already de-strided).
 
         strategy="centroid"    RegularSpace along PC1 -> nearest real frame.
                                Diverse starting points (milestones, exploration).
         strategy="time_spaced" evenly spaced in time. Population-weighted, the
                                correct choice when seeding an ensemble average.
+
+        `min_frame_separation` counts featurized rows, i.e. strided frames.
         """
         self._require_fit()
         if strategy not in _STRATEGIES:
@@ -133,7 +139,7 @@ class Clustering:
                     f"{n} evenly spaced frames over {n_frames} gives a gap of "
                     f"{spacing}, below min_frame_separation={min_frame_separation}; "
                     f"request fewer frames or lower the separation")
-            return frames
+            return frames * self._stride
 
         from autopath.utils import match_cluster_centroids_unique
         pc1 = self.X_reduced[:, 0].reshape(-1, 1)
@@ -148,19 +154,26 @@ class Clustering:
         self.labels_ = model.transform(pc1)
         centers = model.cluster_centers
         self.centers_ = centers[np.argsort(centers[:, 0])]
-        frames = np.sort(np.asarray(match_cluster_centroids_unique(
-            pc1, self.centers_, min_frame_separation=min_frame_separation), dtype=int))
+        # Returned in centroid (PC1, bound -> unbound) order, NOT frame order:
+        # sorting by frame index would scramble the milestone sequence.
+        frames = np.asarray(match_cluster_centroids_unique(
+            pc1, self.centers_, min_frame_separation=min_frame_separation), dtype=int)
         if len(frames) < n:
             logger.warning(
                 "requested %d centroid frames but RegularSpace yielded %d; PC1 spread "
                 "may be too small or min_frame_separation=%d too large",
                 n, len(frames), min_frame_separation)
-        return frames
+        return frames * self._stride
 
     def write_states(self, u, frames, topology, system, out_dir, prefix,
-                     temperature=300.0):
+                     temperature=300.0, ligand_sel=None):
         """Serialized State per frame. Velocities are drawn fresh at
-        `temperature`: a trajectory frame carries none."""
+        `temperature`: a trajectory frame carries none.
+
+        `ligand_sel` re-images the ligand into the periodic image nearest the
+        protein before serializing: backbone superposition can leave it a box
+        away, and the State inherits the frame's coordinates verbatim."""
+        from autopath.utils import _reimaging_ligand
         os.makedirs(out_dir, exist_ok=True)
         # The Universe, Topology and System must describe the same particles;
         # a mismatch otherwise surfaces as an opaque error from setPositions.
@@ -173,25 +186,32 @@ class Clustering:
         integ = mm.LangevinMiddleIntegrator(
             temperature * ommunit.kelvin, 1 / ommunit.picosecond,
             0.002 * ommunit.picoseconds)
-        ctx = mm.Context(system, integ)
+        # Pin the CPU platform: this context only serializes coordinates, so it
+        # must not seize a GPU.
+        ctx = mm.Context(system, integ, mm.Platform.getPlatformByName("CPU"))
         out = []
-        for i, fi in enumerate(int(f) for f in frames):
-            ts = u.trajectory[fi]
-            if ts.triclinic_dimensions is None:
-                raise ValueError(
-                    f"frame {fi} carries no unit cell. Falling back to the System's "
-                    "default box would silently restart at the wrong density, so "
-                    "this is refused. Supply a trajectory with box information "
-                    "(e.g. MDAnalysis transformations.boxdimensions.set_dimensions).")
-            ctx.setPeriodicBoxVectors(*ts.triclinic_dimensions / 10.0
-                                      * ommunit.nanometer)
-            ctx.setPositions(u.atoms.positions / 10.0 * ommunit.nanometer)
-            ctx.setVelocitiesToTemperature(temperature * ommunit.kelvin)
-            st = ctx.getState(getPositions=True, getVelocities=True)
-            fp = os.path.join(out_dir, f"{prefix}_{i+1}_frame_{fi}.xml")
-            with open(fp, "w") as fh:
-                fh.write(mm.XmlSerializer.serialize(st))
-            out.append(fp)
+        try:
+            for i, fi in enumerate(int(f) for f in frames):
+                ts = u.trajectory[fi]
+                if ligand_sel is not None:
+                    _reimaging_ligand(u, ligand_sel)
+                if ts.triclinic_dimensions is None:
+                    raise ValueError(
+                        f"frame {fi} carries no unit cell. Falling back to the System's "
+                        "default box would silently restart at the wrong density, so "
+                        "this is refused. Supply a trajectory with box information "
+                        "(e.g. MDAnalysis transformations.boxdimensions.set_dimensions).")
+                ctx.setPeriodicBoxVectors(*ts.triclinic_dimensions / 10.0
+                                          * ommunit.nanometer)
+                ctx.setPositions(u.atoms.positions / 10.0 * ommunit.nanometer)
+                ctx.setVelocitiesToTemperature(temperature * ommunit.kelvin)
+                st = ctx.getState(getPositions=True, getVelocities=True)
+                fp = os.path.join(out_dir, f"{prefix}_{i+1}_frame_{fi}.xml")
+                with open(fp, "w") as fh:
+                    fh.write(mm.XmlSerializer.serialize(st))
+                out.append(fp)
+        finally:
+            del ctx, integ
         logger.info("wrote %d states to %s", len(out), out_dir)
         return out
 
@@ -205,7 +225,7 @@ class Clustering:
             if ligand_sel is not None:
                 _reimaging_ligand(u, ligand_sel)
             fp = os.path.join(out_dir, f"{prefix}_{i+1}_frame_{fi}.pdb")
-            with mda.Writer(fp, u.atoms.n_atoms) as W:
+            with mda.Writer(fp, u.atoms.n_atoms, reindex=True) as W:
                 W.write(u.atoms)
             out.append(fp)
         return out
@@ -215,6 +235,9 @@ class Clustering:
 
         `_plot_pca_milestones` dereferences `pca.explained_variance_ratio_` for
         its axis labels, so the fitted PCA object must be passed, never None.
+        Without labels (strategy="time_spaced") the scatter is drawn as one
+        unlabelled cluster, with the selected frames still annotated.
+        `frames` are trajectory indices, as returned by select().
         """
         from autopath.utils import _plot_pca_milestones
         self._require_fit()
@@ -226,8 +249,10 @@ class Clustering:
                 f"{self.X_reduced.shape[1]} (a single-feature featurizer such as "
                 "CoordinateRMSD cannot give a 2D scatter)")
         os.makedirs(out_dir, exist_ok=True)
-        _plot_pca_milestones(self.X_reduced, self.labels_,
-                             list(frames) if frames is not None else [],
+        labels = self.labels_  # None after time_spaced: drawn as one cluster
+        rows = ([int(f) // self._stride for f in frames]
+                if frames is not None else [])
+        _plot_pca_milestones(self.X_reduced, labels, rows,
                              out_dir, prefix, self._pca)
         return os.path.join(out_dir, f"{prefix}_pca_clusters.png")
 
