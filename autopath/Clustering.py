@@ -51,3 +51,45 @@ class CoordinateRMSD(Featurizer):
         for ts in u.trajectory[::self.stride]:
             out.append(_mda_rmsd(ag.positions, ref_pos, superposition=True))
         return np.asarray(out, dtype=float).reshape(-1, 1)
+
+
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+
+
+class Clustering:
+    """Feature -> reduce -> select representative frames -> write.
+
+    fit/select/plot need no OpenMM; only write_states does.
+    """
+
+    def __init__(self, featurizer: Featurizer, n_components: int = 2,
+                 scale: bool = True, seed: int = 42):
+        self.featurizer = featurizer
+        self.n_components = n_components
+        self.scale = scale
+        self.seed = seed
+        self.X = None
+        self.X_reduced = None
+        self.explained_variance_ratio_ = None
+        self.labels_ = None
+        self.centers_ = None
+        self._pca = None
+
+    def fit(self, u):
+        X = self.featurizer.compute(u)
+        if X.ndim != 2:
+            raise ValueError("featurizer must return a 2D (n_frames, n_features) array")
+        self.X = X
+        Xs = StandardScaler().fit_transform(X) if self.scale else X
+        pca = PCA(n_components=self.n_components, random_state=self.seed)
+        self.X_reduced = pca.fit_transform(Xs)
+        self._pca = pca
+        self.explained_variance_ratio_ = pca.explained_variance_ratio_
+        logger.info("PCA: explained variance ratio = %s",
+                    [f"{v*100:.1f}%" for v in pca.explained_variance_ratio_])
+        return self
+
+    def _require_fit(self):
+        if self.X_reduced is None:
+            raise RuntimeError("call fit() before select()/plot()")
