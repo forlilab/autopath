@@ -66,6 +66,36 @@ def test_n_exceeding_frames_raises(c):
         c.select(10_000, strategy="time_spaced")
 
 
+def test_labels_reset_when_switching_to_time_spaced(c):
+    """Stale clustering state would misrepresent a time_spaced selection."""
+    c.select(4, strategy="centroid")
+    assert c.labels_ is not None
+    c.select(4, strategy="time_spaced")
+    assert c.labels_ is None and c.centers_ is None
+
+
+def test_time_spaced_honours_min_frame_separation(c):
+    """The signature accepts it for both strategies; ignoring it silently
+    would be a contract violation."""
+    with pytest.raises(ValueError, match="min_frame_separation"):
+        c.select(50, strategy="time_spaced", min_frame_separation=10)
+
+
+def test_degenerate_pc1_raises_and_names_the_alternative():
+    """A converged trajectory has no PC1 spread; RegularSpace then returns one
+    centre regardless of n, which would silently under-deliver frames."""
+    import numpy as _np
+    from autopath.Clustering import Clustering as _C, Featurizer as _F
+
+    class _Flat(_F):
+        def compute(self, u):
+            return _np.ones((60, 4))
+
+    cc = _C(_Flat()).fit(mda.Universe(PSF, DCD))
+    with pytest.raises(ValueError, match="time_spaced"):
+        cc.select(5, strategy="centroid")
+
+
 def test_centroid_uses_pc1_not_full_matrix(c):
     """Review Focus #1: selection runs on the 1-D PC1 column."""
     f = c.select(4, strategy="centroid")

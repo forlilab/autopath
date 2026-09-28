@@ -118,16 +118,39 @@ class Clustering:
         if n > n_frames:
             raise ValueError(f"requested {n} frames but only {n_frames} are available")
 
+        # Clustering state belongs to a centroid run only; stale values after a
+        # time_spaced call would misrepresent which frames were chosen and why.
+        self.labels_ = None
+        self.centers_ = None
+
         if strategy == "time_spaced":
-            return np.unique(np.linspace(0, n_frames - 1, n).astype(int))
+            frames = np.unique(np.linspace(0, n_frames - 1, n).astype(int))
+            spacing = int(np.diff(frames).min()) if len(frames) > 1 else n_frames
+            if min_frame_separation and spacing < min_frame_separation:
+                raise ValueError(
+                    f"{n} evenly spaced frames over {n_frames} gives a gap of "
+                    f"{spacing}, below min_frame_separation={min_frame_separation}; "
+                    f"request fewer frames or lower the separation")
+            return frames
 
         from autopath.utils import match_cluster_centroids_unique
         pc1 = self.X_reduced[:, 0].reshape(-1, 1)
-        dmin = float((pc1.max() - pc1.min()) / n)
-        model = RegularSpace(dmin=dmin, max_centers=n).fit(pc1).fetch_model()
+        spread = float(pc1.max() - pc1.min())
+        if spread <= 0:
+            raise ValueError(
+                "PC1 has zero spread, so RegularSpace cannot place distinct centres "
+                "(it returns one regardless of n). This is what a converged "
+                "trajectory looks like: there are no basins to find. Use "
+                "strategy='time_spaced' instead.")
+        model = RegularSpace(dmin=spread / n, max_centers=n).fit(pc1).fetch_model()
         self.labels_ = model.transform(pc1)
         centers = model.cluster_centers
         self.centers_ = centers[np.argsort(centers[:, 0])]
-        frames = match_cluster_centroids_unique(
-            pc1, self.centers_, min_frame_separation=min_frame_separation)
-        return np.sort(np.asarray(frames, dtype=int))
+        frames = np.sort(np.asarray(match_cluster_centroids_unique(
+            pc1, self.centers_, min_frame_separation=min_frame_separation), dtype=int))
+        if len(frames) < n:
+            logger.warning(
+                "requested %d centroid frames but RegularSpace yielded %d; PC1 spread "
+                "may be too small or min_frame_separation=%d too large",
+                n, len(frames), min_frame_separation)
+        return frames
