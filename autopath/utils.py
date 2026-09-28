@@ -1474,133 +1474,6 @@ def compute_rmsd(u,
     return rmsd_df
 
 
-def match_cluster_centroids_unique(X: np.ndarray,
-                                   centroids: np.ndarray,
-                                   min_frame_separation: int = 10,
-                                   ) -> list[int]:
-    """Match each centroid to a unique frame index in X.
-
-    This prevents multiple milestones from collapsing onto the same frame and
-    optionally enforces a minimum index separation to avoid near-consecutive picks.
-    """
-    if X.ndim != 2:
-        raise ValueError("X must be a 2D array of shape (n_frames, n_features)")
-    if centroids.ndim != 2:
-        raise ValueError("centroids must be a 2D array of shape (n_centroids, n_features)")
-
-    selected: list[int] = []
-
-    for centroid in centroids:
-        distances = np.linalg.norm(X - centroid, axis=1)
-        candidate_indices = np.argsort(distances)
-
-        chosen = None
-        for idx in candidate_indices:
-            idx = int(idx)
-            if idx in selected:
-                continue
-            if min_frame_separation > 0 and any(abs(idx - j) < min_frame_separation for j in selected):
-                continue
-            chosen = idx
-            break
-
-        if chosen is None:
-            # Fallback: keep uniqueness if possible, even if separation is violated
-            for idx in candidate_indices:
-                idx = int(idx)
-                if idx not in selected:
-                    chosen = idx
-                    break
-
-        if chosen is None:
-            # Degenerate fallback (e.g., more centers than frames)
-            chosen = int(candidate_indices[0])
-
-        selected.append(chosen)
-
-    return selected
-
-
-def compute_distance_features(u: mda.Universe,
-                              ligand_sel: str,
-                              pocket_sel: str,
-                              stride: int = 1,
-                              ) -> np.ndarray:
-    """
-    Compute flattened pairwise distances between ligand and pocket atoms 
-    for each frame in the Universe trajectory.
-
-    Parameters
-    ----------
-    u : mda.Universe
-        MDAnalysis Universe with trajectory loaded.
-    ligand_sel : str
-        MDAnalysis selection string for ligand atoms.
-    pocket_sel : str
-        MDAnalysis selection string for pocket atoms.
-    stride : int
-        Process every `stride`-th frame.
-
-    Returns
-    -------
-    np.ndarray
-        Feature matrix of shape (n_frames, n_ligand * n_pocket).
-        Distances are in nm.
-    """
-    ligand_atoms = u.select_atoms(ligand_sel)
-    pocket_atoms = u.select_atoms(pocket_sel)
-
-    if ligand_atoms.n_atoms == 0 or pocket_atoms.n_atoms == 0:
-        raise ValueError(
-            f"Empty atom selection: ligand={ligand_atoms.n_atoms}, pocket={pocket_atoms.n_atoms}"
-        )
-
-    all_dists = []
-    for ts in u.trajectory[::stride]:
-        # Pass box=u.dimensions so MDAnalysis uses the minimum-image convention.
-        # Without this, frames where the ligand is in a different periodic image
-        # from the pocket (e.g. after backbone superposition) produce inflated
-        # Euclidean distances that corrupt PCA-based milestone selection.
-        box = u.dimensions if u.dimensions is not None else None
-        dists = distance_array(ligand_atoms.positions, pocket_atoms.positions, box=box)
-        all_dists.append(dists.flatten() / 10.0)  # Angstroms -> nm
-
-    return np.array(all_dists)
-
-
-def _plot_pca_milestones(
-    X_pca: np.ndarray,
-    labels: np.ndarray,
-    milestone_frame_indices: list,
-    out_dir: str,
-    prefix: str,
-    pca: PCA,
-) -> None:
-    """Save a 2D PCA scatter plot coloured by cluster label with milestone frames annotated."""
-    n_clusters = int(labels.max()) + 1
-    palette = plt.cm.get_cmap("tab10", n_clusters)
-
-    fig, ax = plt.subplots(figsize=(6, 5))
-    for k in range(n_clusters):
-        mask = labels == k
-        ax.scatter(X_pca[mask, 0], X_pca[mask, 1],
-                   color=palette(k), s=10, alpha=0.5, label=f"milestone {k+1}")
-
-    for i, fi in enumerate(milestone_frame_indices):
-        ax.scatter(X_pca[fi, 0], X_pca[fi, 1],
-                   marker="*", s=300, color="black", zorder=5)
-        ax.annotate(f"M{i+1}", (X_pca[fi, 0], X_pca[fi, 1]),
-                    textcoords="offset points", xytext=(5, 5), fontsize=8)
-
-    ax.set_xlabel(f"PC1 ({pca.explained_variance_ratio_[0]*100:.1f}%)")
-    ax.set_ylabel(f"PC2 ({pca.explained_variance_ratio_[1]*100:.1f}%)")
-    ax.set_title("Milestone clustering")
-    ax.legend(fontsize=15)#, markerscale=1.5)
-    plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, f"{prefix}_pca_clusters.png"), dpi=300)
-    plt.close()
-
-    return
 
 def _reimaging_ligand(u: mda.Universe, ligand_sel: str) -> bool:
     """
@@ -1649,122 +1522,6 @@ def _reimaging_ligand(u: mda.Universe, ligand_sel: str) -> bool:
         lig_atoms.positions += translation
         return True
     return False
-
-
-def extract_milestones(
-    u: mda.Universe,
-    X: np.ndarray,
-    n_milestones: int = 5,
-    out_dir: str = None,
-    prefix: str = "milestone",
-    min_frame_separation: int = 0,
-    pca_n_components: int = 2,
-    plot: bool = True,
-    ligand_sel: str = None,
-) -> Tuple[np.ndarray, np.ndarray, list]:
-    """
-    Extract milestone frames from sMD trajectory data.
-
-    Reduces the raw pairwise-distance feature matrix to 2D PCA space, then
-    applies RegularSpace clustering along PC1 (the dominant unbinding axis) to
-    obtain evenly-spaced milestones. A scatter plot of the PCA projection with
-    cluster labels and selected milestone frames is saved alongside the PDBs.
-
-    Parameters
-    ----------
-    u : mda.Universe
-        MDAnalysis Universe with trajectories loaded (used for writing PDBs).
-    X : np.ndarray
-        Feature matrix of shape (n_frames, n_features) from
-        ``compute_distance_features()``.
-    n_milestones : int
-        Maximum number of milestones (RegularSpace max_centers).
-    out_dir : str
-        Output directory for milestone PDB files and the PCA plot.
-    prefix : str
-        Prefix for milestone file names.
-    min_frame_separation : int
-        Minimum frame-index gap between selected milestone frames.
-    pca_n_components : int
-        Number of PCA components to keep for the projection (default 2).
-    plot : bool
-        If True and out_dir is provided, save a PCA cluster scatter plot.
-    ligand_sel : str, optional
-        MDAnalysis selection string for the ligand. When provided, each milestone
-        frame is corrected for PBC imaging artifacts before the PDB is written:
-        the ligand is translated to the minimum-image position relative to the
-        protein COM. This is necessary because backbone superposition can displace
-        the ligand into a distant periodic image (particularly for non-orthogonal
-        boxes such as rhombic dodecahedra), which would corrupt PathCV reference
-        distances.
-
-    Returns
-    -------
-    labels : np.ndarray
-        Cluster assignment for each frame (in PC1 space).
-    sorted_centers : np.ndarray
-        RegularSpace cluster centers sorted by PC1 value (bound → unbound).
-    milestone_files : list[str]
-        Paths to the written milestone PDB files.
-    """
-    if X.ndim != 2:
-        raise ValueError("X must be a 2D array of shape (n_frames, n_features)")
-
-    X_scaled = StandardScaler().fit_transform(X)
-    pca = PCA(n_components=pca_n_components)
-    X_pca = pca.fit_transform(X_scaled)
-    logger.info(
-        f"PCA: explained variance ratio = "
-        f"{[f'{v*100:.1f}%' for v in pca.explained_variance_ratio_]}"
-    )
-
-    pc1 = X_pca[:, 0].reshape(-1, 1)
-    dmin = float((pc1.max() - pc1.min()) / n_milestones)
-    fitted_model = RegularSpace(dmin=dmin, max_centers=n_milestones).fit(pc1).fetch_model()
-
-    cluster_centers = fitted_model.cluster_centers        # shape (k, 1)
-    labels = fitted_model.transform(pc1)
-    sorted_centers = cluster_centers[np.argsort(cluster_centers[:, 0])]
-
-    closest_frames = match_cluster_centroids_unique(
-        pc1,
-        sorted_centers,
-        min_frame_separation=min_frame_separation,
-    )
-
-    os.makedirs(out_dir, exist_ok=True)
-    milestone_files = []
-    u.trajectory[0]
-    for i, frame_index in enumerate(closest_frames):
-        frame_index = int(frame_index)
-        u.trajectory[frame_index]
-
-        # Correct any PBC imaging artifact before writing:
-        # backbone superposition can leave the ligand in a distant periodic image.
-        if ligand_sel is not None:
-            try:
-                reimaged = _reimaging_ligand(u, ligand_sel)
-                if reimaged:
-                    logger.info(
-                        f"  Milestone {i+1} (frame {frame_index}): ligand was re-imaged "
-                        f"to the minimum-image position relative to protein COM."
-                    )
-            except Exception as e:
-                logger.warning(
-                    f"  Milestone {i+1} (frame {frame_index}): re-imaging failed: {e}"
-                )
-
-        fname = os.path.join(out_dir, f"{prefix}_{i+1}_frame_{frame_index}.pdb")
-        with mda.Writer(fname, reindex=True) as W:
-            W.write(u.atoms)
-        milestone_files.append(fname)
-        logger.info(f"Wrote milestone {i+1} at frame {frame_index}: {fname}")
-
-    if plot and out_dir is not None:
-        _plot_pca_milestones(X_pca, labels, closest_frames, out_dir, prefix, pca)
-
-    return labels, sorted_centers, milestone_files
-
 
 
 def find_closest_points(
@@ -1961,3 +1718,250 @@ def write_pocket_pymol(
     return None
 
 
+
+### DEPRECATED ###
+# Superseded by autopath/Clustering.py. Retained: still imported by
+# Clustering (PairwiseDistances, write_pdbs, plot) and by any external caller.
+
+def match_cluster_centroids_unique(X: np.ndarray,
+                                   centroids: np.ndarray,
+                                   min_frame_separation: int = 10,
+                                   ) -> list[int]:
+    """Match each centroid to a unique frame index in X.
+
+    This prevents multiple milestones from collapsing onto the same frame and
+    optionally enforces a minimum index separation to avoid near-consecutive picks.
+    """
+    if X.ndim != 2:
+        raise ValueError("X must be a 2D array of shape (n_frames, n_features)")
+    if centroids.ndim != 2:
+        raise ValueError("centroids must be a 2D array of shape (n_centroids, n_features)")
+
+    selected: list[int] = []
+
+    for centroid in centroids:
+        distances = np.linalg.norm(X - centroid, axis=1)
+        candidate_indices = np.argsort(distances)
+
+        chosen = None
+        for idx in candidate_indices:
+            idx = int(idx)
+            if idx in selected:
+                continue
+            if min_frame_separation > 0 and any(abs(idx - j) < min_frame_separation for j in selected):
+                continue
+            chosen = idx
+            break
+
+        if chosen is None:
+            # Fallback: keep uniqueness if possible, even if separation is violated
+            for idx in candidate_indices:
+                idx = int(idx)
+                if idx not in selected:
+                    chosen = idx
+                    break
+
+        if chosen is None:
+            # Degenerate fallback (e.g., more centers than frames)
+            chosen = int(candidate_indices[0])
+
+        selected.append(chosen)
+
+    return selected
+
+
+def compute_distance_features(u: mda.Universe,
+                              ligand_sel: str,
+                              pocket_sel: str,
+                              stride: int = 1,
+                              ) -> np.ndarray:
+    """
+    Compute flattened pairwise distances between ligand and pocket atoms 
+    for each frame in the Universe trajectory.
+
+    Parameters
+    ----------
+    u : mda.Universe
+        MDAnalysis Universe with trajectory loaded.
+    ligand_sel : str
+        MDAnalysis selection string for ligand atoms.
+    pocket_sel : str
+        MDAnalysis selection string for pocket atoms.
+    stride : int
+        Process every `stride`-th frame.
+
+    Returns
+    -------
+    np.ndarray
+        Feature matrix of shape (n_frames, n_ligand * n_pocket).
+        Distances are in nm.
+    """
+    ligand_atoms = u.select_atoms(ligand_sel)
+    pocket_atoms = u.select_atoms(pocket_sel)
+
+    if ligand_atoms.n_atoms == 0 or pocket_atoms.n_atoms == 0:
+        raise ValueError(
+            f"Empty atom selection: ligand={ligand_atoms.n_atoms}, pocket={pocket_atoms.n_atoms}"
+        )
+
+    all_dists = []
+    for ts in u.trajectory[::stride]:
+        # Pass box=u.dimensions so MDAnalysis uses the minimum-image convention.
+        # Without this, frames where the ligand is in a different periodic image
+        # from the pocket (e.g. after backbone superposition) produce inflated
+        # Euclidean distances that corrupt PCA-based milestone selection.
+        box = u.dimensions if u.dimensions is not None else None
+        dists = distance_array(ligand_atoms.positions, pocket_atoms.positions, box=box)
+        all_dists.append(dists.flatten() / 10.0)  # Angstroms -> nm
+
+    return np.array(all_dists)
+
+
+def _plot_pca_milestones(
+    X_pca: np.ndarray,
+    labels: np.ndarray,
+    milestone_frame_indices: list,
+    out_dir: str,
+    prefix: str,
+    pca: PCA,
+) -> None:
+    """Save a 2D PCA scatter plot coloured by cluster label with milestone frames annotated."""
+    n_clusters = int(labels.max()) + 1
+    palette = plt.cm.get_cmap("tab10", n_clusters)
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    for k in range(n_clusters):
+        mask = labels == k
+        ax.scatter(X_pca[mask, 0], X_pca[mask, 1],
+                   color=palette(k), s=10, alpha=0.5, label=f"milestone {k+1}")
+
+    for i, fi in enumerate(milestone_frame_indices):
+        ax.scatter(X_pca[fi, 0], X_pca[fi, 1],
+                   marker="*", s=300, color="black", zorder=5)
+        ax.annotate(f"M{i+1}", (X_pca[fi, 0], X_pca[fi, 1]),
+                    textcoords="offset points", xytext=(5, 5), fontsize=8)
+
+    ax.set_xlabel(f"PC1 ({pca.explained_variance_ratio_[0]*100:.1f}%)")
+    ax.set_ylabel(f"PC2 ({pca.explained_variance_ratio_[1]*100:.1f}%)")
+    ax.set_title("Milestone clustering")
+    ax.legend(fontsize=15)#, markerscale=1.5)
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, f"{prefix}_pca_clusters.png"), dpi=300)
+    plt.close()
+
+    return
+
+
+def extract_milestones(
+    u: mda.Universe,
+    X: np.ndarray,
+    n_milestones: int = 5,
+    out_dir: str = None,
+    prefix: str = "milestone",
+    min_frame_separation: int = 0,
+    pca_n_components: int = 2,
+    plot: bool = True,
+    ligand_sel: str = None,
+) -> Tuple[np.ndarray, np.ndarray, list]:
+    """
+    Extract milestone frames from sMD trajectory data.
+
+    Reduces the raw pairwise-distance feature matrix to 2D PCA space, then
+    applies RegularSpace clustering along PC1 (the dominant unbinding axis) to
+    obtain evenly-spaced milestones. A scatter plot of the PCA projection with
+    cluster labels and selected milestone frames is saved alongside the PDBs.
+
+    Parameters
+    ----------
+    u : mda.Universe
+        MDAnalysis Universe with trajectories loaded (used for writing PDBs).
+    X : np.ndarray
+        Feature matrix of shape (n_frames, n_features) from
+        ``compute_distance_features()``.
+    n_milestones : int
+        Maximum number of milestones (RegularSpace max_centers).
+    out_dir : str
+        Output directory for milestone PDB files and the PCA plot.
+    prefix : str
+        Prefix for milestone file names.
+    min_frame_separation : int
+        Minimum frame-index gap between selected milestone frames.
+    pca_n_components : int
+        Number of PCA components to keep for the projection (default 2).
+    plot : bool
+        If True and out_dir is provided, save a PCA cluster scatter plot.
+    ligand_sel : str, optional
+        MDAnalysis selection string for the ligand. When provided, each milestone
+        frame is corrected for PBC imaging artifacts before the PDB is written:
+        the ligand is translated to the minimum-image position relative to the
+        protein COM. This is necessary because backbone superposition can displace
+        the ligand into a distant periodic image (particularly for non-orthogonal
+        boxes such as rhombic dodecahedra), which would corrupt PathCV reference
+        distances.
+
+    Returns
+    -------
+    labels : np.ndarray
+        Cluster assignment for each frame (in PC1 space).
+    sorted_centers : np.ndarray
+        RegularSpace cluster centers sorted by PC1 value (bound → unbound).
+    milestone_files : list[str]
+        Paths to the written milestone PDB files.
+    """
+    if X.ndim != 2:
+        raise ValueError("X must be a 2D array of shape (n_frames, n_features)")
+
+    X_scaled = StandardScaler().fit_transform(X)
+    pca = PCA(n_components=pca_n_components)
+    X_pca = pca.fit_transform(X_scaled)
+    logger.info(
+        f"PCA: explained variance ratio = "
+        f"{[f'{v*100:.1f}%' for v in pca.explained_variance_ratio_]}"
+    )
+
+    pc1 = X_pca[:, 0].reshape(-1, 1)
+    dmin = float((pc1.max() - pc1.min()) / n_milestones)
+    fitted_model = RegularSpace(dmin=dmin, max_centers=n_milestones).fit(pc1).fetch_model()
+
+    cluster_centers = fitted_model.cluster_centers        # shape (k, 1)
+    labels = fitted_model.transform(pc1)
+    sorted_centers = cluster_centers[np.argsort(cluster_centers[:, 0])]
+
+    closest_frames = match_cluster_centroids_unique(
+        pc1,
+        sorted_centers,
+        min_frame_separation=min_frame_separation,
+    )
+
+    os.makedirs(out_dir, exist_ok=True)
+    milestone_files = []
+    u.trajectory[0]
+    for i, frame_index in enumerate(closest_frames):
+        frame_index = int(frame_index)
+        u.trajectory[frame_index]
+
+        # Correct any PBC imaging artifact before writing:
+        # backbone superposition can leave the ligand in a distant periodic image.
+        if ligand_sel is not None:
+            try:
+                reimaged = _reimaging_ligand(u, ligand_sel)
+                if reimaged:
+                    logger.info(
+                        f"  Milestone {i+1} (frame {frame_index}): ligand was re-imaged "
+                        f"to the minimum-image position relative to protein COM."
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"  Milestone {i+1} (frame {frame_index}): re-imaging failed: {e}"
+                )
+
+        fname = os.path.join(out_dir, f"{prefix}_{i+1}_frame_{frame_index}.pdb")
+        with mda.Writer(fname, reindex=True) as W:
+            W.write(u.atoms)
+        milestone_files.append(fname)
+        logger.info(f"Wrote milestone {i+1} at frame {frame_index}: {fname}")
+
+    if plot and out_dir is not None:
+        _plot_pca_milestones(X_pca, labels, closest_frames, out_dir, prefix, pca)
+
+    return labels, sorted_centers, milestone_files
