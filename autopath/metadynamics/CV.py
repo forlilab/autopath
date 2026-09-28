@@ -152,6 +152,11 @@ def rmsd_states_cv(
             if atom.name in atom_names
         ]
         milestone_pdbs = sorted(glob(f"{milestone_dir}/milestone_*.pdb"))
+        if not milestone_pdbs:
+            raise FileNotFoundError(
+                f"no milestone_*.pdb under {milestone_dir}. Milestones are now "
+                "written as .xml states; rmsd_states_cv still requires PDBs "
+                "(its _build_reference_dict reads PDB paths).")
         milestones_dicts = [
             _build_reference_dict(pdb, atom_names, atom_indexes)
             for pdb in milestone_pdbs
