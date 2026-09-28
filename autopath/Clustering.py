@@ -55,6 +55,9 @@ class CoordinateRMSD(Featurizer):
 
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
+from deeptime.clustering import RegularSpace
+
+_STRATEGIES = ("centroid", "time_spaced")
 
 
 class Clustering:
@@ -99,3 +102,32 @@ class Clustering:
     def _require_fit(self):
         if self.X_reduced is None:
             raise RuntimeError("call fit() before select()/plot()")
+
+    def select(self, n: int, strategy: str, min_frame_separation: int = 0):
+        """Representative frame indices.
+
+        strategy="centroid"    RegularSpace along PC1 -> nearest real frame.
+                               Diverse starting points (milestones, exploration).
+        strategy="time_spaced" evenly spaced in time. Population-weighted, the
+                               correct choice when seeding an ensemble average.
+        """
+        self._require_fit()
+        if strategy not in _STRATEGIES:
+            raise ValueError(f"strategy must be one of {_STRATEGIES}, got {strategy!r}")
+        n_frames = self.X_reduced.shape[0]
+        if n > n_frames:
+            raise ValueError(f"requested {n} frames but only {n_frames} are available")
+
+        if strategy == "time_spaced":
+            return np.unique(np.linspace(0, n_frames - 1, n).astype(int))
+
+        from autopath.utils import match_cluster_centroids_unique
+        pc1 = self.X_reduced[:, 0].reshape(-1, 1)
+        dmin = float((pc1.max() - pc1.min()) / n)
+        model = RegularSpace(dmin=dmin, max_centers=n).fit(pc1).fetch_model()
+        self.labels_ = model.transform(pc1)
+        centers = model.cluster_centers
+        self.centers_ = centers[np.argsort(centers[:, 0])]
+        frames = match_cluster_centroids_unique(
+            pc1, self.centers_, min_frame_separation=min_frame_separation)
+        return np.sort(np.asarray(frames, dtype=int))
