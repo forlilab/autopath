@@ -10,6 +10,8 @@ import openmm.unit as openmmunit
 
 import MDAnalysis as mda
 
+from autopath.Clustering import read_positions
+
 logger = logging.getLogger("autopath")
 
 
@@ -630,7 +632,8 @@ def write_funnel_pymol(
     ms_data = []
     for i, ms_file in enumerate(milestone_files):
         try:
-            u_ms = mda.Universe(ms_file)
+            u_ms = mda.Universe(reference_pdb)
+            u_ms.atoms.positions = read_positions(ms_file) * 10.0
             lig = u_ms.select_atoms(f"({ligand_selection}) and not name H*")
             if len(lig) == 0:
                 lig = u_ms.select_atoms(

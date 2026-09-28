@@ -19,7 +19,7 @@ from openmm.unit import *
 
 # AutoPath imports
 from autopath.utils import *
-from autopath.Clustering import Clustering, PairwiseDistances
+from autopath.Clustering import Clustering, PairwiseDistances, read_positions
 from autopath.pdb_preprocessor import PDBPreprocessor
 from autopath.ap_PLIP import plot_atomic_property, calculate_ligand_rmsf, calculate_contact_frequency
 from autopath import (
@@ -1115,8 +1115,8 @@ class AutoPath:
                         for i in ligand_atoms_indices
                     ])
                     _milestone_com_dists = []
-                    for _m_pdb in milestones:
-                        _pos = np.array(PDBFile(_m_pdb).positions.value_in_unit(nanometers))
+                    for _m_file in milestones:
+                        _pos = read_positions(_m_file)
                         _p_com = np.average(_pos[pocket_atom_indices], axis=0, weights=_pocket_masses)
                         _l_com = np.average(_pos[ligand_atoms_indices], axis=0, weights=_ligand_masses)
                         _milestone_com_dists.append(float(np.linalg.norm(_l_com - _p_com)))
