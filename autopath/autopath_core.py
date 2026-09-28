@@ -1024,7 +1024,7 @@ class AutoPath:
                         ms_files = clu.write_states(
                             u_path, frames, topology, system,
                             out_dir=path_outdir, prefix=f"milestone_{path_id}",
-                            temperature=self.temperature)
+                            temperature=self.temperature, ligand_sel=ligand_sel)
                         clu.plot(path_outdir, f"milestone_{path_id}", frames=frames)
                         all_milestone_files.extend(ms_files)
 
@@ -1041,7 +1041,7 @@ class AutoPath:
                 milestone_files = clu.write_states(
                     u_milestone, frames, topology, system,
                     out_dir=milestones_outdir, prefix="milestone",
-                    temperature=self.temperature)
+                    temperature=self.temperature, ligand_sel=ligand_sel)
                 clu.plot(milestones_outdir, "milestone", frames=frames)
 
                 logger.info(f"Extracted {len(milestone_files)} milestones from {len(medoid_dcds)} medoid trajectories.")
@@ -1071,10 +1071,10 @@ class AutoPath:
 
             logger.info(f"sMD COM distance range: [{min_com:.3f}, {max_com:.3f}] nm (informational; path CV uses [0.0, 1.0])")
 
-            milestones = glob(f'{milestones_outdir}/**/milestone_*_*_*.xml', recursive=True)
-            # filter milestones to only those that do not have relaxed systems yet (i.e. those that need to be processed in the loop below)
-            # (the glob above also matches the relaxed output states, which share the .xml extension)
-            milestones = [m for m in milestones if not m.endswith('_relax_state.xml')]  # Simplified check
+            milestones = glob(f'{milestones_outdir}/**/milestone_*_frame_*.xml', recursive=True)
+            # RelaxMD writes both _relax_system.xml and _relax_state.xml alongside the
+            # milestones; drop every _relax_* output so only the input states remain.
+            milestones = [m for m in milestones if '_relax' not in os.path.basename(m)]
             
             if len(milestones) == 0:
                 raise RuntimeError("No milestones found. Please check the milestone extraction step.")

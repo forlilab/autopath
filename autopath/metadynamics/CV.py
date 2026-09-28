@@ -151,10 +151,16 @@ def rmsd_states_cv(
             for atom in residue.atoms()
             if atom.name in atom_names
         ]
-        milestone_pdbs = sorted(glob(f"{milestone_dir}/milestone_*.pdb"))
+        # RelaxMD writes <milestone>_relax.pdb into the same directory; matching
+        # those would build the path from relaxed structures instead of the
+        # milestones themselves.
+        milestone_pdbs = sorted(
+            p for p in glob(f"{milestone_dir}/milestone_*_frame_*.pdb")
+            if "_relax" not in os.path.basename(p)
+        )
         if not milestone_pdbs:
             raise FileNotFoundError(
-                f"no milestone_*.pdb under {milestone_dir}. Milestones are now "
+                f"no milestone_*_frame_*.pdb under {milestone_dir}. Milestones are now "
                 "written as .xml states; rmsd_states_cv still requires PDBs "
                 "(its _build_reference_dict reads PDB paths).")
         milestones_dicts = [
@@ -202,6 +208,16 @@ def path_rmsd_cv(
     sigma: float = 0.001,
 ) -> CVSpec:
     """Path-in-RMSD-space CV through ligand heavy-atom milestones (deferred: needs positions)."""
+    # _build_reference_dict reads each milestone with PDBFile, which fails with an
+    # opaque IndexError on a serialized State; reject non-PDB paths up front.
+    _bad = [m for m in milestones if not m.lower().endswith(".pdb")]
+    if _bad:
+        raise ValueError(
+            f"path_rmsd_cv requires .pdb milestones, got {len(_bad)} with another "
+            f"extension (e.g. {os.path.basename(_bad[0])}). Milestones are now written "
+            "as serialized .xml states; path_rmsd_cv cannot read them because its "
+            "_build_reference_dict needs a topology. Write PDB milestones "
+            "(Clustering.write_pdbs) or use a CV that accepts states.")
     milestones = sorted(milestones, key=_milestone_sort_key)
 
     def factory(input_positions, n_atoms, topology):
