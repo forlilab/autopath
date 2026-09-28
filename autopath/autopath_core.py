@@ -19,6 +19,7 @@ from openmm.unit import *
 
 # AutoPath imports
 from autopath.utils import *
+from autopath.Clustering import Clustering, PairwiseDistances
 from autopath.pdb_preprocessor import PDBPreprocessor
 from autopath.ap_PLIP import plot_atomic_property, calculate_ligand_rmsf, calculate_contact_frequency
 from autopath import (
@@ -1015,16 +1016,16 @@ class AutoPath:
                         u_path = mda.Universe(solvated_system_pdb, path_dcds)
                         
                         logger.info(f"Computing distance features for path {path_id} ({len(path_dcds)} trajs, {len(u_path.trajectory)} frames)...")
-                        X_path = compute_distance_features(u_path, ligand_sel, pocket_sel)
-
-                        labels, centers, ms_files = extract_milestones(
-                            u_path, X_path,
-                            n_milestones=self.n_milestones,
-                            out_dir=path_outdir,
-                            prefix=f"milestone_{path_id}",
-                            min_frame_separation=self.milestone_min_frame_separation,
-                            ligand_sel=ligand_sel,
-                        )
+                        clu = Clustering(
+                            PairwiseDistances(ligand_sel, pocket_sel)
+                        ).fit(u_path)
+                        frames = clu.select(self.n_milestones, strategy="centroid",
+                                            min_frame_separation=self.milestone_min_frame_separation)
+                        ms_files = clu.write_states(
+                            u_path, frames, topology, system,
+                            out_dir=path_outdir, prefix=f"milestone_{path_id}",
+                            temperature=self.temperature)
+                        clu.plot(path_outdir, f"milestone_{path_id}", frames=frames)
                         all_milestone_files.extend(ms_files)
 
                         logger.info(f"Path {path_id}: extracted {len(ms_files)} milestones.")
@@ -1032,16 +1033,16 @@ class AutoPath:
             if self.milestone_mode == "all_medoids":
                 # Mode: pool all medoid trajectories, cluster together
                 logger.info(f"Computing distance features for all medoids ({len(u_milestone.trajectory)} frames)...")
-                X_all = compute_distance_features(u_milestone, ligand_sel, pocket_sel)
-
-                labels, sorted_cluster_centers, milestone_files = extract_milestones(
-                    u_milestone, X_all,
-                    n_milestones=self.n_milestones,
-                    out_dir=milestones_outdir,
-                    prefix="milestone",
-                    min_frame_separation=self.milestone_min_frame_separation,
-                    ligand_sel=ligand_sel,
-                )
+                clu = Clustering(
+                    PairwiseDistances(ligand_sel, pocket_sel)
+                ).fit(u_milestone)
+                frames = clu.select(self.n_milestones, strategy="centroid",
+                                    min_frame_separation=self.milestone_min_frame_separation)
+                milestone_files = clu.write_states(
+                    u_milestone, frames, topology, system,
+                    out_dir=milestones_outdir, prefix="milestone",
+                    temperature=self.temperature)
+                clu.plot(milestones_outdir, "milestone", frames=frames)
 
                 logger.info(f"Extracted {len(milestone_files)} milestones from {len(medoid_dcds)} medoid trajectories.")
 
@@ -1070,9 +1071,10 @@ class AutoPath:
 
             logger.info(f"sMD COM distance range: [{min_com:.3f}, {max_com:.3f}] nm (informational; path CV uses [0.0, 1.0])")
 
-            milestones = glob(f'{milestones_outdir}/**/milestone_*_*_*.pdb', recursive=True)
+            milestones = glob(f'{milestones_outdir}/**/milestone_*_*_*.xml', recursive=True)
             # filter milestones to only those that do not have relaxed systems yet (i.e. those that need to be processed in the loop below)
-            milestones = [m for m in milestones if not m.endswith('_relax.pdb')]  # Simplified check
+            # (the glob above also matches the relaxed output states, which share the .xml extension)
+            milestones = [m for m in milestones if not m.endswith('_relax_state.xml')]  # Simplified check
             
             if len(milestones) == 0:
                 raise RuntimeError("No milestones found. Please check the milestone extraction step.")
@@ -1264,7 +1266,7 @@ class AutoPath:
                     logger.info(f'Relaxing milestone {milestone_name}')
                     try:
                         system = load_system(f"{sys_name}/system.xml")
-                        milestone_system = milestone_relax.run(system=system, pdb_file=milestone, run_id=milestone_name)
+                        milestone_system = milestone_relax.run(system=system, state_xml_file=milestone, run_id=milestone_name)
                     except Exception as e:
                         logger.error(f"Error relaxing {milestone_name}: {e}")
                         continue
