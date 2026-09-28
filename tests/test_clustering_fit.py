@@ -1,6 +1,6 @@
 import numpy as np, pytest, MDAnalysis as mda
 from MDAnalysis.tests.datafiles import PSF, DCD
-from autopath.Clustering import Clustering, PairwiseDistances
+from autopath.Clustering import Clustering, PairwiseDistances, CoordinateRMSD
 
 
 @pytest.fixture
@@ -25,3 +25,9 @@ def test_n_components_is_honoured():
                                      "resid 20-30 and name CA"),
                    n_components=3).fit(u)
     assert c.X_reduced.shape[1] == 3
+
+
+def test_single_feature_featurizer_does_not_explode():
+    u = mda.Universe(PSF, DCD)
+    c = Clustering(CoordinateRMSD("name CA")).fit(u)
+    assert c.X_reduced.shape == (len(u.trajectory), 1)

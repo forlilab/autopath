@@ -82,7 +82,13 @@ class Clustering:
             raise ValueError("featurizer must return a 2D (n_frames, n_features) array")
         self.X = X
         Xs = StandardScaler().fit_transform(X) if self.scale else X
-        pca = PCA(n_components=self.n_components, random_state=self.seed)
+        # A featurizer may return fewer features than n_components (CoordinateRMSD
+        # returns one), and PCA refuses n_components > n_features.
+        n_comp = min(self.n_components, Xs.shape[1])
+        if n_comp < self.n_components:
+            logger.warning("n_components=%d exceeds the %d available features; using %d",
+                           self.n_components, Xs.shape[1], n_comp)
+        pca = PCA(n_components=n_comp, random_state=self.seed)
         self.X_reduced = pca.fit_transform(Xs)
         self._pca = pca
         self.explained_variance_ratio_ = pca.explained_variance_ratio_
