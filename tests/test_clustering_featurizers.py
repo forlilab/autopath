@@ -9,19 +9,26 @@ def u():
     return mda.Universe(PSF, DCD)
 
 
-def test_pairwise_distances_matches_hand_computed_reference(u):
-    """Independent reference: PairwiseDistances must equal distances computed
-    directly from coordinates. Comparing it to compute_distance_features would
-    be vacuous, because the implementation delegates to that function."""
+def test_pairwise_distances_matches_independent_reference(u):
+    """Independent reference built from MDAnalysis primitives, NOT from
+    compute_distance_features (the implementation delegates to that, so
+    comparing against it would be vacuous).
+
+    Two details the reference must match or the test is wrong rather than the
+    code: the distances are MINIMUM-IMAGE (box= is passed) and the output is in
+    NANOMETRES (Angstrom / 10).
+    """
+    from MDAnalysis.lib.distances import distance_array
     lig, pock = "resid 1-5 and name CA", "resid 20-30 and name CA"
     X = PairwiseDistances(lig, pock).compute(u)
     lg, pk = u.select_atoms(lig), u.select_atoms(pock)
     u.trajectory[0]
-    expected = np.linalg.norm(
-        lg.positions[:, None, :] - pk.positions[None, :, :], axis=-1).ravel()
+    expected = distance_array(lg.positions, pk.positions,
+                              box=u.dimensions).flatten() / 10.0
     assert X.shape == (len(u.trajectory), lg.n_atoms * pk.n_atoms)
     np.testing.assert_allclose(X[0], expected, rtol=1e-6, atol=1e-6)
     assert (X >= 0).all()
+    assert X.max() < 100.0          # nm, not Angstrom
 
 
 def test_pairwise_distances_respects_stride(u):
