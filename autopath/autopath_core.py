@@ -1373,7 +1373,10 @@ class AutoPath:
                                 universe,
                                 host_selection=funnel_host_sel,
                                 guest_selection=ligand_selection,
-                                percentile_z=50.0,
+                                # z_cc must sit BEYOND the binding site so the cone
+                                # covers it and the restraint is not felt there; the
+                                # default high percentile does that. A median z_cc puts
+                                # the site in the cylinder, at the tightest radius.
                                 # R_cylinder is derived from the trajectory's own radial
                                 # spread beyond z_cc; pass R_cylinder_ang to override.
                                 # z_cc_ang=5, # this overrides the default automatic z_cc calculation (floor is 5A)

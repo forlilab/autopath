@@ -546,3 +546,89 @@ def test_funnel_unchanged_inside_the_cone_and_cylinder():
     assert _funnel_energy(p, 15.0, 3.0) == pytest.approx(0.0, abs=1e-6)
     # inside the cylinder, outside R_cylinder -> radial wall
     assert _funnel_energy(p, 15.0, 6.0) > 0
+
+
+# --- z_cc must put the binding site inside the cone ------------------------
+
+def _unbinding_universe(n_frames=400, seed=1):
+    """Ligand leaves along +x. Radial spread is LARGE while bound (the pocket
+    lets it rattle) and small far out, which is the shape that exposes a z_cc
+    placed at the median: the site ends up in the cylinder."""
+    import numpy as np
+    import MDAnalysis as mda
+    rng = np.random.default_rng(seed)
+    u = mda.Universe.empty(2, n_residues=2, atom_resindex=[0, 1],
+                           residue_segindex=[0, 0], trajectory=True)
+    u.add_TopologyAttr("name", ["CA", "C1"])
+    u.add_TopologyAttr("resname", ["ALA", "LIG"])
+    u.add_TopologyAttr("resid", [1, 2])
+    u.add_TopologyAttr("masses", [12.0, 12.0])
+    z = np.linspace(1.0, 20.0, n_frames)
+    rad = np.where(z < 8.0, rng.normal(0, 3.0, n_frames), rng.normal(0, 1.0, n_frames))
+    coords = np.zeros((n_frames, 2, 3))
+    coords[:, 1, 0] = z
+    coords[:, 1, 1] = rad
+    u.load_new(coords, order="fac")
+    u.dimensions = [80, 80, 80, 90, 90, 90]
+    return u
+
+
+def _cone_radius_at(params, z_ang):
+    from openmm import unit as ommunit
+    import numpy as np
+    zcc = params["z_cc"].value_in_unit(ommunit.angstrom)
+    R = params["R_cylinder"].value_in_unit(ommunit.angstrom)
+    a = params["alpha"].value_in_unit(ommunit.degrees)
+    return R + max(0.0, zcc - z_ang) * np.tan(np.radians(a))
+
+
+def test_default_zcc_keeps_the_binding_site_inside_the_cone():
+    """Limongelli 2013 requires z_cc > the site's outer edge, so that exploring
+    the site is unaffected by the restraint."""
+    from autopath.metadynamics.Funnel import generate_funnel_parameters_from_trajectory
+    from openmm import unit as ommunit
+    import numpy as np
+
+    u = _unbinding_universe()
+    p = generate_funnel_parameters_from_trajectory(
+        u, host_selection="resname ALA", guest_selection="resname LIG",
+        stride=1, verbose=False)
+
+    z = np.abs(np.asarray(p["axial_distances"]))
+    z_site = float(np.percentile(z, 10.0))
+    zcc = p["z_cc"].value_in_unit(ommunit.angstrom)
+    assert zcc > z_site, f"z_cc={zcc:.2f} does not clear the site edge {z_site:.2f}"
+    # and the cone must be wide enough there to not squeeze the bound ligand
+    r_bound = float(np.percentile(np.asarray(p["radial_distances"])[z <= z_site], 95))
+    assert _cone_radius_at(p, z_site) > r_bound
+
+
+def test_median_zcc_would_put_the_site_in_the_cylinder():
+    """Pins WHY the default matters: percentile_z=50 reproduces the old bug."""
+    from autopath.metadynamics.Funnel import generate_funnel_parameters_from_trajectory
+    from openmm import unit as ommunit
+    import numpy as np
+
+    u = _unbinding_universe()
+    bad = generate_funnel_parameters_from_trajectory(
+        u, host_selection="resname ALA", guest_selection="resname LIG",
+        percentile_z=50.0, stride=1, verbose=False)
+    good = generate_funnel_parameters_from_trajectory(
+        u, host_selection="resname ALA", guest_selection="resname LIG",
+        stride=1, verbose=False)
+
+    z = np.abs(np.asarray(bad["axial_distances"]))
+    z_site = float(np.percentile(z, 10.0))
+    r_bound = float(np.percentile(np.asarray(bad["radial_distances"])[z <= z_site], 95))
+
+    assert _cone_radius_at(bad, z_site) < _cone_radius_at(good, z_site)
+    assert bad["z_cc"].value_in_unit(ommunit.angstrom) < good["z_cc"].value_in_unit(ommunit.angstrom)
+    # the default must be the one that leaves the bound ligand unrestrained
+    assert _cone_radius_at(good, z_site) > r_bound
+
+
+def test_core_does_not_force_a_median_zcc():
+    import inspect
+    from autopath import autopath_core
+    src = inspect.getsource(autopath_core)
+    assert "percentile_z=50" not in src.replace(" ", "")

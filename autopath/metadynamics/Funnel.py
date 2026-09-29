@@ -82,6 +82,7 @@ def generate_funnel_parameters_from_trajectory(
     z_max_buffer_ang: float = 3.0,
     R_cylinder_ang: Optional[float] = None,
     percentile_r_funnel: float = 95.0,
+    bound_percentile_z: float = 10.0,
     alpha_cone_degrees: float = 25.0,
     stride: int = 2,
     verbose: bool = True,
@@ -224,8 +225,31 @@ def generate_funnel_parameters_from_trajectory(
     else:
         z_cc = np.percentile(z_distances, percentile_z)
 
-    n_bound = max(10, int(0.1 * trajectory_length))
-    R_funnel_bound = np.percentile(radial_distances[:n_bound], percentile_r_funnel)
+    # The bound state is the LOW-|z| tail, not the leading frames: these arrays
+    # pool many trajectories, so the first 10% is the first few whole pulls
+    # (each running bound -> unbound), not the bound part of each.
+    _absz = np.abs(z_distances)
+    z_site = float(np.percentile(_absz, bound_percentile_z))
+    R_funnel_bound = float(np.percentile(
+        radial_distances[_absz <= z_site], percentile_r_funnel))
+
+    # The cone must contain the binding site, so that exploring the site is not
+    # biased by the restraint. A non-positive radius there means the site sits in
+    # the cylinder instead -- the opposite of the intended geometry.
+    R_cone_at_site = R_cylinder_ang if R_cylinder_ang is not None else 0.0
+    R_cone_at_site += (z_cc - z_site) * np.tan(np.radians(alpha_cone_degrees))
+    if z_cc <= z_site:
+        logger.warning(
+            "z_cc=%.2f A does not reach the bound state (|z| p%.0f = %.2f A): the "
+            "binding site falls in the cylinder, where the restraint is at its "
+            "tightest. Raise percentile_z or set z_cc_ang.",
+            z_cc, bound_percentile_z, z_site)
+    elif R_cone_at_site < R_funnel_bound:
+        logger.warning(
+            "cone radius at the bound state is %.2f A but the ligand's radial "
+            "spread there is %.2f A, so the restraint acts inside the binding "
+            "site. Raise percentile_z or alpha.",
+            R_cone_at_site, R_funnel_bound)
 
     # Size the cylinder from the radial spread the ligand actually shows WHERE THE
     # CYLINDER APPLIES (|z| >= z_cc). The bound-state spread is the wrong basis: it
