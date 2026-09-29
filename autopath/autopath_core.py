@@ -1169,10 +1169,12 @@ class AutoPath:
                             "analysis or relax its filters.")
 
             base_system = load_system(f"{sys_name}/system.xml")
-            # {trajname: path}, so each group's funnel sees only its own trajectories.
-            # The table is large, so only read it when there is a path to select on.
+            # {trajname: path}. Selects each labelled group's own trajectories, and
+            # for an unlabelled group still drops the ones the analysis rejected, so
+            # it is needed either way. Only the two columns are read.
             trajname_to_path = (read_trajname_to_path(sMD_analysis_outdir)
-                                if has_path_labels else {})
+                                if self.mMD_use_funnel_potential or has_path_labels
+                                else {})
             # Collect aligned forward-direction sMD trajectories only
             all_smd_trajs = glob(f"{sMD_traj_outdir}/*_{self.sMD_pulling_dir}_aligned.dcd")
 
@@ -1285,9 +1287,25 @@ class AutoPath:
                         # every path widens the cone until it restrains nothing.
                         smd_trajs = all_smd_trajs
                         if group_key is None:
-                            logger.warning(
-                                "Milestone group is unlabelled; building the funnel from "
-                                "all sMD trajectories.")
+                            # Unlabelled group pools every medoid, so there is no single
+                            # path to restrict to. Still drop the trajectories the
+                            # analysis rejected: they are exactly the under-sampled ones
+                            # that widen the cone without describing a real route.
+                            _ok = {os.path.basename(self._trajname_to_dcd(n))
+                                   for n in trajname_to_path}
+                            _kept = [t for t in all_smd_trajs
+                                     if os.path.basename(t) in _ok]
+                            if _kept:
+                                logger.info(
+                                    "Building the funnel from the %d of %d sMD "
+                                    "trajectories that passed the quality filters.",
+                                    len(_kept), len(all_smd_trajs))
+                                smd_trajs = _kept
+                            else:
+                                logger.info(
+                                    "No trajectory-to-path map under %s; building the "
+                                    "funnel from all sMD trajectories.",
+                                    sMD_analysis_outdir)
                         elif not trajname_to_path:
                             logger.warning(
                                 "No trajectory-to-path map under %s; building the funnel "
