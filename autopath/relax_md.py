@@ -206,7 +206,7 @@ class RelaxMD:
         logger.debug("Warming up the system..")
         warm_up_system(simulation, integrator,
                        warming_steps=npt_steps,
-                       timestep=0.004 * openmmunit.picoseconds,  # lower timestep for warming
+                       timestep=self.timestep,
                        Tend=self.temperature.value_in_unit(openmmunit.kelvin))
 
         logger.debug("Running short NPT..")
