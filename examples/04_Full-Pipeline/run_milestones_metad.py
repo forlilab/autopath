@@ -63,14 +63,6 @@ def main():
 
                   lig_ff='openff-2.3.0',
 
-                  # 2 fs, NOT the 4 fs default. This system was prepared with
-                  # hydrogenMass=1.5 amu (1605 solute H at 1.5; water H stay at
-                  # 1.008 and are rigid), which is too little repartitioning for
-                  # 4 fs -- marginally stable, so a walker blows up at random.
-                  # A 5 ns walker died with "Particle position is NaN" at 1.7 ns
-                  # at 4 fs while two others survived. run_preparation=False
-                  # reuses the existing masses, so the timestep is the only knob.
-                  timestep=0.002,
 
                   # OpenCL, not CUDA: this is what the sMD run used on these same
                   # RTX PRO 6000 (Blackwell) nodes.

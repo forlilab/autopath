@@ -239,3 +239,43 @@ def test_load_bias_files_still_reads_flat_shared_bias_layout(tmp_path):
     biases = MetadynamicsAnalysis.load_bias_files(str(out))
     assert sorted(biases) == [7, 8]
     assert biases[7][0] == 1.0, "should keep the highest save index for walker 7"
+
+
+# --- metadynamics context rebuild + state-xml restart ----------------------
+
+def test_metad_rebuilds_context_instead_of_reinitialising():
+    """The funnel and bias forces are added to the System AFTER the Context is
+    built. reinitialize(preserveState=True) restores globals by name, so a newly
+    added force's default can be overwritten by a stale value and the force
+    silently does nothing. equilibration.py and relax_md.py already use
+    rebuild_simulation for this; MetadynamicsMD must too.
+    """
+    import inspect
+    from autopath.metadynamics.MetadynamicsMD import MetadynamicsMD
+
+    src = inspect.getsource(MetadynamicsMD.run)
+    code = "\n".join(l.split("#", 1)[0] for l in src.splitlines())
+    assert "reinitialize" not in code
+    assert "rebuild_simulation(simulation, system)" in code
+
+
+def test_metad_attaches_reporters_after_the_rebuild():
+    """rebuild_simulation returns a NEW Simulation, so reporters attached before
+    it would be silently dropped and the run would write no output."""
+    import inspect
+    from autopath.metadynamics.MetadynamicsMD import MetadynamicsMD
+
+    src = inspect.getsource(MetadynamicsMD.run)
+    assert src.index("rebuild_simulation(simulation, system)") < src.index("add_reporters(")
+
+
+def test_core_seeds_metadynamics_from_state_xml_not_checkpoint():
+    """A checkpoint is only valid for an identical Context, and metadynamics adds
+    the funnel and bias forces on top of the relaxed system."""
+    import inspect
+    from autopath import autopath_core
+
+    src = inspect.getsource(autopath_core)
+    assert "_relax_state.xml" in src
+    # the metadynamics seeds must not come from a relax checkpoint any more
+    assert "_relax_checkpoint.chk" not in src

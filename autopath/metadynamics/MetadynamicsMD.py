@@ -23,6 +23,7 @@ from autopath.metadynamics.Analysis import (
 )
 from autopath.utils import (
     add_reporters,
+    rebuild_simulation,
     save_system,
     save_simulation,
     save_pdb,
@@ -312,22 +313,6 @@ class MetadynamicsMD:
             system.addForce(fresh_funnel)
             logging.info(f"Added funnel potential with force group {funnel_force.getForceGroup()}")
 
-        logging.debug(f"Setting up reporters for {run_id}..")
-        add_reporters(
-            simulation,
-            self.out_dir,
-            f"WTMetaD_{run_id}",
-            mMD_steps,
-            biasFrequency,
-        )
-        if self.use_GReweighting:
-            simulation.reporters.append(ReweightingReporter(f"{self.out_dir}/GR_WTMetaD_{run_id}.dat",
-                                                            biasFrequency,
-                                                            integrator,
-                                                            unperturebed=True,
-                                                            firtsPertubation=True,
-                                                            ))
-
         resolved = [spec.resolve(input_positions, self.n_atoms, self.topology) for spec in cv_specs]
 
         bias_variables = [
@@ -357,9 +342,36 @@ class MetadynamicsMD:
             biasDir=effective_bias_dir,
         )
 
+        # The funnel and the metadynamics bias force were both added to `system`
+        # AFTER this context was built. reinitialize(preserveState=True) restores
+        # global parameters by NAME, so a newly added force's default can be
+        # overwritten by a stale value and the force silently does nothing -- the
+        # same failure already fixed in equilibration.py and relax_md.py. Rebuild
+        # instead: a fresh context only knows the parameters `system` still defines.
+        simulation = rebuild_simulation(simulation, system)
         simulation.context.setTime(0)
         simulation.context.setStepCount(0)
-        simulation.context.reinitialize(preserveState=True)
+        simulation.currentStep = 0
+
+        # Reporters are attached here, after the rebuild, because rebuild_simulation
+        # returns a new Simulation and anything attached earlier would be dropped.
+        logging.debug(f"Setting up reporters for {run_id}..")
+        add_reporters(
+            simulation,
+            self.out_dir,
+            f"WTMetaD_{run_id}",
+            mMD_steps,
+            biasFrequency,
+        )
+        if self.use_GReweighting:
+            # simulation.integrator, not `integrator`: the rebuild handed the new
+            # context its own copy and the reporter must watch the live one.
+            simulation.reporters.append(ReweightingReporter(f"{self.out_dir}/GR_WTMetaD_{run_id}.dat",
+                                                            biasFrequency,
+                                                            simulation.integrator,
+                                                            unperturebed=True,
+                                                            firtsPertubation=True,
+                                                            ))
 
         colvar_list = [meta.getCollectiveVariables(simulation)]
         for i in range(0, int(mMD_steps), self.record_CV):

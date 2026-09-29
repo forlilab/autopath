@@ -1264,14 +1264,14 @@ class AutoPath:
             # Single-walker mode: all walkers start from the most-bound (first) milestone.
             # Resolve this before reversing the loop so it is milestone-order independent.
             first_milestone_name = os.path.basename(milestones[0]).split('.')[0]
-            first_milestone_chk = f"{milestones_outdir}/{first_milestone_name}_relax_checkpoint.chk"
-            walker_run_info = {}  # {run_id: (checkpoint_path, system_xml_path)} for stuck-walker retry
+            first_milestone_state = f"{milestones_outdir}/{first_milestone_name}_relax_state.xml"
+            walker_run_info = {}  # {run_id: (state_xml_path, system_xml_path)} for stuck-walker retry
 
             # Run most-unbound walker first so the most-bound walker inherits their accumulated bias.
             for milestone in reversed(milestones):
                 milestone_name = os.path.basename(milestone).split('.')[0]
                 milestone_system_xml = f"{milestones_outdir}/{milestone_name}_relax_system.xml"
-                milestone_chk = f"{milestones_outdir}/{milestone_name}_relax_checkpoint.chk"
+                milestone_state = f"{milestones_outdir}/{milestone_name}_relax_state.xml"
 
                 if os.path.exists(milestone_system_xml):
                     milestone_system = load_system(milestone_system_xml)
@@ -1287,7 +1287,10 @@ class AutoPath:
 
                 # mMD_milestone_seeding=True : each walker starts from its own milestone's checkpoint.
                 # mMD_milestone_seeding=False: all walkers start from the first (bound-state) checkpoint.
-                chk_to_use = milestone_chk if self.mMD_milestone_seeding else first_milestone_chk
+                # Restart from the serialized state, not the relax checkpoint. A
+                # checkpoint is only valid for an identical Context, and metadynamics
+                # adds the funnel and bias forces on top of the relaxed system.
+                state_to_use = milestone_state if self.mMD_milestone_seeding else first_milestone_state
 
                 # mMD_multiple_walkers=False (default): each walker gets its own bias subdir so
                 #   hills are NOT shared — walkers run independently without bias communication.
@@ -1310,7 +1313,7 @@ class AutoPath:
                 logger.info(f"Running WTMetaD for milestone {milestone_name}")
                 try:
                     WTMetaD.run(
-                        checkpoint_file=chk_to_use,
+                        state_xml_file=state_to_use,
                         system=milestone_system,
                         run_id=milestone_name,
                         cv_specs=[path_cv],
@@ -1322,7 +1325,7 @@ class AutoPath:
                         funnel_params=funnel_params if funnel_force is not None else None,
                         bias_dir=walker_bias_dir,
                     )
-                    walker_run_info[milestone_name] = (chk_to_use, milestone_system_xml)
+                    walker_run_info[milestone_name] = (state_to_use, milestone_system_xml)
                 except Exception as e:
                     logger.error(f"Error during WTMetaD for {milestone_name}: {e}")
                     continue
@@ -1335,8 +1338,8 @@ class AutoPath:
             #   previously-deposited hills; no cross-walker benefit, but the walker may
             #   still climb out given its own partial bias.
             stuck_walkers = [
-                (run_id, chk, xml)
-                for run_id, (chk, xml) in walker_run_info.items()
+                (run_id, state_xml, xml)
+                for run_id, (state_xml, xml) in walker_run_info.items()
                 if os.path.exists(f"{mMD_out_dir}/COLVAR_{run_id}.npy")
                 and float(np.load(f"{mMD_out_dir}/COLVAR_{run_id}.npy")[:, 0].max()) < 0.5
             ]
@@ -1345,14 +1348,14 @@ class AutoPath:
                     f"{len(stuck_walkers)} stuck walker(s) detected "
                     f"({[r for r, _, _ in stuck_walkers]}); retrying with accumulated bias."
                 )
-                for run_id, chk, xml in stuck_walkers:
+                for run_id, state_xml, xml in stuck_walkers:
                     retry_bias_dir = (
                         os.path.join(mMD_out_dir, f"bias_{run_id}")
                         if not self.mMD_multiple_walkers else None
                     )
                     try:
                         WTMetaD.run(
-                            checkpoint_file=chk,
+                            state_xml_file=state_xml,
                             system=load_system(xml),
                             run_id=f"{run_id}_retry",
                             cv_specs=[path_cv],
