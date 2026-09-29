@@ -296,7 +296,7 @@ Runs a single COM-distance pulling replica in OpenMM, applying a moving harmonic
 
 **`SMDAnalysis`**
 
-Orchestrates the full dcTMD post-processing pipeline for a set of sMD replicas. It loads and filters `.dat` work-profile files via `SMDData`, clusters the trajectories into distinct unbinding paths using DTW + k-medoids (`DTWPathModel`), and estimates ΔG and dissipated work via Jarzynski and second-cumulant estimators. A friction profile Γ(r) is built from the spatially resolved work dissipation, and the unbinding rate k_off is estimated via the Kramers/Pontryagin mean first-passage time formula. Representative frames from each identified path are saved as serialized OpenMM state files for optional metadynamics seeding; a state carries exact box vectors and velocities, which a PDB cannot.
+Orchestrates the full dcTMD post-processing pipeline for a set of sMD replicas. It loads and filters `.dat` work-profile files via `SMDData`, clusters the trajectories into distinct unbinding paths using DTW + k-medoids (`DTWPathModel`), and estimates ΔG and dissipated work via Jarzynski and second-cumulant estimators. A friction profile Γ(r) is built from the spatially resolved work dissipation, and the unbinding rate k_off is estimated via the Kramers/Pontryagin mean first-passage time formula. Representative frames from each identified path are saved as serialized OpenMM state files for optional metadynamics seeding; a state carries the exact unit cell and full-precision coordinates, which a PDB does not (velocities are drawn fresh at the target temperature, since a trajectory frame carries none).
 
 **`MetadynamicsMD`**
 
