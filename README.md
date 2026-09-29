@@ -53,11 +53,11 @@ Applies a COM-distance pulling force along a user-defined direction at one or mo
 
 ### 4. SMD Analysis (`SMDAnalysis`)
 
-Runs the full dcTMD post-processing pipeline on the `.dat` work logs. Trajectories are clustered with DTW + k-medoids to identify distinct unbinding pathways; Jarzynski and cumulant estimators compute ΔG and dissipated work W_diss for each path. A friction profile Γ(r) is derived from the dissipated work, and k_off is estimated via Kramers/Pontryagin MFPT theory. Medoid trajectory PDBs are saved as milestone structures that seed the subsequent metadynamics stage.
+Runs the full dcTMD post-processing pipeline on the `.dat` work logs. Trajectories are clustered with DTW + k-medoids to identify distinct unbinding pathways; Jarzynski and cumulant estimators compute ΔG and dissipated work W_diss for each path. A friction profile Γ(r) is derived from the dissipated work, and k_off is estimated via Kramers/Pontryagin MFPT theory. Representative frames along each path are clustered out and saved as serialized OpenMM states (`milestone_*_frame_*.xml`) that seed the subsequent metadynamics stage.
 
 ### 5. Metadynamics (`MetadynamicsMD`)
 
-Each milestone PDB seeds one walker in a well-tempered metadynamics run. An optional funnel restraint — derived from PCA of the sMD trajectories — focuses sampling along the identified unbinding pathway and reduces convergence time. Walkers can share a single bias or accumulate independent hill files. Output arrays (`COLVAR_*.npy`) and OpenMM hill files are saved for downstream analysis.
+Each milestone state seeds one walker in a well-tempered metadynamics run (relaxed first, so the walker actually restarts from the relaxation checkpoint). An optional funnel restraint — derived from PCA of the sMD trajectories — focuses sampling along the identified unbinding pathway and reduces convergence time. Walkers can share a single bias or accumulate independent hill files. Output arrays (`COLVAR_*.npy`) and OpenMM hill files are saved for downstream analysis.
 
 ### 6. Analysis & Funnel Correction (`MetadynamicsAnalysis`)
 
@@ -296,7 +296,7 @@ Runs a single COM-distance pulling replica in OpenMM, applying a moving harmonic
 
 **`SMDAnalysis`**
 
-Orchestrates the full dcTMD post-processing pipeline for a set of sMD replicas. It loads and filters `.dat` work-profile files via `SMDData`, clusters the trajectories into distinct unbinding paths using DTW + k-medoids (`DTWPathModel`), and estimates ΔG and dissipated work via Jarzynski and second-cumulant estimators. A friction profile Γ(r) is built from the spatially resolved work dissipation, and the unbinding rate k_off is estimated via the Kramers/Pontryagin mean first-passage time formula. Medoid trajectories from each identified path are saved as milestone PDB files for optional metadynamics seeding.
+Orchestrates the full dcTMD post-processing pipeline for a set of sMD replicas. It loads and filters `.dat` work-profile files via `SMDData`, clusters the trajectories into distinct unbinding paths using DTW + k-medoids (`DTWPathModel`), and estimates ΔG and dissipated work via Jarzynski and second-cumulant estimators. A friction profile Γ(r) is built from the spatially resolved work dissipation, and the unbinding rate k_off is estimated via the Kramers/Pontryagin mean first-passage time formula. Representative frames from each identified path are saved as serialized OpenMM state files for optional metadynamics seeding; a state carries exact box vectors and velocities, which a PDB cannot.
 
 **`MetadynamicsMD`**
 

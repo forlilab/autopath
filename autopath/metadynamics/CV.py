@@ -155,8 +155,9 @@ def rmsd_states_cv(
         # those would build the path from relaxed structures instead of the
         # milestones themselves.
         milestone_pdbs = sorted(
-            p for p in glob(f"{milestone_dir}/milestone_*_frame_*.pdb")
-            if "_relax" not in os.path.basename(p)
+            (p for p in glob(f"{milestone_dir}/milestone_*_frame_*.pdb")
+             if "_relax" not in os.path.basename(p)),
+            key=_milestone_sort_key,
         )
         if not milestone_pdbs:
             raise FileNotFoundError(
@@ -186,14 +187,19 @@ def rmsd_states_cv(
 
 
 def _milestone_sort_key(path: str) -> int:
-    """Extract the integer index from a milestone filename (<prefix>_<int>[_<suffix>].pdb)."""
-    parts = os.path.basename(path).split("_")
+    """Milestone index from a `<prefix>_<index>_frame_<frame>` filename.
+
+    Reads the token immediately before `_frame_`, so it is correct for both the
+    pooled scheme (`milestone_1_frame_12`) and the per-path scheme
+    (`milestone_0_1_frame_12`), where a positional split would return the path id.
+    """
+    base = os.path.basename(path)
     try:
-        return int(parts[1])
+        return int(base.split("_frame_")[0].rsplit("_", 1)[-1])
     except (IndexError, ValueError) as exc:
         raise ValueError(
-            f"Cannot parse milestone index from '{os.path.basename(path)}'. "
-            f"Expected format: <prefix>_<integer>[_<suffix>].pdb"
+            f"Cannot parse milestone index from '{base}'. "
+            f"Expected format: <prefix>_<index>_frame_<frame>.<ext>"
         ) from exc
 
 
