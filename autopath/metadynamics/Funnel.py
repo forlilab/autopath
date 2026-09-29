@@ -430,6 +430,7 @@ def create_funnel_force_from_trajectory_analysis(
     z_max = params_dict["z_max"]
     alpha = params_dict["alpha"]
     R_cylinder = params_dict["R_cylinder"]
+    k_z = params_dict.get("k_z", k_xy)
     force_group = params_dict.get("force_group", 10)
     force_name = params_dict.get("force_name", "k_funnel_trajectory")
     unbinding_axis = params_dict["unbinding_axis"]  # unit vector (3,)
@@ -440,9 +441,15 @@ def create_funnel_force_from_trajectory_analysis(
     # frame.  nx,ny,nz are the components of the unit vector along the unbinding direction.
     funnel = CustomCentroidBondForce(
         2,
-        "U_funnel + U_cylinder;"
+        # z_max is a WALL, not a switch. Gating the cylinder on
+        # step(z_max - abs(r_z)) instead sets the whole potential to zero beyond
+        # z_max: the guest is then free axially AND radially, and the energy jumps
+        # discontinuously at the crossing, which kicks the integrator when it comes
+        # back. Keep the radial term on at all |r_z| and close the end with U_axial.
+        "U_funnel + U_cylinder + U_axial;"
         "U_funnel = step(z_cc - abs(r_z))*step(r_xy - R_funnel)*Wall_funnel;"
-        "U_cylinder = step(abs(r_z) - z_cc)*step(z_max - abs(r_z))*step(r_xy - R_cylinder)*Wall_cylinder;"
+        "U_cylinder = step(abs(r_z) - z_cc)*step(r_xy - R_cylinder)*Wall_cylinder;"
+        "U_axial = step(abs(r_z) - z_max)*0.5*k_z*(abs(r_z) - z_max)^2;"
         "Wall_funnel = 0.5 * k_xy * (r_xy - R_funnel)^2;"
         "Wall_cylinder = 0.5 * k_xy * (r_xy - R_cylinder)^2;"
         "R_funnel = (z_cc-abs(r_z))*tan(alpha) + R_cylinder;"
@@ -455,6 +462,7 @@ def create_funnel_force_from_trajectory_analysis(
     funnel.setForceGroup(force_group)
 
     funnel.addGlobalParameter("k_xy", k_xy)
+    funnel.addGlobalParameter("k_z", k_z)
     funnel.addGlobalParameter("z_cc", z_cc)
     funnel.addGlobalParameter("z_max", z_max)
     funnel.addGlobalParameter("alpha", alpha)

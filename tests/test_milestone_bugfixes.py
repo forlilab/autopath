@@ -471,3 +471,78 @@ def test_medoid_filter_is_a_noop_without_analysis_output():
     m = {"repA": "path-0", "repB": "path-1"}
     kept, dropped, disagree = filter_medoids_by_surviving_trajectories(m, {})
     assert kept == m and dropped == {} and disagree == {}
+
+
+# --- funnel z_max must be a wall, not a switch -----------------------------
+
+def _funnel_energy(params, r_z, r_xy):
+    """Funnel energy (kJ/mol) for a guest at axial r_z, radial r_xy (Angstrom)."""
+    import openmm as mm
+    from openmm import unit as ommunit
+    from autopath.metadynamics.Funnel import create_funnel_force_from_trajectory_analysis
+
+    sysm = mm.System()
+    sysm.addParticle(1.0)
+    sysm.addParticle(1.0)
+    force = create_funnel_force_from_trajectory_analysis(params)
+    sysm.addForce(force)
+    ctx = mm.Context(sysm, mm.VerletIntegrator(0.001),
+                     mm.Platform.getPlatformByName("Reference"))
+    # axis is +x, so r_z is along x and r_xy along y
+    ctx.setPositions([mm.Vec3(0, 0, 0), mm.Vec3(r_z / 10.0, r_xy / 10.0, 0)]
+                     * ommunit.nanometer)
+    e = ctx.getState(getEnergy=True).getPotentialEnergy().value_in_unit(
+        ommunit.kilojoule_per_mole)
+    del ctx
+    return e
+
+
+def _funnel_params(z_cc=8.0, z_max=20.0, R=4.0, k=10.0):
+    from openmm import unit as ommunit
+    import numpy as np
+    return {
+        "host_index": [0], "guest_index": [1],
+        "k_xy": k * ommunit.kilocalorie_per_mole / ommunit.angstrom ** 2,
+        "z_cc": z_cc * ommunit.angstrom,
+        "z_max": z_max * ommunit.angstrom,
+        "alpha": 45.0 * ommunit.degrees,
+        "R_cylinder": R * ommunit.angstrom,
+        "unbinding_axis": np.array([1.0, 0.0, 0.0]),
+    }
+
+
+def test_funnel_is_continuous_across_z_max():
+    """Gating the cylinder on step(z_max - |r_z|) zeroes the whole potential past
+    z_max, so the energy drops discontinuously and the guest is released."""
+    p = _funnel_params()
+    r_xy = 10.0  # well outside R_cylinder, so the radial wall is active
+    inside = _funnel_energy(p, 19.99, r_xy)
+    outside = _funnel_energy(p, 20.01, r_xy)
+    assert inside > 0, "radial wall should be active just inside z_max"
+    assert abs(outside - inside) < 1.0, (
+        f"energy jumps {inside:.1f} -> {outside:.1f} kJ/mol across z_max")
+
+
+def test_funnel_still_confines_radially_beyond_z_max():
+    """Past z_max the guest must not be radially free."""
+    p = _funnel_params()
+    assert _funnel_energy(p, 30.0, 12.0) > _funnel_energy(p, 30.0, 4.0)
+
+
+def test_funnel_pushes_back_axially_beyond_z_max():
+    """There must be an axial restoring term past z_max, growing with distance."""
+    p = _funnel_params()
+    on_axis = [_funnel_energy(p, z, 0.0) for z in (20.0, 22.0, 25.0)]
+    assert on_axis[0] == pytest.approx(0.0, abs=1e-6), "wall starts at z_max"
+    assert on_axis[1] > 0 and on_axis[2] > on_axis[1], "wall must grow outward"
+
+
+def test_funnel_unchanged_inside_the_cone_and_cylinder():
+    """The fix must not perturb the region the funnel already handled."""
+    p = _funnel_params()
+    # inside the cone, within R_funnel -> free
+    assert _funnel_energy(p, 2.0, 1.0) == pytest.approx(0.0, abs=1e-6)
+    # inside the cylinder, within R_cylinder -> free
+    assert _funnel_energy(p, 15.0, 3.0) == pytest.approx(0.0, abs=1e-6)
+    # inside the cylinder, outside R_cylinder -> radial wall
+    assert _funnel_energy(p, 15.0, 6.0) > 0
