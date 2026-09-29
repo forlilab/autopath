@@ -275,7 +275,12 @@ def generate_funnel_parameters_from_trajectory(
         logger.info(f"Unbinding axis: {unbinding_axis}")
         logger.info(f"Z-crossing point (z_cc): {z_cc:.2f} Å")
         logger.info(f"Cylinder cap (z_max): {z_max:.2f} Å  (sMD max {np.max(z_distances):.2f} Å + {z_max_buffer_ang:.1f} Å buffer)")
-        logger.info(f"Cylinder radius (R_cylinder): {R_cylinder:.2f} Å  (design parameter, Limongelli 2013: 1–3 Å)")
+        # Exceeding the reference 1-3 A is a statement about the path, not a fault:
+        # it means the observed channel is wider than the canonical funnel assumes.
+        _ref = "" if R_cylinder <= 3.0 else (
+            "  NOTE: wider than the 1-3 A of Limongelli 2013 -- the observed "
+            "channel is broad, so the funnel confines weakly")
+        logger.info("Cylinder radius (R_cylinder): %.2f Å%s", R_cylinder, _ref)
         logger.info(f"Bound-state radial spread (informational): {R_funnel_bound:.2f} Å")
         logger.info(f"Cone angle (alpha): {alpha_cone_degrees}°")
         logger.info(f"Radial distances - min: {radial_distances.min():.2f}, max: {radial_distances.max():.2f}, mean: {radial_distances.mean():.2f} Å")
