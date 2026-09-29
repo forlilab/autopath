@@ -89,10 +89,27 @@ def plot_bias(out_dir: str = None, x_min: float = None, x_max: float = None, gri
     axis_values = np.linspace(x_min, x_max, grid_points)
     axis_values = [round(i, 2) for i in axis_values]
 
-    files = glob(f"{out_dir}/bias_*")
+    # Shared-bias mode writes bias_*.npy straight into out_dir. Isolated mode
+    # (mMD_multiple_walkers=False) gives each walker its own bias_<run_id>/
+    # subdirectory, so out_dir holds DIRECTORIES named bias_* and no .npy at all --
+    # a bare bias_* glob then hands np.load a directory (IsADirectoryError).
+    entries = []
+    for f in sorted(glob(f"{out_dir}/bias_*.npy")):
+        if os.path.isfile(f):
+            entries.append((os.path.splitext(os.path.basename(f))[0], f))
+    for d in sorted(glob(f"{out_dir}/bias_*")):
+        if not os.path.isdir(d):
+            continue
+        walker = os.path.basename(d)[len("bias_"):]
+        for f in sorted(glob(f"{d}/bias_*.npy")):
+            entries.append((walker, f))
+
+    if not entries:
+        logger.warning("No bias arrays found under %s; skipping bias plot.", out_dir)
+        return
+
     data = []
-    for f in files:
-        walker_name = os.path.splitext(os.path.basename(f))[0]
+    for walker_name, f in entries:
         np_data = np.load(f)
         np_data = np_data * KJ_TO_KCAL
         df = pd.DataFrame(np_data, columns=["bias"])
@@ -751,13 +768,23 @@ class MetadynamicsAnalysis:
         """
         import re
         pattern = re.compile(r'bias_(\d+)_(\d+)\.npy')
+        # Shared-bias mode writes bias_<id>_<idx>.npy directly into bias_dir.
+        # Isolated mode (mMD_multiple_walkers=False) gives each walker its own
+        # bias_<run_id>/ subdirectory, so bias_dir itself holds no matching files
+        # and a flat listdir silently returns nothing.
+        search_dirs = [bias_dir]
+        search_dirs += sorted(
+            d for d in glob(os.path.join(bias_dir, "bias_*")) if os.path.isdir(d))
         latest = {}
-        for fname in sorted(os.listdir(bias_dir)):
-            m = pattern.match(fname)
-            if m:
-                wid, idx = int(m.group(1)), int(m.group(2))
-                if wid not in latest or idx > latest[wid][0]:
-                    latest[wid] = (idx, os.path.join(bias_dir, fname))
+        for d in search_dirs:
+            if not os.path.isdir(d):
+                continue
+            for fname in sorted(os.listdir(d)):
+                m = pattern.match(fname)
+                if m:
+                    wid, idx = int(m.group(1)), int(m.group(2))
+                    if wid not in latest or idx > latest[wid][0]:
+                        latest[wid] = (idx, os.path.join(d, fname))
         return {wid: np.load(fp) for wid, (_, fp) in latest.items()}
 
     @staticmethod

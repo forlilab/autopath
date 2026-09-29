@@ -164,3 +164,78 @@ def test_core_looks_for_medoid_info_under_path_analysis():
 
     reader = inspect.getsource(autopath_core)
     assert 'path_analysis/medoid_info.json' in reader
+
+
+# --- bias plot glob (isolated-walker mode) ---------------------------------
+
+def test_plot_bias_skips_walker_bias_directories(tmp_path, monkeypatch):
+    """With mMD_multiple_walkers=False each walker gets its own bias_<run_id>/
+    directory inside out_dir, so a bare `bias_*` glob hands np.load a directory."""
+    import numpy as np
+    from autopath.metadynamics.Analysis import plot_bias
+
+    # plot_bias takes sys_name from Path(out_dir).parts[0], so out_dir must be
+    # relative the way the pipeline passes it.
+    monkeypatch.chdir(tmp_path)
+    out = tmp_path / "3ptb" / "metadynamics_funnel"
+    out.mkdir(parents=True)
+    # the layout the pipeline actually produces in isolated mode:
+    # directories named bias_<run_id>, each holding the real arrays
+    for run_id in ("milestone_1_frame_0", "milestone_2_frame_145"):
+        d = out / f"bias_{run_id}"
+        d.mkdir()
+        np.save(d / "bias_12345_7.npy", np.linspace(0.0, 5.0, 25))
+    # must not raise IsADirectoryError, and must produce the plot
+    plot_bias("3ptb/metadynamics_funnel", x_min=0.0, x_max=1.0, grid_points=25,
+              colvar_name="PathCV_progress")
+    assert (out / "3ptb_BIAS.png").exists()
+
+
+def test_plot_bias_returns_quietly_when_no_bias_arrays(tmp_path, monkeypatch):
+    from autopath.metadynamics.Analysis import plot_bias
+    monkeypatch.chdir(tmp_path)
+    out = tmp_path / "sys" / "metadynamics"
+    out.mkdir(parents=True)
+    plot_bias("sys/metadynamics", x_min=0.0, x_max=1.0, grid_points=25,
+              colvar_name="PathCV_progress")
+    assert not (out / "sys_BIAS.png").exists()
+
+
+def test_load_bias_files_finds_isolated_walker_subdirs(tmp_path):
+    """Isolated mode hides each walker's bias inside bias_<run_id>/.
+
+    A flat os.listdir of out_dir matches nothing there (the entries are
+    directories named bias_<run_id>, not bias_<int>_<int>.npy), so the post-run
+    diagnosis got an empty dict and died on np.stack([]).
+    """
+    import numpy as np
+    from autopath.metadynamics.Analysis import MetadynamicsAnalysis
+
+    out = tmp_path / "metadynamics_funnel"
+    out.mkdir()
+    (out / "bias_milestone_1_frame_0").mkdir()
+    np.save(out / "bias_milestone_1_frame_0" / "bias_874600475_101.npy",
+            np.zeros(125))
+    (out / "bias_milestone_2_frame_145").mkdir()
+    np.save(out / "bias_milestone_2_frame_145" / "bias_525115211_17.npy",
+            np.ones(125))
+
+    biases = MetadynamicsAnalysis.load_bias_files(str(out))
+    assert len(biases) == 2, f"expected both walkers, got {list(biases)}"
+    assert all(b.shape == (125,) for b in biases.values())
+
+
+def test_load_bias_files_still_reads_flat_shared_bias_layout(tmp_path):
+    """Shared-bias mode must keep working: highest index wins per walker."""
+    import numpy as np
+    from autopath.metadynamics.Analysis import MetadynamicsAnalysis
+
+    out = tmp_path / "metadynamics"
+    out.mkdir()
+    np.save(out / "bias_7_1.npy", np.zeros(125))
+    np.save(out / "bias_7_9.npy", np.ones(125))
+    np.save(out / "bias_8_3.npy", np.full(125, 2.0))
+
+    biases = MetadynamicsAnalysis.load_bias_files(str(out))
+    assert sorted(biases) == [7, 8]
+    assert biases[7][0] == 1.0, "should keep the highest save index for walker 7"
