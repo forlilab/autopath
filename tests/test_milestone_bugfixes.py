@@ -433,3 +433,41 @@ def test_grouping_puts_the_unlabelled_group_first(tmp_path):
 
     groups = group_milestones_by_path([str(nested), str(flat)], str(root))
     assert [k for k, _ in groups] == [None, "path-0"]
+
+
+# --- medoid filtering keys on the trajectory, not the stale label ----------
+
+def test_medoid_filter_keeps_a_medoid_whose_label_is_stale():
+    """medoid_info.json is written before the quality filters run and can label a
+    trajectory differently from the final assignment. Filtering on the LABEL drops
+    medoids whose trajectory actually passed QC."""
+    from autopath.utils import filter_medoids_by_surviving_trajectories
+
+    medoid_to_path = {"repA": "path-0_v0.02", "repB": "path-1_v0.02"}
+    surviving = {"repA": "path-0_v0.02", "repB": "path-0_v0.02"}  # repB really passed
+
+    kept, dropped, disagree = filter_medoids_by_surviving_trajectories(
+        medoid_to_path, surviving)
+
+    assert dropped == {}, "a medoid whose trajectory passed QC must not be dropped"
+    assert kept == {"repA": "path-0_v0.02", "repB": "path-0_v0.02"}
+    assert disagree == {"repB": ("path-1_v0.02", "path-0_v0.02")}
+
+
+def test_medoid_filter_drops_a_medoid_whose_trajectory_failed_qc():
+    from autopath.utils import filter_medoids_by_surviving_trajectories
+
+    kept, dropped, disagree = filter_medoids_by_surviving_trajectories(
+        {"repA": "path-0", "repGone": "path-1"}, {"repA": "path-0"})
+    assert kept == {"repA": "path-0"}
+    assert dropped == {"repGone": "path-1"}
+    assert disagree == {}
+
+
+def test_medoid_filter_is_a_noop_without_analysis_output():
+    """An empty surviving map means 'unknown', never 'nothing survived'."""
+    from autopath.utils import filter_medoids_by_surviving_trajectories
+
+    m = {"repA": "path-0", "repB": "path-1"}
+    kept, dropped, disagree = filter_medoids_by_surviving_trajectories(m, {})
+    assert kept == m and dropped == {} and disagree == {}

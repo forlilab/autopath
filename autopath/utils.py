@@ -1778,6 +1778,30 @@ def read_trajname_to_path(analysis_outdir: str) -> dict[str, str]:
     return dict(zip(df["trajname"].astype(str), df["path"].astype(str)))
 
 
+def filter_medoids_by_surviving_trajectories(medoid_to_path: dict,
+                                            surviving: dict) -> tuple[dict, dict, dict]:
+    """Keep medoids whose trajectory passed QC, relabelled from the analysis.
+
+    ``medoid_to_path`` is written before the quality filters run and its label
+    for a trajectory can disagree with the final assignment for that same
+    trajectory, so the label is not a safe key: filtering on it drops medoids
+    that actually passed. Decide on the trajectory and take the path from
+    ``surviving`` (trajname -> path), which is what the verdict was recorded on.
+
+    Returns ``(kept, dropped, disagreements)`` where *kept* maps medoid to its
+    analysis path, *dropped* maps medoid to its old label, and *disagreements*
+    maps medoid to ``(old_label, analysis_label)``. With an empty *surviving*
+    (no analysis output) nothing is dropped.
+    """
+    if not surviving:
+        return dict(medoid_to_path), {}, {}
+    kept = {m: surviving[m] for m in medoid_to_path if m in surviving}
+    dropped = {m: p for m, p in medoid_to_path.items() if m not in surviving}
+    disagreements = {m: (medoid_to_path[m], kept[m])
+                     for m in kept if medoid_to_path[m] != kept[m]}
+    return kept, dropped, disagreements
+
+
 ### DEPRECATED ###
 # Superseded by autopath/clustering.py. Retained: still imported by
 # Clustering (PairwiseDistances, write_pdbs, plot) and by any external caller.

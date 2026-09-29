@@ -1008,33 +1008,35 @@ class AutoPath:
                     "Falling back to using all sMD trajectories."
                 )
 
-            # Medoid bookkeeping is written before the analysis drops under-sampled
-            # and artefactual paths, so it keeps a medoid for every cluster. Seeding
-            # from a rejected path builds milestones and a funnel around a route the
-            # analysis already threw away.
+            # medoid_info.json is written before the analysis drops under-sampled and
+            # artefactual paths, and its labels can disagree with the final assignment
+            # for the very same trajectory. Decide per TRAJECTORY against the analysis
+            # output, which is what the quality verdict was actually recorded on, and
+            # re-label from it -- keying on the stale label drops good medoids.
             if medoid_to_path:
-                kept = read_surviving_paths(sMD_analysis_outdir)
-                if kept:
-                    dropped = {m: p for m, p in medoid_to_path.items() if p not in kept}
-                    if dropped:
-                        logger.warning(
-                            "Dropping %d of %d medoid(s) whose path did not survive the "
-                            "sMD quality filters: %s. Surviving paths: %s.",
-                            len(dropped), len(medoid_to_path),
-                            sorted(set(dropped.values())), sorted(kept))
-                        medoid_to_path = {m: p for m, p in medoid_to_path.items()
-                                          if p in kept}
-                        medoid_names = [m for m in medoid_names if m in medoid_to_path]
-                    if not medoid_to_path:
-                        raise RuntimeError(
-                            "No medoid survived the sMD path quality filters "
-                            f"(surviving paths: {sorted(kept)}). Milestones would be "
-                            "seeded from rejected paths; re-run the sMD analysis or "
-                            "relax its filters.")
-                else:
+                surviving = read_trajname_to_path(sMD_analysis_outdir)
+                if not surviving:
                     logger.warning(
-                        "No path quality table under %s; cannot tell which paths "
-                        "survived, so every medoid is used.", sMD_analysis_outdir)
+                        "No analysis path table under %s; cannot tell which "
+                        "trajectories survived, so every medoid is used.",
+                        sMD_analysis_outdir)
+                medoid_to_path, dropped, disagree = (
+                    filter_medoids_by_surviving_trajectories(medoid_to_path, surviving))
+                if dropped:
+                    logger.warning(
+                        "Dropping %d medoid(s) whose trajectory did not survive the "
+                        "sMD quality filters: %s.", len(dropped), sorted(dropped))
+                if disagree:
+                    logger.warning(
+                        "medoid_info.json disagrees with the analysis on %d medoid(s); "
+                        "using the analysis label. %s", len(disagree),
+                        {m: f"{a} -> {b}" for m, (a, b) in disagree.items()})
+                medoid_names = [m for m in medoid_names if m in medoid_to_path]
+                if surviving and not medoid_to_path:
+                    raise RuntimeError(
+                        "No medoid trajectory survived the sMD path quality filters, "
+                        "so milestones would come from rejected data. Re-run the sMD "
+                        "analysis or relax its filters.")
 
             if medoid_names:
                 medoid_dcds = [self._trajname_to_dcd(name) for name in medoid_names]
