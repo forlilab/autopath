@@ -7,7 +7,7 @@ import cvpack
 import openmm.unit as openmmunit
 from openmm.app import PDBFile
 
-from autopath.Clustering import read_positions
+from autopath.clustering import read_positions
 
 logger = logging.getLogger("autopath.cv")
 
@@ -296,11 +296,35 @@ def pathCV_cv(
         milestones_array = np.array(milestones_array)
         logger.info(f"PathCV milestone COM distances (nm): {milestones_array.flatten().tolist()}")
 
+        com_dists = milestones_array.flatten()
+        steps = np.diff(com_dists)
+        if np.any(steps < 0):
+            logger.warning(
+                "PathCV milestone COM distances are not monotonically increasing "
+                "(%d of %d steps go backwards). The milestone list is meant to run "
+                "bound -> unbound; a backwards step means the order is wrong, not "
+                "that the path doubles back. Usual causes: milestone_mode='per_path' "
+                "interleaves several paths into one CV, or PC1's sign was not "
+                "anchored. The path CV will be built anyway, but its progress "
+                "coordinate will not track unbinding.",
+                int(np.sum(steps < 0)), steps.size)
+
         if sigma == 'auto':
             # Half the minimum spacing — guarantees kernels overlap at the closest pair
             # without over-smoothing at larger gaps.  mean-based sigma under-covers
             # the largest gap when milestone spacings are uneven.
-            sigma = 0.5 * np.min(np.diff(milestones_array.flatten()))
+            # Use |gaps|: a negative step (see the warning above) would otherwise make
+            # sigma negative, which cvpack accepts and which silently breaks the CV.
+            gaps = np.abs(steps)
+            usable = gaps[gaps > 1e-6]
+            if usable.size == 0:
+                raise ValueError(
+                    f"cannot auto-tune sigma: the {com_dists.size} milestones are all "
+                    f"at effectively the same pocket-ligand COM distance "
+                    f"({com_dists.tolist()} nm), so there is no spacing to halve. "
+                    "Pass an explicit sigma, or extract milestones that span the "
+                    "unbinding coordinate.")
+            sigma = 0.5 * float(usable.min())
             logger.info(f"Auto-tuned sigma for PathCV: {sigma:.4f} nm (0.5 × min milestone spacing)")
 
         cv_com_bias = cvpack.CentroidFunction(

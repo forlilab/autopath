@@ -1,6 +1,6 @@
 import numpy as np, pytest, MDAnalysis as mda
 from MDAnalysis.tests.datafiles import PSF, DCD
-from autopath.Clustering import Featurizer, PairwiseDistances, CoordinateRMSD
+from autopath.clustering import Featurizer, PairwiseDistances, CoordinateRMSD
 from autopath.utils import compute_distance_features
 
 

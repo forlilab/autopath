@@ -2,7 +2,7 @@ import os, numpy as np, pytest
 import openmm as mm
 from openmm import unit as ommunit
 from openmm import app
-from autopath.Clustering import read_positions
+from autopath.clustering import read_positions
 
 
 def _tiny_system(n=6):
@@ -51,7 +51,7 @@ def test_write_states_roundtrips_a_real_trajectory(tmp_path):
     import MDAnalysis as mda
     from MDAnalysis.tests.datafiles import PSF, DCD
     from openmm import app as _app
-    from autopath.Clustering import Clustering, PairwiseDistances
+    from autopath.clustering import Clustering, PairwiseDistances
 
     from MDAnalysis.transformations.boxdimensions import set_dimensions
     u = mda.Universe(PSF, DCD)
@@ -90,7 +90,7 @@ def test_write_states_rejects_atom_count_mismatch(tmp_path):
     import MDAnalysis as mda
     from MDAnalysis.tests.datafiles import PSF, DCD
     from openmm import app as _app
-    from autopath.Clustering import Clustering, PairwiseDistances
+    from autopath.clustering import Clustering, PairwiseDistances
     u = mda.Universe(PSF, DCD)
     system = mm.System()
     for _ in range(5):                      # deliberately wrong
@@ -107,7 +107,7 @@ def test_write_states_refuses_a_boxless_frame(tmp_path):
     import MDAnalysis as mda
     from MDAnalysis.tests.datafiles import PSF, DCD
     from openmm import app as _app
-    from autopath.Clustering import Clustering, PairwiseDistances
+    from autopath.clustering import Clustering, PairwiseDistances
     u = mda.Universe(PSF, DCD)                 # no unit cell
     n = u.atoms.n_atoms
     system = mm.System()
@@ -176,7 +176,7 @@ def test_write_states_reimages_the_ligand_when_asked(tmp_path):
     """I1: backbone superposition can leave the ligand a box away, and the
     State inherits the frame's coordinates verbatim, so write_states needs the
     same re-imaging write_pdbs does."""
-    from autopath.Clustering import Clustering, PairwiseDistances
+    from autopath.clustering import Clustering, PairwiseDistances
     u = _six_atom_universe()
     system, top = _six_atom_system_and_topology()
     # write_states needs no fit; a 1-frame Universe cannot be PCA'd anyway.
@@ -200,7 +200,7 @@ def test_write_pdbs_reindexes(tmp_path):
     """M4: extract_milestones wrote with reindex=True; the replacement must
     stay output-compatible."""
     import MDAnalysis as mda
-    from autopath.Clustering import Clustering, PairwiseDistances
+    from autopath.clustering import Clustering, PairwiseDistances
     u = _six_atom_universe()
     c = Clustering(PairwiseDistances("resname UNK", "resname ALA"))
     out = c.write_pdbs(u, [0], str(tmp_path), "ms")

@@ -19,7 +19,8 @@ from openmm.unit import *
 
 # AutoPath imports
 from autopath.utils import *
-from autopath.Clustering import Clustering, PairwiseDistances, read_positions
+from autopath.clustering import (Clustering, PairwiseDistances, read_positions,
+                                 order_milestones_bound_to_unbound)
 from autopath.pdb_preprocessor import PDBPreprocessor
 from autopath.ap_PLIP import plot_atomic_property, calculate_ligand_rmsf, calculate_contact_frequency
 from autopath import (
@@ -1081,6 +1082,14 @@ class AutoPath:
 
             #sort the milestones by their index (milestone number is the last token before 'frame')
             milestones.sort(key=lambda x: int(os.path.basename(x).split('_frame_')[0].rsplit('_', 1)[-1]))
+
+            # The index order follows PC1, whose sign is arbitrary, so anchor the
+            # direction on pocket-ligand separation before anything consumes the
+            # list. Every consumer below (path CV, preseed, funnel PSE, the relax
+            # loop, first_milestone_name) reads this same list, so they stay
+            # consistent only if the flip happens here.
+            milestones = order_milestones_bound_to_unbound(
+                milestones, pocket_atom_indices, ligand_atoms_indices)
 
             base_system = load_system(f"{sys_name}/system.xml")
             path_cv = pathCV_cv(

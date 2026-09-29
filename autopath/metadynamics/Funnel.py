@@ -10,7 +10,7 @@ import openmm.unit as openmmunit
 
 import MDAnalysis as mda
 
-from autopath.Clustering import read_positions
+from autopath.clustering import read_positions
 
 logger = logging.getLogger("autopath")
 

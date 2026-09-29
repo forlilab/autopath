@@ -1519,7 +1519,11 @@ def _reimaging_ligand(u: mda.Universe, ligand_sel: str) -> bool:
 
     translation = min_disp - disp[0]
     if np.linalg.norm(translation) > 0.1:   # only apply if > 0.1 Å shift needed
-        lig_atoms.positions += translation
+        # Translate whole residues, not just the selected atoms. Callers pass a
+        # heavy-atom selection, so shifting only `lig_atoms` would leave the
+        # ligand's hydrogens a box length behind their parent heavy atoms.
+        moved = lig_atoms.residues.atoms
+        moved.positions += translation
         return True
     return False
 
@@ -1720,7 +1724,7 @@ def write_pocket_pymol(
 
 
 ### DEPRECATED ###
-# Superseded by autopath/Clustering.py. Retained: still imported by
+# Superseded by autopath/clustering.py. Retained: still imported by
 # Clustering (PairwiseDistances, write_pdbs, plot) and by any external caller.
 
 def match_cluster_centroids_unique(X: np.ndarray,

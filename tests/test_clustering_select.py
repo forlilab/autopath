@@ -1,6 +1,6 @@
 import numpy as np, pytest, MDAnalysis as mda
 from MDAnalysis.tests.datafiles import PSF, DCD
-from autopath.Clustering import Clustering, PairwiseDistances
+from autopath.clustering import Clustering, PairwiseDistances
 
 
 @pytest.fixture
@@ -13,7 +13,7 @@ def c():
 def test_single_feature_featurizer_does_not_explode():
     """CoordinateRMSD returns one feature; the default n_components=2 would
     make PCA raise. fit() must clamp instead."""
-    from autopath.Clustering import CoordinateRMSD
+    from autopath.clustering import CoordinateRMSD
     u = mda.Universe(PSF, DCD)
     c = Clustering(CoordinateRMSD("name CA")).fit(u)
     assert c.X_reduced.shape == (len(u.trajectory), 1)
@@ -85,7 +85,7 @@ def test_degenerate_pc1_raises_and_names_the_alternative():
     """A converged trajectory has no PC1 spread; RegularSpace then returns one
     centre regardless of n, which would silently under-deliver frames."""
     import numpy as _np
-    from autopath.Clustering import Clustering as _C, Featurizer as _F
+    from autopath.clustering import Clustering as _C, Featurizer as _F
 
     class _Flat(_F):
         def compute(self, u):
@@ -129,7 +129,7 @@ def test_centroid_frames_are_returned_in_pc1_order(c):
 def test_pc1_order_differs_from_frame_order():
     """The regression only bites when PC1 is non-monotone in frame index,
     which is the normal case for pooled medoid trajectories."""
-    from autopath.Clustering import Clustering as _C, Featurizer as _F
+    from autopath.clustering import Clustering as _C, Featurizer as _F
 
     rng = np.random.default_rng(0)
     vals = rng.permutation(60).astype(float)

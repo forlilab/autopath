@@ -269,3 +269,34 @@ def read_positions(path: str) -> np.ndarray:
         return np.asarray(app.PDBFile(path).positions
                           .value_in_unit(ommunit.nanometer))
     raise ValueError(f"unsupported extension {ext!r}: expected .xml or .pdb")
+
+
+def order_milestones_bound_to_unbound(milestones: list[str],
+                                      pocket_atoms, ligand_atoms) -> list[str]:
+    """Reverse `milestones` if they run unbound -> bound.
+
+    PC1's sign is arbitrary (sklearn anchors it deterministically, not
+    physically), so a centroid ordering along PC1 is as likely to start at the
+    unbound end as the bound one. Everything downstream -- the path CV's
+    progress coordinate, the [0, 1] grid, the stuck-walker test, the preseed
+    bias -- assumes index 0 is the most bound. Anchor the direction on the one
+    physical quantity available here: pocket-ligand separation.
+
+    Unweighted centroids are enough to pick a direction; the CV itself still
+    uses mass-weighted COMs.
+    """
+    if len(milestones) < 2:
+        return milestones
+
+    def _sep(path):
+        pos = read_positions(path)
+        return float(np.linalg.norm(pos[ligand_atoms].mean(axis=0)
+                                    - pos[pocket_atoms].mean(axis=0)))
+
+    first, last = _sep(milestones[0]), _sep(milestones[-1])
+    if first > last:
+        logger.info(
+            "Reversing milestone order: the first is %.3f nm from the pocket and "
+            "the last %.3f nm, so the list runs unbound -> bound.", first, last)
+        return list(reversed(milestones))
+    return milestones

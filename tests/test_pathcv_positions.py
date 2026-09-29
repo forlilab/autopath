@@ -1,7 +1,7 @@
 import numpy as np, pytest
 import openmm as mm
 from openmm import unit as ommunit, app
-from autopath.Clustering import read_positions
+from autopath.clustering import read_positions
 
 
 def test_pdb_and_xml_of_same_frame_give_same_coms(tmp_path):

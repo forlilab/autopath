@@ -146,8 +146,15 @@ class VanillaMD:
         simulation = Simulation(self.topology, self.system, integrator, self.platform)
 
         if state_file is not None:
-            logger.info(f"Loading state from {state_file}")
-            simulation.loadState(state_file)
+            # Deserialize and apply the state explicitly. Simulation.loadState
+            # restores global parameters BY NAME, so on a system whose forces were
+            # stripped and re-added it silently keeps stale values.
+            logger.info(f"Setting state from portable XML state file {state_file}")
+            with open(state_file) as f:
+                state = XmlSerializer.deserialize(f.read())
+            simulation.context.setPeriodicBoxVectors(*state.getPeriodicBoxVectors())
+            simulation.context.setPositions(state.getPositions())
+            simulation.context.setVelocities(state.getVelocities())
         elif checkpoint_file is None and pdb_file is None:
             raise ValueError("Either pdb_file, checkpoint_file or state_file must be provided to set initial positions.")
         elif checkpoint_file is None and pdb_file is not None:

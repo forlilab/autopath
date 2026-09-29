@@ -1,6 +1,6 @@
 import numpy as np, pytest, MDAnalysis as mda
 from MDAnalysis.tests.datafiles import PSF, DCD
-from autopath.Clustering import Clustering, PairwiseDistances, CoordinateRMSD
+from autopath.clustering import Clustering, PairwiseDistances, CoordinateRMSD
 
 
 @pytest.fixture

@@ -4,7 +4,7 @@ import autopath.autopath_core as core
 
 def test_core_imports_clustering():
     src = inspect.getsource(core)
-    assert "from autopath.Clustering import" in src or "Clustering(" in src
+    assert "from autopath.clustering import" in src or "Clustering(" in src
 
 
 def test_core_no_longer_calls_extract_milestones():
