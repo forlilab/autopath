@@ -279,3 +279,157 @@ def test_core_seeds_metadynamics_from_state_xml_not_checkpoint():
     assert "_relax_state.xml" in src
     # the metadynamics seeds must not come from a relax checkpoint any more
     assert "_relax_checkpoint.chk" not in src
+
+
+# --- funnel cylinder radius ------------------------------------------------
+
+def _funnel_universe(n_frames=400, r_bound=0.5, r_cyl=4.0, seed=0):
+    """Ligand walks out along +x; radial spread is SMALL while bound and LARGE
+    once it is in the cylinder region. That is the real shape of an unbinding
+    path, and the case a bound-state-derived radius gets wrong."""
+    import numpy as np
+    import MDAnalysis as mda
+    rng = np.random.default_rng(seed)
+    u = mda.Universe.empty(2, n_residues=2, atom_resindex=[0, 1],
+                           residue_segindex=[0, 0], trajectory=True)
+    u.add_TopologyAttr("name", ["CA", "C1"])
+    u.add_TopologyAttr("resname", ["ALA", "LIG"])
+    u.add_TopologyAttr("resid", [1, 2])
+    u.add_TopologyAttr("masses", [12.0, 12.0])  # center_of_mass needs masses
+    coords = np.zeros((n_frames, 2, 3))
+    z = np.linspace(0.0, 25.0, n_frames)
+    half = n_frames // 2
+    rad = np.concatenate([rng.normal(0, r_bound, half),
+                          rng.normal(0, r_cyl, n_frames - half)])
+    coords[:, 1, 0] = z
+    coords[:, 1, 1] = rad
+    u.load_new(coords, order="fac")
+    u.dimensions = [80, 80, 80, 90, 90, 90]
+    return u
+
+
+def test_cylinder_radius_is_derived_from_the_cylinder_region():
+    """A hardcoded 2 A wall that the reference path itself violates does not
+    guide sampling, it just injects force."""
+    from autopath.metadynamics.Funnel import generate_funnel_parameters_from_trajectory
+    import numpy as np
+
+    u = _funnel_universe()
+    p = generate_funnel_parameters_from_trajectory(
+        u, host_selection="resname ALA", guest_selection="resname LIG",
+        stride=1, verbose=False)
+
+    from openmm import unit as ommunit
+    R = p["R_cylinder"].value_in_unit(ommunit.angstrom)
+    r = np.asarray(p["radial_distances"])
+    z = np.abs(np.asarray(p["axial_distances"]))
+    zcc = p["z_cc"].value_in_unit(ommunit.angstrom)
+    outside = float((r[z >= zcc] > R).mean())
+    # the whole point: the derived wall must not exclude most of the path
+    assert outside < 0.25, f"R_cylinder={R:.2f} excludes {100*outside:.0f}% of the path"
+    assert R > 2.0, f"derived radius {R:.2f} collapsed to the old hardcoded value"
+
+
+def test_explicit_cylinder_radius_still_overrides():
+    from autopath.metadynamics.Funnel import generate_funnel_parameters_from_trajectory
+    u = _funnel_universe()
+    p = generate_funnel_parameters_from_trajectory(
+        u, host_selection="resname ALA", guest_selection="resname LIG",
+        R_cylinder_ang=1.5, stride=1, verbose=False)
+    from openmm import unit as ommunit
+    assert p["R_cylinder"].value_in_unit(ommunit.angstrom) == 1.5
+
+
+# --- per-path metadynamics grouping ---------------------------------------
+
+def _write_processed_csv(path, rows, with_path_ok=True):
+    import pandas as pd
+    cols = ["step", "trajname", "path"] + (["path_ok"] if with_path_ok else [])
+    df = pd.DataFrame(rows, columns=cols)
+    df.to_csv(path, index=False)
+
+
+def test_read_trajname_to_path_keeps_only_surviving_rows(tmp_path):
+    from autopath.utils import read_trajname_to_path
+
+    _write_processed_csv(
+        tmp_path / "sMD_processed_data.csv",
+        [[0, "sMD_replica-1_v0.01_forward", "path-0_v0.01", True],
+         [1, "sMD_replica-1_v0.01_forward", "path-0_v0.01", True],
+         [0, "sMD_replica-2_v0.01_forward", "path-1_v0.01", False]],
+    )
+    mapping = read_trajname_to_path(str(tmp_path))
+    assert mapping == {"sMD_replica-1_v0.01_forward": "path-0_v0.01"}
+
+
+def test_read_trajname_to_path_treats_missing_path_ok_as_all_kept(tmp_path):
+    from autopath.utils import read_trajname_to_path
+
+    _write_processed_csv(
+        tmp_path / "sMD_processed_data.csv",
+        [[0, "a", "path-0"], [0, "b", "path-1"]],
+        with_path_ok=False,
+    )
+    assert read_trajname_to_path(str(tmp_path)) == {"a": "path-0", "b": "path-1"}
+
+
+def test_read_trajname_to_path_is_empty_when_the_table_is_missing(tmp_path):
+    from autopath.utils import read_trajname_to_path
+
+    assert read_trajname_to_path(str(tmp_path)) == {}
+
+
+def test_grouping_splits_subdirectory_milestones_by_path(tmp_path):
+    """per_path extraction writes one subdir per path; each must become its own
+    group so it gets its own path CV and its own funnel."""
+    from autopath.autopath_core import group_milestones_by_path
+
+    root = tmp_path / "milestones"
+    files = []
+    for path_label in ("path-1_v0.02", "path-0_v0.02"):
+        (root / path_label).mkdir(parents=True)
+        for i in (1, 0):
+            f = root / path_label / f"milestone_{path_label}_{i}_frame_{i}.xml"
+            f.write_text("")
+            files.append(str(f))
+
+    groups = group_milestones_by_path(files, str(root))
+
+    assert [k for k, _ in groups] == ["path-0_v0.02", "path-1_v0.02"]
+    assert all(len(v) == 2 for _, v in groups)
+    for key, members in groups:
+        assert all(os.path.basename(os.path.dirname(m)) == key for m in members)
+
+
+def test_grouping_keeps_the_flat_layout_as_one_unlabelled_group(tmp_path):
+    """all_medoids (the default) writes milestones flat. That layout must stay a
+    single group keyed None, or the default pipeline changes its output paths."""
+    from autopath.autopath_core import group_milestones_by_path
+
+    root = tmp_path / "milestones"
+    root.mkdir()
+    files = []
+    for i in range(3):
+        f = root / f"milestone_{i}_frame_{i}.xml"
+        f.write_text("")
+        files.append(str(f))
+
+    groups = group_milestones_by_path(files, str(root))
+
+    assert len(groups) == 1
+    assert groups[0][0] is None
+    assert sorted(groups[0][1]) == sorted(files)
+
+
+def test_grouping_puts_the_unlabelled_group_first(tmp_path):
+    from autopath.autopath_core import group_milestones_by_path
+
+    root = tmp_path / "milestones"
+    (root / "path-0").mkdir(parents=True)
+    flat = root / "milestone_0_frame_0.xml"
+    flat.write_text("")
+    nested = root / "path-0" / "milestone_1_frame_1.xml"
+    nested.write_text("")
+
+    groups = group_milestones_by_path([str(nested), str(flat)], str(root))
+    assert [k for k, _ in groups] == [None, "path-0"]

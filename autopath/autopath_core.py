@@ -49,6 +49,34 @@ from autopath.pulling.Diagnostics import plot_convergence_traces, plot_convergen
 import logging
 logger = logging.getLogger('autopath.core')
 
+
+def group_milestones_by_path(milestones: list[str],
+                             milestones_outdir: str,
+                             ) -> list[tuple[str | None, list[str]]]:
+    """Group milestone state files by the unbinding path they came from.
+
+    ``milestone_mode="per_path"`` writes each path's milestones into a
+    subdirectory of ``milestones_outdir`` named after the path label, while
+    ``all_medoids`` writes them flat. Files sitting directly in
+    ``milestones_outdir`` therefore have no path label and form a single
+    pooled group keyed by ``None``.
+
+    Returns ``[(path_label_or_None, files)]`` sorted by key, ``None`` first.
+    """
+    groups = defaultdict(list)
+    root = os.path.abspath(milestones_outdir)
+    for m in milestones:
+        rel = os.path.relpath(os.path.abspath(m), root)
+        head = os.path.dirname(rel)
+        # no directory component (or a path outside the root) means "unlabelled"
+        if head and not head.startswith(os.pardir):
+            key = head.split(os.sep)[0]
+        else:
+            key = None
+        groups[key].append(m)
+    return [(k, groups[k]) for k in sorted(groups, key=lambda k: (k is not None, k or ""))]
+
+
 class AutoPath:
     """Main orchestrator for the AutoPath binding-free-energy pipeline.
 
@@ -980,6 +1008,34 @@ class AutoPath:
                     "Falling back to using all sMD trajectories."
                 )
 
+            # Medoid bookkeeping is written before the analysis drops under-sampled
+            # and artefactual paths, so it keeps a medoid for every cluster. Seeding
+            # from a rejected path builds milestones and a funnel around a route the
+            # analysis already threw away.
+            if medoid_to_path:
+                kept = read_surviving_paths(sMD_analysis_outdir)
+                if kept:
+                    dropped = {m: p for m, p in medoid_to_path.items() if p not in kept}
+                    if dropped:
+                        logger.warning(
+                            "Dropping %d of %d medoid(s) whose path did not survive the "
+                            "sMD quality filters: %s. Surviving paths: %s.",
+                            len(dropped), len(medoid_to_path),
+                            sorted(set(dropped.values())), sorted(kept))
+                        medoid_to_path = {m: p for m, p in medoid_to_path.items()
+                                          if p in kept}
+                        medoid_names = [m for m in medoid_names if m in medoid_to_path]
+                    if not medoid_to_path:
+                        raise RuntimeError(
+                            "No medoid survived the sMD path quality filters "
+                            f"(surviving paths: {sorted(kept)}). Milestones would be "
+                            "seeded from rejected paths; re-run the sMD analysis or "
+                            "relax its filters.")
+                else:
+                    logger.warning(
+                        "No path quality table under %s; cannot tell which paths "
+                        "survived, so every medoid is used.", sMD_analysis_outdir)
+
             if medoid_names:
                 medoid_dcds = [self._trajname_to_dcd(name) for name in medoid_names]
                 medoid_dcds = [f for f in medoid_dcds if os.path.exists(f)]
@@ -1081,283 +1137,314 @@ class AutoPath:
             # RelaxMD writes both _relax_system.xml and _relax_state.xml alongside the
             # milestones; drop every _relax_* output so only the input states remain.
             milestones = [m for m in milestones if '_relax' not in os.path.basename(m)]
-            
+
             if len(milestones) == 0:
                 raise RuntimeError("No milestones found. Please check the milestone extraction step.")
 
-            #sort the milestones by their index (milestone number is the last token before 'frame')
-            milestones.sort(key=lambda x: int(os.path.basename(x).split('_frame_')[0].rsplit('_', 1)[-1]))
+            # One metadynamics stage per path. Pooling geometrically distinct routes
+            # forces a single path CV and a single funnel wide enough to contain the
+            # widest of them, which is no longer a funnel.
+            milestone_groups = group_milestones_by_path(milestones, milestones_outdir)
+            has_path_labels = any(key is not None for key, _ in milestone_groups)
 
-            # The index order follows PC1, whose sign is arbitrary, so anchor the
-            # direction on pocket-ligand separation before anything consumes the
-            # list. Every consumer below (path CV, preseed, funnel PSE, the relax
-            # loop, first_milestone_name) reads this same list, so they stay
-            # consistent only if the flip happens here.
-            milestones = order_milestones_bound_to_unbound(
-                milestones, pocket_atom_indices, ligand_atoms_indices)
+            if has_path_labels:
+                kept_paths = read_surviving_paths(sMD_analysis_outdir)
+                if kept_paths:
+                    dropped = [k for k, _ in milestone_groups
+                               if k is not None and k not in kept_paths]
+                    if dropped:
+                        logger.warning(
+                            "Skipping milestone group(s) %s: not among the paths that "
+                            "survived the sMD analysis (%s).",
+                            sorted(dropped), sorted(kept_paths))
+                    # the unlabelled group is never dropped: it has no path to check
+                    milestone_groups = [(k, v) for k, v in milestone_groups
+                                        if k is None or k in kept_paths]
+                    if not milestone_groups:
+                        raise RuntimeError(
+                            "No milestone group corresponds to a surviving sMD path "
+                            f"(surviving paths: {sorted(kept_paths)}). Re-run the sMD "
+                            "analysis or relax its filters.")
 
             base_system = load_system(f"{sys_name}/system.xml")
-            path_cv = pathCV_cv(
-                topology=topology,
-                milestones=milestones,
-                pocket_atoms=pocket_atom_indices,
-                ligand_atoms=ligand_atoms_indices,
-                system=base_system,
-                grid_min=0.0,
-                grid_max=1.0,
-                hill_width=self.mMD_hill_width,
-                sigma='auto', # related to distance between milestones
-                #sigma approz min milestone spacings
-            )
-            # when you first run, check the logged line
-            # PathCV milestone COM distances (nm): [...].
-            # If adjacent milestones differ by more than 3 × sigma = 0.3 nm,
-            # the Gaussian kernels won't overlap well and you'll want to increase sigma.
-            # If they're closer than 0.5 × sigma = 0.05 nm, decrease it.
+            # {trajname: path}, so each group's funnel sees only its own trajectories.
+            # The table is large, so only read it when there is a path to select on.
+            trajname_to_path = (read_trajname_to_path(sMD_analysis_outdir)
+                                if has_path_labels else {})
+            # Collect aligned forward-direction sMD trajectories only
+            all_smd_trajs = glob(f"{sMD_traj_outdir}/*_{self.sMD_pulling_dir}_aligned.dcd")
 
-            # Pre-seed the metadynamics bias surface from the sMD PMF (optional).
-            # Done before any walker starts so all walkers load the preseed via _syncWithDisk().
-            if self.mMD_preseed_bias:
-                try:
-                    # Compute milestone COM distances (same formula as in pathCV_cv factory)
-                    _pocket_masses = np.array([
-                        base_system.getParticleMass(i).value_in_unit(dalton)
-                        for i in pocket_atom_indices
-                    ])
-                    _ligand_masses = np.array([
-                        base_system.getParticleMass(i).value_in_unit(dalton)
-                        for i in ligand_atoms_indices
-                    ])
-                    _milestone_com_dists = []
-                    for _m_file in milestones:
-                        _pos = read_positions(_m_file)
-                        _p_com = np.average(_pos[pocket_atom_indices], axis=0, weights=_pocket_masses)
-                        _l_com = np.average(_pos[ligand_atoms_indices], axis=0, weights=_ligand_masses)
-                        _milestone_com_dists.append(float(np.linalg.norm(_l_com - _p_com)))
-
-                    write_metad_preseed(
-                        smd_analysis_outdir=sMD_analysis_outdir,
-                        milestone_com_distances=_milestone_com_dists,
-                        bias_dir=mMD_out_dir,
-                        gamma=self.mMD_bias_factor,
-                        temperature=self.temperature,
-                        speed=self.mMD_preseed_speed,
-                        alpha=0.05
-                    )
-                except Exception as _preseed_err:
-                    logger.error(f"Preseed bias failed (non-fatal, continuing without preseed): {_preseed_err}")
-
-            milestone_relax = RelaxMD(
-                topology=topology,
-                ligand_atoms=ligand_total_hatoms, # use all HA
-                pocket_atoms=pocket_atom_indices,
-                out_dir=milestones_outdir,
-                is_membrane=self.is_membrane,
-                temp=self.temperature,
-                timestep=self.timestep,
-                platform=self.platform
-            )
-
-            WTMetaD = MetadynamicsMD(
-                topology=topology,
-                ligand_atoms=ligand_atoms_indices, # use ligand anchor atoms for biasing
-                pocket_atoms=pocket_atom_indices,
-                restrained_atoms=None,
-                is_membrane=self.is_membrane,
-                timestep=self.timestep,
-                temp=self.temperature,
-                out_dir=mMD_out_dir,
-                platform=self.platform
-            )
-
-            # Generate funnel potential if requested
-            funnel_force = None
-            if self.mMD_use_funnel_potential:
-                logger.info("Generating funnel potential from sMD trajectories...")
-                try:
-                    # Collect aligned forward-direction sMD trajectories only
-                    smd_trajs = glob(f"{sMD_traj_outdir}/*_{self.sMD_pulling_dir}_aligned.dcd")
-                    
-                    if not smd_trajs:
-                        logger.warning("No sMD trajectories found. Skipping funnel potential generation.")
-                    else:                       
-                        # Create MDAnalysis Universe with all trajectories
-                        universe = mda.Universe(solvated_system_pdb, smd_trajs)
-                        logger.info(f"Loaded {len(universe.trajectory)} frames total")
-                        
-                        # Determine funnel host selection.
-                        # The funnel axis must pass through the binding site so the
-                        # bound-state ligand is inside the cone (r_xy ≈ 0).
-                        # pocket_selection is intentionally wide (whole-helix CAs for sMD
-                        # stability) and its COM sits far from the pocket — do NOT reuse it
-                        # here.  Default: CA atoms of residues contacting the ligand in
-                        # the equilibrated structure, derived automatically.
-                        if self.mMD_funnel_host_selection is not None:
-                            funnel_host_sel = self.mMD_funnel_host_selection
-                            logger.info(f"Using user-specified funnel host selection: {funnel_host_sel}")
-                        else:
-                            u_ref = mda.Universe(equilibrated_pdb)
-                            contact_ca = u_ref.select_atoms(
-                                f"protein and name CA and same residue as "
-                                f"(around 6 ({ligand_selection}))"
-                            )
-                            if len(contact_ca) == 0:
-                                logger.warning(
-                                    "No protein CA found within 6 Å of ligand in the "
-                                    "equilibrated structure. Falling back to pocket_selection "
-                                    "for funnel host — the funnel may be misaligned."
-                                )
-                                funnel_host_sel = f"index {' '.join(map(str, pocket_atom_indices))}"
-                            else:
-                                contact_resids = sorted(set(contact_ca.resids))
-                                funnel_host_sel = (
-                                    f"protein and name CA and resid "
-                                    f"{' '.join(map(str, contact_resids))}"
-                                )
-                                logger.info(
-                                    f"Auto-derived funnel host: {len(contact_ca)} CA atoms of "
-                                    f"residues within 6 Å of ligand (resids: "
-                                    f"{contact_resids[:5]}{'...' if len(contact_resids) > 5 else ''}). "
-                                    f"Pass mMD_funnel_host_selection= to override."
-                                )
-
-                        funnel_params = generate_funnel_parameters_from_trajectory(
-                            universe,
-                            host_selection=funnel_host_sel,
-                            guest_selection=ligand_selection,
-                            percentile_z=50.0,
-                            R_cylinder_ang=2.0, # Angstroms; radius of cylindrical part of funnel
-                            # z_cc_ang=5, # this overrides the default automatic z_cc calculation (floor is 5A)
-                            alpha_cone_degrees=45.0,
-                            verbose=True,
-                        )
-                        
-                        # Create funnel force from parameters
-                        funnel_force = create_funnel_force_from_trajectory_analysis(funnel_params)
-                        logger.info("Funnel potential successfully generated from trajectories")
-
-                        # Persist funnel parameters so they can be reloaded for
-                        # post-hoc PMF correction or funnel visualisation
-
-                        save_funnel_params(
-                            funnel_params,
-                            os.path.join(mMD_out_dir, "funnel_params"),
-                        )
-
-                        # Write debug PSE showing funnel geometry
-                        try:
-                            write_funnel_pymol(
-                                funnel_params=funnel_params,
-                                reference_pdb=solvated_system_pdb,
-                                milestone_files=milestones,
-                                outdir=mMD_out_dir,
-                                ligand_selection=ligand_selection,
-                            )
-                        except Exception as viz_e:
-                            logger.warning(f"Funnel visualization failed (non-fatal): {viz_e}")
-
-                except Exception as e:
-                    logger.error(f"Error generating funnel potential: {e}")
-                    logger.warning("Continuing without funnel potential")
-                    funnel_force = None
-
-            # Single-walker mode: all walkers start from the most-bound (first) milestone.
-            # Resolve this before reversing the loop so it is milestone-order independent.
-            first_milestone_name = os.path.basename(milestones[0]).split('.')[0]
-            first_milestone_state = f"{milestones_outdir}/{first_milestone_name}_relax_state.xml"
-            walker_run_info = {}  # {run_id: (state_xml_path, system_xml_path)} for stuck-walker retry
-
-            # Run most-unbound walker first so the most-bound walker inherits their accumulated bias.
-            for milestone in reversed(milestones):
-                milestone_name = os.path.basename(milestone).split('.')[0]
-                milestone_system_xml = f"{milestones_outdir}/{milestone_name}_relax_system.xml"
-                milestone_state = f"{milestones_outdir}/{milestone_name}_relax_state.xml"
-
-                if os.path.exists(milestone_system_xml):
-                    milestone_system = load_system(milestone_system_xml)
-                    logger.info(f"Loading relaxed milestone {milestone_name}")
-                else:
-                    logger.info(f'Relaxing milestone {milestone_name}')
-                    try:
-                        system = load_system(f"{sys_name}/system.xml")
-                        milestone_system = milestone_relax.run(system=system, state_xml_file=milestone, run_id=milestone_name)
-                    except Exception as e:
-                        logger.error(f"Error relaxing {milestone_name}: {e}")
-                        continue
-
-                # mMD_milestone_seeding=True : each walker starts from its own milestone's checkpoint.
-                # mMD_milestone_seeding=False: all walkers start from the first (bound-state) checkpoint.
-                # Restart from the serialized state, not the relax checkpoint. A
-                # checkpoint is only valid for an identical Context, and metadynamics
-                # adds the funnel and bias forces on top of the relaxed system.
-                state_to_use = milestone_state if self.mMD_milestone_seeding else first_milestone_state
-
-                # mMD_multiple_walkers=False (default): each walker gets its own bias subdir so
-                #   hills are NOT shared — walkers run independently without bias communication.
-                # mMD_multiple_walkers=True: all walkers share mMD_out_dir as biasDir so
-                #   OpenMM accumulates hills from all of them (true multi-walker metadynamics).
-                walker_bias_dir = (
-                    os.path.join(mMD_out_dir, f"bias_{milestone_name}")
-                    if not self.mMD_multiple_walkers else None
-                )
-
-                # In isolated mode the preseed file lives in mMD_out_dir but each walker's
-                # biasDir is a subdirectory, so OpenMM would not find it.  Copy it there
-                # before the walker initialises its Metadynamics object.
-                if walker_bias_dir is not None and self.mMD_preseed_bias:
-                    preseed_src = os.path.join(mMD_out_dir, "bias_0_0.npy")
-                    if os.path.exists(preseed_src):
-                        os.makedirs(walker_bias_dir, exist_ok=True)
-                        shutil.copy2(preseed_src, os.path.join(walker_bias_dir, "bias_0_0.npy"))
-
-                logger.info(f"Running WTMetaD for milestone {milestone_name}")
-                try:
-                    WTMetaD.run(
-                        state_xml_file=state_to_use,
-                        system=milestone_system,
-                        run_id=milestone_name,
-                        cv_specs=[path_cv],
-                        mMD_time=self.mMD_time,
-                        bias_factor=self.mMD_bias_factor,
-                        hill_height=self.mMD_hill_height,
-                        biasFrequency=self.mMD_bias_frequency,
-                        funnel_force=funnel_force,
-                        funnel_params=funnel_params if funnel_force is not None else None,
-                        bias_dir=walker_bias_dir,
-                    )
-                    walker_run_info[milestone_name] = (state_to_use, milestone_system_xml)
-                except Exception as e:
-                    logger.error(f"Error during WTMetaD for {milestone_name}: {e}")
-                    continue
-
-            # Retry walkers that never left the bound state (max PathCV < 0.5).
-            # mMD_multiple_walkers=True (shared bias): by this point the biasDir contains
-            #   accumulated hills from all successful walkers, so a stuck walker benefits
-            #   from a warm landscape.
-            # mMD_multiple_walkers=False (isolated): each walker retries with its own
-            #   previously-deposited hills; no cross-walker benefit, but the walker may
-            #   still climb out given its own partial bias.
-            stuck_walkers = [
-                (run_id, state_xml, xml)
-                for run_id, (state_xml, xml) in walker_run_info.items()
-                if os.path.exists(f"{mMD_out_dir}/COLVAR_{run_id}.npy")
-                and float(np.load(f"{mMD_out_dir}/COLVAR_{run_id}.npy")[:, 0].max()) < 0.5
-            ]
-            if stuck_walkers:
+            for group_key, group_milestones in milestone_groups:
+                group_name = group_key if group_key is not None else "all milestones"
+                # unlabelled group keeps the flat layout untouched
+                group_out_dir = (mMD_out_dir if group_key is None
+                                 else os.path.join(mMD_out_dir, group_key))
+                # relax outputs stay beside the milestones they relax
+                group_milestones_dir = (milestones_outdir if group_key is None
+                                        else os.path.join(milestones_outdir, group_key))
+                os.makedirs(group_out_dir, exist_ok=True)
                 logger.info(
-                    f"{len(stuck_walkers)} stuck walker(s) detected "
-                    f"({[r for r, _, _ in stuck_walkers]}); retrying with accumulated bias."
+                    f"Metadynamics for {group_name}: {len(group_milestones)} milestone(s) "
+                    f"-> {group_out_dir}")
+
+                #sort the milestones by their index (milestone number is the last token before 'frame')
+                path_milestones = sorted(
+                    group_milestones,
+                    key=lambda x: int(os.path.basename(x).split('_frame_')[0].rsplit('_', 1)[-1]))
+
+                # The index order follows PC1, whose sign is arbitrary, so anchor the
+                # direction on pocket-ligand separation before anything consumes the
+                # list. Every consumer below (path CV, preseed, funnel PSE, the relax
+                # loop, first_milestone_name) reads this same list, so they stay
+                # consistent only if the flip happens here.
+                path_milestones = order_milestones_bound_to_unbound(
+                    path_milestones, pocket_atom_indices, ligand_atoms_indices)
+
+                path_cv = pathCV_cv(
+                    topology=topology,
+                    milestones=path_milestones,
+                    pocket_atoms=pocket_atom_indices,
+                    ligand_atoms=ligand_atoms_indices,
+                    system=base_system,
+                    grid_min=0.0,
+                    grid_max=1.0,
+                    hill_width=self.mMD_hill_width,
+                    sigma='auto', # related to distance between milestones
+                    #sigma approz min milestone spacings
                 )
-                for run_id, state_xml, xml in stuck_walkers:
-                    retry_bias_dir = (
-                        os.path.join(mMD_out_dir, f"bias_{run_id}")
+                # when you first run, check the logged line
+                # PathCV milestone COM distances (nm): [...].
+                # If adjacent milestones differ by more than 3 × sigma = 0.3 nm,
+                # the Gaussian kernels won't overlap well and you'll want to increase sigma.
+                # If they're closer than 0.5 × sigma = 0.05 nm, decrease it.
+
+                # Pre-seed the metadynamics bias surface from the sMD PMF (optional).
+                # Done before any walker starts so all walkers load the preseed via _syncWithDisk().
+                if self.mMD_preseed_bias:
+                    try:
+                        # Compute milestone COM distances (same formula as in pathCV_cv factory)
+                        _pocket_masses = np.array([
+                            base_system.getParticleMass(i).value_in_unit(dalton)
+                            for i in pocket_atom_indices
+                        ])
+                        _ligand_masses = np.array([
+                            base_system.getParticleMass(i).value_in_unit(dalton)
+                            for i in ligand_atoms_indices
+                        ])
+                        _milestone_com_dists = []
+                        for _m_file in path_milestones:
+                            _pos = read_positions(_m_file)
+                            _p_com = np.average(_pos[pocket_atom_indices], axis=0, weights=_pocket_masses)
+                            _l_com = np.average(_pos[ligand_atoms_indices], axis=0, weights=_ligand_masses)
+                            _milestone_com_dists.append(float(np.linalg.norm(_l_com - _p_com)))
+
+                        write_metad_preseed(
+                            smd_analysis_outdir=sMD_analysis_outdir,
+                            milestone_com_distances=_milestone_com_dists,
+                            bias_dir=group_out_dir,
+                            gamma=self.mMD_bias_factor,
+                            temperature=self.temperature,
+                            speed=self.mMD_preseed_speed,
+                            alpha=0.05
+                        )
+                    except Exception as _preseed_err:
+                        logger.error(f"Preseed bias failed (non-fatal, continuing without preseed): {_preseed_err}")
+
+                milestone_relax = RelaxMD(
+                    topology=topology,
+                    ligand_atoms=ligand_total_hatoms, # use all HA
+                    pocket_atoms=pocket_atom_indices,
+                    out_dir=group_milestones_dir,
+                    is_membrane=self.is_membrane,
+                    temp=self.temperature,
+                    timestep=self.timestep,
+                    platform=self.platform
+                )
+
+                WTMetaD = MetadynamicsMD(
+                    topology=topology,
+                    ligand_atoms=ligand_atoms_indices, # use ligand anchor atoms for biasing
+                    pocket_atoms=pocket_atom_indices,
+                    restrained_atoms=None,
+                    is_membrane=self.is_membrane,
+                    timestep=self.timestep,
+                    temp=self.temperature,
+                    out_dir=group_out_dir,
+                    platform=self.platform
+                )
+
+                # Generate funnel potential if requested
+                funnel_force = None
+                funnel_params = None
+                if self.mMD_use_funnel_potential:
+                    logger.info("Generating funnel potential from sMD trajectories...")
+                    try:
+                        # Restrict the funnel to this path's own trajectories; pooling
+                        # every path widens the cone until it restrains nothing.
+                        smd_trajs = all_smd_trajs
+                        if group_key is None:
+                            logger.warning(
+                                "Milestone group is unlabelled; building the funnel from "
+                                "all sMD trajectories.")
+                        elif not trajname_to_path:
+                            logger.warning(
+                                "No trajectory-to-path map under %s; building the funnel "
+                                "for %s from all sMD trajectories.",
+                                sMD_analysis_outdir, group_key)
+                        else:
+                            _wanted = {os.path.basename(self._trajname_to_dcd(n))
+                                       for n, p in trajname_to_path.items() if p == group_key}
+                            _group_trajs = [t for t in all_smd_trajs
+                                            if os.path.basename(t) in _wanted]
+                            if _group_trajs:
+                                smd_trajs = _group_trajs
+                                logger.info(
+                                    f"Funnel for {group_key}: {len(smd_trajs)} of "
+                                    f"{len(all_smd_trajs)} aligned sMD trajectories.")
+                            else:
+                                logger.warning(
+                                    "No aligned sMD trajectory maps to %s; building the "
+                                    "funnel from all sMD trajectories.", group_key)
+
+                        if not smd_trajs:
+                            logger.warning("No sMD trajectories found. Skipping funnel potential generation.")
+                        else:
+                            # Create MDAnalysis Universe with all trajectories
+                            universe = mda.Universe(solvated_system_pdb, smd_trajs)
+                            logger.info(f"Loaded {len(universe.trajectory)} frames total")
+
+                            # Determine funnel host selection.
+                            # The funnel axis must pass through the binding site so the
+                            # bound-state ligand is inside the cone (r_xy ≈ 0).
+                            # pocket_selection is intentionally wide (whole-helix CAs for sMD
+                            # stability) and its COM sits far from the pocket — do NOT reuse it
+                            # here.  Default: CA atoms of residues contacting the ligand in
+                            # the equilibrated structure, derived automatically.
+                            if self.mMD_funnel_host_selection is not None:
+                                funnel_host_sel = self.mMD_funnel_host_selection
+                                logger.info(f"Using user-specified funnel host selection: {funnel_host_sel}")
+                            else:
+                                u_ref = mda.Universe(equilibrated_pdb)
+                                contact_ca = u_ref.select_atoms(
+                                    f"protein and name CA and same residue as "
+                                    f"(around 6 ({ligand_selection}))"
+                                )
+                                if len(contact_ca) == 0:
+                                    logger.warning(
+                                        "No protein CA found within 6 Å of ligand in the "
+                                        "equilibrated structure. Falling back to pocket_selection "
+                                        "for funnel host — the funnel may be misaligned."
+                                    )
+                                    funnel_host_sel = f"index {' '.join(map(str, pocket_atom_indices))}"
+                                else:
+                                    contact_resids = sorted(set(contact_ca.resids))
+                                    funnel_host_sel = (
+                                        f"protein and name CA and resid "
+                                        f"{' '.join(map(str, contact_resids))}"
+                                    )
+                                    logger.info(
+                                        f"Auto-derived funnel host: {len(contact_ca)} CA atoms of "
+                                        f"residues within 6 Å of ligand (resids: "
+                                        f"{contact_resids[:5]}{'...' if len(contact_resids) > 5 else ''}). "
+                                        f"Pass mMD_funnel_host_selection= to override."
+                                    )
+
+                            funnel_params = generate_funnel_parameters_from_trajectory(
+                                universe,
+                                host_selection=funnel_host_sel,
+                                guest_selection=ligand_selection,
+                                percentile_z=50.0,
+                                # R_cylinder is derived from the trajectory's own radial
+                                # spread beyond z_cc; pass R_cylinder_ang to override.
+                                # z_cc_ang=5, # this overrides the default automatic z_cc calculation (floor is 5A)
+                                alpha_cone_degrees=45.0,
+                                verbose=True,
+                            )
+
+                            # Create funnel force from parameters
+                            funnel_force = create_funnel_force_from_trajectory_analysis(funnel_params)
+                            logger.info("Funnel potential successfully generated from trajectories")
+
+                            # Persist funnel parameters so they can be reloaded for
+                            # post-hoc PMF correction or funnel visualisation
+
+                            save_funnel_params(
+                                funnel_params,
+                                os.path.join(group_out_dir, "funnel_params"),
+                            )
+
+                            # Write debug PSE showing funnel geometry
+                            try:
+                                write_funnel_pymol(
+                                    funnel_params=funnel_params,
+                                    reference_pdb=solvated_system_pdb,
+                                    milestone_files=path_milestones,
+                                    outdir=group_out_dir,
+                                    ligand_selection=ligand_selection,
+                                )
+                            except Exception as viz_e:
+                                logger.warning(f"Funnel visualization failed (non-fatal): {viz_e}")
+
+                    except Exception as e:
+                        logger.error(f"Error generating funnel potential: {e}")
+                        logger.warning("Continuing without funnel potential")
+                        funnel_force = None
+
+                # Single-walker mode: all walkers start from the most-bound (first) milestone.
+                # Resolve this before reversing the loop so it is milestone-order independent.
+                first_milestone_name = os.path.basename(path_milestones[0]).split('.')[0]
+                first_milestone_state = f"{group_milestones_dir}/{first_milestone_name}_relax_state.xml"
+                walker_run_info = {}  # {run_id: (state_xml_path, system_xml_path)} for stuck-walker retry
+
+                # Run most-unbound walker first so the most-bound walker inherits their accumulated bias.
+                for milestone in reversed(path_milestones):
+                    milestone_name = os.path.basename(milestone).split('.')[0]
+                    milestone_system_xml = f"{group_milestones_dir}/{milestone_name}_relax_system.xml"
+                    milestone_state = f"{group_milestones_dir}/{milestone_name}_relax_state.xml"
+
+                    if os.path.exists(milestone_system_xml):
+                        milestone_system = load_system(milestone_system_xml)
+                        logger.info(f"Loading relaxed milestone {milestone_name}")
+                    else:
+                        logger.info(f'Relaxing milestone {milestone_name}')
+                        try:
+                            system = load_system(f"{sys_name}/system.xml")
+                            milestone_system = milestone_relax.run(system=system, state_xml_file=milestone, run_id=milestone_name)
+                        except Exception as e:
+                            logger.error(f"Error relaxing {milestone_name}: {e}")
+                            continue
+
+                    # mMD_milestone_seeding=True : each walker starts from its own milestone's checkpoint.
+                    # mMD_milestone_seeding=False: all walkers start from the first (bound-state) checkpoint.
+                    # Restart from the serialized state, not the relax checkpoint. A
+                    # checkpoint is only valid for an identical Context, and metadynamics
+                    # adds the funnel and bias forces on top of the relaxed system.
+                    state_to_use = milestone_state if self.mMD_milestone_seeding else first_milestone_state
+
+                    # mMD_multiple_walkers=False (default): each walker gets its own bias subdir so
+                    #   hills are NOT shared — walkers run independently without bias communication.
+                    # mMD_multiple_walkers=True: all walkers share the group's out dir as biasDir so
+                    #   OpenMM accumulates hills from all of them (true multi-walker metadynamics).
+                    walker_bias_dir = (
+                        os.path.join(group_out_dir, f"bias_{milestone_name}")
                         if not self.mMD_multiple_walkers else None
                     )
+
+                    # In isolated mode the preseed file lives in the group's out dir but each
+                    # walker's biasDir is a subdirectory, so OpenMM would not find it.  Copy it
+                    # there before the walker initialises its Metadynamics object.
+                    if walker_bias_dir is not None and self.mMD_preseed_bias:
+                        preseed_src = os.path.join(group_out_dir, "bias_0_0.npy")
+                        if os.path.exists(preseed_src):
+                            os.makedirs(walker_bias_dir, exist_ok=True)
+                            shutil.copy2(preseed_src, os.path.join(walker_bias_dir, "bias_0_0.npy"))
+
+                    logger.info(f"Running WTMetaD for milestone {milestone_name}")
                     try:
                         WTMetaD.run(
-                            state_xml_file=state_xml,
-                            system=load_system(xml),
-                            run_id=f"{run_id}_retry",
+                            state_xml_file=state_to_use,
+                            system=milestone_system,
+                            run_id=milestone_name,
                             cv_specs=[path_cv],
                             mMD_time=self.mMD_time,
                             bias_factor=self.mMD_bias_factor,
@@ -1365,34 +1452,77 @@ class AutoPath:
                             biasFrequency=self.mMD_bias_frequency,
                             funnel_force=funnel_force,
                             funnel_params=funnel_params if funnel_force is not None else None,
-                            bias_dir=retry_bias_dir,
+                            bias_dir=walker_bias_dir,
                         )
+                        walker_run_info[milestone_name] = (state_to_use, milestone_system_xml)
                     except Exception as e:
-                        logger.error(f"Retry failed for {run_id}: {e}")
+                        logger.error(f"Error during WTMetaD for {milestone_name}: {e}")
+                        continue
 
-            # Post-run diagnosis: FES, walker stats, and ΔG°_b from the coverage-filtered FES.
-            try:
-                colvar_files_diag = sorted(glob(f"{mMD_out_dir}/COLVAR_*.npy"))
-                if colvar_files_diag:
-                    ma = MetadynamicsAnalysis(out_dir=mMD_out_dir)
-                    diag = ma.diagnose(
-                        colvar_files=colvar_files_diag,
-                        temperature=float(self.temperature),
-                        bias_factor=float(self.mMD_bias_factor),
-                        cv_name="PathCV progress (s)",
-                        out_prefix=os.path.join(mMD_out_dir, sys_name),
+                # Retry walkers that never left the bound state (max PathCV < 0.5).
+                # mMD_multiple_walkers=True (shared bias): by this point the biasDir contains
+                #   accumulated hills from all successful walkers, so a stuck walker benefits
+                #   from a warm landscape.
+                # mMD_multiple_walkers=False (isolated): each walker retries with its own
+                #   previously-deposited hills; no cross-walker benefit, but the walker may
+                #   still climb out given its own partial bias.
+                stuck_walkers = [
+                    (run_id, state_xml, xml)
+                    for run_id, (state_xml, xml) in walker_run_info.items()
+                    if os.path.exists(f"{group_out_dir}/COLVAR_{run_id}.npy")
+                    and float(np.load(f"{group_out_dir}/COLVAR_{run_id}.npy")[:, 0].max()) < 0.5
+                ]
+                if stuck_walkers:
+                    logger.info(
+                        f"{len(stuck_walkers)} stuck walker(s) detected "
+                        f"({[r for r, _, _ in stuck_walkers]}); retrying with accumulated bias."
                     )
-                    if diag.get('dG_bind_std_kcal') is not None:
-                        logger.info(
-                            f"Final ΔG°_b = {diag['dG_bind_std_kcal']:.2f} kcal/mol  "
-                            f"pKd = {diag['pKd']:.2f}  "
-                            f"({diag['n_converged_cv']}/{diag['n_walkers']} walkers converged)"
+                    for run_id, state_xml, xml in stuck_walkers:
+                        retry_bias_dir = (
+                            os.path.join(group_out_dir, f"bias_{run_id}")
+                            if not self.mMD_multiple_walkers else None
                         )
-            except Exception as _diag_err:
-                logger.warning(f"Post-run metadynamics diagnosis failed (non-fatal): {_diag_err}")
+                        try:
+                            WTMetaD.run(
+                                state_xml_file=state_xml,
+                                system=load_system(xml),
+                                run_id=f"{run_id}_retry",
+                                cv_specs=[path_cv],
+                                mMD_time=self.mMD_time,
+                                bias_factor=self.mMD_bias_factor,
+                                hill_height=self.mMD_hill_height,
+                                biasFrequency=self.mMD_bias_frequency,
+                                funnel_force=funnel_force,
+                                funnel_params=funnel_params if funnel_force is not None else None,
+                                bias_dir=retry_bias_dir,
+                            )
+                        except Exception as e:
+                            logger.error(f"Retry failed for {run_id}: {e}")
 
-        # Load and align the WTMetaD trajectories
-        WTMetaD_trajs = glob(f"{mMD_out_dir}/trajectory_metadynamics_milestone_*_frame_*.dcd")
+                # Post-run diagnosis: FES, walker stats, and ΔG°_b from the coverage-filtered FES.
+                try:
+                    colvar_files_diag = sorted(glob(f"{group_out_dir}/COLVAR_*.npy"))
+                    if colvar_files_diag:
+                        ma = MetadynamicsAnalysis(out_dir=group_out_dir)
+                        diag = ma.diagnose(
+                            colvar_files=colvar_files_diag,
+                            temperature=float(self.temperature),
+                            bias_factor=float(self.mMD_bias_factor),
+                            cv_name="PathCV progress (s)",
+                            out_prefix=os.path.join(group_out_dir, sys_name),
+                        )
+                        if diag.get('dG_bind_std_kcal') is not None:
+                            logger.info(
+                                f"Final ΔG°_b = {diag['dG_bind_std_kcal']:.2f} kcal/mol  "
+                                f"pKd = {diag['pKd']:.2f}  "
+                                f"({diag['n_converged_cv']}/{diag['n_walkers']} walkers converged)"
+                            )
+                except Exception as _diag_err:
+                    logger.warning(f"Post-run metadynamics diagnosis failed (non-fatal): {_diag_err}")
+
+        # Load and align the WTMetaD trajectories (per-path runs write into subdirs)
+        WTMetaD_trajs = glob(f"{mMD_out_dir}/**/trajectory_metadynamics_milestone_*_frame_*.dcd",
+                             recursive=True)
         WTMetaD_trajs = [f for f in WTMetaD_trajs if "aligned" not in f]  # only process unaligned trajectories
 
         wrap_align_save_traj(WTMetaD_trajs, solvated_system_pdb, is_membrane=self.is_membrane)

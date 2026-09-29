@@ -80,8 +80,8 @@ def generate_funnel_parameters_from_trajectory(
     percentile_z: float = 95.0,
     z_cc_ang: Optional[float] = None,
     z_max_buffer_ang: float = 3.0,
-    R_cylinder_ang: float = 2.0,
-    percentile_r_funnel: float = 85.0,
+    R_cylinder_ang: Optional[float] = None,
+    percentile_r_funnel: float = 95.0,
     alpha_cone_degrees: float = 25.0,
     stride: int = 2,
     verbose: bool = True,
@@ -224,10 +224,29 @@ def generate_funnel_parameters_from_trajectory(
     else:
         z_cc = np.percentile(z_distances, percentile_z)
 
-    R_cylinder = float(R_cylinder_ang)
-
     n_bound = max(10, int(0.1 * trajectory_length))
     R_funnel_bound = np.percentile(radial_distances[:n_bound], percentile_r_funnel)
+
+    # Size the cylinder from the radial spread the ligand actually shows WHERE THE
+    # CYLINDER APPLIES (|z| >= z_cc). The bound-state spread is the wrong basis: it
+    # describes the cone's base, and on a real path it comes out far too tight.
+    # A wall that the reference trajectory itself violates does not guide sampling,
+    # it just injects force.
+    if R_cylinder_ang is None:
+        _cyl = radial_distances[np.abs(z_distances) >= z_cc]
+        if _cyl.size == 0:
+            raise ValueError(
+                f"no trajectory frames beyond z_cc={z_cc:.2f} A, so the cylinder "
+                "radius cannot be derived; pass R_cylinder_ang explicitly.")
+        R_cylinder = float(np.percentile(_cyl, percentile_r_funnel))
+        if verbose:
+            logger.info(
+                "Derived R_cylinder=%.2f A from the p%.0f radial spread of the "
+                "%d frames beyond z_cc (%.1f%% of them fall outside it).",
+                R_cylinder, percentile_r_funnel, _cyl.size,
+                100.0 * float((_cyl > R_cylinder).mean()))
+    else:
+        R_cylinder = float(R_cylinder_ang)
 
     z_max = float(np.max(z_distances)) + float(z_max_buffer_ang)
 

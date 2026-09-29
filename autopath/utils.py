@@ -1722,6 +1722,61 @@ def write_pocket_pymol(
     return None
 
 
+def read_surviving_paths(analysis_outdir: str) -> set[str]:
+    """Path labels that passed the sMD analysis quality filters.
+
+    The analysis drops under-sampled, prematurely-terminated and
+    negative-well paths, but the medoid bookkeeping is written before that and
+    keeps a medoid for every cluster. Downstream stages that seed simulations
+    from medoids must intersect with this set, or they build milestones and
+    funnels around a path the analysis already rejected.
+
+    Returns an empty set when no quality table is present, which the caller
+    should treat as "unknown", not as "nothing survived".
+    """
+    quality = os.path.join(analysis_outdir, "path_quality.csv")
+    if os.path.exists(quality):
+        df = pd.read_csv(quality)
+        if "path" in df.columns:
+            return set(df["path"].dropna().astype(str))
+
+    processed = os.path.join(analysis_outdir, "sMD_processed_data.csv")
+    if os.path.exists(processed):
+        df = pd.read_csv(processed, usecols=lambda c: c in ("path", "path_ok"))
+        if "path" in df.columns:
+            if "path_ok" in df.columns:
+                df = df[df["path_ok"].astype(str).str.lower() == "true"]
+            return set(df["path"].dropna().astype(str))
+
+    return set()
+
+
+def read_trajname_to_path(analysis_outdir: str) -> dict[str, str]:
+    """Map each surviving sMD trajectory name to its path label.
+
+    Stages that build a per-path model (funnel, path CV) need to know which
+    trajectories belong to which path; pooling every trajectory merges
+    geometrically distinct routes into one over-wide model.
+
+    Only rows the analysis kept are returned; a missing ``path_ok`` column is
+    read as "all rows kept". Returns an empty dict when the table or the
+    columns it needs are absent, which the caller should treat as "unknown".
+    """
+    processed = os.path.join(analysis_outdir, "sMD_processed_data.csv")
+    if not os.path.exists(processed):
+        return {}
+
+    # the table is large; only the three columns below are ever needed
+    wanted = ("trajname", "path", "path_ok")
+    df = pd.read_csv(processed, usecols=lambda c: c in wanted)
+    if "trajname" not in df.columns or "path" not in df.columns:
+        return {}
+
+    if "path_ok" in df.columns:
+        df = df[df["path_ok"].astype(str).str.lower() == "true"]
+    df = df.dropna(subset=["trajname", "path"])
+    return dict(zip(df["trajname"].astype(str), df["path"].astype(str)))
+
 
 ### DEPRECATED ###
 # Superseded by autopath/clustering.py. Retained: still imported by
