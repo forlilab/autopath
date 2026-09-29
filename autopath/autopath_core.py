@@ -951,7 +951,12 @@ class AutoPath:
                 raise RuntimeError("No sMD trajectories found. Please check the sMD pulling step.")
 
             # Load medoid info (from analysis or from saved file)
-            medoid_info_path = f"{sMD_analysis_outdir}/medoid_info.json"
+            # PathModel writes this under path_analysis/; keep the flat path as a
+            # fallback so older analysis directories still load. Getting this wrong
+            # silently falls back to every sMD trajectory instead of the medoids.
+            medoid_info_path = f"{sMD_analysis_outdir}/path_analysis/medoid_info.json"
+            if not os.path.exists(medoid_info_path):
+                medoid_info_path = f"{sMD_analysis_outdir}/medoid_info.json"
             medoid_to_path = {}
             medoid_names = []
 

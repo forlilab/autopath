@@ -145,3 +145,22 @@ def test_no_module_calls_load_state():
                     if ".loadState(" in code:
                         offenders.append(f"{os.path.relpath(path, root)}:{lineno}")
     assert offenders == [], f"loadState is forbidden; found at {offenders}"
+
+
+# --- medoid_info.json lookup ------------------------------------------------
+
+def test_core_looks_for_medoid_info_under_path_analysis():
+    """PathModel writes medoid_info.json into path_analysis/.
+
+    Reading it from the analysis dir instead silently fell back to using every
+    sMD trajectory rather than the medoids, with only a warning.
+    """
+    import inspect
+    from autopath import autopath_core
+    from autopath.pulling import PathModel as pm
+
+    writer = inspect.getsource(pm)
+    assert '"path_analysis", "medoid_info.json"' in writer
+
+    reader = inspect.getsource(autopath_core)
+    assert 'path_analysis/medoid_info.json' in reader
