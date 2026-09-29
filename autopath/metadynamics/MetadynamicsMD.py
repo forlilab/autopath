@@ -38,7 +38,7 @@ try:
     from reweightingreporter import ReweightingReporter
 except ImportError:
     girsanov = False
-    logging.warning("Please install openmmtools to use Girsanov reweighting.")
+    logger.warning("Please install openmmtools to use Girsanov reweighting.")
 
 
 class MetadynamicsMD:
@@ -129,10 +129,10 @@ class MetadynamicsMD:
         self.use_GReweighting = use_GReweighting
         if self.use_GReweighting:
             if not girsanov:
-                logging.error("Disabled Girsanov reweighting because openmmtools is not installed.")
+                logger.error("Disabled Girsanov reweighting because openmmtools is not installed.")
                 self.use_GReweighting = False
             else:
-                logging.info("Using Girsanov reweighting for steered MD.")
+                logger.info("Using Girsanov reweighting for steered MD.")
 
         self.verbose = verbose
         self.record_CV = int((1/self.timestep.value_in_unit(openmmunit.picoseconds)) * 10)
@@ -250,9 +250,9 @@ class MetadynamicsMD:
         hill_height = hill_height * openmmunit.kilojoules_per_mole
 
         cv_names = ", ".join(s.name for s in cv_specs)
-        logging.info(f"Running metadynamics with CV(s): {cv_names}")
+        logger.info(f"Running metadynamics with CV(s): {cv_names}")
 
-        logging.debug("Setting up the integrator..")
+        logger.debug("Setting up the integrator..")
         if self.use_GReweighting:
             integrator = LangevinSplittingGirsanov(
                 nstxout = biasFrequency,
@@ -267,23 +267,23 @@ class MetadynamicsMD:
                                                   1.0/openmmunit.picoseconds,
                                                   self.timestep)
 
-        logging.debug(f"Creating the simulation for {run_id}")
+        logger.debug(f"Creating the simulation for {run_id}")
         simulation = Simulation(self.topology, system, integrator, self.platform)
 
         # Precedence: checkpoint_file > state_xml_file > pdb_file.
         if checkpoint_file is not None:
-            logging.info(f"Setting positions from checkpoint {checkpoint_file}")
+            logger.info(f"Setting positions from checkpoint {checkpoint_file}")
             simulation.loadCheckpoint(checkpoint_file)
             simulation.integrator = integrator
         elif state_xml_file is not None:
-            logging.info(f"Setting state from portable XML state file {state_xml_file}")
+            logger.info(f"Setting state from portable XML state file {state_xml_file}")
             with open(state_xml_file) as f:
                 state = XmlSerializer.deserialize(f.read())
             simulation.context.setPeriodicBoxVectors(*state.getPeriodicBoxVectors())
             simulation.context.setPositions(state.getPositions())
             simulation.context.setVelocities(state.getVelocities())
         elif pdb_file is not None:
-            logging.info(f"Setting positions from PDB file {pdb_file}")
+            logger.info(f"Setting positions from PDB file {pdb_file}")
             pdb = PDBFile(pdb_file)
             simulation.context.setPositions(pdb.getPositions())
             simulation.context.setPeriodicBoxVectors(*pdb.topology.getPeriodicBoxVectors())
@@ -311,7 +311,7 @@ class MetadynamicsMD:
         if funnel_force is not None:
             fresh_funnel = XmlSerializer.deserialize(XmlSerializer.serialize(funnel_force))
             system.addForce(fresh_funnel)
-            logging.info(f"Added funnel potential with force group {funnel_force.getForceGroup()}")
+            logger.info(f"Added funnel potential with force group {funnel_force.getForceGroup()}")
 
         resolved = [spec.resolve(input_positions, self.n_atoms, self.topology) for spec in cv_specs]
 
@@ -355,7 +355,7 @@ class MetadynamicsMD:
 
         # Reporters are attached here, after the rebuild, because rebuild_simulation
         # returns a new Simulation and anything attached earlier would be dropped.
-        logging.debug(f"Setting up reporters for {run_id}..")
+        logger.debug(f"Setting up reporters for {run_id}..")
         add_reporters(
             simulation,
             self.out_dir,
@@ -386,7 +386,7 @@ class MetadynamicsMD:
 
         max_cv = float(colvar_array[:, 0].max())
         if max_cv < 0.5:
-            logging.warning(
+            logger.warning(
                 f"Walker {run_id}: CV never exceeded 0.5 (max={max_cv:.3f}). "
                 "The ligand did not reach the unbound state — this walker will distort the FE profile. "
                 "Consider increasing mMD_time or mMD_hill_height."
@@ -405,7 +405,7 @@ class MetadynamicsMD:
                 )
                 rw_path = os.path.join(self.out_dir, f"FE_{run_id}_rw.npy")
                 np.save(rw_path, result["fe_corrected"])
-                logging.info(
+                logger.info(
                     f"[{run_id}] ΔG_sim={result['dG_bind_sim_kj_mol']:.2f} kJ/mol  "
                     f"correction={result['correction_kj_mol']:.2f} kJ/mol  "
                     f"ΔG°_b={result['dG_bind_std_kj_mol']:.2f} kJ/mol  "
@@ -437,7 +437,7 @@ class MetadynamicsMD:
         save_pdb(self.topology, final_positions, f"{self.out_dir}/WTMetaD_{run_id}.pdb")
 
         simulation_time = time.monotonic() - start_time
-        logging.info(f"Finished {run_id} metadynamics in {simulation_time/60:.2f} min.")
+        logger.info(f"Finished {run_id} metadynamics in {simulation_time/60:.2f} min.")
 
         return run_id
 
