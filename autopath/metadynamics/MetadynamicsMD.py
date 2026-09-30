@@ -376,6 +376,9 @@ class MetadynamicsMD:
         colvar_list = [meta.getCollectiveVariables(simulation)]
         # ~40 snapshots over the run, so the curve is readable at any length
         fe_hist, fe_hist_steps = [], []
+        # Shared-bias walkers run sequentially and inherit each other's hills, so
+        # the analysis needs their run order to lay the curves end to end.
+        _started_at = time.time()
         _fe_hist_every = max(self.record_CV,
                              (int(mMD_steps) // 40 // self.record_CV or 1) * self.record_CV)
         for i in range(0, int(mMD_steps), self.record_CV):
@@ -402,6 +405,7 @@ class MetadynamicsMD:
                 os.path.join(self.out_dir, f"FEhist_{run_id}.npz"),
                 fes_kj=np.array(fe_hist),
                 time_ns=np.array(fe_hist_steps, dtype=float) * _ps_per_step / 1000.0,
+                started_at=np.array(_started_at, dtype=float),
             )
             logger.info("Saved %d FES snapshots for the convergence curve (%s).",
                         len(fe_hist), f"FEhist_{run_id}.npz")

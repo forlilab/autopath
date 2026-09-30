@@ -938,3 +938,40 @@ def test_dG_convergence_plot_draws_the_unresolved_part(tmp_path):
     assert out and os.path.exists(out)
     # a 2-tuple must still work: finiteness is the fallback mask
     assert MA._plot_dG_convergence({"w1": (t, g)}, str(tmp_path / "q"))
+
+
+# --- shared bias: sequential walkers form one curve ------------------------
+
+def test_shared_bias_run_order_is_not_alphabetical(tmp_path):
+    """Shared-bias walkers run most-unbound first, so alphabetical order is the
+    reverse of run order and laying the curves end to end on it would put the
+    walker that inherited 10 ns of hills at t=0."""
+    import numpy as np
+    from autopath.metadynamics.Analysis import MetadynamicsAnalysis as MA
+    # milestone_3 ran first, milestone_1 last
+    for name, started in (("milestone_1", 300.0), ("milestone_2", 200.0),
+                          ("milestone_3", 100.0)):
+        np.savez(tmp_path / f"FEhist_{name}.npz", fes_kj=np.zeros((2, 8)),
+                 time_ns=np.array([0.5, 1.0]),
+                 started_at=np.array(started, dtype=float))
+    files = sorted(str(p) for p in tmp_path.glob("FEhist_*.npz"))
+    assert [os.path.basename(f) for f in files][0] == "FEhist_milestone_1.npz"
+    ordered = MA.shared_bias_run_order(files)
+    assert [os.path.basename(f) for f in ordered] == [
+        "FEhist_milestone_3.npz", "FEhist_milestone_2.npz", "FEhist_milestone_1.npz"]
+
+
+def test_shared_bias_run_order_falls_back_to_mtime(tmp_path):
+    """Histories written before started_at was recorded still have to order, and
+    they are written when each walker finishes, so mtime is run order."""
+    import numpy as np, os as _os
+    from autopath.metadynamics.Analysis import MetadynamicsAnalysis as MA
+    for name, mtime in (("milestone_1", 3000), ("milestone_2", 2000),
+                        ("milestone_3", 1000)):
+        f = tmp_path / f"FEhist_{name}.npz"
+        np.savez(f, fes_kj=np.zeros((2, 8)), time_ns=np.array([0.5, 1.0]))
+        _os.utime(f, (mtime, mtime))
+    files = sorted(str(p) for p in tmp_path.glob("FEhist_*.npz"))
+    ordered = MA.shared_bias_run_order(files)
+    assert [os.path.basename(f) for f in ordered] == [
+        "FEhist_milestone_3.npz", "FEhist_milestone_2.npz", "FEhist_milestone_1.npz"]

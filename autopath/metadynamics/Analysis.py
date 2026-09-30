@@ -866,6 +866,25 @@ class MetadynamicsAnalysis:
         return path
 
     @staticmethod
+    def shared_bias_run_order(hist_files) -> list:
+        """Execution order of walkers that shared one bias directory.
+
+        Shared-bias walkers run sequentially, so each inherits its predecessors'
+        hills and its history continues theirs rather than restarting. Alphabetical
+        order is not run order -- the loop starts from the most unbound milestone --
+        so the files are ordered by the time each walker finished writing them.
+        """
+        def _key(f):
+            try:
+                d = np.load(f)
+                if "started_at" in getattr(d, "files", []):
+                    return float(d["started_at"])
+            except Exception:
+                pass
+            return os.path.getmtime(f)
+        return sorted(hist_files, key=_key)
+
+    @staticmethod
     def dG_timeseries(fe_hist_npz, funnel_params: dict, temperature: float = 298.15,
                       grid_min: float = 0.0, grid_max: float = 1.0,
                       cv_length_per_unit_ang: float = None,
@@ -1318,13 +1337,29 @@ class MetadynamicsAnalysis:
                 }
                 # Per-walker ΔG(t) from the retained FES history: the Box 2 test.
                 _plateau, _curves = None, {}
-                for _h in sorted(glob(os.path.join(self.out_dir, "FEhist_*.npz"))):
+                _hists = sorted(glob(os.path.join(self.out_dir, "FEhist_*.npz")))
+                _shared = self.bias_layout(self.out_dir) == "shared"
+                if _shared and len(_hists) > 1:
+                    _hists = self.shared_bias_run_order(_hists)
+                    logger.info(
+                        "Shared bias: laying %d walker curves end to end in run "
+                        "order (%s); ΔG(t) spans the accumulated run, not 0-%s ns.",
+                        len(_hists),
+                        ", ".join(os.path.basename(h)[len("FEhist_"):-len(".npz")]
+                                  for h in _hists), "mMD_time")
+                _offset = 0.0
+                _cat_t, _cat_g, _cat_s = [], [], []
+                for _h in _hists:
                     _rid = os.path.basename(_h)[len("FEhist_"):-len(".npz")]
                     try:
                         _t, _g, _s = self.dG_timeseries(
                             _h, _fp, temperature=temperature,
                             grid_min=grid_min, grid_max=grid_max,
                             cv_length_per_unit_ang=cv_length_per_unit_ang)
+                        if _shared:
+                            _t = np.asarray(_t, dtype=float) + _offset
+                            _offset = float(_t[-1]) if _t.size else _offset
+                            _cat_t.append(_t); _cat_g.append(_g); _cat_s.append(_s)
                         _curves[_rid] = (_t, _g, _s)
                         # A walker only informs convergence if it saw both basins.
                         _ws = walker_stats.get(_rid, {})
@@ -1346,6 +1381,24 @@ class MetadynamicsAnalysis:
                             _plateau = _p
                     except Exception as _hist_err:
                         logger.warning("ΔG(t) for %s failed: %s", _rid, _hist_err)
+                if _shared and _cat_t:
+                    # One bias, one estimate: the plateau test belongs on the whole
+                    # accumulated curve, not on any single walker's slice of it.
+                    _ct = np.concatenate(_cat_t)
+                    _cg = np.concatenate(_cat_g)
+                    _cs = np.concatenate(_cat_s)
+                    _any_both = any(
+                        bool(_w.get("frac_bound", 0) > 0.01
+                             and _w.get("frac_unbound", 0) > 0.01)
+                        for _w in walker_stats.values())
+                    _plateau = self.dG_plateau(_ct, _cg, sampled=_cs,
+                                               both_basins=_any_both)
+                    logger.info(
+                        "ΔG(t) over the accumulated shared-bias run (%.2f ns, %d "
+                        "resolved of %d): drift over the last 40%% = %.1f kJ/mol -> %s",
+                        float(_ct[-1]), int(_cs.sum()), _cs.size,
+                        _plateau["drift_kj"],
+                        "settled" if _plateau["settled"] else "NOT settled")
                 if _curves:
                     self._plot_dG_convergence(_curves, out_prefix)
 
