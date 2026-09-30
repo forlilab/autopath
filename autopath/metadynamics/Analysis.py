@@ -398,9 +398,12 @@ def correct_fe_for_funnel(
     Parameters
     ----------
     fe_files : str, list of str, or np.ndarray
-        Path(s) to FE_*.npy (kJ/mol). If a list, the last file is used (most converged,
-        since each sequential walker accumulates all previous bias). A numpy array can
-        be passed directly.
+        Path(s) to FE_*.npy (kJ/mol), or the array itself. Each FE file holds
+        ``getFreeEnergy()`` for one walker, i.e. its ``_totalBias``. With a SHARED
+        biasDir that total already includes every walker, so the last file is the
+        accumulated surface; with a per-walker biasDir it is only that walker's own
+        estimate and the last file is not "the most converged". Passing a list
+        therefore assumes shared accumulation and warns.
     funnel_params : dict
         From ``generate_funnel_parameters_from_trajectory()``. Must contain
         ``"R_cylinder"``, ``"z_cc"``, and ``"z_max"`` as OpenMM Quantities in angstroms.
@@ -453,6 +456,12 @@ def correct_fe_for_funnel(
     else:
         if isinstance(fe_files, str):
             fe_files = [fe_files]
+        if len(fe_files) > 1:
+            logger.warning(
+                "%d FE files given; using only the last (%s). That is the accumulated "
+                "surface only when the walkers shared a biasDir -- with per-walker "
+                "biasDirs each file is one walker's own estimate.",
+                len(fe_files), os.path.basename(fe_files[-1]))
         fe = np.load(fe_files[-1]).astype(float)
         n_files = len(fe_files)
 
@@ -788,8 +797,25 @@ class MetadynamicsAnalysis:
         return {wid: np.load(fp) for wid, (_, fp) in latest.items()}
 
     @staticmethod
+    def bias_layout(bias_dir: str) -> str:
+        """'isolated' if each walker owns a bias_<run_id>/ subdirectory, else 'shared'.
+
+        Decides how walker biases combine: summed when they are partial
+        contributions to one shared bias, averaged when each is complete.
+        """
+        import re
+        pattern = re.compile(r'bias_(\d+)_(\d+)\.npy')
+        if any(pattern.match(f) for f in os.listdir(bias_dir)):
+            return "shared"
+        if any(os.path.isdir(os.path.join(bias_dir, d))
+               for d in os.listdir(bias_dir) if d.startswith("bias_")):
+            return "isolated"
+        return "shared"
+
+    @staticmethod
     def compute_fes(bias_arrays, temperature: float, bias_factor: float,
-                    grid_min: float = 0.0, grid_max: float = 1.0) -> tuple:
+                    grid_min: float = 0.0, grid_max: float = 1.0,
+                    combine: str = "sum") -> tuple:
         """Compute the WT-MetaD FES from a collection of bias arrays.
 
         Uses the standard estimator:
@@ -815,7 +841,21 @@ class MetadynamicsAnalysis:
         axis : np.ndarray   — CV values at each grid point
         fes  : np.ndarray   — Free energy in kJ/mol
         """
-        V = np.sum(np.stack(bias_arrays), axis=0)
+        # OpenMM writes each walker's SELF bias (metadynamics.py: np.save(..., 
+        # self._selfBias)) and rebuilds the total by summing every walker's file.
+        # So with a shared biasDir the arrays are partial contributions to ONE bias
+        # and must be summed. With a per-walker biasDir each array is already that
+        # walker's complete bias -- an independent estimate of the same surface --
+        # and summing them scales the free energy by the number of walkers.
+        stacked = np.stack(bias_arrays)
+        if combine == "sum":
+            V = np.sum(stacked, axis=0)
+        elif combine == "mean":
+            V = np.mean(stacked, axis=0)
+        else:
+            raise ValueError(
+                f"combine must be 'sum' (shared biasDir) or 'mean' (per-walker "
+                f"biasDir); got {combine!r}")
         gamma = float(bias_factor)
         if abs(gamma - 1.0) < 1e-9:
             raise ValueError(
@@ -1012,8 +1052,14 @@ class MetadynamicsAnalysis:
         converged_biases = self.select_converged_biases(coverage_threshold)
 
         all_bias_list = list(all_biases.values())
+        # Per-walker biasDirs hold complete, independent biases; a shared one holds
+        # partial contributions. Summing the former multiplies the FES by n_walkers.
+        _combine = "mean" if self.bias_layout(self.out_dir) == "isolated" else "sum"
+        if len(all_bias_list) > 1:
+            logger.info("Combining %d walker bias arrays by %s (%s biasDir layout).",
+                        len(all_bias_list), _combine, self.bias_layout(self.out_dir))
         axis, fes_all_kj = self.compute_fes(all_bias_list, temperature, bias_factor,
-                                              grid_min, grid_max)
+                                              grid_min, grid_max, combine=_combine)
         n = len(axis)
 
         def _norm_plateau(fes_kj):
@@ -1025,7 +1071,8 @@ class MetadynamicsAnalysis:
         # Coverage-filtered FES: useful for visual comparison (shows what walkers that
         # reached unbound contribute), but may have poor bound-basin coverage.
         _, fes_conv_kj = self.compute_fes(
-            [b for _, b in converged_biases], temperature, bias_factor, grid_min, grid_max
+            [b for _, b in converged_biases], temperature, bias_factor,
+            grid_min, grid_max, combine=_combine
         )
         fes_conv_kcal = _norm_plateau(fes_conv_kj) if len(converged_biases) < len(all_biases) else None
 

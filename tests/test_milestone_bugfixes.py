@@ -632,3 +632,75 @@ def test_core_does_not_force_a_median_zcc():
     from autopath import autopath_core
     src = inspect.getsource(autopath_core)
     assert "percentile_z=50" not in src.replace(" ", "")
+
+
+# --- walker biases: sum when shared, average when isolated -----------------
+
+def test_openmm_writes_self_bias_and_sums_to_get_the_total():
+    """Pins WHY shared-bias files must be summed.
+
+    OpenMM's Metadynamics saves each walker's SELF bias and rebuilds the total by
+    adding every walker's file, so one file is a partial contribution -- reading
+    only the last walker would give a fraction of the total.
+    """
+    import inspect
+    import openmm.app.metadynamics as m
+
+    src = inspect.getsource(m.Metadynamics._syncWithDisk)
+    assert "self._selfBias" in src, "walkers save their own bias, not the total"
+    total = inspect.getsource(m.Metadynamics)
+    assert "self._totalBias = np.copy(self._selfBias)" in total
+    assert "self._totalBias += bias.bias" in total
+
+
+def test_isolated_walkers_are_averaged_not_summed():
+    """Each per-walker biasDir holds a COMPLETE bias, so summing n of them scales
+    the free energy by n."""
+    import numpy as np
+    from autopath.metadynamics.Analysis import MetadynamicsAnalysis
+
+    one = np.linspace(0.0, 10.0, 25)
+    arrays = [one, one, one]
+    _, fes_mean = MetadynamicsAnalysis.compute_fes(
+        arrays, temperature=300.0, bias_factor=15.0, combine="mean")
+    _, fes_one = MetadynamicsAnalysis.compute_fes(
+        [one], temperature=300.0, bias_factor=15.0, combine="mean")
+    np.testing.assert_allclose(fes_mean, fes_one)
+
+    _, fes_sum = MetadynamicsAnalysis.compute_fes(
+        arrays, temperature=300.0, bias_factor=15.0, combine="sum")
+    np.testing.assert_allclose(fes_sum, 3.0 * fes_one)
+
+
+def test_shared_walkers_are_summed():
+    import numpy as np
+    from autopath.metadynamics.Analysis import MetadynamicsAnalysis
+
+    a, b = np.full(25, 1.0), np.full(25, 2.0)
+    _, fes = MetadynamicsAnalysis.compute_fes(
+        [a, b], temperature=300.0, bias_factor=15.0, combine="sum")
+    _, fes_total = MetadynamicsAnalysis.compute_fes(
+        [a + b], temperature=300.0, bias_factor=15.0, combine="sum")
+    np.testing.assert_allclose(fes, fes_total)
+
+
+def test_compute_fes_rejects_an_unknown_combination_rule():
+    import numpy as np, pytest as _pytest
+    from autopath.metadynamics.Analysis import MetadynamicsAnalysis
+    with _pytest.raises(ValueError):
+        MetadynamicsAnalysis.compute_fes(
+            [np.zeros(5)], temperature=300.0, bias_factor=15.0, combine="median")
+
+
+def test_bias_layout_detects_both_arrangements(tmp_path):
+    import numpy as np
+    from autopath.metadynamics.Analysis import MetadynamicsAnalysis
+
+    shared = tmp_path / "shared"; shared.mkdir()
+    np.save(shared / "bias_7_1.npy", np.zeros(25))
+    assert MetadynamicsAnalysis.bias_layout(str(shared)) == "shared"
+
+    iso = tmp_path / "iso"; iso.mkdir()
+    (iso / "bias_milestone_1_frame_0").mkdir()
+    np.save(iso / "bias_milestone_1_frame_0" / "bias_99_3.npy", np.zeros(25))
+    assert MetadynamicsAnalysis.bias_layout(str(iso)) == "isolated"
