@@ -374,13 +374,37 @@ class MetadynamicsMD:
                                                             ))
 
         colvar_list = [meta.getCollectiveVariables(simulation)]
+        # ~40 snapshots over the run, so the curve is readable at any length
+        fe_hist, fe_hist_steps = [], []
+        _fe_hist_every = max(self.record_CV,
+                             (int(mMD_steps) // 40 // self.record_CV or 1) * self.record_CV)
         for i in range(0, int(mMD_steps), self.record_CV):
             if self.verbose and i % self.store_CV == 0:
                 np.save(os.path.join(self.out_dir, f"COLVAR_{run_id}.npy"), np.array(colvar_list))
 
             meta.step(simulation, self.record_CV)
             colvar_list.append(meta.getCollectiveVariables(simulation))
+
+            # Snapshot the surface as it grows. Convergence is judged on how the
+            # FES (and the dG read off it) stops changing with time, and OpenMM
+            # deletes the previous bias index on every sync, so the history has to
+            # be kept here or it is gone.
+            if i % _fe_hist_every == 0:
+                fe_hist.append(np.asarray(
+                    meta.getFreeEnergy().value_in_unit(
+                        openmmunit.kilojoule_per_mole), dtype=float))
+                fe_hist_steps.append(i + self.record_CV)
         colvar_array = np.array(colvar_list)
+
+        if fe_hist:
+            _ps_per_step = self.timestep.value_in_unit(openmmunit.picoseconds)
+            np.savez(
+                os.path.join(self.out_dir, f"FEhist_{run_id}.npz"),
+                fes_kj=np.array(fe_hist),
+                time_ns=np.array(fe_hist_steps, dtype=float) * _ps_per_step / 1000.0,
+            )
+            logger.info("Saved %d FES snapshots for the convergence curve (%s).",
+                        len(fe_hist), f"FEhist_{run_id}.npz")
 
         np.save(os.path.join(self.out_dir, f"COLVAR_{run_id}.npy"), colvar_array)
 

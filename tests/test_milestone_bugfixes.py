@@ -794,3 +794,65 @@ def test_convergence_sums_round_trips_over_walkers():
     v = MA.assess_convergence(
         [{"n_round_trips": 0}, {"n_round_trips": 1}], flat, min_round_trips=1)
     assert v["converged"] and v["n_round_trips"] == 1
+
+
+# --- dG(t) convergence curve ----------------------------------------------
+
+def _fe_history(n_snap=20, n_grid=125, depth=-40.0, drift=0.0):
+    """FES snapshots whose bound well deepens by `drift` kJ/mol over the run."""
+    import numpy as np
+    fes = np.zeros((n_snap, n_grid))
+    for i in range(n_snap):
+        d = depth - drift * (i / max(1, n_snap - 1))
+        fes[i, :int(0.10 * n_grid)] = d
+    return {"fes_kj": fes, "time_ns": np.linspace(0.25, 5.0, n_snap)}
+
+
+def test_dG_timeseries_returns_one_value_per_snapshot(tmp_path):
+    import numpy as np
+    from autopath.metadynamics.Analysis import MetadynamicsAnalysis as MA
+
+    h = _fe_history()
+    t, g = MA.dG_timeseries(h, _flat_funnel_params(), temperature=298.15,
+                            cv_length_per_unit_ang=10.0)
+    assert len(t) == len(g) == len(h["time_ns"])
+    assert np.isfinite(g).all()
+    # a flat history must give a flat curve
+    assert np.ptp(g) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_dG_plateau_detects_a_settled_run():
+    import numpy as np
+    from autopath.metadynamics.Analysis import MetadynamicsAnalysis as MA
+    t = np.linspace(0, 5, 20)
+    assert MA.dG_plateau(t, np.full(20, -25.0))["settled"]
+
+
+def test_dG_plateau_detects_a_drifting_run():
+    """A surface can look flat at one instant while ΔG is still moving; this is
+    the test the single-snapshot flatness check cannot make."""
+    import numpy as np
+    from autopath.metadynamics.Analysis import MetadynamicsAnalysis as MA
+    t = np.linspace(0, 5, 20)
+    drifting = np.linspace(-10.0, -45.0, 20)
+    v = MA.dG_plateau(t, drifting)
+    assert not v["settled"] and "still moves" in v["reason"]
+
+
+def test_convergence_fails_when_dG_has_not_settled():
+    import numpy as np
+    from autopath.metadynamics.Analysis import MetadynamicsAnalysis as MA
+    flat = np.concatenate([np.full(40, -40.0), np.zeros(85)])
+    v = MA.assess_convergence(
+        [{"n_round_trips": 3}], flat,
+        dG_plateau_result={"settled": False, "reason": "drifting", "n_points": 9})
+    assert not v["converged"] and "ΔG(t)" in " ".join(v["reasons"])
+
+
+def test_metad_keeps_a_fes_history_for_the_curve():
+    """OpenMM deletes the previous bias index each sync, so unless the run loop
+    snapshots the surface there is no history to build ΔG(t) from."""
+    import inspect
+    from autopath.metadynamics.MetadynamicsMD import MetadynamicsMD
+    src = inspect.getsource(MetadynamicsMD.run)
+    assert "FEhist_" in src and "getFreeEnergy()" in src

@@ -818,10 +818,98 @@ class MetadynamicsAnalysis:
         return {wid: np.load(fp) for wid, (_, fp) in latest.items()}
 
     @staticmethod
+    def _plot_dG_convergence(curves: dict, out_prefix: str = None) -> str:
+        """One line per walker: ΔG° against simulation time."""
+        if not curves:
+            return None
+        plt.figure(figsize=(7, 4))
+        for rid, (t, g) in sorted(curves.items()):
+            plt.plot(t, g * KJ_TO_KCAL, marker="o", ms=3, lw=1.2, label=rid)
+        plt.xlabel("simulation time (ns)")
+        plt.ylabel("ΔG°$_b$ (kcal/mol)")
+        plt.title("Binding free energy vs time (convergence)")
+        plt.grid(alpha=0.3)
+        plt.legend(fontsize=7)
+        plt.tight_layout()
+        path = f"{out_prefix}_dG_convergence.png" if out_prefix else "dG_convergence.png"
+        plt.savefig(path, dpi=150)
+        plt.close()
+        logger.info("Wrote the ΔG(t) convergence plot: %s", path)
+        return path
+
+    @staticmethod
+    def dG_timeseries(fe_hist_npz, funnel_params: dict, temperature: float = 298.15,
+                      grid_min: float = 0.0, grid_max: float = 1.0,
+                      cv_length_per_unit_ang: float = None) -> tuple:
+        """ΔG°(t) from a saved FES history — the Box 2 convergence curve.
+
+        Raniolo & Limongelli judge convergence on the free-energy difference
+        between bound and unbound as a function of simulation time: it is
+        converged once that value fluctuates about a constant. A single final
+        number cannot show that, so each snapshot is corrected independently.
+
+        Parameters
+        ----------
+        fe_hist_npz : str or dict-like
+            ``FEhist_<run_id>.npz`` holding ``fes_kj`` (n_snapshots, n_grid) and
+            ``time_ns``.
+
+        Returns
+        -------
+        (time_ns, dG_kj) arrays. Snapshots whose bound basin is not yet sampled
+        are returned as NaN rather than dropped, so the curve keeps its time axis.
+        """
+        data = np.load(fe_hist_npz) if isinstance(fe_hist_npz, str) else fe_hist_npz
+        fes = np.asarray(data["fes_kj"], dtype=float)
+        t = np.asarray(data["time_ns"], dtype=float)
+        out = np.full(len(fes), np.nan)
+        for i, fe in enumerate(fes):
+            try:
+                out[i] = correct_fe_for_funnel(
+                    fe, funnel_params, temperature=temperature,
+                    grid_min=grid_min, grid_max=grid_max,
+                    cv_length_per_unit_ang=cv_length_per_unit_ang,
+                )["dG_bind_std_kj_mol"]
+            except Exception:
+                pass          # basin not sampled yet at this point in time
+        return t, out
+
+    @staticmethod
+    def dG_plateau(time_ns, dG_kj, tail_frac: float = 0.4,
+                   drift_tol_kj: float = 4.0) -> dict:
+        """Has ΔG°(t) settled?
+
+        Measures the spread of ΔG over the trailing ``tail_frac`` of the run.
+        This is the primary convergence test: a surface can look flat at one
+        instant and still be drifting.
+        """
+        t = np.asarray(time_ns, dtype=float)
+        g = np.asarray(dG_kj, dtype=float)
+        ok = np.isfinite(g)
+        if ok.sum() < 3:
+            return {"settled": False, "n_points": int(ok.sum()), "drift_kj": float("nan"),
+                    "reason": "too few snapshots with a sampled bound basin"}
+        t, g = t[ok], g[ok]
+        n_tail = max(3, int(tail_frac * len(g)))
+        tail = g[-n_tail:]
+        drift = float(np.ptp(tail))
+        return {
+            "settled": drift <= drift_tol_kj,
+            "drift_kj": drift,
+            "n_points": int(len(g)),
+            "tail_frac": tail_frac,
+            "dG_final_kj": float(tail.mean()),
+            "reason": "" if drift <= drift_tol_kj else
+                      f"ΔG still moves by {drift:.1f} kJ/mol over the last "
+                      f"{100*tail_frac:.0f}% of the run (tol {drift_tol_kj:.1f})",
+        }
+
+    @staticmethod
     def assess_convergence(walker_transitions: list, fes_kj, grid_min: float = 0.0,
                            grid_max: float = 1.0, plateau_frac: float = 0.25,
                            min_round_trips: int = 1,
-                           flatness_tol_kj: float = 5.0) -> dict:
+                           flatness_tol_kj: float = 5.0,
+                           dG_plateau_result: dict = None) -> dict:
         """Limongelli 2013's two convergence conditions, as a verdict.
 
         The paper reports a binding free energy only once (i) the system has
@@ -863,8 +951,12 @@ class MetadynamicsAnalysis:
             reasons.append(
                 f"the solvated plateau spans {flatness:.1f} kJ/mol "
                 f"(tol {flatness_tol_kj:.1f}); the unbound state is not flat")
+        if dG_plateau_result is not None and not dG_plateau_result.get("settled"):
+            reasons.append("ΔG(t) has not settled: "
+                           + dG_plateau_result.get("reason", "still drifting"))
         return {
             "converged": not reasons,
+            "dG_plateau": dG_plateau_result,
             "n_round_trips": round_trips,
             "plateau_span_kj": flatness,
             "plateau_frac": plateau_frac,
@@ -1165,9 +1257,33 @@ class MetadynamicsAnalysis:
                     'z_cc':       float(_raw['z_cc_ang'])       * openmmunit.angstrom,
                     'z_max':      float(_raw['z_max_ang'])       * openmmunit.angstrom,
                 }
+                # Per-walker ΔG(t) from the retained FES history: the Box 2 test.
+                _plateau, _curves = None, {}
+                for _h in sorted(glob(os.path.join(self.out_dir, "FEhist_*.npz"))):
+                    _rid = os.path.basename(_h)[len("FEhist_"):-len(".npz")]
+                    try:
+                        _t, _g = self.dG_timeseries(
+                            _h, _fp, temperature=temperature,
+                            grid_min=grid_min, grid_max=grid_max,
+                            cv_length_per_unit_ang=cv_length_per_unit_ang)
+                        _curves[_rid] = (_t, _g)
+                        _p = self.dG_plateau(_t, _g)
+                        logger.info(
+                            "ΔG(t) for %s: %d usable snapshot(s), drift over the last "
+                            "40%% = %.1f kJ/mol -> %s", _rid, _p["n_points"],
+                            _p["drift_kj"], "settled" if _p["settled"] else "STILL MOVING")
+                        # the longest-running walker sets the verdict
+                        if _plateau is None or _p["n_points"] > _plateau["n_points"]:
+                            _plateau = _p
+                    except Exception as _hist_err:
+                        logger.warning("ΔG(t) for %s failed: %s", _rid, _hist_err)
+                if _curves:
+                    self._plot_dG_convergence(_curves, out_prefix)
+
                 conv = self.assess_convergence(
                     [ts for _, _, ts in walker_data], fes_all_kj,
-                    grid_min=grid_min, grid_max=grid_max)
+                    grid_min=grid_min, grid_max=grid_max,
+                    dG_plateau_result=_plateau)
                 if conv["converged"]:
                     logger.info(
                         "Convergence OK: %d round trip(s), solvated plateau flat to "
