@@ -5,8 +5,10 @@ disk: preparation, equilibration, sMD pulling and sMD analysis all already ran.
 The medoid trajectories and medoid_info.json under sMD/analysis_traces are the
 only inputs needed here.
 
-3 walkers, each seeded from its own milestone. No bias pre-seeding, no shared
-(multiple-walker) bias.
+3 walkers, each seeded from its own milestone, all sharing one bias directory.
+Walkers run sequentially (most-unbound first), so each inherits the hills its
+predecessors deposited and the run accumulates one free-energy surface over
+3 x mMD_time. No bias pre-seeding.
 """
 import os
 import argparse
@@ -28,6 +30,9 @@ def cmd_lineparser():
                         help="path to the ligand SDF file")
     parser.add_argument("-p", "--protocol", dest="protocol", required=True, action="store",
                         help="path to the JSON file with the equilibration protocol")
+    parser.add_argument("--seed-order", dest="seed_order", default="unbound_first",
+                        choices=["unbound_first", "bound_first"],
+                        help="order sequential shared-bias walkers are seeded in")
     return parser.parse_args()
 
 
@@ -95,7 +100,8 @@ def main():
                   run_metadynamics=True,
                   mMD_use_funnel_potential=True,
                   mMD_preseed_bias=False,       # no FES pre-filling
-                  mMD_multiple_walkers=False,   # independent bias per walker
+                  mMD_multiple_walkers=True,    # one shared bias for all walkers
+                  mMD_seed_order=args.seed_order,
                   mMD_milestone_seeding=True,   # each walker starts at its own milestone
 
                   mMD_time=5,  # ns per walker

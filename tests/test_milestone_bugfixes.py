@@ -975,3 +975,23 @@ def test_shared_bias_run_order_falls_back_to_mtime(tmp_path):
     ordered = MA.shared_bias_run_order(files)
     assert [os.path.basename(f) for f in ordered] == [
         "FEhist_milestone_3.npz", "FEhist_milestone_2.npz", "FEhist_milestone_1.npz"]
+
+
+# --- walker seed order -----------------------------------------------------
+
+def test_walker_seed_order_reverses_only_for_unbound_first():
+    """path_milestones runs bound -> unbound. Getting this backwards decides
+    whether the last walker inherits bias that helps it leave the basin or bias
+    deposited somewhere it never visits."""
+    from autopath.autopath_core import walker_seed_order
+    m = ["bound", "mid", "unbound"]
+    assert walker_seed_order(m, "unbound_first") == ["unbound", "mid", "bound"]
+    assert walker_seed_order(m, "bound_first") == ["bound", "mid", "unbound"]
+    # must not mutate the caller's list
+    assert m == ["bound", "mid", "unbound"]
+
+
+def test_walker_seed_order_rejects_an_unknown_order():
+    from autopath.autopath_core import walker_seed_order
+    with pytest.raises(ValueError, match="unbound_first"):
+        walker_seed_order(["a", "b"], "middle_first")

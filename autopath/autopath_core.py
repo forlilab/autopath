@@ -77,6 +77,22 @@ def group_milestones_by_path(milestones: list[str],
     return [(k, groups[k]) for k in sorted(groups, key=lambda k: (k is not None, k or ""))]
 
 
+def walker_seed_order(path_milestones: list, order: str) -> list:
+    """Order the seeds for sequential shared-bias walkers.
+
+    `path_milestones` runs bound -> unbound. 'unbound_first' makes the most-bound
+    walker inherit every earlier walker's bias; 'bound_first' starts each walker
+    further out than the last, so accumulated bias pushes it along the path rather
+    than piling into a basin its seed cannot leave.
+    """
+    if order == "unbound_first":
+        return list(reversed(path_milestones))
+    if order == "bound_first":
+        return list(path_milestones)
+    raise ValueError("order must be 'unbound_first' or 'bound_first', "
+                     f"got {order!r}")
+
+
 class AutoPath:
     """Main orchestrator for the AutoPath binding-free-energy pipeline.
 
@@ -259,6 +275,7 @@ class AutoPath:
         mMD_time: int = 5,  # ns
         mMD_milestone_seeding: bool = True,
         mMD_multiple_walkers: bool = False,
+        mMD_seed_order: str = "unbound_first",
         mMD_preseed_bias: bool = False,
         mMD_preseed_speed: float = None,
         mMD_funnel_host_selection: str | None = None,
@@ -342,6 +359,10 @@ class AutoPath:
         self.mMD_time = mMD_time
         self.mMD_milestone_seeding = mMD_milestone_seeding
         self.mMD_multiple_walkers = mMD_multiple_walkers
+        if mMD_seed_order not in ("unbound_first", "bound_first"):
+            raise ValueError("mMD_seed_order must be 'unbound_first' or "
+                             f"'bound_first', got {mMD_seed_order!r}")
+        self.mMD_seed_order = mMD_seed_order
         self.mMD_preseed_bias = mMD_preseed_bias
         self.mMD_preseed_speed = mMD_preseed_speed
         self.mMD_funnel_host_selection = mMD_funnel_host_selection
@@ -1419,8 +1440,11 @@ class AutoPath:
                 first_milestone_state = f"{group_milestones_dir}/{first_milestone_name}_relax_state.xml"
                 walker_run_info = {}  # {run_id: (state_xml_path, system_xml_path)} for stuck-walker retry
 
-                # Run most-unbound walker first so the most-bound walker inherits their accumulated bias.
-                for milestone in reversed(path_milestones):
+                _walker_order = walker_seed_order(path_milestones,
+                                                  self.mMD_seed_order)
+                logger.info("Walker seed order (%s): %s", self.mMD_seed_order,
+                            [os.path.basename(m).split('.')[0] for m in _walker_order])
+                for milestone in _walker_order:
                     milestone_name = os.path.basename(milestone).split('.')[0]
                     milestone_system_xml = f"{group_milestones_dir}/{milestone_name}_relax_system.xml"
                     milestone_state = f"{group_milestones_dir}/{milestone_name}_relax_state.xml"
