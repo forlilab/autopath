@@ -643,8 +643,8 @@ class SMDAnalysis:
         try:
             _koff_per_path = _kramers.compute_per_path(
                 per_path_results=sMDDdata.results,
-                friction_df=friction_df,
                 weights_by_estimator=weights_by_estimator,
+                realized_speed_map=sMDDdata.realized_speed_map,
             )
             if not _koff_per_path.empty:
                 _koff_per_path.to_csv(
