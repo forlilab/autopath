@@ -398,10 +398,15 @@ class MetadynamicsMD:
         if funnel_params is not None:
             try:
                 temp_K = self.temperature.value_in_unit(openmmunit.kelvin)
+                # resolved[0] is the CV actually biased; it carries how much
+                # physical distance one unit of it spans, which Eq. 15 needs.
                 result = correct_fe_for_funnel(
                     fe_path,
                     funnel_params,
                     temperature=temp_K,
+                    grid_min=resolved[0].grid_min,
+                    grid_max=resolved[0].grid_max,
+                    cv_length_per_unit_ang=resolved[0].cv_length_per_unit_ang,
                 )
                 rw_path = os.path.join(self.out_dir, f"FE_{run_id}_rw.npy")
                 np.save(rw_path, result["fe_corrected"])

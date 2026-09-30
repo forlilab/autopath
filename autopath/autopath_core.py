@@ -1533,6 +1533,7 @@ class AutoPath:
                             bias_factor=float(self.mMD_bias_factor),
                             cv_name="PathCV progress (s)",
                             out_prefix=os.path.join(group_out_dir, sys_name),
+                            cv_length_per_unit_ang=path_cv.cv_length_per_unit_ang,
                         )
                         if diag.get('dG_bind_std_kcal') is not None:
                             logger.info(

@@ -704,3 +704,93 @@ def test_bias_layout_detects_both_arrangements(tmp_path):
     (iso / "bias_milestone_1_frame_0").mkdir()
     np.save(iso / "bias_milestone_1_frame_0" / "bias_99_3.npy", np.zeros(25))
     assert MetadynamicsAnalysis.bias_layout(str(iso)) == "isolated"
+
+
+# --- Limongelli Eq. 15: cross-section + basin integral ---------------------
+
+def _flat_funnel_params(R=5.0, z_cc=8.0, z_max=20.0):
+    from openmm import unit as ommunit
+    return {"R_cylinder": R * ommunit.angstrom,
+            "z_cc": z_cc * ommunit.angstrom,
+            "z_max": z_max * ommunit.angstrom}
+
+
+def _well(depth_kj=-40.0, n=125, width_frac=0.10):
+    """FES with a square well of known width at the bound end, flat elsewhere."""
+    import numpy as np
+    fe = np.zeros(n)
+    fe[:max(1, int(width_frac * n))] = depth_kj
+    return fe
+
+
+def test_correction_uses_cross_section_not_cylinder_volume():
+    """Eq. 3 subtracts kT*ln(pi R^2 C0). Multiplying by the cylinder LENGTH as
+    well treats the bound basin as if it were as wide as the whole cylinder."""
+    import numpy as np, math
+    from autopath.metadynamics.Analysis import correct_fe_for_funnel
+
+    R, kT = 5.0, 8.314e-3 * 298.15
+    r = correct_fe_for_funnel(_well(), _flat_funnel_params(R=R),
+                              temperature=298.15, cv_length_per_unit_ang=10.0)
+    # rebuild the expected value straight from Eq. 15
+    fe = _well(); fe = fe - fe[-10:].mean()
+    bound = fe[:max(1, int(0.20 * len(fe)))]
+    d_cv = 1.0 / (len(fe) - 1)
+    I = float(np.trapz(np.exp(-bound / kT), dx=d_cv) * 10.0)
+    expected = -kT * math.log(I) - kT * math.log(math.pi * R ** 2 / 1660.0)
+    assert r["dG_bind_std_kj_mol"] == pytest.approx(expected, abs=1e-6)
+
+
+def test_correction_is_independent_of_the_cylinder_length():
+    """z_max only sets the cylinder length, which Eq. 15 does not use."""
+    from autopath.metadynamics.Analysis import correct_fe_for_funnel
+    a = correct_fe_for_funnel(_well(), _flat_funnel_params(z_max=20.0),
+                              temperature=298.15, cv_length_per_unit_ang=10.0)
+    b = correct_fe_for_funnel(_well(), _flat_funnel_params(z_max=60.0),
+                              temperature=298.15, cv_length_per_unit_ang=10.0)
+    assert a["dG_bind_std_kj_mol"] == pytest.approx(b["dG_bind_std_kj_mol"])
+
+
+def test_a_wider_bound_basin_binds_more_strongly():
+    """The integral rewards basin WIDTH; the old min() ignored it entirely."""
+    from autopath.metadynamics.Analysis import correct_fe_for_funnel
+    narrow = correct_fe_for_funnel(_well(width_frac=0.04), _flat_funnel_params(),
+                                   temperature=298.15, cv_length_per_unit_ang=10.0)
+    wide = correct_fe_for_funnel(_well(width_frac=0.16), _flat_funnel_params(),
+                                 temperature=298.15, cv_length_per_unit_ang=10.0)
+    assert wide["dG_bind_std_kj_mol"] < narrow["dG_bind_std_kj_mol"]
+
+
+def test_correction_refuses_without_a_length_scale():
+    """A dimensionless progress coordinate cannot supply the length Eq. 15 needs."""
+    from autopath.metadynamics.Analysis import correct_fe_for_funnel
+    with pytest.raises(ValueError, match="cv_length_per_unit_ang"):
+        correct_fe_for_funnel(_well(), _flat_funnel_params(), temperature=298.15)
+
+
+# --- convergence criterion -------------------------------------------------
+
+def test_convergence_needs_recrossing_and_a_flat_plateau():
+    import numpy as np
+    from autopath.metadynamics.Analysis import MetadynamicsAnalysis as MA
+
+    flat = np.concatenate([np.full(40, -40.0), np.zeros(85)])
+    assert MA.assess_convergence([{"n_round_trips": 2}], flat)["converged"]
+
+    # no recrossing
+    v = MA.assess_convergence([{"n_round_trips": 0}], flat)
+    assert not v["converged"] and "round trip" in " ".join(v["reasons"])
+
+    # sloping unbound region: the paper's flatness test
+    sloped = np.concatenate([np.full(40, -40.0), np.linspace(0, -30, 85)])
+    v = MA.assess_convergence([{"n_round_trips": 5}], sloped)
+    assert not v["converged"] and "plateau" in " ".join(v["reasons"])
+
+
+def test_convergence_sums_round_trips_over_walkers():
+    import numpy as np
+    from autopath.metadynamics.Analysis import MetadynamicsAnalysis as MA
+    flat = np.concatenate([np.full(40, -40.0), np.zeros(85)])
+    v = MA.assess_convergence(
+        [{"n_round_trips": 0}, {"n_round_trips": 1}], flat, min_round_trips=1)
+    assert v["converged"] and v["n_round_trips"] == 1

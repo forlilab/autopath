@@ -379,6 +379,7 @@ def correct_fe_for_funnel(
     grid_max: float = 1.0,
     n_plateau_points: int = 10,
     C0_per_A3: float = 1.0 / 1660.0,
+    cv_length_per_unit_ang: float = None,
 ) -> dict:
     """Apply the Limongelli 2013 standard-state correction to a funnel metadynamics FE profile.
 
@@ -489,25 +490,44 @@ def correct_fe_for_funnel(
     dG_bind_sim = float(fe_norm[min_idx])
     cv_at_min = float(cv[min_idx])
 
+    if cv_length_per_unit_ang is None or not np.isfinite(cv_length_per_unit_ang) \
+            or cv_length_per_unit_ang <= 0:
+        raise ValueError(
+            "cv_length_per_unit_ang is required: Limongelli Eq. 15 integrates "
+            "exp(-beta W) over the bound site in LENGTH units, and a progress "
+            "coordinate is dimensionless. Pass the Angstrom spanned per CV unit "
+            "(CVSpec.cv_length_per_unit_ang).")
+
     R_cyl_ang = float(funnel_params["R_cylinder"].value_in_unit(openmmunit.angstrom))
     z_cc_ang = float(funnel_params["z_cc"].value_in_unit(openmmunit.angstrom))
     z_max_ang = float(funnel_params["z_max"].value_in_unit(openmmunit.angstrom))
+    # Limongelli 2013 Eq. 15:  K_b = pi*R_cyl^2 * INTEGRAL_site dz exp(-beta W(z))
+    # Only the CROSS-SECTION enters the analytic term; the length comes from the
+    # integral over the BOUND SITE. Using the cylinder length instead, with the
+    # well depth in place of the integral, treats the bound basin as if it were as
+    # wide as the whole cylinder and overestimates affinity by kT*ln(L/dz_site).
+    d_cv = (grid_max - grid_min) / max(1, len(fe_norm) - 1)
+    site = fe_norm[:bound_bins]
+    integral_ang = float(np.trapz(np.exp(-site / kT), dx=d_cv)
+                         * cv_length_per_unit_ang)
+    if integral_ang <= 0:
+        raise ValueError("bound-site integral is not positive; cannot take its log")
+    dG_basin = -kT * math.log(integral_ang)          # = -kT ln INTEGRAL_site
+    correction = kT * math.log(math.pi * R_cyl_ang ** 2 * C0_per_A3)
+    dG_bind_std = dG_basin - correction
+
+    # Reported surface keeps the old meaning: the normalised FES shifted so its
+    # minimum sits at the standard-state binding free energy.
+    fe_rw = fe_norm + (dG_bind_std - dG_bind_sim)
     L_cyl_ang = z_max_ang - z_cc_ang
-
-    V_cyl = math.pi * R_cyl_ang ** 2 * L_cyl_ang  # Å³
-    correction = kT * math.log(V_cyl * C0_per_A3)  # kJ/mol
-
-    fe_rw = fe_norm - correction
-
-    dG_bind_std = float(fe_rw[:bound_bins].min())
     pKd = -dG_bind_std / (kT * math.log(10))
 
     logger.info(
-        f"Funnel correction: ΔG_sim={dG_bind_sim:.2f} kJ/mol, "
-        f"correction={correction:.2f} kJ/mol "
-        f"(R_cyl={R_cyl_ang:.1f} Å, L_cyl={L_cyl_ang:.1f} Å, V_cyl={V_cyl:.1f} Å³), "
-        f"ΔG°_b={dG_bind_std:.2f} kJ/mol, pKd={pKd:.2f}"
-    )
+        "Funnel correction (Limongelli Eq. 15): well depth %.2f, basin integral "
+        "%.3f Å -> ΔG=%.2f, analytic term kT·ln(πR²C°)=%.2f "
+        "(R_cyl=%.1f Å), ΔG°_b=%.2f kJ/mol, pKd=%.2f",
+        dG_bind_sim, integral_ang, dG_basin, correction,
+        R_cyl_ang, dG_bind_std, pKd)
 
     return {
         "fe_corrected": fe_rw,
@@ -517,8 +537,9 @@ def correct_fe_for_funnel(
         "R_cylinder_ang": R_cyl_ang,
         "z_cc_ang": z_cc_ang,
         "z_max_ang": z_max_ang,
-        "L_cylinder_ang": L_cyl_ang,
-        "V_cylinder_ang3": V_cyl,
+        "L_cylinder_ang": L_cyl_ang,       # geometry only; Eq. 15 does not use it
+        "bound_integral_ang": integral_ang,
+        "dG_basin_kj_mol": dG_basin,
         "pKd": pKd,
         "cv_at_minimum": cv_at_min,
         "n_fe_files": n_files,
@@ -797,6 +818,60 @@ class MetadynamicsAnalysis:
         return {wid: np.load(fp) for wid, (_, fp) in latest.items()}
 
     @staticmethod
+    def assess_convergence(walker_transitions: list, fes_kj, grid_min: float = 0.0,
+                           grid_max: float = 1.0, plateau_frac: float = 0.25,
+                           min_round_trips: int = 1,
+                           flatness_tol_kj: float = 5.0) -> dict:
+        """Limongelli 2013's two convergence conditions, as a verdict.
+
+        The paper reports a binding free energy only once (i) the system has
+        recrossed between bound and unbound several times, and (ii) the FES is
+        flat in the fully solvated region -- "the flatness of the FES gives a
+        measure of the convergence of our calculations". A single outward pass
+        with a sloping plateau is not a converged surface, and a dG read off one
+        is not interpretable.
+
+        Parameters
+        ----------
+        walker_transitions : list of dict
+            ``analyze_colvar_transitions`` output, one per walker.
+        fes_kj : array
+            Free energy on the CV grid, kJ/mol.
+        plateau_frac : float
+            Trailing fraction of the grid treated as the solvated region.
+        min_round_trips : int
+            Recrossings required, summed over walkers.
+        flatness_tol_kj : float
+            Peak-to-peak spread allowed across the plateau.
+
+        Returns
+        -------
+        dict with ``converged`` and the two measurements behind it.
+        """
+        fes = np.asarray(fes_kj, dtype=float)
+        n_tail = max(2, int(plateau_frac * len(fes)))
+        tail = fes[-n_tail:]
+        flatness = float(np.ptp(tail))
+        round_trips = int(sum(t.get("n_round_trips", 0) for t in walker_transitions))
+
+        reasons = []
+        if round_trips < min_round_trips:
+            reasons.append(
+                f"{round_trips} bound<->unbound round trip(s) across "
+                f"{len(walker_transitions)} walker(s), need >= {min_round_trips}")
+        if flatness > flatness_tol_kj:
+            reasons.append(
+                f"the solvated plateau spans {flatness:.1f} kJ/mol "
+                f"(tol {flatness_tol_kj:.1f}); the unbound state is not flat")
+        return {
+            "converged": not reasons,
+            "n_round_trips": round_trips,
+            "plateau_span_kj": flatness,
+            "plateau_frac": plateau_frac,
+            "reasons": reasons,
+        }
+
+    @staticmethod
     def bias_layout(bias_dir: str) -> str:
         """'isolated' if each walker owns a bias_<run_id>/ subdirectory, else 'shared'.
 
@@ -979,6 +1054,7 @@ class MetadynamicsAnalysis:
         unbound_threshold: float = 0.9,
         coverage_threshold: float = 0.6,
         out_prefix: str = None,
+        cv_length_per_unit_ang: float = None,
     ) -> dict:
         """Comprehensive multi-walker WT-MetaD diagnostic.
 
@@ -1078,6 +1154,7 @@ class MetadynamicsAnalysis:
 
         # All-walkers FES for Limongelli correction; see Notes in docstring.
         dG_result = None
+        conv = None
         funnel_npz = os.path.join(self.out_dir, 'funnel_params.npz')
         if os.path.exists(funnel_npz):
             try:
@@ -1088,11 +1165,23 @@ class MetadynamicsAnalysis:
                     'z_cc':       float(_raw['z_cc_ang'])       * openmmunit.angstrom,
                     'z_max':      float(_raw['z_max_ang'])       * openmmunit.angstrom,
                 }
+                conv = self.assess_convergence(
+                    [ts for _, _, ts in walker_data], fes_all_kj,
+                    grid_min=grid_min, grid_max=grid_max)
+                if conv["converged"]:
+                    logger.info(
+                        "Convergence OK: %d round trip(s), solvated plateau flat to "
+                        "%.1f kJ/mol.", conv["n_round_trips"], conv["plateau_span_kj"])
+                else:
+                    logger.warning(
+                        "NOT CONVERGED by the Limongelli criteria -- treat the ΔG "
+                        "below as indicative only: %s", "; ".join(conv["reasons"]))
                 dG_result = correct_fe_for_funnel(
                     fes_all_kj, _fp,
                     temperature=temperature,
                     grid_min=grid_min,
                     grid_max=grid_max,
+                    cv_length_per_unit_ang=cv_length_per_unit_ang,
                 )
             except Exception as _fe_err:
                 logger.warning(f"Limongelli correction failed (non-fatal): {_fe_err}")
@@ -1216,4 +1305,7 @@ class MetadynamicsAnalysis:
             'dG_bind_std_kcal': dG_result['dG_bind_std_kj_mol'] * KJ_TO_KCAL if dG_result else None,
             'pKd':              dG_result['pKd'] if dG_result else None,
             'fes_min_at_cv':    dG_result['cv_at_minimum'] if dG_result else None,
+            # Carries the Limongelli convergence verdict alongside the number, so a
+            # caller cannot quote ΔG without seeing whether it is interpretable.
+            'convergence':      conv,
         }

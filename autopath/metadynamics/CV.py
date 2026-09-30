@@ -46,6 +46,10 @@ class CVSpec:
     grid_points: int
     periodic: bool = False
     name: str = "cv"
+    # Angstrom spanned per unit of this CV. The funnel correction integrates
+    # exp(-beta W) over the bound site in LENGTH units; a progress coordinate is
+    # dimensionless, so the integral needs this scale to mean anything.
+    cv_length_per_unit_ang: Optional[float] = None
     _factory: Optional[Callable] = field(default=None, repr=False)
 
     def is_deferred(self) -> bool:
@@ -65,6 +69,7 @@ class CVSpec:
             grid_points=self.grid_points,
             periodic=self.periodic,
             name=self.name,
+            cv_length_per_unit_ang=self.cv_length_per_unit_ang,
         )
 
 
@@ -341,6 +346,28 @@ def pathCV_cv(
             sigma=sigma,
         )
 
+    # How much physical distance one unit of progress spans. Computed eagerly:
+    # it only needs the milestone files, not the deferred input positions. The
+    # funnel standard-state correction integrates over the bound site in LENGTH
+    # units, which a [0,1] progress coordinate cannot supply on its own.
+    _span_ang = None
+    try:
+        _ends = [read_positions(m) for m in (milestones[0], milestones[-1])]
+        _d = []
+        for _pos in _ends:
+            _d.append(float(np.linalg.norm(_pos[ligand_atoms].mean(axis=0)
+                                           - _pos[pocket_atoms].mean(axis=0))))
+        _span = abs(_d[-1] - _d[0]) * 10.0            # nm -> Angstrom
+        _range = float(grid_max) - float(grid_min)
+        if _span > 0 and _range > 0:
+            _span_ang = _span / _range
+            logger.info(
+                "PathCV spans %.2f A of pocket-ligand separation over the CV range, "
+                "so 1 unit of progress = %.2f A.", _span, _span_ang)
+    except Exception as _e:
+        logger.warning("Could not measure the PathCV length scale (%s); the funnel "
+                       "standard-state correction will refuse to run.", _e)
+
     return CVSpec(
         cv=None,
         grid_min=grid_min,
@@ -348,6 +375,7 @@ def pathCV_cv(
         hill_width=hill_width,
         grid_points=grid_points,
         name="pathCV_progress",
+        cv_length_per_unit_ang=_span_ang,
         _factory=factory,
     )
 
