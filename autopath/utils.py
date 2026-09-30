@@ -166,6 +166,14 @@ def wrap_align_save_traj(traj_files, topology, remove_original=True, is_membrane
     -------
     list of str
         Paths of the aligned trajectories.
+
+    Notes
+    -----
+    Superposition rotates the coordinates while the stored box lengths and angles
+    are rotation-invariant, so the saved box no longer records the periodic frame
+    of the coordinates. Treat aligned trajectories as geometry for superposition
+    and visualisation; do not run PBC-dependent calculations (minimum image,
+    re-wrapping, re-imaging) on them.
     """
     import mdtraj as md
     if isinstance(traj_files, str):
@@ -188,14 +196,14 @@ def wrap_align_save_traj(traj_files, topology, remove_original=True, is_membrane
         if len(sel) > 0:
             try:
                 if ref_traj is None:
+                    # Image BEFORE superposing only (done above). Superposition
+                    # rotates the coordinates but not unitcell_vectors, so imaging
+                    # afterwards wraps against a box that no longer matches them and
+                    # translates whole molecules by vectors that are wrong in the
+                    # rotated frame -- dropping solvent on top of solvent. A uniform
+                    # rigid transform preserves every interatomic vector, so nothing
+                    # needs re-imaging after it.
                     traj = traj.superpose(traj[0], atom_indices=sel)
-                    # Re-image after superposition: rigid-body rotation can move the
-                    # ligand into a distant periodic image in Cartesian space even
-                    # though PBC distances are unchanged. A second imaging pass
-                    # restores every molecule to the image closest to the (now-fixed)
-                    # protein backbone.
-                    if not is_membrane:
-                        traj = traj.image_molecules(make_whole=True)
                 else:
                     ref_sel = ref_traj.topology.select(align_select)
                     if len(ref_sel) != len(sel):
