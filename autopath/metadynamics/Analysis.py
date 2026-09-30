@@ -876,12 +876,17 @@ class MetadynamicsAnalysis:
 
     @staticmethod
     def dG_plateau(time_ns, dG_kj, tail_frac: float = 0.4,
-                   drift_tol_kj: float = 4.0) -> dict:
+                   drift_tol_kj: float = 4.0, both_basins: bool = True) -> dict:
         """Has ΔG°(t) settled?
 
         Measures the spread of ΔG over the trailing ``tail_frac`` of the run.
         This is the primary convergence test: a surface can look flat at one
         instant and still be drifting.
+
+        ``both_basins`` must be True for the plateau to count. A walker that never
+        enters the binding site produces the flattest curve of all -- it is flat
+        near zero because nothing is happening -- so flatness alone would rank the
+        least informative walker as the best converged.
         """
         t = np.asarray(time_ns, dtype=float)
         g = np.asarray(dG_kj, dtype=float)
@@ -893,15 +898,20 @@ class MetadynamicsAnalysis:
         n_tail = max(3, int(tail_frac * len(g)))
         tail = g[-n_tail:]
         drift = float(np.ptp(tail))
+        settled = bool(drift <= drift_tol_kj and both_basins)
         return {
-            "settled": drift <= drift_tol_kj,
+            "settled": settled,
+            "both_basins": bool(both_basins),
             "drift_kj": drift,
             "n_points": int(len(g)),
             "tail_frac": tail_frac,
             "dG_final_kj": float(tail.mean()),
-            "reason": "" if drift <= drift_tol_kj else
-                      f"ΔG still moves by {drift:.1f} kJ/mol over the last "
-                      f"{100*tail_frac:.0f}% of the run (tol {drift_tol_kj:.1f})",
+            "reason": "" if settled else (
+                f"ΔG still moves by {drift:.1f} kJ/mol over the last "
+                f"{100*tail_frac:.0f}% of the run (tol {drift_tol_kj:.1f})"
+                if drift > drift_tol_kj else
+                "the walker did not visit both basins, so a flat ΔG only means "
+                "nothing happened"),
         }
 
     @staticmethod
@@ -1267,13 +1277,22 @@ class MetadynamicsAnalysis:
                             grid_min=grid_min, grid_max=grid_max,
                             cv_length_per_unit_ang=cv_length_per_unit_ang)
                         _curves[_rid] = (_t, _g)
-                        _p = self.dG_plateau(_t, _g)
+                        # A walker only informs convergence if it saw both basins.
+                        _ws = walker_stats.get(_rid, {})
+                        _both = bool(_ws.get("frac_bound", 0) > 0.01
+                                     and _ws.get("frac_unbound", 0) > 0.01)
+                        _p = self.dG_plateau(_t, _g, both_basins=_both)
                         logger.info(
                             "ΔG(t) for %s: %d usable snapshot(s), drift over the last "
-                            "40%% = %.1f kJ/mol -> %s", _rid, _p["n_points"],
-                            _p["drift_kj"], "settled" if _p["settled"] else "STILL MOVING")
+                            "40%% = %.1f kJ/mol, both basins visited: %s -> %s",
+                            _rid, _p["n_points"], _p["drift_kj"], _both,
+                            "settled" if _p["settled"] else "NOT settled")
                         # the longest-running walker sets the verdict
-                        if _plateau is None or _p["n_points"] > _plateau["n_points"]:
+                        _better = (_plateau is None
+                                   or (_p["both_basins"] and not _plateau["both_basins"])
+                                   or (_p["both_basins"] == _plateau["both_basins"]
+                                       and _p["n_points"] > _plateau["n_points"]))
+                        if _better:
                             _plateau = _p
                     except Exception as _hist_err:
                         logger.warning("ΔG(t) for %s failed: %s", _rid, _hist_err)

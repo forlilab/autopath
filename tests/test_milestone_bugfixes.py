@@ -856,3 +856,17 @@ def test_metad_keeps_a_fes_history_for_the_curve():
     from autopath.metadynamics.MetadynamicsMD import MetadynamicsMD
     src = inspect.getsource(MetadynamicsMD.run)
     assert "FEhist_" in src and "getFreeEnergy()" in src
+
+
+def test_a_flat_curve_without_both_basins_is_not_settled():
+    """The failure this caught on real data: a walker seeded unbound that never
+    enters the site gives the flattest curve of all, because nothing happens."""
+    import numpy as np
+    from autopath.metadynamics.Analysis import MetadynamicsAnalysis as MA
+    t = np.linspace(0, 5, 20)
+    flat_but_empty = np.full(20, -6.0)          # flat, and nearly zero binding
+    v = MA.dG_plateau(t, flat_but_empty, both_basins=False)
+    assert not v["settled"]
+    assert "did not visit both basins" in v["reason"]
+    # the same curve counts once the walker has actually sampled both
+    assert MA.dG_plateau(t, flat_but_empty, both_basins=True)["settled"]
