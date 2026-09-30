@@ -258,6 +258,33 @@ def path_rmsd_cv(
     )
 
 
+def _extend_milestones(milestones_array: np.ndarray,
+                       extend_to_nm: float) -> np.ndarray:
+    """Append milestones out to `extend_to_nm`, spaced like the existing ones.
+
+    The path's far end sets what the progress coordinate calls unbound, so a path
+    that stops while the guest still touches the host makes s=1 a contact state and
+    no amount of sampling produces a flat reference. Extending with ONE distant
+    milestone instead would leave a gap far wider than sigma, which degrades the
+    progress coordinate into a staircase; keep the existing spacing.
+    """
+    d = milestones_array.flatten().astype(float)
+    last = float(d[-1])
+    if extend_to_nm <= last:
+        raise ValueError(
+            f"extend_path_to_nm ({extend_to_nm:.3f} nm) must be beyond the last "
+            f"milestone ({last:.3f} nm); the path only runs bound -> unbound")
+    gaps = np.abs(np.diff(d))
+    spacing = float(np.median(gaps)) if gaps.size else (extend_to_nm - last)
+    n_extra = max(1, int(round((extend_to_nm - last) / spacing)))
+    extra = np.linspace(last, extend_to_nm, n_extra + 1)[1:]
+    logger.info(
+        "Extending the path to %.3f nm with %d milestone(s) at %.3f nm spacing "
+        "(median of the existing spacings).",
+        extend_to_nm, n_extra, (extend_to_nm - last) / n_extra)
+    return np.concatenate([d, extra]).reshape(-1, 1)
+
+
 def pathCV_cv(
     topology,
     milestones: list[str],
@@ -269,6 +296,7 @@ def pathCV_cv(
     hill_width: float = 0.05,
     grid_points: int = 125,
     sigma: Union[float, str] = 'auto',
+    extend_path_to_nm: float = None,
 ) -> CVSpec:
     """Path-in-CV-space CV through milestones evaluated with COM distance (deferred: needs positions).
 
@@ -299,6 +327,9 @@ def pathCV_cv(
             milestones_array.append([round(com_dist, 4)])
 
         milestones_array = np.array(milestones_array)
+        if extend_path_to_nm is not None:
+            milestones_array = _extend_milestones(milestones_array,
+                                                  float(extend_path_to_nm))
         logger.info(f"PathCV milestone COM distances (nm): {milestones_array.flatten().tolist()}")
 
         com_dists = milestones_array.flatten()
@@ -357,7 +388,8 @@ def pathCV_cv(
         for _pos in _ends:
             _d.append(float(np.linalg.norm(_pos[ligand_atoms].mean(axis=0)
                                            - _pos[pocket_atoms].mean(axis=0))))
-        _span = abs(_d[-1] - _d[0]) * 10.0            # nm -> Angstrom
+        _far = float(extend_path_to_nm) if extend_path_to_nm is not None else _d[-1]
+        _span = abs(_far - _d[0]) * 10.0              # nm -> Angstrom
         _range = float(grid_max) - float(grid_min)
         if _span > 0 and _range > 0:
             _span_ang = _span / _range

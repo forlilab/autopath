@@ -995,3 +995,92 @@ def test_walker_seed_order_rejects_an_unknown_order():
     from autopath.autopath_core import walker_seed_order
     with pytest.raises(ValueError, match="unbound_first"):
         walker_seed_order(["a", "b"], "middle_first")
+
+
+# --- reaching bulk: the cylinder cap and the path's far end ----------------
+
+def _two_atom_universe(guest_z=2.0):
+    """One host atom at the origin, one guest atom up the z axis."""
+    import MDAnalysis as mda
+    u = mda.Universe.empty(2, n_residues=2, atom_resindex=[0, 1],
+                           residue_segindex=[0, 0], trajectory=True)
+    u.add_TopologyAttr('name', ['P', 'G'])
+    u.add_TopologyAttr('resname', ['PRO', 'LIG'])
+    u.add_TopologyAttr('mass', [12.0, 12.0])
+    u.atoms.positions = [[0.0, 0.0, 0.0], [0.0, 0.0, guest_z]]
+    return u
+
+
+def test_z_for_bulk_is_where_the_guest_clears_the_cutoff():
+    """A cap taken from how far the pulling happened to reach can leave the guest
+    in the first solvation shell, which makes the unbound plateau a contact state."""
+    import numpy as np
+    from autopath.metadynamics.Funnel import z_where_guest_reaches_bulk
+    u = _two_atom_universe(guest_z=2.0)
+    guest = u.select_atoms('name G')
+    z = z_where_guest_reaches_bulk(u, guest, np.zeros(3), np.array([0.0, 0.0, 1.0]),
+                                   cutoff_ang=10.0, protein_selection='name P',
+                                   step_ang=0.5)
+    # starts 2 A out, needs >10 A, so the first 0.5 A step past 10 is 10.5
+    assert z == pytest.approx(10.5, abs=1e-6)
+    # and the search must not leave the guest displaced
+    assert u.select_atoms('name G').positions[0][2] == pytest.approx(2.0)
+
+
+def test_z_for_bulk_raises_when_the_axis_never_escapes():
+    import numpy as np
+    from autopath.metadynamics.Funnel import z_where_guest_reaches_bulk
+    u = _two_atom_universe()
+    with pytest.raises(ValueError, match="never cleared"):
+        z_where_guest_reaches_bulk(u, u.select_atoms('name G'), np.zeros(3),
+                                   np.array([0.0, 0.0, 1.0]), cutoff_ang=10.0,
+                                   protein_selection='name P', max_extra_ang=1.0)
+
+
+def test_extend_milestones_keeps_the_existing_spacing():
+    """One distant milestone would leave a gap far wider than sigma and turn the
+    progress coordinate into a staircase."""
+    import numpy as np
+    from autopath.metadynamics.CV import _extend_milestones
+    m = np.array([[0.70], [1.10], [1.50]])
+    out = _extend_milestones(m, 2.70).flatten()
+    assert out[:3].tolist() == [0.70, 1.10, 1.50]
+    gaps = np.abs(np.diff(out))
+    # every new gap stays within the range the original path already had
+    assert gaps.max() <= np.abs(np.diff(m.flatten())).max() + 1e-9
+    assert out[-1] == pytest.approx(2.70)
+
+
+def test_extend_milestones_rejects_a_target_inside_the_path():
+    import numpy as np
+    from autopath.metadynamics.CV import _extend_milestones
+    with pytest.raises(ValueError, match="must be beyond"):
+        _extend_milestones(np.array([[0.7], [1.5]]), 1.2)
+
+
+def test_com_distance_at_z_converts_the_wall_into_a_path_target():
+    """The wall is axial, the path's far end is a COM separation. Setting them
+    independently is how one ends up capping sampling before the other."""
+    import numpy as np
+    from autopath.metadynamics.Funnel import com_distance_at_z
+    pos = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 2.0]])   # host, guest (A)
+    # move the guest to z = 10 A along z: COM separation is 10 A = 1.0 nm
+    assert com_distance_at_z(pos, [1], [0], [0.0, 0.0, 1.0], 10.0) == pytest.approx(1.0)
+    # an off-axis guest ends up further than z, since z is only the projection
+    off = np.array([[0.0, 0.0, 0.0], [3.0, 0.0, 2.0]])
+    d = com_distance_at_z(off, [1], [0], [0.0, 0.0, 1.0], 10.0)
+    assert d > 1.0 and d == pytest.approx(np.hypot(3.0, 10.0) / 10.0)
+
+
+def test_z_max_for_bulk_takes_the_worst_probed_frame():
+    """Reading the cap off one frame lets a single lateral excursion set the
+    geometry; the wall has to clear bulk from all of them."""
+    import numpy as np
+    from autopath.metadynamics.Funnel import z_max_for_bulk
+    u = _two_atom_universe(guest_z=2.0)
+    # two probes of the same frame differ only in the z label, so the required
+    # cap is identical; the point is that the max is what gets returned
+    z = z_max_for_bulk(u, 'name G', 'name P', np.array([0.0, 0.0, 1.0]),
+                       frame_z_pairs=[(0, 2.0), (0, 17.0)], cutoff_ang=10.0,
+                       n_probe=2, protein_selection='name P', step_ang=0.5)
+    assert z == pytest.approx(10.5, abs=1e-6)

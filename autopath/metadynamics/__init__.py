@@ -46,6 +46,8 @@ from .Funnel import (
     save_funnel_params,
     load_funnel_params,
     create_funnel_force_from_trajectory_analysis,
+    com_distance_at_z,
+    z_max_for_bulk,
     write_funnel_pymol,
 )
 
@@ -72,5 +74,7 @@ __all__ = [
     "save_funnel_params",
     "load_funnel_params",
     "create_funnel_force_from_trajectory_analysis",
+    "com_distance_at_z",
+    "z_max_for_bulk",
     "write_funnel_pymol",
 ]

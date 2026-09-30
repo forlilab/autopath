@@ -37,6 +37,7 @@ from autopath.metadynamics import (
     write_metad_preseed,
     generate_funnel_parameters_from_trajectory,
     create_funnel_force_from_trajectory_analysis,
+    com_distance_at_z,
     save_funnel_params,
     write_funnel_pymol,
 )
@@ -276,6 +277,11 @@ class AutoPath:
         mMD_milestone_seeding: bool = True,
         mMD_multiple_walkers: bool = False,
         mMD_seed_order: str = "unbound_first",
+        mMD_funnel_z_max_mode: str = "buffer",
+        mMD_bulk_cutoff_ang: float = 10.0,
+        mMD_extend_path_to_nm: float = None,
+        mMD_extend_path_to_bulk: bool = False,
+        mMD_outdir_suffix: str = "",
         mMD_preseed_bias: bool = False,
         mMD_preseed_speed: float = None,
         mMD_funnel_host_selection: str | None = None,
@@ -363,6 +369,11 @@ class AutoPath:
             raise ValueError("mMD_seed_order must be 'unbound_first' or "
                              f"'bound_first', got {mMD_seed_order!r}")
         self.mMD_seed_order = mMD_seed_order
+        self.mMD_funnel_z_max_mode = mMD_funnel_z_max_mode
+        self.mMD_bulk_cutoff_ang = mMD_bulk_cutoff_ang
+        self.mMD_extend_path_to_nm = mMD_extend_path_to_nm
+        self.mMD_extend_path_to_bulk = mMD_extend_path_to_bulk
+        self.mMD_outdir_suffix = mMD_outdir_suffix
         self.mMD_preseed_bias = mMD_preseed_bias
         self.mMD_preseed_speed = mMD_preseed_speed
         self.mMD_funnel_host_selection = mMD_funnel_host_selection
@@ -1142,6 +1153,7 @@ class AutoPath:
                 mMD_out_dir = f"{sys_name}/metadynamics_funnel"
         else:
             mMD_out_dir = f"{sys_name}/metadynamics"
+        mMD_out_dir += self.mMD_outdir_suffix
         os.makedirs(mMD_out_dir, exist_ok=True)
             
         if self.run_metadynamics:
@@ -1235,6 +1247,7 @@ class AutoPath:
                     grid_max=1.0,
                     hill_width=self.mMD_hill_width,
                     sigma='auto', # related to distance between milestones
+                    extend_path_to_nm=self.mMD_extend_path_to_nm,
                     #sigma approz min milestone spacings
                 )
                 # when you first run, check the logged line
@@ -1402,10 +1415,77 @@ class AutoPath:
                                 # spread beyond z_cc; pass R_cylinder_ang to override.
                                 # z_cc_ang=5, # this overrides the default automatic z_cc calculation (floor is 5A)
                                 alpha_cone_degrees=45.0,
+                                z_max_mode=self.mMD_funnel_z_max_mode,
+                                bulk_cutoff_ang=self.mMD_bulk_cutoff_ang,
                                 verbose=True,
                             )
 
                             # Create funnel force from parameters
+                            _zmax = float(funnel_params["z_max"].value_in_unit(
+                                openmmunit.angstrom))
+                            _zcc = float(funnel_params["z_cc"].value_in_unit(
+                                openmmunit.angstrom))
+                            if self.mMD_extend_path_to_bulk:
+                                # Derive the path's far end FROM the wall so the two
+                                # caps cannot disagree. Hand-setting it means guessing
+                                # a number the funnel only produces later.
+                                _target_nm = com_distance_at_z(
+                                    read_positions(path_milestones[-1]) * 10.0,
+                                    ligand_atoms_indices, pocket_atom_indices,
+                                    funnel_params["unbinding_axis"], _zmax)
+                                logger.info(
+                                    "Extending the path to the cylinder cap: z_max="
+                                    "%.2f A -> %.3f nm COM separation.",
+                                    _zmax, _target_nm)
+                                path_cv = pathCV_cv(
+                                    topology=topology,
+                                    milestones=path_milestones,
+                                    pocket_atoms=pocket_atom_indices,
+                                    ligand_atoms=ligand_atoms_indices,
+                                    system=base_system,
+                                    grid_min=0.0, grid_max=1.0,
+                                    hill_width=self.mMD_hill_width,
+                                    sigma='auto',
+                                    extend_path_to_nm=_target_nm,
+                                )
+                            _span = path_cv.cv_length_per_unit_ang
+                            if _span is not None:
+                                # The funnel wall and the CV range are independent
+                                # caps; the shorter one decides where the unbound
+                                # reference sits. A path that cannot even cross the
+                                # cylinder puts s=1 back inside the cone.
+                                # Put the path's far end in the funnel's own z so
+                                # the two caps are directly comparable.
+                                try:
+                                    _ax = np.asarray(funnel_params["unbinding_axis"],
+                                                     dtype=float)
+                                    _ax = _ax / np.linalg.norm(_ax)
+                                    _p0 = read_positions(path_milestones[0]) * 10.0
+                                    _z_first = float(np.dot(
+                                        _p0[ligand_atoms_indices].mean(axis=0)
+                                        - _p0[pocket_atom_indices].mean(axis=0), _ax))
+                                    _z_path_far = _z_first + _span
+                                except Exception as _geom_err:
+                                    _z_path_far = None
+                                    logger.debug("path far z unavailable: %s", _geom_err)
+                                logger.info(
+                                    "Reference geometry: cylinder %.1f-%.1f A "
+                                    "(length %.1f A); path spans %.1f A%s.",
+                                    _zcc, _zmax, _zmax - _zcc, _span,
+                                    f" reaching z={_z_path_far:.1f} A"
+                                    if _z_path_far is not None else "")
+                                if _z_path_far is not None and _z_path_far > _zmax + 2.0:
+                                    logger.warning(
+                                        "The path reaches z=%.1f A but the wall stops "
+                                        "the guest at %.1f A, so the far end of the CV "
+                                        "is unreachable and s=1 will never be sampled. "
+                                        "Extend the path to the wall, not past it.",
+                                        _z_path_far, _zmax)
+                                elif _z_path_far is not None and _z_path_far < _zcc:
+                                    logger.warning(
+                                        "The path ends at z=%.1f A, inside the cone "
+                                        "(z_cc=%.1f A), so s=1 is not bulk however long "
+                                        "the cylinder is.", _z_path_far, _zcc)
                             funnel_force = create_funnel_force_from_trajectory_analysis(funnel_params)
                             logger.info("Funnel potential successfully generated from trajectories")
 

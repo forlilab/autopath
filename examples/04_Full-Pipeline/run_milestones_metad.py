@@ -33,6 +33,14 @@ def cmd_lineparser():
     parser.add_argument("--seed-order", dest="seed_order", default="unbound_first",
                         choices=["unbound_first", "bound_first"],
                         help="order sequential shared-bias walkers are seeded in")
+    parser.add_argument("--z-max-mode", dest="z_max_mode", default="buffer",
+                        choices=["buffer", "bulk_cutoff"])
+    parser.add_argument("--extend-path-to-nm", dest="extend_path", type=float,
+                        default=None)
+    parser.add_argument("--extend-path-to-bulk", dest="extend_bulk",
+                        action="store_true",
+                        help="derive the path's far end from the funnel wall")
+    parser.add_argument("--outdir-suffix", dest="suffix", default="")
     return parser.parse_args()
 
 
@@ -102,6 +110,10 @@ def main():
                   mMD_preseed_bias=False,       # no FES pre-filling
                   mMD_multiple_walkers=True,    # one shared bias for all walkers
                   mMD_seed_order=args.seed_order,
+                  mMD_funnel_z_max_mode=args.z_max_mode,
+                  mMD_extend_path_to_nm=args.extend_path,
+                  mMD_extend_path_to_bulk=args.extend_bulk,
+                  mMD_outdir_suffix=args.suffix,
                   mMD_milestone_seeding=True,   # each walker starts at its own milestone
 
                   mMD_time=5,  # ns per walker

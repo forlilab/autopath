@@ -9,8 +9,84 @@ from openmm.app import *
 import openmm.unit as openmmunit
 
 import MDAnalysis as mda
+from MDAnalysis.lib.distances import distance_array
 
 from autopath.clustering import read_positions
+
+
+def z_where_guest_reaches_bulk(universe, guest, host_com, axis,
+                               cutoff_ang: float = 10.0,
+                               protein_selection: str = "protein",
+                               step_ang: float = 0.5,
+                               max_extra_ang: float = 80.0):
+    """Smallest funnel z at which every guest atom clears `cutoff_ang` from the host.
+
+    The cylinder exists to hold a flat reference, so its cap has to reach where the
+    guest no longer interacts with the host. A cap set from how far the pulling
+    happened to travel can leave the guest inside the first solvation shell, which
+    makes the unbound plateau a contact state and biases every dG read off it.
+    """
+    protein = universe.select_atoms(protein_selection)
+    if protein.n_atoms == 0:
+        raise ValueError(f"protein_selection {protein_selection!r} selected no atoms")
+    g0 = guest.positions.copy()
+    z0 = float(np.dot(guest.center_of_mass() - host_com, axis))
+    try:
+        for dz in np.arange(0.0, max_extra_ang + step_ang, step_ang):
+            guest.positions = g0 + axis * float(dz)
+            if distance_array(guest.positions, protein.positions).min() > cutoff_ang:
+                return z0 + float(dz)
+    finally:
+        guest.positions = g0
+    raise ValueError(
+        f"guest never cleared {cutoff_ang:.1f} A of the host within "
+        f"{max_extra_ang:.0f} A along the unbinding axis; the axis is probably not "
+        "pointing out of the site")
+
+
+def com_distance_at_z(positions_ang, guest_idx, host_idx, axis,
+                     z_target_ang: float) -> float:
+    """Host-guest COM separation (nm) with the guest moved along `axis` to `z_target_ang`.
+
+    The funnel wall lives in the axial coordinate and the path's far end in COM
+    separation. Converting one into the other is what keeps them from capping
+    sampling at different places.
+    """
+    axis = np.asarray(axis, dtype=float)
+    axis = axis / np.linalg.norm(axis)
+    g = np.asarray(positions_ang)[guest_idx].mean(axis=0)
+    h = np.asarray(positions_ang)[host_idx].mean(axis=0)
+    z_now = float(np.dot(g - h, axis))
+    g_moved = g + axis * (float(z_target_ang) - z_now)
+    return float(np.linalg.norm(g_moved - h)) / 10.0
+
+
+def z_max_for_bulk(universe, guest_selection, host_selection, axis,
+                   frame_z_pairs, cutoff_ang: float = 10.0, n_probe: int = 25,
+                   **kwargs) -> float:
+    """Cylinder cap that reaches bulk from EVERY probed configuration.
+
+    How far the guest must travel to clear the host depends on where it sits
+    laterally, so reading the cap off a single frame lets one excursion set the
+    geometry. Probe the most-unbound frames and take the largest requirement: the
+    wall has to be beyond bulk for all of them, not just the luckiest.
+    """
+    pairs = sorted(frame_z_pairs, key=lambda fz: abs(fz[1]), reverse=True)
+    probe = [int(f) for f, _ in pairs[:max(1, int(n_probe))]]
+    guest = universe.select_atoms(guest_selection)
+    host = universe.select_atoms(host_selection)
+    required = []
+    for idx in probe:
+        universe.trajectory[min(idx, universe.trajectory.n_frames - 1)]
+        required.append(z_where_guest_reaches_bulk(
+            universe, guest, host.center_of_mass(), axis,
+            cutoff_ang=cutoff_ang, **kwargs))
+    z = float(np.max(required))
+    logger.info(
+        "Cylinder cap from %d probed frames: max %.2f A, median %.2f A, min %.2f A "
+        "-- using the max so the wall is beyond bulk for all of them.",
+        len(required), z, float(np.median(required)), float(np.min(required)))
+    return z
 
 logger = logging.getLogger("autopath")
 
@@ -80,6 +156,8 @@ def generate_funnel_parameters_from_trajectory(
     percentile_z: float = 95.0,
     z_cc_ang: Optional[float] = None,
     z_max_buffer_ang: float = 3.0,
+    z_max_mode: str = "buffer",
+    bulk_cutoff_ang: float = 10.0,
     R_cylinder_ang: Optional[float] = None,
     percentile_r_funnel: float = 95.0,
     bound_percentile_z: float = 10.0,
@@ -272,7 +350,27 @@ def generate_funnel_parameters_from_trajectory(
     else:
         R_cylinder = float(R_cylinder_ang)
 
-    z_max = float(np.max(z_distances)) + float(z_max_buffer_ang)
+    if z_max_mode == "buffer":
+        z_max = float(np.max(z_distances)) + float(z_max_buffer_ang)
+        _z_max_why = (f"traj max {np.max(z_distances):.2f} A + "
+                      f"{z_max_buffer_ang:.1f} A buffer")
+    elif z_max_mode == "bulk_cutoff":
+        # Park the guest at the most-unbound observed frame and walk it out along
+        # the axis from there: that is where the exit channel actually is.
+        _pairs = list(zip(np.arange(z_distances.size) * int(stride),
+                          np.asarray(z_distances, dtype=float)))
+        z_max = z_max_for_bulk(
+            universe, guest_selection, host_selection, unbinding_axis,
+            frame_z_pairs=_pairs, cutoff_ang=bulk_cutoff_ang)
+        _z_max_why = (f"every guest atom > {bulk_cutoff_ang:.1f} A from the host "
+                      "across the most-unbound probed frames")
+    else:
+        raise ValueError("z_max_mode must be 'buffer' or 'bulk_cutoff', "
+                         f"got {z_max_mode!r}")
+    if z_max <= z_cc:
+        raise ValueError(
+            f"z_max ({z_max:.2f} A) is not beyond z_cc ({z_cc:.2f} A); the cylinder "
+            "would have zero or negative length")
 
     z_cc_quantity = z_cc * openmmunit.angstrom
     z_max_quantity = z_max * openmmunit.angstrom
@@ -298,7 +396,12 @@ def generate_funnel_parameters_from_trajectory(
     if verbose:
         logger.info(f"Unbinding axis: {unbinding_axis}")
         logger.info(f"Z-crossing point (z_cc): {z_cc:.2f} Å")
-        logger.info(f"Cylinder cap (z_max): {z_max:.2f} Å  (sMD max {np.max(z_distances):.2f} Å + {z_max_buffer_ang:.1f} Å buffer)")
+        logger.info(f"Cylinder cap (z_max): {z_max:.2f} Å  ({_z_max_why})")
+        _cyl_len = z_max - z_cc
+        logger.info(
+            "Cylinder length %.2f Å vs cone %.2f Å (ratio %.2f). The cylinder holds "
+            "the unbound reference, so a short one leaves no flat region to "
+            "normalise against.", _cyl_len, z_cc, _cyl_len / z_cc)
         # Exceeding the reference 1-3 A is a statement about the path, not a fault:
         # it means the observed channel is wider than the canonical funnel assumes.
         _ref = "" if R_cylinder <= 3.0 else (
