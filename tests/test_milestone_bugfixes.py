@@ -813,10 +813,11 @@ def test_dG_timeseries_returns_one_value_per_snapshot(tmp_path):
     from autopath.metadynamics.Analysis import MetadynamicsAnalysis as MA
 
     h = _fe_history()
-    t, g = MA.dG_timeseries(h, _flat_funnel_params(), temperature=298.15,
-                            cv_length_per_unit_ang=10.0)
-    assert len(t) == len(g) == len(h["time_ns"])
+    t, g, ok = MA.dG_timeseries(h, _flat_funnel_params(), temperature=298.15,
+                                cv_length_per_unit_ang=10.0)
+    assert len(t) == len(g) == len(ok) == len(h["time_ns"])
     assert np.isfinite(g).all()
+    assert ok.all()
     # a flat history must give a flat curve
     assert np.ptp(g) == pytest.approx(0.0, abs=1e-9)
 
@@ -870,3 +871,70 @@ def test_a_flat_curve_without_both_basins_is_not_settled():
     assert "did not visit both basins" in v["reason"]
     # the same curve counts once the walker has actually sampled both
     assert MA.dG_plateau(t, flat_but_empty, both_basins=True)["settled"]
+
+
+# --- the gate belongs on the reported number, not on the curve -------------
+
+def test_correction_flags_an_empty_basin_instead_of_raising_when_not_strict():
+    """The reported ΔG must still refuse an unsampled site; the convergence
+    curve needs the same snapshot as a flagged value, because a walker seeded
+    along the unbinding path has no basin yet by construction."""
+    import numpy as np
+    from autopath.metadynamics.Analysis import correct_fe_for_funnel
+    empty = np.zeros(125)                       # no well anywhere
+    with pytest.raises(ValueError, match="Bound state not sampled"):
+        correct_fe_for_funnel(empty, _flat_funnel_params(), temperature=298.15,
+                              cv_length_per_unit_ang=10.0)
+    r = correct_fe_for_funnel(empty, _flat_funnel_params(), temperature=298.15,
+                              cv_length_per_unit_ang=10.0, strict=False)
+    assert r["bound_state_sampled"] is False
+    assert np.isfinite(r["dG_bind_std_kj_mol"])
+    # an empty site is Boltzmann-weighted to a small integral, so ΔG comes out
+    # unfavourable rather than undefined
+    assert r["dG_bind_std_kj_mol"] > 0
+    # and a real well is still flagged as sampled
+    assert correct_fe_for_funnel(_well(), _flat_funnel_params(), temperature=298.15,
+                                 cv_length_per_unit_ang=10.0)["bound_state_sampled"]
+
+
+def test_dG_timeseries_keeps_snapshots_whose_basin_is_not_yet_filled():
+    """A path-seeded walker starts outside the site. Dropping those snapshots
+    breaks the curve exactly where its transient lives."""
+    import numpy as np
+    from autopath.metadynamics.Analysis import MetadynamicsAnalysis as MA
+    h = _fe_history(n_snap=10)
+    h["fes_kj"][:4] = 0.0                       # first 4 snapshots: no basin yet
+    t, g, ok = MA.dG_timeseries(h, _flat_funnel_params(), temperature=298.15,
+                                cv_length_per_unit_ang=10.0)
+    assert len(g) == 10
+    assert np.isfinite(g).all(), "every snapshot must carry a value"
+    assert not ok[:4].any() and ok[4:].all()
+
+
+def test_dG_plateau_will_not_settle_on_unsampled_snapshots():
+    """Now that unsampled snapshots carry values, flatness over them would read
+    as convergence. The mask, not finiteness, has to gate the plateau."""
+    import numpy as np
+    from autopath.metadynamics.Analysis import MetadynamicsAnalysis as MA
+    t = np.linspace(0, 5, 20)
+    g = np.full(20, -25.0)                      # perfectly flat
+    sampled = np.zeros(20, dtype=bool)
+    sampled[:4] = True                          # only the first few are real
+    v = MA.dG_plateau(t, g, sampled=sampled)
+    assert v["n_points"] == 4, "the mask, not finiteness, must select the points"
+    assert not v["settled"] and not v["ends_resolved"]
+    assert "not resolved at the end" in v["reason"]
+    # without a mask the same curve settles, which is the behaviour being guarded
+    assert MA.dG_plateau(t, g)["settled"]
+
+
+def test_dG_convergence_plot_draws_the_unresolved_part(tmp_path):
+    import numpy as np
+    from autopath.metadynamics.Analysis import MetadynamicsAnalysis as MA
+    t = np.linspace(0, 5, 12)
+    g = np.linspace(20.0, -30.0, 12)
+    ok = np.arange(12) >= 5
+    out = MA._plot_dG_convergence({"w1": (t, g, ok)}, str(tmp_path / "p"))
+    assert out and os.path.exists(out)
+    # a 2-tuple must still work: finiteness is the fallback mask
+    assert MA._plot_dG_convergence({"w1": (t, g)}, str(tmp_path / "q"))

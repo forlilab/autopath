@@ -380,6 +380,7 @@ def correct_fe_for_funnel(
     n_plateau_points: int = 10,
     C0_per_A3: float = 1.0 / 1660.0,
     cv_length_per_unit_ang: float = None,
+    strict: bool = True,
 ) -> dict:
     """Apply the Limongelli 2013 standard-state correction to a funnel metadynamics FE profile.
 
@@ -479,13 +480,21 @@ def correct_fe_for_funnel(
 
     # Sanity check: bound basin must be meaningfully below the unbound reference.
     bound_depth = float(fe_norm[:bound_bins].min())   # should be negative
-    if bound_depth > -10.0:
+    bound_state_sampled = bound_depth <= -10.0
+    if not bound_state_sampled:
         sign = "above" if bound_depth >= 0 else "only"
-        raise ValueError(
+        msg = (
             f"Bound state not sampled: the FES in the bound basin (s < 0.20) "
             f"sits {sign} {bound_depth:.1f} kJ/mol relative to the unbound reference. "
             "The walker may not have visited the binding site; ΔG would be meaningless."
         )
+        # Reported numbers stay gated. Convergence curves pass strict=False: a
+        # walker seeded outside the site has no basin yet by construction, and
+        # the integral is Boltzmann-weighted, so an empty site yields a small
+        # integral and a large positive ΔG -- well defined, just not an estimate.
+        if strict:
+            raise ValueError(msg)
+        logger.debug("%s", msg)
     min_idx = int(np.argmin(fe_norm[:bound_bins]))
     dG_bind_sim = float(fe_norm[min_idx])
     cv_at_min = float(cv[min_idx])
@@ -541,6 +550,8 @@ def correct_fe_for_funnel(
         "bound_integral_ang": integral_ang,
         "dG_basin_kj_mol": dG_basin,
         "pKd": pKd,
+        "bound_state_sampled": bool(bound_state_sampled),
+        "bound_depth_kj_mol": bound_depth,
         "cv_at_minimum": cv_at_min,
         "n_fe_files": n_files,
         "temperature_K": temperature,
@@ -819,12 +830,29 @@ class MetadynamicsAnalysis:
 
     @staticmethod
     def _plot_dG_convergence(curves: dict, out_prefix: str = None) -> str:
-        """One line per walker: ΔG° against simulation time."""
+        """One line per walker: ΔG° against simulation time.
+
+        Dotted where the bound basin is not yet resolved. Those points are
+        sampling transients rather than estimates, but hiding them would break
+        the curve where a path-seeded walker begins.
+        """
         if not curves:
             return None
         plt.figure(figsize=(7, 4))
-        for rid, (t, g) in sorted(curves.items()):
-            plt.plot(t, g * KJ_TO_KCAL, marker="o", ms=3, lw=1.2, label=rid)
+        any_unresolved = False
+        for rid, entry in sorted(curves.items()):
+            t = np.asarray(entry[0], dtype=float)
+            g = np.asarray(entry[1], dtype=float) * KJ_TO_KCAL
+            mask = (np.asarray(entry[2], dtype=bool) if len(entry) > 2
+                    else np.isfinite(g))
+            any_unresolved = any_unresolved or bool((~mask).any())
+            line, = plt.plot(np.where(mask, t, np.nan), np.where(mask, g, np.nan),
+                             marker="o", ms=3, lw=1.4, label=rid)
+            plt.plot(t, g, color=line.get_color(), ls=":", lw=0.9,
+                     alpha=0.5, zorder=0)
+        if any_unresolved:
+            plt.plot([], [], color="0.5", ls=":", lw=0.9,
+                     label="bound basin not resolved")
         plt.xlabel("simulation time (ns)")
         plt.ylabel("ΔG°$_b$ (kcal/mol)")
         plt.title("Binding free energy vs time (convergence)")
@@ -840,7 +868,8 @@ class MetadynamicsAnalysis:
     @staticmethod
     def dG_timeseries(fe_hist_npz, funnel_params: dict, temperature: float = 298.15,
                       grid_min: float = 0.0, grid_max: float = 1.0,
-                      cv_length_per_unit_ang: float = None) -> tuple:
+                      cv_length_per_unit_ang: float = None,
+                      strict: bool = False) -> tuple:
         """ΔG°(t) from a saved FES history — the Box 2 convergence curve.
 
         Raniolo & Limongelli judge convergence on the free-energy difference
@@ -854,28 +883,37 @@ class MetadynamicsAnalysis:
             ``FEhist_<run_id>.npz`` holding ``fes_kj`` (n_snapshots, n_grid) and
             ``time_ns``.
 
+        strict : bool
+            Default False, so every snapshot gets a value and the third array
+            flags which ones had a resolved bound basin. Dropping the rest cuts
+            the curve exactly where a path-seeded walker starts, which is the
+            part worth seeing.
+
         Returns
         -------
-        (time_ns, dG_kj) arrays. Snapshots whose bound basin is not yet sampled
-        are returned as NaN rather than dropped, so the curve keeps its time axis.
+        (time_ns, dG_kj, bound_state_sampled) arrays.
         """
         data = np.load(fe_hist_npz) if isinstance(fe_hist_npz, str) else fe_hist_npz
         fes = np.asarray(data["fes_kj"], dtype=float)
         t = np.asarray(data["time_ns"], dtype=float)
         out = np.full(len(fes), np.nan)
+        sampled = np.zeros(len(fes), dtype=bool)
         for i, fe in enumerate(fes):
             try:
-                out[i] = correct_fe_for_funnel(
+                r = correct_fe_for_funnel(
                     fe, funnel_params, temperature=temperature,
                     grid_min=grid_min, grid_max=grid_max,
                     cv_length_per_unit_ang=cv_length_per_unit_ang,
-                )["dG_bind_std_kj_mol"]
+                    strict=strict,
+                )
+                out[i] = r["dG_bind_std_kj_mol"]
+                sampled[i] = r["bound_state_sampled"]
             except Exception:
-                pass          # basin not sampled yet at this point in time
-        return t, out
+                pass          # strict=True, or a surface with no usable integral
+        return t, out, sampled
 
     @staticmethod
-    def dG_plateau(time_ns, dG_kj, tail_frac: float = 0.4,
+    def dG_plateau(time_ns, dG_kj, sampled=None, tail_frac: float = 0.4,
                    drift_tol_kj: float = 4.0, both_basins: bool = True) -> dict:
         """Has ΔG°(t) settled?
 
@@ -891,6 +929,14 @@ class MetadynamicsAnalysis:
         t = np.asarray(time_ns, dtype=float)
         g = np.asarray(dG_kj, dtype=float)
         ok = np.isfinite(g)
+        if sampled is not None:
+            # Values now exist for unsampled snapshots too; only the resolved
+            # ones can settle onto a ΔG.
+            ok = ok & np.asarray(sampled, dtype=bool)
+        # Settling is a statement about the END of the run. A walker that
+        # resolved a basin early and then left has not settled, however flat the
+        # points it did produce.
+        ends_resolved = bool(ok[-1]) if ok.size else False
         if ok.sum() < 3:
             return {"settled": False, "n_points": int(ok.sum()), "drift_kj": float("nan"),
                     "reason": "too few snapshots with a sampled bound basin"}
@@ -898,10 +944,11 @@ class MetadynamicsAnalysis:
         n_tail = max(3, int(tail_frac * len(g)))
         tail = g[-n_tail:]
         drift = float(np.ptp(tail))
-        settled = bool(drift <= drift_tol_kj and both_basins)
+        settled = bool(drift <= drift_tol_kj and both_basins and ends_resolved)
         return {
             "settled": settled,
             "both_basins": bool(both_basins),
+            "ends_resolved": ends_resolved,
             "drift_kj": drift,
             "n_points": int(len(g)),
             "tail_frac": tail_frac,
@@ -911,7 +958,9 @@ class MetadynamicsAnalysis:
                 f"{100*tail_frac:.0f}% of the run (tol {drift_tol_kj:.1f})"
                 if drift > drift_tol_kj else
                 "the walker did not visit both basins, so a flat ΔG only means "
-                "nothing happened"),
+                "nothing happened" if not both_basins else
+                "the bound basin was not resolved at the end of the run, so the "
+                "flat stretch is earlier history rather than a settled value"),
         }
 
     @staticmethod
@@ -1272,16 +1321,17 @@ class MetadynamicsAnalysis:
                 for _h in sorted(glob(os.path.join(self.out_dir, "FEhist_*.npz"))):
                     _rid = os.path.basename(_h)[len("FEhist_"):-len(".npz")]
                     try:
-                        _t, _g = self.dG_timeseries(
+                        _t, _g, _s = self.dG_timeseries(
                             _h, _fp, temperature=temperature,
                             grid_min=grid_min, grid_max=grid_max,
                             cv_length_per_unit_ang=cv_length_per_unit_ang)
-                        _curves[_rid] = (_t, _g)
+                        _curves[_rid] = (_t, _g, _s)
                         # A walker only informs convergence if it saw both basins.
                         _ws = walker_stats.get(_rid, {})
                         _both = bool(_ws.get("frac_bound", 0) > 0.01
                                      and _ws.get("frac_unbound", 0) > 0.01)
-                        _p = self.dG_plateau(_t, _g, both_basins=_both)
+                        _p = self.dG_plateau(_t, _g, sampled=_s,
+                                             both_basins=_both)
                         logger.info(
                             "ΔG(t) for %s: %d usable snapshot(s), drift over the last "
                             "40%% = %.1f kJ/mol, both basins visited: %s -> %s",
