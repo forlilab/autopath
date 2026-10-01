@@ -388,8 +388,13 @@ def correct_fe_for_funnel(
     cv_length_per_unit_ang: float = None,
     strict: bool = True,
     verbose: bool = True,
+    reference_range: tuple = None,
 ) -> dict:
     """Apply the Limongelli 2013 standard-state correction to a funnel metadynamics FE profile.
+
+    ``reference_range`` (CV units) sets the unbound zero to the FES mean over that
+    window; without it the last ``n_plateau_points`` grid points are used, which sit
+    on the hill-deficit artifact at a hard CV edge.
 
     Accepts a single FE_*.npy path, a numpy array (kJ/mol), or a list of paths.
     When a list is given the last file is used, as each sequential walker already
@@ -476,9 +481,17 @@ def correct_fe_for_funnel(
 
     cv = np.linspace(grid_min, grid_max, len(fe))
 
-    # Last N points → unbound reference (s ≈ 1); see Notes in docstring.
+    # Unbound reference: an explicit window, else the last N points (s ≈ 1).
     n_tail = min(n_plateau_points, len(fe))
-    plateau_val = float(fe[-n_tail:].mean())
+    if reference_range is not None:
+        ref_mask = (cv >= reference_range[0]) & (cv <= reference_range[1])
+        if ref_mask.sum() < 3:
+            raise ValueError(f"reference_range {reference_range} covers fewer than 3 grid points")
+        plateau_val = float(fe[ref_mask].mean())
+        _plateau_range = (float(cv[ref_mask][0]), float(cv[ref_mask][-1]))
+    else:
+        plateau_val = float(fe[-n_tail:].mean())
+        _plateau_range = (float(cv[-n_tail]), float(cv[-1]))
 
     fe_norm = fe - plateau_val
 
@@ -563,7 +576,7 @@ def correct_fe_for_funnel(
         # The exact CV ranges used: the bound site integrated over, and the unbound
         # plateau the surface is referenced to.
         "site_range": (float(cv[0]), float(cv[bound_bins - 1])),
-        "plateau_range": (float(cv[-n_tail]), float(cv[-1])),
+        "plateau_range": _plateau_range,
         "n_fe_files": n_files,
         "temperature_K": temperature,
     }
@@ -961,7 +974,8 @@ class MetadynamicsAnalysis:
                            grid_max: float = 1.0, plateau_frac: float = 0.25,
                            min_round_trips: int = 1,
                            flatness_tol_kj: float = 5.0,
-                           dG_plateau_result: dict = None) -> dict:
+                           dG_plateau_result: dict = None,
+                           reference_range: tuple = None) -> dict:
         """Limongelli 2013's two convergence conditions, as a verdict.
 
         The paper reports a binding free energy only once (i) the system has
@@ -989,8 +1003,12 @@ class MetadynamicsAnalysis:
         dict with ``converged`` and the two measurements behind it.
         """
         fes = np.asarray(fes_kj, dtype=float)
-        n_tail = max(2, int(plateau_frac * len(fes)))
-        tail = fes[-n_tail:]
+        if reference_range is not None:
+            _cv = np.linspace(grid_min, grid_max, len(fes))
+            tail = fes[(_cv >= reference_range[0]) & (_cv <= reference_range[1])]
+        else:
+            n_tail = max(2, int(plateau_frac * len(fes)))
+            tail = fes[-n_tail:]
         flatness = float(np.ptp(tail))
         round_trips = int(sum(t.get("n_round_trips", 0) for t in walker_transitions))
 
@@ -1234,6 +1252,7 @@ class MetadynamicsAnalysis:
         out_prefix: str = None,
         cv_length_per_unit_ang: float = None,
         cv_is_funnel_z: bool = False,
+        hill_width: float = None,
     ) -> dict:
         """End-of-run analysis: see :func:`autopath.metadynamics.report.report`.
 
@@ -1244,4 +1263,5 @@ class MetadynamicsAnalysis:
         return report(self.out_dir, temperature, bias_factor, grid_min=grid_min,
                       grid_max=grid_max, cv_name=cv_name,
                       cv_length_per_unit_ang=cv_length_per_unit_ang,
-                      out_prefix=out_prefix, cv_is_funnel_z=cv_is_funnel_z)
+                      out_prefix=out_prefix, cv_is_funnel_z=cv_is_funnel_z,
+                      hill_width=hill_width)

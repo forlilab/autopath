@@ -120,18 +120,82 @@ def _well_depth(fes_kj, n_tail=10, bound_frac=0.20):
     return float((fe - fe[-n_tail:].mean())[:max(1, int(bound_frac * fe.size))].min())
 
 
-def _correct(fes_kj, fp, temperature, grid, cv_len):
+def reference_range_from_funnel(fp, grid, cv_is_funnel_z, sigma_ang, out_dir=None,
+                                cv_len=None, n_sigma=3.0, hill_width_cv=None):
+    """Unbound reference window in CV units: the cylinder, clear of the wall.
+
+    z from z_cc to z_max - n_sigma·σ: the cylinder holds the unbound state, and the
+    last few σ before the wall carry the hill-deficit artifact of a hard CV edge. For
+    funnel z this is the window itself (nm). For another CV it is mapped through the
+    recorded funnel z (median z per CV bin); without it, linearly from the bound site
+    (grid_min) to the cap (grid_max), where a path extended to the cap ends. The window
+    also stays n_sigma hill widths inside the CV grid's own edges, where the artifact
+    lives whatever the mapping. Returns None when no window can be placed.
+    """
+    z_cc = float(fp["z_cc"].value_in_unit(unit_ang()))
+    z_max = float(fp["z_max"].value_in_unit(unit_ang()))
+    z_lo, z_hi = z_cc, z_max - n_sigma * float(sigma_ang)
+    if z_hi <= z_lo:
+        logger.warning("Cylinder (%.1f-%.1f A) is shorter than %g sigma: no reference window.",
+                       z_cc, z_max, n_sigma)
+        return None
+    if cv_is_funnel_z:
+        lo, hi = z_lo / 10.0, z_hi / 10.0
+    else:
+        pairs = []
+        for c in glob(os.path.join(out_dir or "", "COLVAR_*.npy")):
+            zf = c.replace("COLVAR_", "FUNNELZ_")
+            if os.path.exists(zf):
+                cv = np.load(c)
+                cv = cv[:, 0] if cv.ndim > 1 else cv
+                z = np.load(zf)
+                n = min(len(cv), len(z))
+                pairs.append(np.c_[cv[:n], z[:n]])
+        if pairs:
+            P = np.concatenate(pairs)
+            edges = np.linspace(grid[0], grid[1], 126)
+            idx = np.clip(np.digitize(P[:, 0], edges) - 1, 0, 124)
+            centres, med = [], []
+            for b in range(125):
+                zb = P[idx == b, 1]
+                if zb.size >= 5:
+                    centres.append(0.5 * (edges[b] + edges[b + 1]))
+                    med.append(np.median(zb))
+            inside = [c for c, m in zip(centres, med) if z_lo <= m <= z_hi]
+            if not inside:
+                logger.warning("No CV bin has its recorded funnel z inside the cylinder window.")
+                return None
+            lo, hi = min(inside), max(inside)
+        else:
+            from autopath.metadynamics.Funnel import funnel_basins as _fb
+            z0 = 2.0 * _fb(fp)[0] - z_cc                     # = the sMD bound-site z
+            span = (grid[1] - grid[0]) / max(z_max - z0, 1e-9)
+            lo, hi = grid[0] + (z_lo - z0) * span, grid[0] + (z_hi - z0) * span
+            logger.info("Reference window mapped linearly bound site -> cap (no FUNNELZ): "
+                        "approximate.")
+    margin = n_sigma * float(hill_width_cv) if hill_width_cv else 0.0
+    lo, hi = max(lo, grid[0] + margin), min(hi, grid[1] - margin)
+    return (lo, hi) if hi > lo else None
+
+
+def unit_ang():
+    from openmm import unit
+    return unit.angstrom
+
+
+def _correct(fes_kj, fp, temperature, grid, cv_len, reference_range=None):
     if fp is None:
         return None, "no funnel: standard-state correction needs the funnel cylinder"
     try:
         return correct_fe_for_funnel(fes_kj, fp, temperature=temperature,
                                      grid_min=grid[0], grid_max=grid[1],
-                                     cv_length_per_unit_ang=cv_len, verbose=False), None
+                                     cv_length_per_unit_ang=cv_len, verbose=False,
+                                     reference_range=reference_range), None
     except Exception as exc:                       # surface not interpretable yet
         return None, str(exc)
 
 
-def _history(snapshots, fp, temperature, grid, cv_len):
+def _history(snapshots, fp, temperature, grid, cv_len, reference_range=None):
     dG = np.full(len(snapshots), np.nan)
     ok = np.zeros(len(snapshots), bool)
     if fp is None:                             # no correction possible: track the well depth
@@ -143,7 +207,8 @@ def _history(snapshots, fp, temperature, grid, cv_len):
         try:
             r = correct_fe_for_funnel(fe, fp, temperature=temperature, grid_min=grid[0],
                                       grid_max=grid[1], cv_length_per_unit_ang=cv_len,
-                                      strict=False, verbose=False)
+                                      strict=False, verbose=False,
+                                      reference_range=reference_range)
             dG[i], ok[i] = r["dG_bind_std_kj_mol"], r["bound_state_sampled"]
         except Exception:
             pass
@@ -199,7 +264,8 @@ def _aggregate_concurrent(hist_lists):
     return np.array([p[0] for p in pts]), np.array([p[1] for p in pts])
 
 
-def build_estimates(out_dir, mode, fp, temperature, bias_factor, grid, cv_len) -> list:
+def build_estimates(out_dir, mode, fp, temperature, bias_factor, grid, cv_len,
+                    reference_range=None) -> list:
     gamma = float(bias_factor)
     estimates = []
     if mode.layout == "isolated":
@@ -211,10 +277,10 @@ def build_estimates(out_dir, mode, fp, temperature, bias_factor, grid, cv_len) -
             if not biases:
                 continue
             fes = -(gamma / (gamma - 1.0)) * np.sum(biases, axis=0)
-            corr, err = _correct(fes, fp, temperature, grid, cv_len)
+            corr, err = _correct(fes, fp, temperature, grid, cv_len, reference_range)
             hists = _hist_files(out_dir, rid)
             t, snaps = _end_to_end([hists])
-            dG, ok = _history(snaps, fp, temperature, grid, cv_len)
+            dG, ok = _history(snaps, fp, temperature, grid, cv_len, reference_range)
             estimates.append(Estimate(rid, fes, corr, err, t, dG, ok, snaps, complete=bool(hists)))
         return estimates
 
@@ -225,14 +291,14 @@ def build_estimates(out_dir, mode, fp, temperature, bias_factor, grid, cv_len) -
     if not biases:
         return estimates
     fes = -(gamma / (gamma - 1.0)) * np.sum(biases, axis=0)
-    corr, err = _correct(fes, fp, temperature, grid, cv_len)
+    corr, err = _correct(fes, fp, temperature, grid, cv_len, reference_range)
     hist_lists = [_hist_files(out_dir, r) for r in mode.run_ids]
     if mode.layout == "shared" and mode.schedule == "concurrent":
         t, snaps = _aggregate_concurrent(hist_lists)
     else:
         order = sorted((h for h in hist_lists if h), key=lambda h: _wall_window(h[0])[0])
         t, snaps = _end_to_end(order)
-    dG, ok = _history(snaps, fp, temperature, grid, cv_len)
+    dG, ok = _history(snaps, fp, temperature, grid, cv_len, reference_range)
     label = mode.run_ids[0] if mode.layout == "single" and mode.run_ids else "shared bias"
     estimates.append(Estimate(label, fes, corr, err, t, dG, ok, snaps,
                               complete=all(bool(h) for h in hist_lists)))
@@ -473,7 +539,7 @@ def plot_convergence(estimates, mode, grid, bias_factor, plateau_results, out_pa
 # ---------------------------------------------------------------------------
 def report(out_dir, temperature, bias_factor, grid_min=0.0, grid_max=1.0,
            cv_name="CV", cv_length_per_unit_ang=None, out_prefix=None,
-           funnel_params=None, cv_is_funnel_z=False) -> dict:
+           funnel_params=None, cv_is_funnel_z=False, hill_width=None) -> dict:
     grid = (float(grid_min), float(grid_max))
     out_prefix = out_prefix or os.path.join(out_dir, "metad")
     fp_path = os.path.join(out_dir, "funnel_params.npz")
@@ -488,9 +554,25 @@ def report(out_dir, temperature, bias_factor, grid_min=0.0, grid_max=1.0,
 
     mode = detect_mode(out_dir)
     logger.info("Metadynamics report: %s", mode.describe())
+    # Unbound zero from the funnel geometry, 3 hill widths clear of the wall.
+    ref_range = None
+    if fp is not None:
+        if hill_width is not None and cv_length_per_unit_ang:
+            sigma_ang = float(hill_width) * float(cv_length_per_unit_ang)
+        else:
+            sigma_ang = 1.0
+            logger.info("Hill width unknown: wall margin assumes sigma = 1 A.")
+        ref_range = reference_range_from_funnel(fp, grid, cv_is_funnel_z, sigma_ang,
+                                                out_dir=out_dir, cv_len=cv_length_per_unit_ang,
+                                                hill_width_cv=hill_width)
+        if ref_range is None:
+            logger.warning("No geometric reference window: falling back to the last grid points.")
+        else:
+            logger.info("Unbound reference: CV %.3f-%.3f (cylinder from z_cc to z_max - 3 sigma).",
+                        *ref_range)
     traces = walker_traces(out_dir, mode.run_ids, basins, grid, cv_is_funnel_z)
     estimates = build_estimates(out_dir, mode, fp, temperature, bias_factor, grid,
-                                cv_length_per_unit_ang)
+                                cv_length_per_unit_ang, reference_range=ref_range)
 
     ma = MetadynamicsAnalysis.__new__(MetadynamicsAnalysis)
     walker_stats = {t.run_id: t.stats for t in traces}
@@ -508,7 +590,8 @@ def report(out_dir, temperature, bias_factor, grid_min=0.0, grid_max=1.0,
         trans = [walker_stats[i] for i in ids if i in walker_stats]
         verdicts[e.label] = ma.assess_convergence(trans, e.fes_kj, grid_min=grid[0],
                                                   grid_max=grid[1],
-                                                  dG_plateau_result=plateau_results.get(e.label))
+                                                  dG_plateau_result=plateau_results.get(e.label),
+                                                  reference_range=ref_range)
 
     good = [e.dG for e in estimates if e.dG is not None and e.complete]
     if mode.layout == "isolated":
@@ -550,6 +633,7 @@ def report(out_dir, temperature, bias_factor, grid_min=0.0, grid_max=1.0,
         "estimates": [(e.label, e.dG, e.complete) for e in estimates],
         "dG_bind_std_kj": dG_main,
         "funnel": fp is not None,
+        "reference_range": ref_range,
         "well_depth_kj": [(e.label, _well_depth(e.fes_kj)) for e in estimates],
         "dG_bind_std_sd_kj": dG_sd,
         "dG_bind_std_kcal": dG_main * KJ_TO_KCAL if dG_main is not None else None,
