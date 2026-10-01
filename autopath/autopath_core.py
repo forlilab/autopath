@@ -34,6 +34,7 @@ from autopath.metadynamics import (
     MetadynamicsAnalysis,
     com_cv,
     pathCV_cv,
+    funnel_z_cv,
     write_metad_preseed,
     generate_funnel_parameters_from_trajectory,
     create_funnel_force_from_trajectory_analysis,
@@ -278,6 +279,7 @@ class AutoPath:
         mMD_multiple_walkers: bool = False,
         mMD_seed_order: str = "unbound_first",
         mMD_bulk_cutoff_ang: float = 10.0,
+        mMD_cv: str = "path",
         mMD_outdir_suffix: str = "",
         mMD_preseed_bias: bool = False,
         mMD_preseed_speed: float = None,
@@ -367,6 +369,15 @@ class AutoPath:
                              f"'bound_first', got {mMD_seed_order!r}")
         self.mMD_seed_order = mMD_seed_order
         self.mMD_bulk_cutoff_ang = mMD_bulk_cutoff_ang
+        if mMD_cv not in ("path", "funnel_z"):
+            raise ValueError(f"mMD_cv must be 'path' or 'funnel_z', got {mMD_cv!r}")
+        if mMD_cv == "funnel_z" and not mMD_use_funnel_potential:
+            raise ValueError("mMD_cv='funnel_z' is the funnel axis coordinate; "
+                             "it needs mMD_use_funnel_potential=True")
+        if mMD_cv == "funnel_z" and mMD_preseed_bias:
+            raise ValueError("mMD_preseed_bias builds its bias on the path-CV grid; "
+                             "it cannot seed mMD_cv='funnel_z'")
+        self.mMD_cv = mMD_cv
         self.mMD_outdir_suffix = mMD_outdir_suffix
         self.mMD_preseed_bias = mMD_preseed_bias
         self.mMD_preseed_speed = mMD_preseed_speed
@@ -1243,6 +1254,7 @@ class AutoPath:
                     sigma='auto', # related to distance between milestones
                     #sigma approz min milestone spacings
                 )
+                metad_cv = path_cv
                 # when you first run, check the logged line
                 # PathCV milestone COM distances (nm): [...].
                 # If adjacent milestones differ by more than 3 × sigma = 0.3 nm,
@@ -1417,81 +1429,108 @@ class AutoPath:
                                 openmmunit.angstrom))
                             _zcc = float(funnel_params["z_cc"].value_in_unit(
                                 openmmunit.angstrom))
-                            # Derive the path's far end FROM the wall so the two
-                            # caps cannot disagree. Hand-setting it means guessing
-                            # a number the funnel only produces later.
-                            _target_nm = com_distance_at_z(
-                                read_positions(path_milestones[-1]) * 10.0,
-                                ligand_atoms_indices, pocket_atom_indices,
-                                funnel_params["unbinding_axis"], _zmax)
-                            _pos = read_positions(path_milestones[-1])
-                            _mass = lambda idx: np.array([
-                                base_system.getParticleMass(int(i)).value_in_unit(openmmunit.dalton)
-                                for i in idx])
-                            _last_nm = float(np.linalg.norm(
-                                np.average(_pos[ligand_atoms_indices], axis=0,
-                                           weights=_mass(ligand_atoms_indices))
-                                - np.average(_pos[pocket_atom_indices], axis=0,
-                                             weights=_mass(pocket_atom_indices))))
-                            if _target_nm > _last_nm:
-                                logger.info(
-                                    "Extending the path to the cylinder cap: z_max="
-                                    "%.2f A -> %.3f nm COM separation.",
-                                    _zmax, _target_nm)
-                                path_cv = pathCV_cv(
-                                    topology=topology,
-                                    milestones=path_milestones,
-                                    pocket_atoms=pocket_atom_indices,
-                                    ligand_atoms=ligand_atoms_indices,
-                                    system=base_system,
-                                    grid_min=0.0, grid_max=1.0,
-                                    hill_width=self.mMD_hill_width,
-                                    sigma='auto',
-                                    extend_path_to_nm=_target_nm,
-                                )
+                            if self.mMD_cv == "path":
+                                # Derive the path's far end FROM the wall so the two
+                                # caps cannot disagree. Hand-setting it means guessing
+                                # a number the funnel only produces later.
+                                _target_nm = com_distance_at_z(
+                                    read_positions(path_milestones[-1]) * 10.0,
+                                    ligand_atoms_indices, pocket_atom_indices,
+                                    funnel_params["unbinding_axis"], _zmax)
+                                _pos = read_positions(path_milestones[-1])
+                                _mass = lambda idx: np.array([
+                                    base_system.getParticleMass(int(i)).value_in_unit(openmmunit.dalton)
+                                    for i in idx])
+                                _last_nm = float(np.linalg.norm(
+                                    np.average(_pos[ligand_atoms_indices], axis=0,
+                                               weights=_mass(ligand_atoms_indices))
+                                    - np.average(_pos[pocket_atom_indices], axis=0,
+                                                 weights=_mass(pocket_atom_indices))))
+                                if _target_nm > _last_nm:
+                                    logger.info(
+                                        "Extending the path to the cylinder cap: z_max="
+                                        "%.2f A -> %.3f nm COM separation.",
+                                        _zmax, _target_nm)
+                                    path_cv = pathCV_cv(
+                                        topology=topology,
+                                        milestones=path_milestones,
+                                        pocket_atoms=pocket_atom_indices,
+                                        ligand_atoms=ligand_atoms_indices,
+                                        system=base_system,
+                                        grid_min=0.0, grid_max=1.0,
+                                        hill_width=self.mMD_hill_width,
+                                        sigma='auto',
+                                        extend_path_to_nm=_target_nm,
+                                    )
+                                else:
+                                    logger.info(
+                                        "Last milestone (%.3f nm) already reaches the "
+                                        "cylinder cap (%.3f nm); path not extended.",
+                                        _last_nm, _target_nm)
+                                _span = path_cv.cv_length_per_unit_ang
+                                if _span is not None:
+                                    # The funnel wall and the CV range are independent
+                                    # caps; the shorter one decides where the unbound
+                                    # reference sits. A path that cannot even cross the
+                                    # cylinder puts s=1 back inside the cone.
+                                    # Put the path's far end in the funnel's own z so
+                                    # the two caps are directly comparable.
+                                    try:
+                                        _ax = np.asarray(funnel_params["unbinding_axis"],
+                                                         dtype=float)
+                                        _ax = _ax / np.linalg.norm(_ax)
+                                        _p0 = read_positions(path_milestones[0]) * 10.0
+                                        _z_first = float(np.dot(
+                                            _p0[ligand_atoms_indices].mean(axis=0)
+                                            - _p0[pocket_atom_indices].mean(axis=0), _ax))
+                                        _z_path_far = _z_first + _span
+                                    except Exception as _geom_err:
+                                        _z_path_far = None
+                                        logger.debug("path far z unavailable: %s", _geom_err)
+                                    logger.info(
+                                        "Reference geometry: cylinder %.1f-%.1f A "
+                                        "(length %.1f A); path spans %.1f A%s.",
+                                        _zcc, _zmax, _zmax - _zcc, _span,
+                                        f" reaching z={_z_path_far:.1f} A"
+                                        if _z_path_far is not None else "")
+                                    if _z_path_far is not None and _z_path_far > _zmax + 2.0:
+                                        logger.warning(
+                                            "The path reaches z=%.1f A but the wall stops "
+                                            "the guest at %.1f A, so the far end of the CV "
+                                            "is unreachable and s=1 will never be sampled. "
+                                            "Extend the path to the wall, not past it.",
+                                            _z_path_far, _zmax)
+                                    elif _z_path_far is not None and _z_path_far < _zcc:
+                                        logger.warning(
+                                            "The path ends at z=%.1f A, inside the cone "
+                                            "(z_cc=%.1f A), so s=1 is not bulk however long "
+                                            "the cylinder is.", _z_path_far, _zcc)
+                                metad_cv = path_cv
                             else:
+                                # Bias the funnel axis coordinate itself: it keeps changing up to the
+                                # cap and is the length Eq. 15 integrates over, so no path extension.
+                                metad_cv = funnel_z_cv(
+                                    funnel_params["host_index"], funnel_params["guest_index"],
+                                    funnel_params["unbinding_axis"],
+                                    grid_min=0.0, grid_max=_zmax / 10.0,
+                                    hill_width=self.mMD_hill_width,
+                                )
+                                _pos0 = read_positions(path_milestones[0]) * 10.0
+                                _hm = [int(i) for i in funnel_params["host_index"]]
+                                _gm = [int(i) for i in funnel_params["guest_index"]]
+                                _w = lambda idx: np.array([
+                                    base_system.getParticleMass(i).value_in_unit(openmmunit.dalton) for i in idx])
+                                _ax0 = np.asarray(funnel_params["unbinding_axis"], dtype=float)
+                                _z_bound = float(np.dot(
+                                    np.average(_pos0[_gm], axis=0, weights=_w(_gm))
+                                    - np.average(_pos0[_hm], axis=0, weights=_w(_hm)), _ax0 / np.linalg.norm(_ax0)))
                                 logger.info(
-                                    "Last milestone (%.3f nm) already reaches the "
-                                    "cylinder cap (%.3f nm); path not extended.",
-                                    _last_nm, _target_nm)
-                            _span = path_cv.cv_length_per_unit_ang
-                            if _span is not None:
-                                # The funnel wall and the CV range are independent
-                                # caps; the shorter one decides where the unbound
-                                # reference sits. A path that cannot even cross the
-                                # cylinder puts s=1 back inside the cone.
-                                # Put the path's far end in the funnel's own z so
-                                # the two caps are directly comparable.
-                                try:
-                                    _ax = np.asarray(funnel_params["unbinding_axis"],
-                                                     dtype=float)
-                                    _ax = _ax / np.linalg.norm(_ax)
-                                    _p0 = read_positions(path_milestones[0]) * 10.0
-                                    _z_first = float(np.dot(
-                                        _p0[ligand_atoms_indices].mean(axis=0)
-                                        - _p0[pocket_atom_indices].mean(axis=0), _ax))
-                                    _z_path_far = _z_first + _span
-                                except Exception as _geom_err:
-                                    _z_path_far = None
-                                    logger.debug("path far z unavailable: %s", _geom_err)
-                                logger.info(
-                                    "Reference geometry: cylinder %.1f-%.1f A "
-                                    "(length %.1f A); path spans %.1f A%s.",
-                                    _zcc, _zmax, _zmax - _zcc, _span,
-                                    f" reaching z={_z_path_far:.1f} A"
-                                    if _z_path_far is not None else "")
-                                if _z_path_far is not None and _z_path_far > _zmax + 2.0:
+                                    "Biasing the funnel axis coordinate z on [0, %.2f] A; bound milestone at "
+                                    "z=%.2f A.", _zmax, _z_bound)
+                                if _z_bound > 0.2 * _zmax:
                                     logger.warning(
-                                        "The path reaches z=%.1f A but the wall stops "
-                                        "the guest at %.1f A, so the far end of the CV "
-                                        "is unreachable and s=1 will never be sampled. "
-                                        "Extend the path to the wall, not past it.",
-                                        _z_path_far, _zmax)
-                                elif _z_path_far is not None and _z_path_far < _zcc:
-                                    logger.warning(
-                                        "The path ends at z=%.1f A, inside the cone "
-                                        "(z_cc=%.1f A), so s=1 is not bulk however long "
-                                        "the cylinder is.", _z_path_far, _zcc)
+                                        "The bound milestone (z=%.2f A) lies beyond the first 20%% of the CV "
+                                        "grid, which the analysis treats as the bound basin.", _z_bound)
                             funnel_force = create_funnel_force_from_trajectory_analysis(funnel_params)
                             logger.info("Funnel potential successfully generated from trajectories")
 
@@ -1578,7 +1617,7 @@ class AutoPath:
                             state_xml_file=state_to_use,
                             system=milestone_system,
                             run_id=milestone_name,
-                            cv_specs=[path_cv],
+                            cv_specs=[metad_cv],
                             mMD_time=self.mMD_time,
                             bias_factor=self.mMD_bias_factor,
                             hill_height=self.mMD_hill_height,
@@ -1603,7 +1642,8 @@ class AutoPath:
                     (run_id, state_xml, xml)
                     for run_id, (state_xml, xml) in walker_run_info.items()
                     if os.path.exists(f"{group_out_dir}/COLVAR_{run_id}.npy")
-                    and float(np.load(f"{group_out_dir}/COLVAR_{run_id}.npy")[:, 0].max()) < 0.5
+                    and float(np.load(f"{group_out_dir}/COLVAR_{run_id}.npy")[:, 0].max())
+                    < metad_cv.grid_min + 0.5 * (metad_cv.grid_max - metad_cv.grid_min)
                 ]
                 if stuck_walkers:
                     logger.info(
@@ -1620,7 +1660,7 @@ class AutoPath:
                                 state_xml_file=state_xml,
                                 system=load_system(xml),
                                 run_id=f"{run_id}_retry",
-                                cv_specs=[path_cv],
+                                cv_specs=[metad_cv],
                                 mMD_time=self.mMD_time,
                                 bias_factor=self.mMD_bias_factor,
                                 hill_height=self.mMD_hill_height,
@@ -1641,9 +1681,12 @@ class AutoPath:
                             colvar_files=colvar_files_diag,
                             temperature=float(self.temperature),
                             bias_factor=float(self.mMD_bias_factor),
-                            cv_name="PathCV progress (s)",
+                            grid_min=metad_cv.grid_min,
+                            grid_max=metad_cv.grid_max,
+                            cv_name=("PathCV progress (s)" if metad_cv.name == "pathCV_progress"
+                                     else "funnel z (nm)"),
                             out_prefix=os.path.join(group_out_dir, sys_name),
-                            cv_length_per_unit_ang=path_cv.cv_length_per_unit_ang,
+                            cv_length_per_unit_ang=metad_cv.cv_length_per_unit_ang,
                         )
                         if diag.get('dG_bind_std_kcal') is not None:
                             logger.info(

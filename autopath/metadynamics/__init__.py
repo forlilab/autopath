@@ -36,6 +36,7 @@ from .CV import (
     rmsd_states_cv,
     path_rmsd_cv,
     pathCV_cv,
+    funnel_z_cv,
     contacts_cv,
 )
 
@@ -68,6 +69,7 @@ __all__ = [
     "rmsd_states_cv",
     "path_rmsd_cv",
     "pathCV_cv",
+    "funnel_z_cv",
     "contacts_cv",
     "add_funnel_restraints",
     "generate_funnel_parameters_from_trajectory",

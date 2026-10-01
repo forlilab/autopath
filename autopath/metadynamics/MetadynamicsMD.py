@@ -413,9 +413,11 @@ class MetadynamicsMD:
         np.save(os.path.join(self.out_dir, f"COLVAR_{run_id}.npy"), colvar_array)
 
         max_cv = float(colvar_array[:, 0].max())
-        if max_cv < 0.5:
+        _half = resolved[0].grid_min + 0.5 * (resolved[0].grid_max - resolved[0].grid_min)
+        if max_cv < _half:
             logger.warning(
-                f"Walker {run_id}: CV never exceeded 0.5 (max={max_cv:.3f}). "
+                f"Walker {run_id}: CV never exceeded the middle of its grid "
+                f"({_half:.3f}; max={max_cv:.3f}). "
                 "The ligand did not reach the unbound state — this walker will distort the FE profile. "
                 "Consider increasing mMD_time or mMD_hill_height."
             )

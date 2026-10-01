@@ -1114,12 +1114,16 @@ class MetadynamicsAnalysis:
     @staticmethod
     def analyze_colvar_transitions(colvar_array: np.ndarray,
                                     bound_threshold: float = 0.1,
-                                    unbound_threshold: float = 0.9) -> dict:
+                                    unbound_threshold: float = 0.9,
+                                    grid_min: float = None,
+                                    grid_max: float = None) -> dict:
         """Detect basin transitions in a 1D CV time series.
 
         A bound→unbound transition is counted each time the CV rises above
         unbound_threshold after having been below bound_threshold.  A round
-        trip additionally requires a return below bound_threshold.
+        trip additionally requires a return below bound_threshold. When
+        ``grid_min``/``grid_max`` are given, both thresholds are fractions of the
+        CV grid, so a length CV and the [0, 1] path progress are judged alike.
 
         Returns
         -------
@@ -1141,6 +1145,10 @@ class MetadynamicsAnalysis:
         discarded.
         """
         cv = colvar_array[:, 0] if np.ndim(colvar_array) > 1 else np.asarray(colvar_array)
+        if grid_min is not None and grid_max is not None:
+            span = float(grid_max) - float(grid_min)
+            bound_threshold = float(grid_min) + bound_threshold * span
+            unbound_threshold = float(grid_min) + unbound_threshold * span
         n_trans, n_rt, first_frame = 0, 0, -1
 
         # Initialise starting basin; unbound-seeded walkers get in_unbound=True.
@@ -1290,7 +1298,8 @@ class MetadynamicsAnalysis:
         for colvar_path in sorted(colvar_files):
             colvar = np.load(colvar_path)
             run_id = os.path.splitext(os.path.basename(colvar_path))[0].replace('COLVAR_', '')
-            ts = self.analyze_colvar_transitions(colvar, bound_threshold, unbound_threshold)
+            ts = self.analyze_colvar_transitions(colvar, bound_threshold, unbound_threshold,
+                                                 grid_min=grid_min, grid_max=grid_max)
             walker_data.append((run_id, colvar, ts))
 
         walker_stats = {run_id: ts for run_id, _, ts in walker_data}
@@ -1433,10 +1442,12 @@ class MetadynamicsAnalysis:
 
         # Panel 1 — CV traces
         ax1 = fig.add_subplot(gs[0])
-        ax1.axhspan(0, bound_threshold, alpha=0.07, color='royalblue')
-        ax1.axhspan(unbound_threshold, 1.0, alpha=0.07, color='tomato')
-        ax1.axhline(bound_threshold,   color='royalblue', lw=0.7, ls='--', alpha=0.5)
-        ax1.axhline(unbound_threshold, color='tomato',    lw=0.7, ls='--', alpha=0.5)
+        _bt = grid_min + bound_threshold * (grid_max - grid_min)
+        _ut = grid_min + unbound_threshold * (grid_max - grid_min)
+        ax1.axhspan(grid_min, _bt, alpha=0.07, color='royalblue')
+        ax1.axhspan(_ut, grid_max, alpha=0.07, color='tomato')
+        ax1.axhline(_bt, color='royalblue', lw=0.7, ls='--', alpha=0.5)
+        ax1.axhline(_ut, color='tomato',    lw=0.7, ls='--', alpha=0.5)
         for k, (run_id, colvar, ts) in enumerate(walker_data):
             cv = colvar[:, 0] if np.ndim(colvar) > 1 else colvar
             converged = ts['reached_unbound']
@@ -1474,8 +1485,8 @@ class MetadynamicsAnalysis:
             ax4.plot(axis, fes_conv_kcal, 'g--', lw=2.0,
                       label=f"Coverage-filtered (n={len(converged_biases)})  ΔG_sim={dG_conv:.1f} kcal/mol")
         ax4.axhline(0, color='gray', lw=0.7, ls=':')
-        ax4.axvline(bound_threshold,   color='royalblue', lw=0.7, ls='--', alpha=0.4)
-        ax4.axvline(unbound_threshold, color='tomato',    lw=0.7, ls='--', alpha=0.4)
+        ax4.axvline(_bt, color='royalblue', lw=0.7, ls='--', alpha=0.4)
+        ax4.axvline(_ut, color='tomato',    lw=0.7, ls='--', alpha=0.4)
         if dG_result is not None:
             dG_std_kcal = dG_result['dG_bind_std_kj_mol'] * KJ_TO_KCAL
             pKd = dG_result['pKd']

@@ -109,6 +109,49 @@ def com_cv(
     )
 
 
+def funnel_z_cv(
+    host_atoms: list[int],
+    guest_atoms: list[int],
+    axis,
+    grid_min: float,
+    grid_max: float,
+    hill_width: float = 0.05,
+    grid_points: int = 125,
+) -> CVSpec:
+    """Guest position along the funnel axis, r_z = n·(COM_guest - COM_host) (nm).
+
+    The coordinate the funnel restraint itself uses (mass-weighted centroids, no PBC),
+    so the bias keeps acting up to the cylinder cap and the FES is in the length
+    coordinate Limongelli Eq. 15 integrates over.
+    """
+    n = np.asarray(axis, dtype=float)
+    n = n / np.linalg.norm(n)
+    host, guest = [int(i) for i in host_atoms], [int(i) for i in guest_atoms]
+
+    def factory(input_positions, n_atoms, topology):
+        # Per-collection parameters (1-element arrays): scalars would become global
+        # Context parameters and collide with the funnel force's nx/ny/nz.
+        return cvpack.CentroidFunction(
+            "fz_nx*(x2-x1) + fz_ny*(y2-y1) + fz_nz*(z2-z1)",
+            openmmunit.nanometers,
+            [host, guest],
+            weighByMass=True,
+            pbc=False,
+            fz_nx=[float(n[0])], fz_ny=[float(n[1])], fz_nz=[float(n[2])],
+        )
+
+    return CVSpec(
+        cv=None,
+        grid_min=grid_min,
+        grid_max=grid_max,
+        hill_width=hill_width,
+        grid_points=grid_points,
+        name="funnel_z",
+        cv_length_per_unit_ang=10.0,
+        _factory=factory,
+    )
+
+
 def rmsd_cv(
     ligand_atoms: list[int],
     grid_min: float,
