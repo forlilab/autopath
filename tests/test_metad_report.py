@@ -118,3 +118,17 @@ def test_deposition_rate_falls_as_the_bias_converges():
     tr, rate = R._deposition_rate(t, snaps, (0.0, 1.0), GAMMA)
     assert rate.size and np.all(rate > 0)
     assert rate[-1] < 0.1 * rate[0]
+
+
+def test_report_without_a_funnel_gives_the_uncorrected_well_depth(tmp_path):
+    d = _shared(tmp_path)
+    out = R.report(str(d), 300.0, GAMMA, 0.0, 1.0, "s", out_prefix=str(tmp_path / "nf"),
+                   funnel_params=None)
+    assert out["funnel"] is False and out["dG_bind_std_kj"] is None
+    (label, depth), = out["well_depth_kj"]
+    assert depth == pytest.approx(-50.0, abs=1.0)          # the synthetic well
+    # no funnel axis: round trips use fractions of the CV grid (this trace stops at 69%)
+    assert all(st["coordinate"] == "cv" for st in out["walker_stats"].values())
+    assert out["n_round_trips"] == 0
+    for f in out["files"].values():
+        assert os.path.exists(f)

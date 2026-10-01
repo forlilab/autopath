@@ -114,7 +114,15 @@ def _latest_bias(directory: str) -> list:
     return [np.load(p) for _, p in latest.values()]
 
 
+def _well_depth(fes_kj, n_tail=10, bound_frac=0.20):
+    """FES minimum in the bound part of the grid relative to its unbound end (kJ/mol)."""
+    fe = np.asarray(fes_kj, float)
+    return float((fe - fe[-n_tail:].mean())[:max(1, int(bound_frac * fe.size))].min())
+
+
 def _correct(fes_kj, fp, temperature, grid, cv_len):
+    if fp is None:
+        return None, "no funnel: standard-state correction needs the funnel cylinder"
     try:
         return correct_fe_for_funnel(fes_kj, fp, temperature=temperature,
                                      grid_min=grid[0], grid_max=grid[1],
@@ -126,6 +134,11 @@ def _correct(fes_kj, fp, temperature, grid, cv_len):
 def _history(snapshots, fp, temperature, grid, cv_len):
     dG = np.full(len(snapshots), np.nan)
     ok = np.zeros(len(snapshots), bool)
+    if fp is None:                             # no correction possible: track the well depth
+        for i, fe in enumerate(snapshots):
+            dG[i] = _well_depth(fe)
+            ok[i] = dG[i] <= -10.0
+        return dG, ok
     for i, fe in enumerate(snapshots):
         try:
             r = correct_fe_for_funnel(fe, fp, temperature=temperature, grid_min=grid[0],
@@ -250,7 +263,7 @@ def walker_traces(out_dir, run_ids, basins, grid, cv_is_funnel_z=False) -> list:
             cv = col[:, 0] if col.ndim > 1 else col
             zpath = os.path.join(out_dir, f"FUNNELZ_{r}.npy")
             z = np.load(zpath) if os.path.exists(zpath) else None
-            if z is None and cv_is_funnel_z:
+            if z is None and cv_is_funnel_z and basins is not None:
                 z = cv * 10.0                      # the biased CV is z itself (nm)
                 stats = ma.analyze_colvar_transitions(z[:, None], bound_threshold=basins[0],
                                                       unbound_threshold=basins[1])
@@ -264,15 +277,15 @@ def walker_traces(out_dir, run_ids, basins, grid, cv_is_funnel_z=False) -> list:
 # ---------------------------------------------------------------------------
 # Figures
 # ---------------------------------------------------------------------------
-_STYLE = {"font.size": 9, "axes.titlesize": 9, "axes.labelsize": 9, "legend.fontsize": 7.5,
-          "axes.grid": True, "grid.alpha": 0.3, "figure.facecolor": "white",
-          "axes.facecolor": "white", "savefig.facecolor": "white"}
+_STYLE = {"figure.facecolor": "white", "axes.facecolor": "white",
+          "savefig.facecolor": "white", "savefig.edgecolor": "white",
+          "axes.titlesize": 11, "legend.fontsize": 9}
 
 
 def _styled(fn):
-    """Render with a clean local style, independent of the module-level one."""
+    """fivethirtyeight on white, the look of the rest of the metadynamics plots."""
     def wrapper(*args, **kwargs):
-        with plt.style.context("default"), plt.rc_context(_STYLE):
+        with plt.style.context("fivethirtyeight"), plt.rc_context(_STYLE):
             return fn(*args, **kwargs)
     wrapper.__name__, wrapper.__doc__ = fn.__name__, fn.__doc__
     return wrapper
@@ -286,7 +299,7 @@ def _cv_to_ang(cv_len, grid):
 
 
 @_styled
-def plot_fes(estimates, mode, grid, cv_name, cv_len, verdict, out_path):
+def plot_fes(estimates, mode, grid, cv_name, cv_len, verdict, out_path, corrected=True):
     fig, ax = plt.subplots(figsize=(8.5, 5.2))
     axis = None
     colors = plt.cm.tab10(np.linspace(0, 1, max(len(estimates), 1)))
@@ -306,8 +319,10 @@ def plot_fes(estimates, mode, grid, cv_name, cv_len, verdict, out_path):
                 shaded = True
         else:
             raw = e.fes_kj - e.fes_kj[-10:].mean()
-            ax.plot(axis, raw, color=colors[k] if many else "k", ls="--", lw=1.0,
-                    label=f"{e.label}: correction refused (raw FES)")
+            lab = (f"{e.label}: correction refused (raw FES)" if corrected
+                   else f"{e.label}: well depth = {_well_depth(e.fes_kj):.1f} kJ/mol")
+            ax.plot(axis, raw, color=colors[k] if many else "k", ls="--" if corrected else "-",
+                    lw=1.0 if corrected else 2.0, label=lab)
     good = [e.dG for e in estimates if e.dG is not None and e.complete]
     if mode.layout == "isolated" and len(good) > 1:
         m, sd = float(np.mean(good)), float(np.std(good, ddof=1))
@@ -318,7 +333,7 @@ def plot_fes(estimates, mode, grid, cv_name, cv_len, verdict, out_path):
         ax.axhline(good[0], color="darkgreen", lw=1.0, ls="--")
     ax.axhline(0, color="0.4", lw=0.7, ls=":")
     ax.set_xlabel(cv_name)
-    ax.set_ylabel("ΔG (kJ/mol), standard state, unbound = 0")
+    ax.set_ylabel("ΔG° (kJ/mol)" if corrected else "FES (kJ/mol), uncorrected")
     conv = _cv_to_ang(cv_len, grid)
     if conv is not None:
         sec = ax.secondary_xaxis("top", functions=conv)
@@ -328,7 +343,7 @@ def plot_fes(estimates, mode, grid, cv_name, cv_len, verdict, out_path):
         dg = float(np.mean(good))
         title += f"\nΔG°_b = {dg:.1f} kJ/mol ({dg * KJ_TO_KCAL:.1f} kcal/mol)"
     ax.set_title(title)
-    ax.legend(loc="upper left")
+    ax.legend(loc="lower right", framealpha=0.9)
     import textwrap
     fig.tight_layout(rect=(0, 0.08, 1, 1))
     fig.text(0.01, 0.01, textwrap.fill(verdict, 130), fontsize=7.5, va="bottom",
@@ -397,7 +412,8 @@ def _deposition_rate(t_ns, snapshots, grid, bias_factor, window=6):
 
 
 @_styled
-def plot_convergence(estimates, mode, grid, bias_factor, plateau_results, out_path):
+def plot_convergence(estimates, mode, grid, bias_factor, plateau_results, out_path,
+                     corrected=True):
     fig, (a1, a2, a3) = plt.subplots(3, 1, figsize=(9, 10))
     colors = plt.cm.tab10(np.linspace(0, 1, max(len(estimates), 1)))
     xlab = ("aggregate simulation time (ns)" if mode.layout == "shared" and mode.schedule == "concurrent"
@@ -421,7 +437,7 @@ def plot_convergence(estimates, mode, grid, bias_factor, plateau_results, out_pa
             if t_r.size:
                 a3.plot(t_r, rate, color=colors[k], lw=1.2, label=e.label)
     a1.set_xlabel(xlab)
-    a1.set_ylabel("ΔG°_b (kJ/mol)")
+    a1.set_ylabel("ΔG°_b (kJ/mol)" if corrected else "well depth (kJ/mol)")
     a1.set_title("ΔG°_b(t)  (filled = bound basin resolved; band = ±4 kJ/mol over the last 40%)",
                  fontsize=9)
     if any(e.t_ns.size for e in estimates):
@@ -463,10 +479,12 @@ def report(out_dir, temperature, bias_factor, grid_min=0.0, grid_max=1.0,
     fp_path = os.path.join(out_dir, "funnel_params.npz")
     fp = funnel_params if funnel_params is not None else (
         load_funnel_params(fp_path) if os.path.exists(fp_path) else None)
+    # Without a funnel there is no cylinder: no standard-state correction and no
+    # funnel axis, so round trips fall back to fractions of the CV grid.
+    basins = funnel_basins(fp) if fp is not None else None
+    z_max = float(fp["z_max"].value_in_unit(fp["z_cc"].unit)) if fp is not None else None
     if fp is None:
-        raise FileNotFoundError(f"funnel parameters not found in {out_dir}")
-    basins = funnel_basins(fp)
-    z_max = float(fp["z_max"].value_in_unit(fp["z_cc"].unit))
+        logger.info("No funnel: reporting the uncorrected FES and its well depth.")
 
     mode = detect_mode(out_dir)
     logger.info("Metadynamics report: %s", mode.describe())
@@ -511,11 +529,12 @@ def report(out_dir, temperature, bias_factor, grid_min=0.0, grid_max=1.0,
 
     files = {
         "fes": plot_fes(estimates, mode, grid, cv_name, cv_length_per_unit_ang, verdict,
-                        f"{out_prefix}_FES.png"),
+                        f"{out_prefix}_FES.png", corrected=fp is not None),
         "colvar": plot_colvar(traces, mode, basins, grid, cv_name, f"{out_prefix}_COLVAR.png",
                               z_max_ang=z_max),
         "convergence": plot_convergence(estimates, mode, grid, float(bias_factor),
-                                        plateau_results, f"{out_prefix}_convergence.png"),
+                                        plateau_results, f"{out_prefix}_convergence.png",
+                                        corrected=fp is not None),
     }
     for e in estimates:
         logger.info("  %-28s ΔG°_b = %s kJ/mol%s", e.label,
@@ -530,6 +549,8 @@ def report(out_dir, temperature, bias_factor, grid_min=0.0, grid_max=1.0,
         "mode": mode,
         "estimates": [(e.label, e.dG, e.complete) for e in estimates],
         "dG_bind_std_kj": dG_main,
+        "funnel": fp is not None,
+        "well_depth_kj": [(e.label, _well_depth(e.fes_kj)) for e in estimates],
         "dG_bind_std_sd_kj": dG_sd,
         "dG_bind_std_kcal": dG_main * KJ_TO_KCAL if dG_main is not None else None,
         "pKd": pKd,
