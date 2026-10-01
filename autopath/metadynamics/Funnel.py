@@ -91,6 +91,32 @@ def z_max_for_bulk(universe, guest_selection, host_selection, axis,
 logger = logging.getLogger("autopath")
 
 
+def funnel_basins(params, bound_percentile_z: float = 10.0):
+    """Bound and unbound basins on the funnel axis (Å) for counting round trips.
+
+    Unbound is the cylinder (|z| > z_cc), Limongelli's unbound region. Bound is below
+    halfway from the sMD bound state (the |z| percentile the funnel itself uses for
+    the site) to z_cc; the gap keeps recrossings of the exit barrier from counting.
+    """
+    z_cc = float(params["z_cc"].value_in_unit(openmmunit.angstrom))
+    z_site = float(np.percentile(np.abs(np.asarray(params["axial_distances"])),
+                                 bound_percentile_z))
+    return z_site + 0.5 * (z_cc - z_site), z_cc
+
+
+def funnel_z_ang(positions_nm, host_idx, guest_idx, masses, axis) -> float:
+    """Guest position on the funnel axis (Å): n·(COM_guest − COM_host), mass-weighted."""
+    pos = np.asarray(positions_nm, dtype=float)
+    m = np.asarray(masses, dtype=float)
+    n = np.asarray(axis, dtype=float)
+    n = n / np.linalg.norm(n)
+    host = np.average(pos[host_idx], axis=0, weights=m[host_idx])
+    guest = np.average(pos[guest_idx], axis=0, weights=m[guest_idx])
+    return float(np.dot(guest - host, n)) * 10.0
+
+
+
+
 def add_funnel_restraints(
     system: System,
     host_index: List[int],

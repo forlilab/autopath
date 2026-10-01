@@ -15,6 +15,8 @@ plt.rcParams["axes.facecolor"] = 'white'
 
 from autopath.pulling.Estimators import _find_pmf_peak
 
+from autopath.metadynamics.Funnel import load_funnel_params, funnel_basins
+
 logger = logging.getLogger("autopath")
 
 KJ_TO_KCAL = 0.239006  # kJ/mol → kcal/mol conversion factor
@@ -1111,6 +1113,25 @@ class MetadynamicsAnalysis:
         axis = np.linspace(grid_min, grid_max, fes.shape[0])
         return axis, fes
 
+    def walker_transitions(self, colvar_path, basins, bound_threshold=0.1,
+                           unbound_threshold=0.9, grid_min=None, grid_max=None) -> dict:
+        """Transitions of one walker: on its recorded funnel z (``FUNNELZ_<run_id>.npy``,
+        Å) with ``basins = (bound_max, unbound_min)`` when both exist, else on the CV
+        with grid-fraction thresholds."""
+        run_id = os.path.splitext(os.path.basename(colvar_path))[0].replace('COLVAR_', '')
+        z_path = os.path.join(os.path.dirname(colvar_path), f"FUNNELZ_{run_id}.npy")
+        if basins is not None and os.path.exists(z_path):
+            ts = self.analyze_colvar_transitions(np.load(z_path)[:, None],
+                                                 bound_threshold=basins[0],
+                                                 unbound_threshold=basins[1])
+            ts["coordinate"] = "funnel_z"
+            return ts
+        ts = self.analyze_colvar_transitions(np.load(colvar_path), bound_threshold,
+                                             unbound_threshold, grid_min=grid_min,
+                                             grid_max=grid_max)
+        ts["coordinate"] = "cv"
+        return ts
+
     @staticmethod
     def analyze_colvar_transitions(colvar_array: np.ndarray,
                                     bound_threshold: float = 0.1,
@@ -1294,12 +1315,21 @@ class MetadynamicsAnalysis:
 
         all_biases = self.load_bias_files(self.out_dir)
 
+        # Round trips are counted on the funnel axis when it was recorded: pocket and
+        # cylinder are physical basins, whereas the ends of a CV grid are not.
+        basins = None
+        _fp_npz = os.path.join(self.out_dir, 'funnel_params.npz')
+        if os.path.exists(_fp_npz):
+            basins = funnel_basins(load_funnel_params(_fp_npz))
+            logger.info("Round trips on the funnel axis: bound z < %.1f A, unbound z > %.1f A "
+                        "(walkers without FUNNELZ fall back to CV-grid fractions).", *basins)
+
         walker_data = []
         for colvar_path in sorted(colvar_files):
             colvar = np.load(colvar_path)
             run_id = os.path.splitext(os.path.basename(colvar_path))[0].replace('COLVAR_', '')
-            ts = self.analyze_colvar_transitions(colvar, bound_threshold, unbound_threshold,
-                                                 grid_min=grid_min, grid_max=grid_max)
+            ts = self.walker_transitions(colvar_path, basins, bound_threshold,
+                                         unbound_threshold, grid_min, grid_max)
             walker_data.append((run_id, colvar, ts))
 
         walker_stats = {run_id: ts for run_id, _, ts in walker_data}

@@ -12,6 +12,7 @@ import openmm.unit as openmmunit
 import cvpack
 
 from autopath.metadynamics.CV import CVSpec
+from autopath.metadynamics.Funnel import funnel_z_ang
 from autopath.metadynamics.Analysis import (
     correct_fe_for_funnel,
     plot_bias,
@@ -374,6 +375,21 @@ class MetadynamicsMD:
                                                             ))
 
         colvar_list = [meta.getCollectiveVariables(simulation)]
+        # Funnel axis coordinate for every walker, whatever CV is biased: round trips
+        # are counted on it (FUNNELZ_<run_id>.npy, Å, same cadence as COLVAR).
+        funnelz_list = None
+        if funnel_params is not None:
+            _sysm = simulation.system
+            _masses = np.array([_sysm.getParticleMass(i).value_in_unit(openmmunit.dalton)
+                                for i in range(_sysm.getNumParticles())])
+            _host = [int(i) for i in funnel_params["host_index"]]
+            _guest = [int(i) for i in funnel_params["guest_index"]]
+
+            def _funnel_z():
+                pos = simulation.context.getState(getPositions=True).getPositions(asNumpy=True)
+                return funnel_z_ang(pos.value_in_unit(openmmunit.nanometer), _host, _guest,
+                                    _masses, funnel_params["unbinding_axis"])
+            funnelz_list = [_funnel_z()]
         # ~40 snapshots over the run, so the curve is readable at any length
         fe_hist, fe_hist_steps = [], []
         # Shared-bias walkers run sequentially and inherit each other's hills, so
@@ -384,9 +400,14 @@ class MetadynamicsMD:
         for i in range(0, int(mMD_steps), self.record_CV):
             if self.verbose and i % self.store_CV == 0:
                 np.save(os.path.join(self.out_dir, f"COLVAR_{run_id}.npy"), np.array(colvar_list))
+                if funnelz_list is not None:
+                    np.save(os.path.join(self.out_dir, f"FUNNELZ_{run_id}.npy"),
+                            np.array(funnelz_list))
 
             meta.step(simulation, self.record_CV)
             colvar_list.append(meta.getCollectiveVariables(simulation))
+            if funnelz_list is not None:
+                funnelz_list.append(_funnel_z())
 
             # Snapshot the surface as it grows. Convergence is judged on how the
             # FES (and the dG read off it) stops changing with time, and OpenMM
@@ -411,6 +432,8 @@ class MetadynamicsMD:
                         len(fe_hist), f"FEhist_{run_id}.npz")
 
         np.save(os.path.join(self.out_dir, f"COLVAR_{run_id}.npy"), colvar_array)
+        if funnelz_list is not None:
+            np.save(os.path.join(self.out_dir, f"FUNNELZ_{run_id}.npy"), np.array(funnelz_list))
 
         max_cv = float(colvar_array[:, 0].max())
         _half = resolved[0].grid_min + 0.5 * (resolved[0].grid_max - resolved[0].grid_min)
