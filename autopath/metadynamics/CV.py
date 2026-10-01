@@ -122,7 +122,9 @@ def funnel_z_cv(
 
     The coordinate the funnel restraint itself uses (mass-weighted centroids, no PBC),
     so the bias keeps acting up to the cylinder cap and the FES is in the length
-    coordinate Limongelli Eq. 15 integrates over.
+    coordinate Limongelli Eq. 15 integrates over. Clamped to [grid_min, grid_max]:
+    OpenMM's bias is zero outside its grid, so an unclamped CV crossing the soft
+    cap wall would drop the whole bias in one step.
     """
     n = np.asarray(axis, dtype=float)
     n = n / np.linalg.norm(n)
@@ -132,12 +134,13 @@ def funnel_z_cv(
         # Per-collection parameters (1-element arrays): scalars would become global
         # Context parameters and collide with the funnel force's nx/ny/nz.
         return cvpack.CentroidFunction(
-            "fz_nx*(x2-x1) + fz_ny*(y2-y1) + fz_nz*(z2-z1)",
+            "min(max(fz_nx*(x2-x1) + fz_ny*(y2-y1) + fz_nz*(z2-z1), fz_lo), fz_hi)",
             openmmunit.nanometers,
             [host, guest],
             weighByMass=True,
             pbc=False,
             fz_nx=[float(n[0])], fz_ny=[float(n[1])], fz_nz=[float(n[2])],
+            fz_lo=[float(grid_min)], fz_hi=[float(grid_max)],
         )
 
     return CVSpec(

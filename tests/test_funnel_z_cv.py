@@ -14,7 +14,8 @@ def _context(pos_nm):
     s = mm.System()
     for m in MASSES:
         s.addParticle(m)
-    spec = funnel_z_cv(HOST, GUEST, AXIS, grid_min=0.0, grid_max=2.0)
+    # Wide grid so the value tests never touch the clamp
+    spec = funnel_z_cv(HOST, GUEST, AXIS, grid_min=-10.0, grid_max=10.0)
     cv = spec.resolve(pos_nm, len(MASSES), None).cv
     cv.addToSystem(s)
     ctx = mm.Context(s, mm.VerletIntegrator(0.001), mm.Platform.getPlatformByName("Reference"))
@@ -84,3 +85,22 @@ def test_mmd_cv_option_is_validated(kw, ok):
     else:
         with pytest.raises(ValueError):
             AutoPath(pdb_path="examples/data/3ptb.pdb", **kw)
+
+
+def test_z_is_clamped_to_the_grid():
+    """OpenMM's metadynamics bias is zero outside [grid_min, grid_max], so a CV that
+    leaves the grid drops the whole bias in one step. Clamping keeps it continuous."""
+    rng = np.random.default_rng(3)
+    pos = rng.normal(0, 0.1, (4, 3))
+    n = AXIS / np.linalg.norm(AXIS)
+    s = mm.System()
+    for m in MASSES:
+        s.addParticle(m)
+    cv = funnel_z_cv(HOST, GUEST, AXIS, grid_min=0.0, grid_max=2.0).resolve(pos, 4, None).cv
+    cv.addToSystem(s)
+    ctx = mm.Context(s, mm.VerletIntegrator(0.001), mm.Platform.getPlatformByName("Reference"))
+    for shift, expected in [(5.0, 2.0), (-5.0, 0.0)]:
+        moved = pos.copy()
+        moved[GUEST] += shift * n
+        ctx.setPositions(moved)
+        assert cv.getValue(ctx).value_in_unit(unit.nanometers) == pytest.approx(expected, abs=1e-6)
