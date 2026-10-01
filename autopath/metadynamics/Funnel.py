@@ -124,7 +124,7 @@ def add_funnel_restraints(
         "Wall_funnel = 0.5 * k_xy * (r_xy - R_funnel)^2;"
         "Wall_cylinder = 0.5 * k_xy * (r_xy - R_cylinder)^2;"
         "R_funnel = (z_cc-abs(r_z))*tan(alpha) + R_cylinder;"
-        "r_xy = sqrt((x2 - x1)^2 + (y2 - y1)^2);"
+        "r_xy = sqrt((x2 - x1)^2 + (y2 - y1)^2 + 1e-12);"
         "r_z = z2 - z1;",
     )
     funnel.setUsesPeriodicBoundaryConditions(False)
@@ -573,9 +573,14 @@ def create_funnel_force_from_trajectory_analysis(
         "Wall_funnel = 0.5 * k_xy * (r_xy - R_funnel)^2;"
         "Wall_cylinder = 0.5 * k_xy * (r_xy - R_cylinder)^2;"
         "R_funnel = (z_cc-abs(r_z))*tan(alpha) + R_cylinder;"
-        "r_xy = sqrt(max(0, r2 - r_z*r_z));"
-        "r_z = nx*(x2-x1) + ny*(y2-y1) + nz*(z2-z1);"
-        "r2 = (x2-x1)^2 + (y2-y1)^2 + (z2-z1)^2;",
+        # r_xy from |n x r|, a sum of squares: sqrt(r2 - r_z^2) cancels in single
+        # precision, and at r_xy = 0 the derivative is infinite, which the zero step()
+        # in front of the wall turns into 0*inf = NaN. The floor keeps sqrt' finite.
+        "r_xy = sqrt(cx^2 + cy^2 + cz^2 + 1e-12);"
+        "cx = ny*(z2-z1) - nz*(y2-y1);"
+        "cy = nz*(x2-x1) - nx*(z2-z1);"
+        "cz = nx*(y2-y1) - ny*(x2-x1);"
+        "r_z = nx*(x2-x1) + ny*(y2-y1) + nz*(z2-z1);",
     )
 
     funnel.setUsesPeriodicBoundaryConditions(False)
