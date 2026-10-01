@@ -1206,3 +1206,30 @@ def test_alignment_applies_only_a_rigid_transform(tmp_path):
     assert worst < 1e-3, (
         f"alignment moved atoms by {worst*10:.2f} A beyond any rigid transform; "
         "imaging must happen before superposition, never after")
+
+
+# --- cylinder cap always reaches bulk ----------------------------------------
+
+def test_cylinder_cap_is_set_by_the_bulk_cutoff_not_the_trajectory_end():
+    """The cap must clear the host by bulk_cutoff_ang; how far sMD happened to
+    pull is irrelevant, so a stricter cutoff has to push the wall outwards."""
+    from autopath.metadynamics.Funnel import generate_funnel_parameters_from_trajectory
+    from openmm import unit as ommunit
+
+    caps = {}
+    for cut in (10.0, 35.0):
+        p = generate_funnel_parameters_from_trajectory(
+            _funnel_universe(), host_selection="resname ALA", guest_selection="resname LIG",
+            bulk_cutoff_ang=cut, stride=1, verbose=False)
+        caps[cut] = p["z_max"].value_in_unit(ommunit.angstrom)
+    assert caps[35.0] >= 35.0 > 25.0          # beyond the 25 A trajectory end
+    assert caps[35.0] > caps[10.0]
+
+
+@pytest.mark.parametrize("removed", [{"z_max_mode": "buffer"}, {"z_max_buffer_ang": 3.0}])
+def test_buffer_cap_options_are_gone(removed):
+    from autopath.metadynamics.Funnel import generate_funnel_parameters_from_trajectory
+    with pytest.raises(TypeError):
+        generate_funnel_parameters_from_trajectory(
+            _funnel_universe(), host_selection="resname ALA", guest_selection="resname LIG",
+            stride=1, verbose=False, **removed)

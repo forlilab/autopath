@@ -277,10 +277,7 @@ class AutoPath:
         mMD_milestone_seeding: bool = True,
         mMD_multiple_walkers: bool = False,
         mMD_seed_order: str = "unbound_first",
-        mMD_funnel_z_max_mode: str = "buffer",
         mMD_bulk_cutoff_ang: float = 10.0,
-        mMD_extend_path_to_nm: float = None,
-        mMD_extend_path_to_bulk: bool = False,
         mMD_outdir_suffix: str = "",
         mMD_preseed_bias: bool = False,
         mMD_preseed_speed: float = None,
@@ -369,10 +366,7 @@ class AutoPath:
             raise ValueError("mMD_seed_order must be 'unbound_first' or "
                              f"'bound_first', got {mMD_seed_order!r}")
         self.mMD_seed_order = mMD_seed_order
-        self.mMD_funnel_z_max_mode = mMD_funnel_z_max_mode
         self.mMD_bulk_cutoff_ang = mMD_bulk_cutoff_ang
-        self.mMD_extend_path_to_nm = mMD_extend_path_to_nm
-        self.mMD_extend_path_to_bulk = mMD_extend_path_to_bulk
         self.mMD_outdir_suffix = mMD_outdir_suffix
         self.mMD_preseed_bias = mMD_preseed_bias
         self.mMD_preseed_speed = mMD_preseed_speed
@@ -1247,7 +1241,6 @@ class AutoPath:
                     grid_max=1.0,
                     hill_width=self.mMD_hill_width,
                     sigma='auto', # related to distance between milestones
-                    extend_path_to_nm=self.mMD_extend_path_to_nm,
                     #sigma approz min milestone spacings
                 )
                 # when you first run, check the logged line
@@ -1415,7 +1408,6 @@ class AutoPath:
                                 # spread beyond z_cc; pass R_cylinder_ang to override.
                                 # z_cc_ang=5, # this overrides the default automatic z_cc calculation (floor is 5A)
                                 alpha_cone_degrees=45.0,
-                                z_max_mode=self.mMD_funnel_z_max_mode,
                                 bulk_cutoff_ang=self.mMD_bulk_cutoff_ang,
                                 verbose=True,
                             )
@@ -1425,14 +1417,23 @@ class AutoPath:
                                 openmmunit.angstrom))
                             _zcc = float(funnel_params["z_cc"].value_in_unit(
                                 openmmunit.angstrom))
-                            if self.mMD_extend_path_to_bulk:
-                                # Derive the path's far end FROM the wall so the two
-                                # caps cannot disagree. Hand-setting it means guessing
-                                # a number the funnel only produces later.
-                                _target_nm = com_distance_at_z(
-                                    read_positions(path_milestones[-1]) * 10.0,
-                                    ligand_atoms_indices, pocket_atom_indices,
-                                    funnel_params["unbinding_axis"], _zmax)
+                            # Derive the path's far end FROM the wall so the two
+                            # caps cannot disagree. Hand-setting it means guessing
+                            # a number the funnel only produces later.
+                            _target_nm = com_distance_at_z(
+                                read_positions(path_milestones[-1]) * 10.0,
+                                ligand_atoms_indices, pocket_atom_indices,
+                                funnel_params["unbinding_axis"], _zmax)
+                            _pos = read_positions(path_milestones[-1])
+                            _mass = lambda idx: np.array([
+                                base_system.getParticleMass(int(i)).value_in_unit(openmmunit.dalton)
+                                for i in idx])
+                            _last_nm = float(np.linalg.norm(
+                                np.average(_pos[ligand_atoms_indices], axis=0,
+                                           weights=_mass(ligand_atoms_indices))
+                                - np.average(_pos[pocket_atom_indices], axis=0,
+                                             weights=_mass(pocket_atom_indices))))
+                            if _target_nm > _last_nm:
                                 logger.info(
                                     "Extending the path to the cylinder cap: z_max="
                                     "%.2f A -> %.3f nm COM separation.",
@@ -1448,6 +1449,11 @@ class AutoPath:
                                     sigma='auto',
                                     extend_path_to_nm=_target_nm,
                                 )
+                            else:
+                                logger.info(
+                                    "Last milestone (%.3f nm) already reaches the "
+                                    "cylinder cap (%.3f nm); path not extended.",
+                                    _last_nm, _target_nm)
                             _span = path_cv.cv_length_per_unit_ang
                             if _span is not None:
                                 # The funnel wall and the CV range are independent

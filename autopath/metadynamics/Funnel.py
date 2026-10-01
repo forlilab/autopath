@@ -155,8 +155,6 @@ def generate_funnel_parameters_from_trajectory(
     use_pca: bool = True,
     percentile_z: float = 95.0,
     z_cc_ang: Optional[float] = None,
-    z_max_buffer_ang: float = 3.0,
-    z_max_mode: str = "buffer",
     bulk_cutoff_ang: float = 10.0,
     R_cylinder_ang: Optional[float] = None,
     percentile_r_funnel: float = 95.0,
@@ -194,11 +192,9 @@ def generate_funnel_parameters_from_trajectory(
         Explicit cone-to-cylinder transition distance in Å. When set, overrides the
         value derived from percentile_z. Useful to shorten the cone and extend the
         cylinder region (smaller value → shorter cone, longer cylinder).
-    z_max_buffer_ang : float
-        Extra length in Å added beyond the farthest axial distance in the sMD
-        trajectory to set z_max (the hard cap of the cylinder). Increase this if
-        the sMD stopped just after the transition state and you want more solvent
-        sampling in metadynamics (default: 3.0 Å).
+    bulk_cutoff_ang : float
+        z_max (the cylinder cap) is placed where every guest atom is farther than
+        this from the protein, from the most-unbound sMD frames (default: 10 Å).
     R_cylinder_ang : float
         Cylinder radius in Å for the unbound-state restraint (default: 2.0).
         Limongelli 2013 recommends 1–3 Å.
@@ -350,23 +346,15 @@ def generate_funnel_parameters_from_trajectory(
     else:
         R_cylinder = float(R_cylinder_ang)
 
-    if z_max_mode == "buffer":
-        z_max = float(np.max(z_distances)) + float(z_max_buffer_ang)
-        _z_max_why = (f"traj max {np.max(z_distances):.2f} A + "
-                      f"{z_max_buffer_ang:.1f} A buffer")
-    elif z_max_mode == "bulk_cutoff":
-        # Park the guest at the most-unbound observed frame and walk it out along
-        # the axis from there: that is where the exit channel actually is.
-        _pairs = list(zip(np.arange(z_distances.size) * int(stride),
-                          np.asarray(z_distances, dtype=float)))
-        z_max = z_max_for_bulk(
-            universe, guest_selection, host_selection, unbinding_axis,
-            frame_z_pairs=_pairs, cutoff_ang=bulk_cutoff_ang)
-        _z_max_why = (f"every guest atom > {bulk_cutoff_ang:.1f} A from the host "
-                      "across the most-unbound probed frames")
-    else:
-        raise ValueError("z_max_mode must be 'buffer' or 'bulk_cutoff', "
-                         f"got {z_max_mode!r}")
+    # The cylinder holds the unbound reference, so its cap must reach bulk. Park
+    # the guest at the most-unbound observed frames and walk it out along the axis.
+    _pairs = list(zip(np.arange(z_distances.size) * int(stride),
+                      np.asarray(z_distances, dtype=float)))
+    z_max = z_max_for_bulk(
+        universe, guest_selection, host_selection, unbinding_axis,
+        frame_z_pairs=_pairs, cutoff_ang=bulk_cutoff_ang)
+    _z_max_why = (f"every guest atom > {bulk_cutoff_ang:.1f} A from the host "
+                  "across the most-unbound probed frames")
     if z_max <= z_cc:
         raise ValueError(
             f"z_max ({z_max:.2f} A) is not beyond z_cc ({z_cc:.2f} A); the cylinder "
