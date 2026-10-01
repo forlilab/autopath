@@ -188,7 +188,7 @@ def test_plot_bias_skips_walker_bias_directories(tmp_path, monkeypatch):
     # must not raise IsADirectoryError, and must produce the plot
     plot_bias("3ptb/metadynamics_funnel", x_min=0.0, x_max=1.0, grid_points=25,
               colvar_name="PathCV_progress")
-    assert (out / "3ptb_BIAS.png").exists()
+    assert (out / "3ptb_quicklook_BIAS.png").exists()
 
 
 def test_plot_bias_returns_quietly_when_no_bias_arrays(tmp_path, monkeypatch):
@@ -198,7 +198,7 @@ def test_plot_bias_returns_quietly_when_no_bias_arrays(tmp_path, monkeypatch):
     out.mkdir(parents=True)
     plot_bias("sys/metadynamics", x_min=0.0, x_max=1.0, grid_points=25,
               colvar_name="PathCV_progress")
-    assert not (out / "sys_BIAS.png").exists()
+    assert not (out / "sys_quicklook_BIAS.png").exists()
 
 
 def test_load_bias_files_finds_isolated_walker_subdirs(tmp_path):
@@ -926,18 +926,6 @@ def test_dG_plateau_will_not_settle_on_unsampled_snapshots():
     assert "not resolved at the end" in v["reason"]
     # without a mask the same curve settles, which is the behaviour being guarded
     assert MA.dG_plateau(t, g)["settled"]
-
-
-def test_dG_convergence_plot_draws_the_unresolved_part(tmp_path):
-    import numpy as np
-    from autopath.metadynamics.Analysis import MetadynamicsAnalysis as MA
-    t = np.linspace(0, 5, 12)
-    g = np.linspace(20.0, -30.0, 12)
-    ok = np.arange(12) >= 5
-    out = MA._plot_dG_convergence({"w1": (t, g, ok)}, str(tmp_path / "p"))
-    assert out and os.path.exists(out)
-    # a 2-tuple must still work: finiteness is the fallback mask
-    assert MA._plot_dG_convergence({"w1": (t, g)}, str(tmp_path / "q"))
 
 
 # --- shared bias: sequential walkers form one curve ------------------------

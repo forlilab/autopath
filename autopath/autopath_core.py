@@ -1687,6 +1687,7 @@ class AutoPath:
                                      else "funnel z (nm)"),
                             out_prefix=os.path.join(group_out_dir, sys_name),
                             cv_length_per_unit_ang=metad_cv.cv_length_per_unit_ang,
+                            cv_is_funnel_z=metad_cv.name == "funnel_z",
                         )
                         if diag.get('dG_bind_std_kcal') is not None:
                             logger.info(
