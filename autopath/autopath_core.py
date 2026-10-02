@@ -1329,7 +1329,7 @@ class AutoPath:
                                 # z_cc must lie beyond the binding site so the cone covers it;
                                 # R_cylinder comes from the radial spread beyond z_cc.
                                 # z_cc_ang=5, # overrides the automatic z_cc (floor 5 A)
-                                alpha_cone_degrees=45.0,
+                                alpha_cone_degrees=20.0,
                                 bulk_cutoff_ang=self.mMD_bulk_cutoff_ang,
                                 verbose=True,
                             )

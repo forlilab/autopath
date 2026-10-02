@@ -621,68 +621,56 @@ def _perp_basis(axis: np.ndarray):
     return e1, e2
 
 
+def _funnel_radius(z, z_cc: float, R_cylinder: float, alpha_deg: float):
+    """Funnel radius at axial z (Å), as in the force expression."""
+    return np.maximum(z_cc - np.abs(z), 0.0) * np.tan(np.radians(alpha_deg)) + R_cylinder
+
+
 def _funnel_cgo(
-    center: np.ndarray,
+    host_com: np.ndarray,
     axis: np.ndarray,
+    z_low: float,
     z_cc: float,
+    z_max: float,
     R_cylinder: float,
     alpha_deg: float,
-    n_z: int = 15,
     n_pts: int = 24,
-    extension: float = 5.0,
-    z_offset: float = 0.0,
+    dz: float = 1.0,
 ) -> list:
-    """Build a PyMOL CGO wireframe for the funnel boundary (all lengths in Å).
+    """PyMOL CGO wireframe of the funnel from the lower wall to the z_max cap (Å).
 
-    ``center`` is the visual anchor (typically the bound-state ligand COM).
-    ``z_offset`` is the axial distance from the force anchor (protein COM) to
-    ``center``, so that ring radii match the force expression exactly:
-    R = R_cylinder + max(0, z_cc - (z_offset + z_visual)) * tan(alpha_deg).
-    Rings are drawn from z=0 (at ``center``) outward to the cylinder end.
+    z is measured from ``host_com`` along ``axis``, as in the force expression.
     """
     from pymol.cgo import BEGIN, LINES, END, VERTEX, COLOR, LINEWIDTH
 
-    center = np.array(center, dtype=float)
-    axis = np.array(axis, dtype=float)
-    axis /= np.linalg.norm(axis)
-    alpha_rad = np.deg2rad(alpha_deg)
+    host_com = np.asarray(host_com, dtype=float)
+    axis = np.asarray(axis, dtype=float) / np.linalg.norm(axis)
     e1, e2 = _perp_basis(axis)
-
-    z_cc_visual = z_cc - z_offset
-
-    def make_ring(z_level: float, radius: float) -> list:
-        rc = center + z_level * axis
-        angles = np.linspace(0, 2 * np.pi, n_pts, endpoint=False)
-        return [rc + radius * (np.cos(a) * e1 + np.sin(a) * e2) for a in angles]
-
-    z_cone = np.linspace(0.0, max(z_cc_visual, 0.0), n_z)
-    n_cyl_rings = max(3, int(extension / 5.0) + 1)
-    z_cyl = [z_cc_visual + extension * t for t in np.linspace(0, 1, n_cyl_rings, endpoint=True)]
-    z_all = list(z_cone) + z_cyl
-
-    rings = []
-    for z in z_all:
-        r = R_cylinder + max(0.0, (z_cc_visual - z)) * np.tan(alpha_rad)
-        rings.append(make_ring(z, r))
+    z_all = np.unique(np.r_[np.arange(z_low, z_max, dz), z_cc, z_max])
+    angles = np.linspace(0, 2 * np.pi, n_pts, endpoint=False)
+    rings = [[host_com + z * axis + _funnel_radius(z, z_cc, R_cylinder, alpha_deg)
+              * (np.cos(a) * e1 + np.sin(a) * e2) for a in angles] for z in z_all]
 
     cgo = [LINEWIDTH, 1.5, COLOR, 0.35, 0.35, 0.35, BEGIN, LINES]
     for pts in rings:
         for i in range(n_pts):
-            p1, p2 = pts[i], pts[(i + 1) % n_pts]
-            cgo += [VERTEX, float(p1[0]), float(p1[1]), float(p1[2]),
-                    VERTEX, float(p2[0]), float(p2[1]), float(p2[2])]
-    cgo.append(END)
-
-    step = max(1, n_pts // 8)
-    cgo += [BEGIN, LINES]
-    for k in range(0, n_pts, step):
+            cgo += [VERTEX, *map(float, pts[i]), VERTEX, *map(float, pts[(i + 1) % n_pts])]
+    for k in range(0, n_pts, max(1, n_pts // 8)):
         for i in range(len(rings) - 1):
-            p1, p2 = rings[i][k], rings[i + 1][k]
-            cgo += [VERTEX, float(p1[0]), float(p1[1]), float(p1[2]),
-                    VERTEX, float(p2[0]), float(p2[1]), float(p2[2])]
+            cgo += [VERTEX, *map(float, rings[i][k]), VERTEX, *map(float, rings[i + 1][k])]
     cgo.append(END)
-
     return cgo
+
+
+def _wall_disk_cgo(host_com, axis, z: float, radius: float, rgb, thickness: float = 0.3) -> list:
+    """Flat disk (thin CGO cylinder) for a wall at axial z (Å)."""
+    from pymol.cgo import CYLINDER
+
+    axis = np.asarray(axis, dtype=float) / np.linalg.norm(axis)
+    p1 = np.asarray(host_com, dtype=float) + (z - thickness / 2) * axis
+    p2 = p1 + thickness * axis
+    return [CYLINDER, *map(float, p1), *map(float, p2), float(radius), *rgb, *rgb]
+
 
 
 def write_funnel_pymol(
@@ -696,8 +684,9 @@ def write_funnel_pymol(
 ) -> str:
     """Create a standalone PyMOL PSE visualising the funnel potential geometry.
 
-    Shows the protein (cartoon), the funnel boundary (CGO wireframe) oriented along the
-    PCA-derived unbinding axis, an arrow for the axis, one sphere per milestone at the
+    Shows the protein (cartoon), the funnel boundary (CGO wireframe) from the lower
+    wall to the z_max cap, the two walls as disks (blue lower, red upper), an arrow
+    for the axis, one sphere per milestone at the
     ligand COM, and the sMD COM trajectory as dots coloured blue→red by progress.
 
     Args:
@@ -733,7 +722,7 @@ def write_funnel_pymol(
     com_traj = funnel_params["com_trajectory"].astype(float)
 
     z_max = funnel_params["z_max"].value_in_unit(openmmunit.angstrom)
-    extension = max(5.0, z_max - z_cc)
+    z_low = funnel_lower_wall_ang(funnel_params)
 
     # com_traj is guest_com - host_com; add the reference PDB's host COM to place it.
     u_ref_anchor = mda.Universe(str(Path(reference_pdb).resolve()))
@@ -753,21 +742,17 @@ def write_funnel_pymol(
     else:
         host_com_ref = prot_com_pdb
 
-    funnel_center = host_com_ref + com_traj[0]
-    z_offset = float(np.dot(com_traj[0], unbinding_axis))
-    z_offset = max(z_offset, 0.0)
+    funnel_cgo = _funnel_cgo(host_com_ref, unbinding_axis, z_low, z_cc, z_max,
+                             R_cylinder, alpha_deg)
+    walls_cgo = (_wall_disk_cgo(host_com_ref, unbinding_axis, z_low,
+                                _funnel_radius(z_low, z_cc, R_cylinder, alpha_deg), (0.2, 0.4, 0.9))
+                 + _wall_disk_cgo(host_com_ref, unbinding_axis, z_max, R_cylinder, (0.9, 0.3, 0.2)))
 
-    funnel_cgo = _funnel_cgo(
-        funnel_center, unbinding_axis, z_cc, R_cylinder, alpha_deg,
-        extension=extension, z_offset=z_offset,
-    )
-
-    z_cc_visual = z_cc - z_offset
-    arrow_mid = (funnel_center + z_cc_visual * unbinding_axis).tolist()
-    arrow_end = (funnel_center + (z_cc_visual + extension + 2.0) * unbinding_axis).tolist()
+    arrow_mid = (host_com_ref + z_cc * unbinding_axis).tolist()
+    arrow_end = (host_com_ref + (z_max + 2.0) * unbinding_axis).tolist()
     axis_cgo = [
         CYLINDER,
-        *funnel_center.tolist(), *arrow_mid,
+        *(host_com_ref + z_low * unbinding_axis).tolist(), *arrow_mid,
         0.25, 0.0, 0.8, 0.0, 0.0, 0.8, 0.0,
         CONE,
         *arrow_mid, *arrow_end,
@@ -841,6 +826,8 @@ def write_funnel_pymol(
             c.set("cartoon_transparency", 0.25, "protein")
 
             c.load_cgo(funnel_cgo, "funnel_boundary")
+            c.load_cgo(walls_cgo, "funnel_walls")
+            c.set("cgo_transparency", 0.5, "funnel_walls")
             c.load_cgo(axis_cgo, "unbinding_axis")
 
             for obj_name, ms_pdb, (r, g, b) in ms_pdb_data:
