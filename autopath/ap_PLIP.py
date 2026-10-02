@@ -218,7 +218,7 @@ class ProteinLigandAnalyzer:
             protein_sel: str = "protein",
             traj_slice: tuple = None,
             cutoff: float = 3.5,
-            fraction_persistence: float = 0.9,
+            fraction_persistence: float = 0.5,
             pdb_fname: str = None,
     ):
         """Identify persistent interfacial water molecules across a trajectory.
@@ -244,6 +244,8 @@ class ProteinLigandAnalyzer:
         fraction_persistence : float
             Minimum fraction of frames in which a water must be interfacial to be
             included in the returned set (e.g. 0.9 means present in >= 90% of frames).
+            Interfacial water exchanges fast enough that 0.9 can return nothing at
+            all; 0.5 keeps the structural core without admitting bulk.
         pdb_fname : str or None
             If provided, write a PDB containing the protein, ligand, and persistent
             waters from the last trajectory frame to this path.
@@ -293,11 +295,17 @@ class ProteinLigandAnalyzer:
         # print(counts)
         
         if pdb_fname is not None:
-            keep_water_str = " ".join(str(r) for r in persistent.keys())
-            persistent_water_sel = f"({WATER_SEL}) and resid {keep_water_str}"
-
-            # Final cleaned selection
-            final_sel_str = f"({protein_sel}) or ({ligand_sel}) or ({persistent_water_sel})"
+            parts = [f"({protein_sel})", f"({ligand_sel})"]
+            if persistent:
+                keep_water_str = " ".join(str(r) for r in persistent.keys())
+                parts.append(f"(({WATER_SEL}) and resid {keep_water_str})")
+            else:
+                # An empty resid list makes the selection string unparseable, and a
+                # site with no long-lived water is a normal result, not an error.
+                logger.warning(
+                    "No water reached %.2f persistence; writing %s without waters.",
+                    fraction_persistence, pdb_fname)
+            final_sel_str = " or ".join(parts)
 
             cleaned = u.select_atoms(final_sel_str)
 
