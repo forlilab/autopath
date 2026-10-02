@@ -410,10 +410,11 @@ class MetadynamicsMD:
             np.save(os.path.join(self.out_dir, f"FUNNELZ_{run_id}.npy"), np.array(funnelz_list))
 
         max_cv = float(colvar_array[:, 0].max())
-        _half = resolved[0].grid_min + 0.5 * (resolved[0].grid_max - resolved[0].grid_min)
+        _lo = resolved[0].bound_end
+        _half = _lo + 0.5 * (resolved[0].grid_max - _lo)
         if max_cv < _half:
             logger.warning(
-                f"Walker {run_id}: CV never exceeded the middle of its grid "
+                f"Walker {run_id}: CV never got halfway from its bound end to grid_max "
                 f"({_half:.3f}; max={max_cv:.3f}). "
                 "The ligand did not reach the unbound state — this walker will distort the FE profile. "
                 "Consider increasing mMD_time or mMD_hill_height."
@@ -432,6 +433,7 @@ class MetadynamicsMD:
                     grid_min=resolved[0].grid_min,
                     grid_max=resolved[0].grid_max,
                     cv_length_per_unit_ang=resolved[0].cv_length_per_unit_ang,
+                    cv_origin=resolved[0].bound_end,
                 )
                 rw_path = os.path.join(self.out_dir, f"FE_{run_id}_rw.npy")
                 np.save(rw_path, result["fe_corrected"])

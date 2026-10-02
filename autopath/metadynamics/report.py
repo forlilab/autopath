@@ -178,19 +178,19 @@ def unit_ang():
     return unit.angstrom
 
 
-def _correct(fes_kj, fp, temperature, grid, cv_len, reference_range=None):
+def _correct(fes_kj, fp, temperature, grid, cv_len, reference_range=None, origin=None):
     if fp is None:
         return None, "no funnel: standard-state correction needs the funnel cylinder"
     try:
         return correct_fe_for_funnel(fes_kj, fp, temperature=temperature,
                                      grid_min=grid[0], grid_max=grid[1],
                                      cv_length_per_unit_ang=cv_len, verbose=False,
-                                     reference_range=reference_range), None
+                                     reference_range=reference_range, cv_origin=origin), None
     except Exception as exc:                       # surface not interpretable yet
         return None, str(exc)
 
 
-def _history(snapshots, fp, temperature, grid, cv_len, reference_range=None):
+def _history(snapshots, fp, temperature, grid, cv_len, reference_range=None, origin=None):
     dG = np.full(len(snapshots), np.nan)
     ok = np.zeros(len(snapshots), bool)
     if fp is None:                             # no correction possible: track the well depth
@@ -203,7 +203,7 @@ def _history(snapshots, fp, temperature, grid, cv_len, reference_range=None):
             r = correct_fe_for_funnel(fe, fp, temperature=temperature, grid_min=grid[0],
                                       grid_max=grid[1], cv_length_per_unit_ang=cv_len,
                                       strict=False, verbose=False,
-                                      reference_range=reference_range)
+                                      reference_range=reference_range, cv_origin=origin)
             dG[i], ok[i] = r["dG_bind_std_kj_mol"], r["bound_state_sampled"]
         except Exception:
             pass
@@ -259,7 +259,7 @@ def _aggregate_concurrent(hist_lists):
 
 
 def build_estimates(out_dir, mode, fp, temperature, bias_factor, grid, cv_len,
-                    reference_range=None) -> list:
+                    reference_range=None, origin=None) -> list:
     gamma = float(bias_factor)
     estimates = []
     if mode.layout == "isolated":
@@ -271,10 +271,10 @@ def build_estimates(out_dir, mode, fp, temperature, bias_factor, grid, cv_len,
             if not biases:
                 continue
             fes = -(gamma / (gamma - 1.0)) * np.sum(biases, axis=0)
-            corr, err = _correct(fes, fp, temperature, grid, cv_len, reference_range)
+            corr, err = _correct(fes, fp, temperature, grid, cv_len, reference_range, origin)
             hists = _hist_files(out_dir, rid)
             t, snaps = _end_to_end([hists])
-            dG, ok = _history(snaps, fp, temperature, grid, cv_len, reference_range)
+            dG, ok = _history(snaps, fp, temperature, grid, cv_len, reference_range, origin)
             estimates.append(Estimate(rid, fes, corr, err, t, dG, ok, snaps, complete=bool(hists)))
         return estimates
 
@@ -285,7 +285,7 @@ def build_estimates(out_dir, mode, fp, temperature, bias_factor, grid, cv_len,
     if not biases:
         return estimates
     fes = -(gamma / (gamma - 1.0)) * np.sum(biases, axis=0)
-    corr, err = _correct(fes, fp, temperature, grid, cv_len, reference_range)
+    corr, err = _correct(fes, fp, temperature, grid, cv_len, reference_range, origin)
     hist_lists = [_hist_files(out_dir, r) for r in mode.run_ids]
     if mode.layout == "shared" and mode.schedule == "concurrent":
         t, snaps = _aggregate_concurrent(hist_lists)
@@ -293,7 +293,7 @@ def build_estimates(out_dir, mode, fp, temperature, bias_factor, grid, cv_len,
         # sequential retries run after other walkers, so order files, not walkers
         order = sorted(([f] for h in hist_lists for f in h), key=lambda h: _wall_window(h[0])[0])
         t, snaps = _end_to_end(order)
-    dG, ok = _history(snaps, fp, temperature, grid, cv_len, reference_range)
+    dG, ok = _history(snaps, fp, temperature, grid, cv_len, reference_range, origin)
     label = mode.run_ids[0] if mode.layout == "single" and mode.run_ids else "shared bias"
     estimates.append(Estimate(label, fes, corr, err, t, dG, ok, snaps,
                               complete=all(bool(h) for h in hist_lists)))
@@ -352,15 +352,16 @@ def _styled(fn):
     return wrapper
 
 
-def _cv_to_ang(cv_len, grid):
+def _cv_to_ang(cv_len, origin):
     if not cv_len:
         return None
-    return (lambda x: (np.asarray(x) - grid[0]) * cv_len,
-            lambda a: np.asarray(a) / cv_len + grid[0])
+    return (lambda x: (np.asarray(x) - origin) * cv_len,
+            lambda a: np.asarray(a) / cv_len + origin)
 
 
 @_styled
-def plot_fes(estimates, mode, grid, cv_name, cv_len, verdict, out_path, corrected=True):
+def plot_fes(estimates, mode, grid, cv_name, cv_len, verdict, out_path, corrected=True,
+             origin=None):
     fig, ax = plt.subplots(figsize=(8.5, 5.2))
     axis = None
     colors = plt.cm.tab10(np.linspace(0, 1, max(len(estimates), 1)))
@@ -395,7 +396,7 @@ def plot_fes(estimates, mode, grid, cv_name, cv_len, verdict, out_path, correcte
     ax.axhline(0, color="0.4", lw=0.7, ls=":")
     ax.set_xlabel(cv_name)
     ax.set_ylabel("ΔG° (kJ/mol)" if corrected else "FES (kJ/mol), uncorrected")
-    conv = _cv_to_ang(cv_len, grid)
+    conv = _cv_to_ang(cv_len, grid[0] if origin is None else origin)
     if conv is not None:
         sec = ax.secondary_xaxis("top", functions=conv)
         sec.set_xlabel("distance along the CV (Å)")
@@ -543,6 +544,7 @@ def report(out_dir, temperature, bias_factor, grid_min=0.0, grid_max=1.0,
            cv_name="CV", cv_length_per_unit_ang=None, out_prefix=None,
            funnel_params=None, cv_is_funnel_z=False, hill_width=None) -> dict:
     grid = (float(grid_min), float(grid_max))
+    origin = 0.0 if cv_is_funnel_z else grid[0]        # funnel z may extend below the site
     out_prefix = out_prefix or os.path.join(out_dir, "metad")
     fp_path = os.path.join(out_dir, "funnel_params.npz")
     fp = funnel_params if funnel_params is not None else (
@@ -573,7 +575,8 @@ def report(out_dir, temperature, bias_factor, grid_min=0.0, grid_max=1.0,
                         *ref_range)
     traces = walker_traces(out_dir, mode.run_ids, basins, grid, cv_is_funnel_z)
     estimates = build_estimates(out_dir, mode, fp, temperature, bias_factor, grid,
-                                cv_length_per_unit_ang, reference_range=ref_range)
+                                cv_length_per_unit_ang, reference_range=ref_range,
+                                origin=origin)
 
     ma = MetadynamicsAnalysis.__new__(MetadynamicsAnalysis)
     walker_stats = {t.run_id: t.stats for t in traces}
@@ -613,7 +616,7 @@ def report(out_dir, temperature, bias_factor, grid_min=0.0, grid_max=1.0,
 
     files = {
         "fes": plot_fes(estimates, mode, grid, cv_name, cv_length_per_unit_ang, verdict,
-                        f"{out_prefix}_FES.png", corrected=fp is not None),
+                        f"{out_prefix}_FES.png", corrected=fp is not None, origin=origin),
         "colvar": plot_colvar(traces, mode, basins, grid, cv_name, f"{out_prefix}_COLVAR.png",
                               z_max_ang=z_max),
         "convergence": plot_convergence(estimates, mode, grid, float(bias_factor),

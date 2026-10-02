@@ -1412,11 +1412,15 @@ class AutoPath:
                             else:
                                 # Bias the funnel axis coordinate itself: it keeps changing up to the
                                 # cap and is the length Eq. 15 integrates over, so no path extension.
+                                # The funnel is symmetric in z, so the grid spans the mirrored
+                                # cone too: a clamp at z=0 would be a hard edge at the bound site.
+                                _zlo = -_zcc
                                 metad_cv = funnel_z_cv(
                                     funnel_params["host_index"], funnel_params["guest_index"],
                                     funnel_params["unbinding_axis"],
-                                    grid_min=0.0, grid_max=_zmax / 10.0,
+                                    grid_min=_zlo / 10.0, grid_max=_zmax / 10.0,
                                     hill_width=self.mMD_hill_width,
+                                    grid_points=int(round(124 * (_zmax - _zlo) / _zmax)) + 1,
                                 )
                                 _pos0 = read_positions(path_milestones[0]) * 10.0
                                 _hm = [int(i) for i in funnel_params["host_index"]]
@@ -1428,12 +1432,12 @@ class AutoPath:
                                     np.average(_pos0[_gm], axis=0, weights=_w(_gm))
                                     - np.average(_pos0[_hm], axis=0, weights=_w(_hm)), _ax0 / np.linalg.norm(_ax0)))
                                 logger.info(
-                                    "Biasing the funnel axis coordinate z on [0, %.2f] A; bound milestone at "
-                                    "z=%.2f A.", _zmax, _z_bound)
+                                    "Biasing the funnel axis coordinate z on [%.2f, %.2f] A; bound milestone at "
+                                    "z=%.2f A.", _zlo, _zmax, _z_bound)
                                 if _z_bound > 0.2 * _zmax:
                                     logger.warning(
-                                        "The bound milestone (z=%.2f A) lies beyond the first 20%% of the CV "
-                                        "grid, which the analysis treats as the bound basin.", _z_bound)
+                                        "The bound milestone (z=%.2f A) lies beyond 20%% of the way to the cap, "
+                                        "which the analysis treats as the bound basin.", _z_bound)
                             funnel_force = create_funnel_force_from_trajectory_analysis(funnel_params)
                             logger.info("Funnel potential successfully generated from trajectories")
 
@@ -1523,14 +1527,14 @@ class AutoPath:
                         logger.error(f"Error during WTMetaD for {milestone_name}: {e}")
                         continue
 
-                # Retry walkers that never passed the CV grid midpoint, on the accumulated
+                # Retry walkers that never got halfway from the bound end, on the accumulated
                 # bias (shared, or the walker's own in isolated mode).
                 stuck_walkers = [
                     (run_id, state_xml, xml)
                     for run_id, (state_xml, xml) in walker_run_info.items()
                     if os.path.exists(f"{group_out_dir}/COLVAR_{run_id}.npy")
                     and float(np.load(f"{group_out_dir}/COLVAR_{run_id}.npy")[:, 0].max())
-                    < metad_cv.grid_min + 0.5 * (metad_cv.grid_max - metad_cv.grid_min)
+                    < metad_cv.bound_end + 0.5 * (metad_cv.grid_max - metad_cv.bound_end)
                 ]
                 if stuck_walkers:
                     logger.info(

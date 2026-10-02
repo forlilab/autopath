@@ -46,6 +46,8 @@ class CVSpec:
     name: str = "cv"
     # Angstrom per CV unit; the funnel correction integrates in length units.
     cv_length_per_unit_ang: Optional[float] = None
+    # Bound end of the CV, if the grid extends past it (default: grid_min).
+    origin: Optional[float] = None
     _factory: Optional[Callable] = field(default=None, repr=False)
 
     def is_deferred(self) -> bool:
@@ -66,7 +68,12 @@ class CVSpec:
             periodic=self.periodic,
             name=self.name,
             cv_length_per_unit_ang=self.cv_length_per_unit_ang,
+            origin=self.origin,
         )
+
+    @property
+    def bound_end(self) -> float:
+        return self.grid_min if self.origin is None else self.origin
 
 
 # Some example CVSpecs for common CV types
@@ -117,7 +124,8 @@ def funnel_z_cv(
 
     Same coordinate as the funnel restraint, so the FES is in the length
     coordinate Limongelli 2013 Eq. 15 integrates over. Clamped to the grid
-    because OpenMM's bias is zero outside it.
+    because OpenMM's bias is zero outside it. z = 0 is the bound end; set
+    grid_min < 0 so the bias also acts below the host COM.
     """
     n = np.asarray(axis, dtype=float)
     n = n / np.linalg.norm(n)
@@ -143,6 +151,7 @@ def funnel_z_cv(
         grid_points=grid_points,
         name="funnel_z",
         cv_length_per_unit_ang=10.0,
+        origin=0.0,
         _factory=factory,
     )
 

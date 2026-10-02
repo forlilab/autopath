@@ -363,6 +363,7 @@ def correct_fe_for_funnel(
     strict: bool = True,
     verbose: bool = True,
     reference_range: tuple = None,
+    cv_origin: float = None,
 ) -> dict:
     """Apply the Limongelli 2013 standard-state correction to a funnel metadynamics FE profile.
 
@@ -392,6 +393,9 @@ def correct_fe_for_funnel(
     reference_range : tuple, optional
         CV window for the unbound zero. Without it the last ``n_plateau_points`` are
         used, which sit on the hill-deficit artifact at a hard CV edge.
+    cv_origin : float, optional
+        Bound end of the CV when the grid extends below it (funnel z: 0).
+        Default ``grid_min``.
 
     Returns
     -------
@@ -408,7 +412,8 @@ def correct_fe_for_funnel(
 
     Notes
     -----
-    The bound site is the first 20 % of the CV grid, so an over-biased unbound
+    The bound site is the grid up to 20 % of the way from ``cv_origin`` to
+    ``grid_max``, so an over-biased unbound
     region cannot pass as the binding minimum; the site must sit ≥10 kJ/mol below
     the unbound reference to count as sampled.
     """
@@ -447,15 +452,17 @@ def correct_fe_for_funnel(
 
     fe_norm = fe - plateau_val
 
-    # First 20 % of CV = bound basin.
-    bound_bins = max(1, int(0.20 * len(fe_norm)))
+    # Bound basin: up to 20 % of the way from the origin to grid_max.
+    origin = grid_min if cv_origin is None else float(cv_origin)
+    site_hi = origin + 0.20 * (grid_max - origin)
+    bound_bins = max(1, int((site_hi - grid_min) / (grid_max - grid_min) * len(fe_norm) + 1e-9))
 
     bound_depth = float(fe_norm[:bound_bins].min())
     bound_state_sampled = bound_depth <= -10.0
     if not bound_state_sampled:
         sign = "above" if bound_depth >= 0 else "only"
         msg = (
-            f"Bound state not sampled: the FES in the bound basin (s < 0.20) "
+            f"Bound state not sampled: the FES in the bound basin (CV < {site_hi:.3g}) "
             f"sits {sign} {bound_depth:.1f} kJ/mol relative to the unbound reference. "
             "The walker may not have visited the binding site; ΔG would be meaningless."
         )

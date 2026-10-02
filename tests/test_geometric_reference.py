@@ -58,3 +58,31 @@ def test_reference_window_stays_clear_of_the_cv_edge():
     lo, hi = R.reference_range_from_funnel(_fp(), grid=(0.0, 1.0), cv_is_funnel_z=False,
                                            sigma_ang=1.0, hill_width_cv=0.05)
     assert hi <= 1.0 - 3 * 0.05 + 1e-9
+
+
+def test_funnel_z_grid_below_zero_keeps_the_bound_site():
+    """Extending the funnel z grid below 0 leaves ΔG unchanged once the origin is given."""
+    from autopath.metadynamics.CV import funnel_z_cv
+    dz = 2.6 / 124
+    z_old = np.linspace(0.0, 2.6, 125)
+    z_new = np.linspace(-1.4, 2.6, int(round(4.0 / dz)) + 1)
+
+    def fes(z):                                   # well at 0.2 nm, plateau 0, no weight below 0
+        return -50.0 * np.exp(-((z - 0.2) / 0.08) ** 2) + 60.0 * (z < -0.05)
+
+    kw = dict(temperature=300.0, cv_length_per_unit_ang=10.0, reference_range=(1.45, 2.3),
+              verbose=False)
+    ref = correct_fe_for_funnel(fes(z_old), _fp(), grid_min=0.0, grid_max=2.6, **kw)
+    new = correct_fe_for_funnel(fes(z_new), _fp(), grid_min=-1.4, grid_max=2.6, cv_origin=0.0, **kw)
+    assert new["dG_bind_std_kj_mol"] == pytest.approx(ref["dG_bind_std_kj_mol"], abs=0.2)
+    assert new["site_range"][1] == pytest.approx(0.52, abs=dz)
+    with pytest.raises(ValueError, match="Bound state not sampled"):
+        correct_fe_for_funnel(fes(z_new), _fp(), grid_min=-1.4, grid_max=2.6, **kw)
+    spec = funnel_z_cv([0], [1], [0, 0, 1], grid_min=-1.4, grid_max=2.6)
+    assert spec.bound_end == 0.0 and spec.resolve(None, 2, None).bound_end == 0.0
+
+
+def test_reference_range_ignores_a_funnel_z_grid_below_zero():
+    lo, hi = R.reference_range_from_funnel(_fp(), grid=(-1.4, 2.6), cv_is_funnel_z=True,
+                                           sigma_ang=1.0)
+    assert (lo, hi) == pytest.approx((1.4, 2.3))

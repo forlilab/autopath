@@ -59,7 +59,7 @@ def main():
                     help="hill width in CV units (overrides the matched-width default)")
     ap.add_argument("--cv", choices=["path", "funnel_z", "funnel_z_unclamped"], default="path",
                     help="path: progress along the milestones, extended to the funnel "
-                         "cap; funnel_z: the funnel axis coordinate on [0, z_max]")
+                         "cap; funnel_z: the funnel axis coordinate on [-z_cc, z_max]")
     args = ap.parse_args()
 
     base = args.base
@@ -134,9 +134,11 @@ def main():
     else:
         # same physical hill width as the path CV
         width_nm = args.hill_width if args.hill_width is not None else 0.05 * span / 10.0
+        z_lo = -float(params["z_cc"].value_in_unit(ommunit.angstrom))
         cv = funnel_z_cv(params["host_index"], params["guest_index"],
-                         params["unbinding_axis"], grid_min=0.0, grid_max=z_max / 10.0,
-                         hill_width=width_nm)
+                         params["unbinding_axis"], grid_min=z_lo / 10.0, grid_max=z_max / 10.0,
+                         hill_width=width_nm,
+                         grid_points=int(round(124 * (z_max - z_lo) / z_max)) + 1)
         if args.cv == "funnel_z_unclamped":
             # unclamped CV, can leave the bias grid
             import cvpack
@@ -149,8 +151,8 @@ def main():
                 [_h, _g], weighByMass=True, pbc=False,
                 fz_nx=[float(_n[0])], fz_ny=[float(_n[1])], fz_nz=[float(_n[2])])
             log.info("funnel z NOT clamped (experiment arm)")
-        log.info("CV: funnel z on [0, %.2f] Å, hills %.3f nm (= the path arm's %.2f Å)",
-                 z_max, width_nm, 0.05 * span)
+        log.info("CV: funnel z on [%.2f, %.2f] Å, hills %.3f nm (= the path arm's %.2f Å)",
+                 z_lo, z_max, width_nm, 0.05 * span)
 
     metad = MetadynamicsMD(topology=topology, ligand_atoms=lig,
                            pocket_atoms=pocket, restrained_atoms=None,
