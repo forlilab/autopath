@@ -35,6 +35,7 @@ from autopath.metadynamics import (
     com_cv,
     pathCV_cv,
     funnel_z_cv,
+    FUNNEL_Z_BELOW_ORIGIN_ANG,
     write_metad_preseed,
     generate_funnel_parameters_from_trajectory,
     create_funnel_force_from_trajectory_analysis,
@@ -1412,9 +1413,8 @@ class AutoPath:
                             else:
                                 # Bias the funnel axis coordinate itself: it keeps changing up to the
                                 # cap and is the length Eq. 15 integrates over, so no path extension.
-                                # The funnel is symmetric in z, so the grid spans the mirrored
-                                # cone too: a clamp at z=0 would be a hard edge at the bound site.
-                                _zlo = -_zcc
+                                # Extend below z=0 so the clamp is not a hard edge at the bound site.
+                                _zlo = -FUNNEL_Z_BELOW_ORIGIN_ANG
                                 metad_cv = funnel_z_cv(
                                     funnel_params["host_index"], funnel_params["guest_index"],
                                     funnel_params["unbinding_axis"],

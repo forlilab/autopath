@@ -360,7 +360,7 @@ def _cv_to_ang(cv_len, origin):
 
 
 @_styled
-def plot_fes(estimates, mode, grid, cv_name, cv_len, verdict, out_path, corrected=True,
+def plot_fes(estimates, mode, grid, cv_name, cv_len, out_path, corrected=True,
              origin=None):
     fig, ax = plt.subplots(figsize=(8.5, 5.2))
     axis = None
@@ -406,10 +406,7 @@ def plot_fes(estimates, mode, grid, cv_name, cv_len, verdict, out_path, correcte
         title += f"\nΔG°_b = {dg:.1f} kJ/mol ({dg * KJ_TO_KCAL:.1f} kcal/mol)"
     ax.set_title(title)
     ax.legend(loc="lower right", framealpha=0.9)
-    import textwrap
-    fig.tight_layout(rect=(0, 0.08, 1, 1))
-    fig.text(0.01, 0.01, textwrap.fill(verdict, 130), fontsize=7.5, va="bottom",
-             color="darkgreen" if verdict == "converged" else "firebrick")
+    fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
     return out_path
@@ -615,7 +612,7 @@ def report(out_dir, temperature, bias_factor, grid_min=0.0, grid_max=1.0,
     pKd = -dG_main / kT_log10 if dG_main is not None else None
 
     files = {
-        "fes": plot_fes(estimates, mode, grid, cv_name, cv_length_per_unit_ang, verdict,
+        "fes": plot_fes(estimates, mode, grid, cv_name, cv_length_per_unit_ang,
                         f"{out_prefix}_FES.png", corrected=fp is not None, origin=origin),
         "colvar": plot_colvar(traces, mode, basins, grid, cv_name, f"{out_prefix}_COLVAR.png",
                               z_max_ang=z_max),

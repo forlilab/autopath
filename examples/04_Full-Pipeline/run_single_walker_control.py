@@ -25,7 +25,7 @@ import numpy as np
 from openmm import unit as ommunit
 
 from autopath.clustering import read_positions
-from autopath.metadynamics.CV import pathCV_cv, funnel_z_cv
+from autopath.metadynamics.CV import FUNNEL_Z_BELOW_ORIGIN_ANG, pathCV_cv, funnel_z_cv
 from autopath.metadynamics.Funnel import (create_funnel_force_from_trajectory_analysis,
                                           load_funnel_params, com_distance_at_z)
 
@@ -59,7 +59,7 @@ def main():
                     help="hill width in CV units (overrides the matched-width default)")
     ap.add_argument("--cv", choices=["path", "funnel_z", "funnel_z_unclamped"], default="path",
                     help="path: progress along the milestones, extended to the funnel "
-                         "cap; funnel_z: the funnel axis coordinate on [-z_cc, z_max]")
+                         "cap; funnel_z: the funnel axis coordinate on [-8 Å, z_max]")
     args = ap.parse_args()
 
     base = args.base
@@ -134,7 +134,7 @@ def main():
     else:
         # same physical hill width as the path CV
         width_nm = args.hill_width if args.hill_width is not None else 0.05 * span / 10.0
-        z_lo = -float(params["z_cc"].value_in_unit(ommunit.angstrom))
+        z_lo = -FUNNEL_Z_BELOW_ORIGIN_ANG
         cv = funnel_z_cv(params["host_index"], params["guest_index"],
                          params["unbinding_axis"], grid_min=z_lo / 10.0, grid_max=z_max / 10.0,
                          hill_width=width_nm,

@@ -111,6 +111,10 @@ def com_cv(
     )
 
 
+# Funnel z grid extends this far below the host COM (Å).
+FUNNEL_Z_BELOW_ORIGIN_ANG = 8.0
+
+
 def funnel_z_cv(
     host_atoms: list[int],
     guest_atoms: list[int],
