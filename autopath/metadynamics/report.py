@@ -21,7 +21,7 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 
-from autopath.metadynamics.Analysis import MetadynamicsAnalysis, correct_fe_for_funnel
+from autopath.metadynamics.Analysis import MetadynamicsAnalysis, bound_site_bins, correct_fe_for_funnel
 from autopath.metadynamics.Funnel import load_funnel_params, funnel_basins
 
 logger = logging.getLogger("autopath")
@@ -112,10 +112,10 @@ def _latest_bias(directory: str) -> list:
     return [np.load(p) for _, p in latest.values()]
 
 
-def _well_depth(fes_kj, n_tail=10, bound_frac=0.20):
-    """FES minimum in the bound part of the grid relative to its unbound end (kJ/mol)."""
+def _well_depth(fes_kj, grid=(0.0, 1.0), origin=None, n_tail=10):
+    """FES minimum in the bound site relative to the unbound end of the grid (kJ/mol)."""
     fe = np.asarray(fes_kj, float)
-    return float((fe - fe[-n_tail:].mean())[:max(1, int(bound_frac * fe.size))].min())
+    return float((fe - fe[-n_tail:].mean())[:bound_site_bins(*grid, fe.size, origin)].min())
 
 
 def reference_range_from_funnel(fp, grid, cv_is_funnel_z, sigma_ang, out_dir=None,
@@ -195,7 +195,7 @@ def _history(snapshots, fp, temperature, grid, cv_len, reference_range=None, ori
     ok = np.zeros(len(snapshots), bool)
     if fp is None:                             # no correction possible: track the well depth
         for i, fe in enumerate(snapshots):
-            dG[i] = _well_depth(fe)
+            dG[i] = _well_depth(fe, grid, origin)
             ok[i] = dG[i] <= -10.0
         return dG, ok
     for i, fe in enumerate(snapshots):
@@ -382,7 +382,7 @@ def plot_fes(estimates, mode, grid, cv_name, cv_len, verdict, out_path, correcte
         else:
             raw = e.fes_kj - e.fes_kj[-10:].mean()
             lab = (f"{e.label}: correction refused (raw FES)" if corrected
-                   else f"{e.label}: well depth = {_well_depth(e.fes_kj):.1f} kJ/mol")
+                   else f"{e.label}: well depth = {_well_depth(e.fes_kj, grid, origin):.1f} kJ/mol")
             ax.plot(axis, raw, color=colors[k] if many else "k", ls="--" if corrected else "-",
                     lw=1.0 if corrected else 2.0, label=lab)
     good = [e.dG for e in estimates if e.dG is not None and e.complete]
@@ -638,7 +638,7 @@ def report(out_dir, temperature, bias_factor, grid_min=0.0, grid_max=1.0,
         "dG_bind_std_kj": dG_main,
         "funnel": fp is not None,
         "reference_range": ref_range,
-        "well_depth_kj": [(e.label, _well_depth(e.fes_kj)) for e in estimates],
+        "well_depth_kj": [(e.label, _well_depth(e.fes_kj, grid, origin)) for e in estimates],
         "dG_bind_std_sd_kj": dG_sd,
         "dG_bind_std_kcal": dG_main * KJ_TO_KCAL if dG_main is not None else None,
         "pKd": pKd,

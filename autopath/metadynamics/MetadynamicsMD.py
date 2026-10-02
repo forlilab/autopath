@@ -453,7 +453,8 @@ class MetadynamicsMD:
             plot_FE(self.out_dir, s.grid_min, s.grid_max, s.grid_points, s.name)
             if funnel_params is not None:
                 plot_FE_rw(self.out_dir, s.grid_min, s.grid_max, s.grid_points, s.name,
-                           temperature=self.temperature.value_in_unit(openmmunit.kelvin))
+                           temperature=self.temperature.value_in_unit(openmmunit.kelvin),
+                           origin=s.bound_end)
         else:
             a, b = resolved[0], resolved[1]
             plot_colvar_2D(self.out_dir, a.name, b.name)

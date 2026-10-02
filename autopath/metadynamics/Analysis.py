@@ -160,10 +160,18 @@ def plot_FE(out_dir, x_min, x_max, grid_points, colvar_name):
     return
 
 
-def plot_FE_rw(out_dir, x_min, x_max, grid_points, colvar_name, temperature: float = 298.15):
+def bound_site_bins(grid_min, grid_max, n_points, origin=None, frac=0.20) -> int:
+    """Grid points from grid_min up to ``frac`` of the way from the origin to grid_max."""
+    origin = grid_min if origin is None else float(origin)
+    site_hi = origin + frac * (grid_max - origin)
+    return max(1, int((site_hi - grid_min) / (grid_max - grid_min) * n_points + 1e-9))
+
+
+def plot_FE_rw(out_dir, x_min, x_max, grid_points, colvar_name, temperature: float = 298.15,
+               origin=None):
     """Plot standard-state-corrected FE profiles (FE_*_rw.npy).
 
-    ΔG°_b per walker is the minimum over the first 20 % of the CV.
+    ΔG°_b per walker is the minimum over the bound site (see ``bound_site_bins``).
 
     Parameters
     ----------
@@ -177,6 +185,8 @@ def plot_FE_rw(out_dir, x_min, x_max, grid_points, colvar_name, temperature: flo
         Label for the CV axis (e.g. ``"PathCV_progress"``).
     temperature : float
         Simulation temperature in K used to convert ΔG to pKd (default 298.15 K).
+    origin : float, optional
+        Bound end of the CV when the grid extends below it (default ``x_min``).
 
     Output
     ------
@@ -190,7 +200,7 @@ def plot_FE_rw(out_dir, x_min, x_max, grid_points, colvar_name, temperature: flo
     if not files:
         return
 
-    bound_bins = max(1, int(0.20 * grid_points))
+    bound_bins = bound_site_bins(x_min, x_max, grid_points, origin)
     kT_log10 = 8.314e-3 * temperature * np.log(10)
     best_dG, best_pKd = None, None
 
@@ -229,8 +239,9 @@ def plot_FE_rw(out_dir, x_min, x_max, grid_points, colvar_name, temperature: flo
     ax.set_ylabel("ΔG°_b (kcal/mol)")
     ax.set_xlabel(colvar_name)
     ax.legend(loc="upper right", fontsize=8, framealpha=0.85)
-    ax.set_title(f"FE standard-state corrected — {sys_name}   "
-                 f"ΔG°_b ≈ {best_dG:.1f} kcal/mol  |  pKd ≈ {best_pKd:.2f}")
+    ax.set_title(f"FE standard-state corrected — {sys_name}   " + (
+        f"ΔG°_b ≈ {best_dG:.1f} kcal/mol  |  pKd ≈ {best_pKd:.2f}" if best_dG is not None
+        else "no walker resolved the bound site"))
     plt.tight_layout()
     plt.suptitle("Quick look (per walker, provisional) — final: *_FES / *_COLVAR / *_convergence.png", fontsize=8)
     plt.savefig(f"{out_dir}/{sys_name}_quicklook_FE_rw.png")
@@ -455,7 +466,7 @@ def correct_fe_for_funnel(
     # Bound basin: up to 20 % of the way from the origin to grid_max.
     origin = grid_min if cv_origin is None else float(cv_origin)
     site_hi = origin + 0.20 * (grid_max - origin)
-    bound_bins = max(1, int((site_hi - grid_min) / (grid_max - grid_min) * len(fe_norm) + 1e-9))
+    bound_bins = bound_site_bins(grid_min, grid_max, len(fe_norm), origin)
 
     bound_depth = float(fe_norm[:bound_bins].min())
     bound_state_sampled = bound_depth <= -10.0
