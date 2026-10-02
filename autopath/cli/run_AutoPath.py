@@ -155,7 +155,6 @@ def main():
             milestone_mode=config.milestone_mode,
             milestone_min_frame_separation=config.milestone_min_frame_separation,
             n_milestones=config.n_milestones,
-            relax_steps=config.relax_steps,
             # Metadynamics
             run_metadynamics=config.run_metadynamics,
             mMD_use_funnel_potential=config.mMD_use_funnel_potential,

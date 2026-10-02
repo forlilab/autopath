@@ -221,7 +221,6 @@ AutoPath configuration files use a nested JSON structure: each top-level key is 
 | `extract_milestones` | bool | `true` | Extract representative frames from sMD trajectories as metadynamics starting points |
 | `n_milestones` | int | `5` | Number of milestones to extract per path |
 | `milestone_mode` | str | `"all_medoids"` | Extraction strategy: `"all_medoids"` (pool all path medoids) or `"per_path"` |
-| `relax_steps` | int | `25000` | MD steps for milestone relaxation before metadynamics launch |
 
 **`metadynamics`**
 

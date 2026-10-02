@@ -51,8 +51,7 @@
         "extract_milestones": true,
         "milestone_mode": "per_path",
         "milestone_min_frame_separation": 0,
-        "n_milestones": 3,
-        "relax_steps": 25000
+        "n_milestones": 3
     },
     "metadynamics": {
         "run_metadynamics": true,

@@ -78,7 +78,6 @@ class Config(object):
         milestone_mode: str = "all_medoids",  # "per_path" or "all_medoids"
         milestone_min_frame_separation: int = 0,
         n_milestones: int = 5,
-        relax_steps: int = 25000,
         run_metadynamics: bool = True,
         mMD_use_funnel_potential: bool = False,
         mMD_bias_factor: int = 15,
@@ -307,9 +306,6 @@ class Config(object):
         n_milestones : int, optional
             Number of milestones to extract per path (or in total for
             ``"all_medoids"`` mode).  Default ``5``.
-        relax_steps : int, optional
-            Number of MD steps for milestone relaxation before metadynamics.
-            Default ``25000``.
 
         Metadynamics (mMD)
         ~~~~~~~~~~~~~~~~~~
@@ -420,7 +416,6 @@ class Config(object):
         self.milestone_mode = milestone_mode
         self.milestone_min_frame_separation = milestone_min_frame_separation
         self.n_milestones = n_milestones
-        self.relax_steps = relax_steps
 
         # Metadynamics
         self.run_metadynamics = run_metadynamics

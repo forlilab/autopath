@@ -160,7 +160,7 @@ class AutoPath:
         ``cluster_across_speeds``, ``sMD_min_replicas_per_path``
     Milestone extraction
         ``extract_milestones``, ``milestone_mode``,
-        ``milestone_min_frame_separation``, ``n_milestones``, ``relax_steps``
+        ``milestone_min_frame_separation``, ``n_milestones``
     Metadynamics
         ``run_metadynamics``, ``mMD_use_funnel_potential``,
         ``mMD_bias_factor``, ``mMD_bias_frequency``, ``mMD_hill_height``,
@@ -267,7 +267,6 @@ class AutoPath:
         milestone_mode: str = "all_medoids",  # "per_path" or "all_medoids"
         milestone_min_frame_separation: int = 0,
         n_milestones: int = 5,
-        relax_steps: int = 25000,
         run_metadynamics: bool = True,
         mMD_use_funnel_potential: bool = False,
         mMD_bias_factor: int = 15,
@@ -353,7 +352,6 @@ class AutoPath:
         self.milestone_mode = milestone_mode
         self.milestone_min_frame_separation = milestone_min_frame_separation
         self.n_milestones = n_milestones
-        self.relax_steps = relax_steps
         # Metadynamics
         self.run_metadynamics = run_metadynamics
         self.mMD_use_funnel_potential = mMD_use_funnel_potential
