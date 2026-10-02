@@ -79,10 +79,10 @@ def test_round_trips_are_counted_in_fractions_of_the_grid():
 def test_mmd_cv_option_is_validated(kw, ok):
     from autopath.autopath_core import AutoPath
     if ok:
-        assert AutoPath(pdb_path="examples/data/3ptb.pdb", **kw).mMD_cv == "funnel_z"
+        assert AutoPath(pdb_path="examples/data/3ptb.pdb", do_fix_pdb=False, **kw).mMD_cv == "funnel_z"
     else:
         with pytest.raises(ValueError):
-            AutoPath(pdb_path="examples/data/3ptb.pdb", **kw)
+            AutoPath(pdb_path="examples/data/3ptb.pdb", do_fix_pdb=False, **kw)
 
 
 def test_z_is_clamped_to_the_grid():
