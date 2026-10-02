@@ -22,9 +22,13 @@ from autopath.clustering import order_milestones_bound_to_unbound
 from autopath.utils import (setup_logging, load_system, get_pocket_atoms_idxs,
                             get_ligand_anchor_atoms)
 from autopath.metadynamics.MetadynamicsMD import MetadynamicsMD
-from autopath.metadynamics.CV import pathCV_cv
+import numpy as np
+from openmm import unit as ommunit
+
+from autopath.clustering import read_positions
+from autopath.metadynamics.CV import pathCV_cv, funnel_z_cv
 from autopath.metadynamics.Funnel import (create_funnel_force_from_trajectory_analysis,
-                                          load_funnel_params)
+                                          load_funnel_params, com_distance_at_z)
 
 POCKET_RESIDUES = [180, 181, 182, 183, 226, 227, 228, 229, 230, 204, 205, 206,
                    207, 208, 209, 210, 211, 212, 213, 214, 215, 196, 197, 198,
@@ -49,9 +53,14 @@ def main():
     ap.add_argument("--extend-path-to-nm", dest="extend_path", type=float,
                     default=None)
     ap.add_argument("--lig", default="../data/3ptb.sdf")
-    ap.add_argument("--expect-cv-length", type=float, default=11.72,
+    ap.add_argument("--expect-cv-length", type=float, default=None,
                     help="Å per unit of progress in the run being compared "
                          "against; the control aborts if its own CV disagrees")
+    ap.add_argument("--hill-width", dest="hill_width", type=float, default=None,
+                    help="hill width in CV units (overrides the matched-width default)")
+    ap.add_argument("--cv", choices=["path", "funnel_z", "funnel_z_unclamped"], default="path",
+                    help="path: progress along the milestones, extended to the funnel "
+                         "cap; funnel_z: the funnel axis coordinate on [0, z_max]")
     args = ap.parse_args()
 
     base = args.base
@@ -100,22 +109,55 @@ def main():
         if not os.path.exists(_f):
             raise SystemExit(f"missing seed file: {_f}")
 
-    cv = pathCV_cv(topology=topology, milestones=milestones,
-                   pocket_atoms=pocket, ligand_atoms=lig,
-                   system=load_system(f"{base}/system.xml"),
-                   grid_min=0.0, grid_max=1.0, hill_width=0.05, sigma="auto",
-                   extend_path_to_nm=args.extend_path)
+    # The path is extended to the funnel cap, as the pipeline does, unless a target
+    # is given explicitly.
+    z_max = params["z_max"].value_in_unit(ommunit.angstrom)
+    extend = args.extend_path
+    if extend is None:
+        extend = com_distance_at_z(read_positions(milestones[-1]) * 10.0, lig, pocket,
+                                   params["unbinding_axis"], z_max)
+    path = pathCV_cv(topology=topology, milestones=milestones,
+                     pocket_atoms=pocket, ligand_atoms=lig,
+                     system=load_system(f"{base}/system.xml"),
+                     grid_min=0.0, grid_max=1.0, hill_width=0.05, sigma="auto",
+                     extend_path_to_nm=extend)
+    span = path.cv_length_per_unit_ang
 
     # Fail loudly rather than produce a curve on a different coordinate: the
     # comparison is only meaningful if one unit of progress means the same
     # distance in both runs.
-    got = cv.cv_length_per_unit_ang
-    if got is None or abs(got - args.expect_cv_length) > 0.01:
+    if args.expect_cv_length is not None and (
+            span is None or abs(span - args.expect_cv_length) > 0.01):
         raise SystemExit(
-            f"CV length is {got} Å/unit but the run being compared against has "
+            f"CV length is {span} Å/unit but the run being compared against has "
             f"{args.expect_cv_length}. The selections or milestones differ, so the "
             "two ΔG(t) curves would not be comparable.")
-    log.info("CV length matches the seeded run: %.2f Å per unit of progress", got)
+
+    if args.cv == "path":
+        cv = path
+        if args.hill_width is not None:
+            cv.hill_width = args.hill_width
+        log.info("CV: path progress, %.2f Å per unit, hills 0.05 (= %.2f Å)", span, 0.05 * span)
+    else:
+        # Same physical hill width as the path arm, so only the coordinate differs.
+        width_nm = args.hill_width if args.hill_width is not None else 0.05 * span / 10.0
+        cv = funnel_z_cv(params["host_index"], params["guest_index"],
+                         params["unbinding_axis"], grid_min=0.0, grid_max=z_max / 10.0,
+                         hill_width=width_nm)
+        if args.cv == "funnel_z_unclamped":
+            # Experiment-only: the pre-clamp CV, which can leave the bias grid
+            import cvpack
+            _n = np.asarray(params["unbinding_axis"], float)
+            _n = _n / np.linalg.norm(_n)
+            _h = [int(i) for i in params["host_index"]]
+            _g = [int(i) for i in params["guest_index"]]
+            cv._factory = lambda pos, n_atoms, top: cvpack.CentroidFunction(
+                "fz_nx*(x2-x1) + fz_ny*(y2-y1) + fz_nz*(z2-z1)", ommunit.nanometers,
+                [_h, _g], weighByMass=True, pbc=False,
+                fz_nx=[float(_n[0])], fz_ny=[float(_n[1])], fz_nz=[float(_n[2])])
+            log.info("funnel z NOT clamped (experiment arm)")
+        log.info("CV: funnel z on [0, %.2f] Å, hills %.3f nm (= the path arm's %.2f Å)",
+                 z_max, width_nm, 0.05 * span)
 
     metad = MetadynamicsMD(topology=topology, ligand_atoms=lig,
                            pocket_atoms=pocket, restrained_atoms=None,

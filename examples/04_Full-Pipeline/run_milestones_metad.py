@@ -34,6 +34,14 @@ def cmd_lineparser():
                         choices=["unbound_first", "bound_first"],
                         help="order sequential shared-bias walkers are seeded in")
     parser.add_argument("--outdir-suffix", dest="suffix", default="")
+    parser.add_argument("--walkers", choices=["shared", "isolated"], default="shared",
+                        help="shared: one bias, walkers run one after another; "
+                             "isolated: every walker its own bias")
+    parser.add_argument("--n-milestones", dest="n_milestones", type=int, default=3)
+    parser.add_argument("--ns", type=float, default=5.0, help="ns per walker")
+    parser.add_argument("--cv", choices=["path", "funnel_z"], default="path")
+    parser.add_argument("--no-extract", dest="extract", action="store_false",
+                        help="reuse the milestones already in <sys>/milestones")
     return parser.parse_args()
 
 
@@ -47,7 +55,7 @@ def main():
 
     # Separate log file on purpose: appending to autopath.log would interleave
     # this run with the earlier sMD run's lines and make attribution ambiguous.
-    logger = setup_logging(f"{sys_name}/autopath_metad.log", log_level="INFO")
+    logger = setup_logging(f"{sys_name}/autopath_metad{args.suffix}.log", log_level="INFO")
 
     # Same pocket definition as the sMD run that produced the trajectories being
     # reused; these are system.pdb sequential resids, not original PDB numbering.
@@ -84,29 +92,30 @@ def main():
                   sMD_converge_speeds=True,
                   sMD_max_replicas=50,
                   sMD_pulling_speeds={
-                      0.020: 5,
-                      0.015: 5,
-                      0.010: 5,
+                      0.020: 10,
+                      0.015: 10,
+                      0.010: 10,
                   },
                   # Analysis already ran; medoids are read from
                   # sMD/analysis_traces/path_analysis/medoid_info.json.
                   sMD_run_analysis=False,
 
                   # --- milestone extraction ---
-                  extract_milestones=True,
-                  n_milestones=3,
+                  extract_milestones=args.extract,
+                  n_milestones=args.n_milestones,
                   milestone_mode='all_medoids',
 
                   # --- metadynamics ---
                   run_metadynamics=True,
                   mMD_use_funnel_potential=True,
                   mMD_preseed_bias=False,       # no FES pre-filling
-                  mMD_multiple_walkers=True,    # one shared bias for all walkers
+                  mMD_multiple_walkers=args.walkers == "shared",
+                  mMD_cv=args.cv,
                   mMD_seed_order=args.seed_order,
                   mMD_outdir_suffix=args.suffix,
                   mMD_milestone_seeding=True,   # each walker starts at its own milestone
 
-                  mMD_time=5,  # ns per walker
+                  mMD_time=args.ns,  # ns per walker
                   mMD_bias_frequency=2,
                   mMD_hill_width=0.05,
                   mMD_hill_height=1.2,
