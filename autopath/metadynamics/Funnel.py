@@ -21,10 +21,8 @@ def z_where_guest_reaches_bulk(universe, guest, host_com, axis,
                                max_extra_ang: float = 80.0):
     """Smallest funnel z at which every guest atom clears `cutoff_ang` from the host.
 
-    The cylinder exists to hold a flat reference, so its cap has to reach where the
-    guest no longer interacts with the host. A cap set from how far the pulling
-    happened to travel can leave the guest inside the first solvation shell, which
-    makes the unbound plateau a contact state and biases every dG read off it.
+    The cylinder holds the unbound reference, so its cap must reach where the guest
+    no longer interacts with the host.
     """
     protein = universe.select_atoms(protein_selection)
     if protein.n_atoms == 0:
@@ -48,9 +46,7 @@ def com_distance_at_z(positions_ang, guest_idx, host_idx, axis,
                      z_target_ang: float) -> float:
     """Host-guest COM separation (nm) with the guest moved along `axis` to `z_target_ang`.
 
-    The funnel wall lives in the axial coordinate and the path's far end in COM
-    separation. Converting one into the other is what keeps them from capping
-    sampling at different places.
+    Converts the axial funnel cap into the COM-separation coordinate of the path.
     """
     axis = np.asarray(axis, dtype=float)
     axis = axis / np.linalg.norm(axis)
@@ -66,10 +62,8 @@ def z_max_for_bulk(universe, guest_selection, host_selection, axis,
                    **kwargs) -> float:
     """Cylinder cap that reaches bulk from EVERY probed configuration.
 
-    How far the guest must travel to clear the host depends on where it sits
-    laterally, so reading the cap off a single frame lets one excursion set the
-    geometry. Probe the most-unbound frames and take the largest requirement: the
-    wall has to be beyond bulk for all of them, not just the luckiest.
+    The required travel depends on lateral position, so the most-unbound frames
+    are probed and the largest requirement is used.
     """
     pairs = sorted(frame_z_pairs, key=lambda fz: abs(fz[1]), reverse=True)
     probe = [int(f) for f, _ in pairs[:max(1, int(n_probe))]]
@@ -94,9 +88,8 @@ logger = logging.getLogger("autopath")
 def funnel_basins(params, bound_percentile_z: float = 10.0):
     """Bound and unbound basins on the funnel axis (Å) for counting round trips.
 
-    Unbound is the cylinder (|z| > z_cc), Limongelli's unbound region. Bound is below
-    halfway from the sMD bound state (the |z| percentile the funnel itself uses for
-    the site) to z_cc; the gap keeps recrossings of the exit barrier from counting.
+    Unbound is the cylinder (|z| > z_cc); bound is below halfway from the site to
+    z_cc, so recrossings of the exit barrier do not count.
     """
     z_cc = float(params["z_cc"].value_in_unit(openmmunit.angstrom))
     z_site = float(np.percentile(np.abs(np.asarray(params["axial_distances"])),
@@ -131,15 +124,12 @@ def add_funnel_restraints(
     force_group: Optional[int] = 10,
 ):
     """
-    Applies a funnel potential restraint to a guest molecule.
+    Applies a Z-axis-aligned funnel potential restraint to a guest molecule.
     Limongelli, V., Bonomi, M., & Parrinello, M. (2013). Funnel metadynamics as accurate binding free-energy method. Proceedings of the National Academy of Sciences, 110(16), 6358-6363.
     https://github.com/jeff231li/funnel_potential
 
-    Note
-    ----
-    This is the simplified Z-axis-aligned funnel variant.
-    For a general PCA-derived unbinding-axis funnel with a z_max cap,
-    use :func:`create_funnel_force_from_trajectory_analysis` instead.
+    For a trajectory-derived axis with a z_max cap use
+    :func:`create_funnel_force_from_trajectory_analysis`.
     """
 
     funnel = CustomCentroidBondForce(
@@ -190,13 +180,7 @@ def generate_funnel_parameters_from_trajectory(
     verbose: bool = True,
 ) -> Dict:
     """
-    Analyze MDAnalysis trajectory to generate optimal funnel potential parameters
-    for guiding unbinding along the observed pathway.
-
-    This function analyzes the conformational changes in a trajectory to determine:
-    - The unbinding axis and pathway geometry
-    - Appropriate funnel cone parameters (z_cc, alpha, R_cylinder)
-    - Center of mass trajectories for host and guest molecules
+    Derive funnel parameters (axis, z_cc, z_max, alpha, R_cylinder) from an unbinding trajectory.
 
     Parameters
     ----------
@@ -215,17 +199,16 @@ def generate_funnel_parameters_from_trajectory(
         Percentile of Z-displacement to use for z_cc parameter (0-100, default: 95).
         Ignored when z_cc_ang is provided.
     z_cc_ang : float, optional
-        Explicit cone-to-cylinder transition distance in Å. When set, overrides the
-        value derived from percentile_z. Useful to shorten the cone and extend the
-        cylinder region (smaller value → shorter cone, longer cylinder).
+        Explicit cone-to-cylinder transition distance in Å; overrides percentile_z.
     bulk_cutoff_ang : float
-        z_max (the cylinder cap) is placed where every guest atom is farther than
-        this from the protein, from the most-unbound sMD frames (default: 10 Å).
+        z_max is placed where every guest atom is farther than this from the
+        protein, across the most-unbound frames (default: 10 Å).
     R_cylinder_ang : float
-        Cylinder radius in Å for the unbound-state restraint (default: 2.0).
+        Cylinder radius in Å. If None, derived from the radial spread beyond z_cc.
         Limongelli 2013 recommends 1–3 Å.
     percentile_r_funnel : float
-        Percentile of radial displacement at bound state, used only for logging (default: 85)
+        Percentile of radial displacement used to derive R_cylinder and the
+        bound-state spread (default: 95)
     alpha_cone_degrees : float
         Cone half-angle in degrees (default: 25.0)
     verbose : bool
@@ -299,9 +282,7 @@ def generate_funnel_parameters_from_trajectory(
         guest_displacement = guest_coms[-1] - guest_coms[0]
         unbinding_axis = guest_displacement / np.linalg.norm(guest_displacement)
 
-    # Ensure the axis points from the bound state (frame 0) toward the unbound state
-    # (last frame). np.linalg.eigh returns eigenvectors with arbitrary sign, so the
-    # PCA branch may produce an inward-pointing axis, inverting z_cc and the visualization.
+    # eigh's eigenvector sign is arbitrary; orient the axis bound -> unbound.
     _net = guest_coms[-1] - guest_coms[0]
     if np.dot(unbinding_axis, _net) < 0:
         unbinding_axis = -unbinding_axis
@@ -325,17 +306,13 @@ def generate_funnel_parameters_from_trajectory(
     else:
         z_cc = np.percentile(z_distances, percentile_z)
 
-    # The bound state is the LOW-|z| tail, not the leading frames: these arrays
-    # pool many trajectories, so the first 10% is the first few whole pulls
-    # (each running bound -> unbound), not the bound part of each.
+    # Bound state = low-|z| tail, not leading frames (arrays pool many trajectories).
     _absz = np.abs(z_distances)
     z_site = float(np.percentile(_absz, bound_percentile_z))
     R_funnel_bound = float(np.percentile(
         radial_distances[_absz <= z_site], percentile_r_funnel))
 
-    # The cone must contain the binding site, so that exploring the site is not
-    # biased by the restraint. A non-positive radius there means the site sits in
-    # the cylinder instead -- the opposite of the intended geometry.
+    # The cone must contain the binding site so the restraint does not bias it.
     R_cone_at_site = R_cylinder_ang if R_cylinder_ang is not None else 0.0
     R_cone_at_site += (z_cc - z_site) * np.tan(np.radians(alpha_cone_degrees))
     if z_cc <= z_site:
@@ -351,11 +328,7 @@ def generate_funnel_parameters_from_trajectory(
             "site. Raise percentile_z or alpha.",
             R_cone_at_site, R_funnel_bound)
 
-    # Size the cylinder from the radial spread the ligand actually shows WHERE THE
-    # CYLINDER APPLIES (|z| >= z_cc). The bound-state spread is the wrong basis: it
-    # describes the cone's base, and on a real path it comes out far too tight.
-    # A wall that the reference trajectory itself violates does not guide sampling,
-    # it just injects force.
+    # Size the cylinder from the radial spread where it applies (|z| >= z_cc).
     if R_cylinder_ang is None:
         _cyl = radial_distances[np.abs(z_distances) >= z_cc]
         if _cyl.size == 0:
@@ -372,8 +345,7 @@ def generate_funnel_parameters_from_trajectory(
     else:
         R_cylinder = float(R_cylinder_ang)
 
-    # The cylinder holds the unbound reference, so its cap must reach bulk. Park
-    # the guest at the most-unbound observed frames and walk it out along the axis.
+    # Cylinder cap must reach bulk.
     _pairs = list(zip(np.arange(z_distances.size) * int(stride),
                       np.asarray(z_distances, dtype=float)))
     z_max = z_max_for_bulk(
@@ -416,8 +388,6 @@ def generate_funnel_parameters_from_trajectory(
             "Cylinder length %.2f Å vs cone %.2f Å (ratio %.2f). The cylinder holds "
             "the unbound reference, so a short one leaves no flat region to "
             "normalise against.", _cyl_len, z_cc, _cyl_len / z_cc)
-        # Exceeding the reference 1-3 A is a statement about the path, not a fault:
-        # it means the observed channel is wider than the canonical funnel assumes.
         _ref = "" if R_cylinder <= 3.0 else (
             "  NOTE: wider than the 1-3 A of Limongelli 2013 -- the observed "
             "channel is broad, so the funnel confines weakly")
@@ -455,17 +425,8 @@ def save_funnel_params(params_dict: Dict, filepath: str) -> None:
     Saves a single .npz file that can be reloaded with load_funnel_params() for
     post-hoc PMF correction or funnel visualisation.
 
-    Geometric scalars are stored in their natural units:
-        z_cc         → angstroms
-        R_cylinder   → angstroms
-        alpha        → degrees
-        k_xy         → kcal/mol/Å²
-
-    Trajectory arrays (angstroms) and metadata are stored as-is.
-
-    Note
-    ----
-    ``force_name`` is now saved and restored faithfully.
+    Units: z_cc, z_max, R_cylinder and trajectory arrays in Å; alpha in degrees;
+    k_xy in kcal/mol/Å².
     """
     np.savez(
         filepath,
@@ -504,10 +465,8 @@ def save_funnel_params(params_dict: Dict, filepath: str) -> None:
 def load_funnel_params(filepath: str) -> Dict:
     """Load a funnel_params dict previously saved by save_funnel_params().
 
-    The returned dict has the same structure as the one produced by
-    generate_funnel_parameters_from_trajectory(), including OpenMM Quantities
-    for the geometric parameters, so it can be passed directly to
-    create_funnel_force_from_trajectory_analysis() or correct_fe_for_funnel().
+    Same structure as generate_funnel_parameters_from_trajectory() output,
+    with OpenMM Quantities for the geometric parameters.
 
     Parameters
     ----------
@@ -546,27 +505,19 @@ def create_funnel_force_from_trajectory_analysis(
     """
     Create a funnel force from trajectory analysis parameters.
 
-    Uses the output dictionary from `generate_funnel_parameters_from_trajectory`
-    to create a CustomCentroidBondForce configured for the observed unbinding pathway.
-
     Parameters
     ----------
     params_dict : Dict
         Dictionary returned by `generate_funnel_parameters_from_trajectory`
     system : System, optional
-        OpenMM System object. If provided, the force will be added to the system
-        and the function returns the force. If None, only the force is created.
+        If provided, the force is also added to it.
 
     Returns
     -------
     CustomCentroidBondForce
         Configured funnel force ready to use in metadynamics
 
-    Note
-    ----
-    This is the general PCA-axis funnel with a ``z_max`` hard cap.
-    For a simpler Z-axis-aligned funnel (no trajectory analysis required),
-    use :func:`add_funnel_restraints` instead.
+    Funnel along the trajectory-derived axis, capped by a ``z_max`` wall.
     """
 
     host_index = params_dict["host_index"]
@@ -581,17 +532,11 @@ def create_funnel_force_from_trajectory_analysis(
     force_name = params_dict.get("force_name", "k_funnel_trajectory")
     unbinding_axis = params_dict["unbinding_axis"]  # unit vector (3,)
 
-    # Create the funnel force.
-    # r_z and r_xy are computed relative to the PCA-derived unbinding axis so that the
-    # funnel geometry matches the parameters (z_cc, R_cylinder) which were derived in that
-    # frame.  nx,ny,nz are the components of the unit vector along the unbinding direction.
+    # r_z, r_xy are relative to the unbinding axis (nx, ny, nz).
     funnel = CustomCentroidBondForce(
         2,
-        # z_max is a WALL, not a switch. Gating the cylinder on
-        # step(z_max - abs(r_z)) instead sets the whole potential to zero beyond
-        # z_max: the guest is then free axially AND radially, and the energy jumps
-        # discontinuously at the crossing, which kicks the integrator when it comes
-        # back. Keep the radial term on at all |r_z| and close the end with U_axial.
+        # z_max is a harmonic wall (U_axial), not a switch: gating the cylinder off
+        # beyond z_max would free the guest and make the energy discontinuous.
         "U_funnel + U_cylinder + U_axial;"
         "U_funnel = step(z_cc - abs(r_z))*step(r_xy - R_funnel)*Wall_funnel;"
         "U_cylinder = step(abs(r_z) - z_cc)*step(r_xy - R_cylinder)*Wall_cylinder;"
@@ -599,9 +544,8 @@ def create_funnel_force_from_trajectory_analysis(
         "Wall_funnel = 0.5 * k_xy * (r_xy - R_funnel)^2;"
         "Wall_cylinder = 0.5 * k_xy * (r_xy - R_cylinder)^2;"
         "R_funnel = (z_cc-abs(r_z))*tan(alpha) + R_cylinder;"
-        # r_xy from |n x r|, a sum of squares: sqrt(r2 - r_z^2) cancels in single
-        # precision, and at r_xy = 0 the derivative is infinite, which the zero step()
-        # in front of the wall turns into 0*inf = NaN. The floor keeps sqrt' finite.
+        # r_xy = |n x r|: sqrt(r2 - r_z^2) cancels in single precision and has an
+        # infinite derivative at 0, which the zero step() turns into NaN.
         "r_xy = sqrt(cx^2 + cy^2 + cz^2 + 1e-12);"
         "cx = ny*(z2-z1) - nz*(y2-y1);"
         "cy = nz*(x2-x1) - nx*(z2-z1);"
@@ -763,11 +707,7 @@ def write_funnel_pymol(
     z_max = funnel_params["z_max"].value_in_unit(openmmunit.angstrom)
     extension = max(5.0, z_max - z_cc)
 
-    # Re-anchor to the reference PDB coordinate frame.
-    # com_traj is a relative quantity (guest_com − host_com) computed during
-    # generate_funnel_parameters_from_trajectory.  To place it in the reference
-    # PDB frame we must add the HOST COM from that PDB — the same atoms used to
-    # define the funnel force, stored in funnel_params["host_index"].
+    # com_traj is guest_com - host_com; add the reference PDB's host COM to place it.
     u_ref_anchor = mda.Universe(str(Path(reference_pdb).resolve()))
     prot_anchor = u_ref_anchor.select_atoms(protein_selection)
     prot_com_pdb = prot_anchor.center_of_mass()

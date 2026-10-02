@@ -92,8 +92,7 @@ class CumulantEstimator(BaseEstimator):
         if raw_W.size == 0:
             return None
         Wmean = float(raw_W.mean())
-        # ddof=1 variance is undefined for a single sample → NaN (propagates to dG);
-        # guard to avoid a spurious "Degrees of freedom <= 0" RuntimeWarning.
+        # ddof=1 variance is undefined for one sample; NaN without the RuntimeWarning.
         Wvar = float(raw_W.var(ddof=1)) if raw_W.size > 1 else np.nan
         dG = Wmean - (beta * Wvar) / 2.0
         return {'Wmean': Wmean, 'dG': dG, 'Wdiss': Wmean - dG}
@@ -146,8 +145,7 @@ class ForceEstimator(BaseEstimator):
         if raw_W.size == 0:
             return None
         Wmean = float(raw_W.mean())
-        # Per-speed "PMF" is the raw work; dissipation is removed by the v→0
-        # extrapolation, not per-speed.  Wdiss is NaN (force friction uses force).
+        # Dissipation is removed only by the v→0 extrapolation; Wdiss is undefined here.
         return {'Wmean': Wmean, 'dG': Wmean, 'Wdiss': np.nan}
 
     def fit_transform(self, smd_data: SMDData) -> SMDData:
@@ -203,9 +201,8 @@ class FrictionEstimator(BaseEstimator):
         self.smooth_method = smooth_method
         self.smooth_polyorder = smooth_polyorder
         self.speeds = speeds
-        # {nominal filename speed -> realized pulling speed}. Used as the physical
-        # velocity in every dF/dv, per-speed /v, and v->0 regression so the
-        # steps_per_move rounding does not bias friction/PMF. None -> use nominal.
+        # {nominal speed -> realized speed}: the physical v used in every /v and v->0
+        # regression, so steps_per_move rounding does not bias friction. None -> nominal.
         self.realized_speed_map = realized_speed_map or None
 
     def _realized(self, speed: float) -> float:
@@ -314,12 +311,8 @@ class FrictionEstimator(BaseEstimator):
 
         Note
         ----
-        For backward pulling, r_coord decreases with step.  After sorting by
-        r_coord the step index is reversed: the small-r end (center) comes first
-        and carries the largest accumulated Wdiss, making dWdiss/dr negative.
-        The correct formula for backward pulling is γ = −dWdiss/dr / v (sign flip
-        because dr < 0 during the pull).  Direction is detected from the ``step``
-        column when available, otherwise from the sign of Wdiss[0] − Wdiss[−1].
+        Backward pulls (r decreasing with step) use γ = −dWdiss/dr / v. Direction is
+        taken from ``step`` when present, else from the sign of Wdiss[0] − Wdiss[−1].
         """
         if df is None or df.empty:
             return pd.DataFrame()
@@ -382,10 +375,6 @@ class FrictionEstimator(BaseEstimator):
         Fits Wdiss(r, v) ≈ Γ(r)·v + b(r) at each grid point using
         :func:`extrapolate_to_v0`, then differentiates the resulting
         Gamma_integrated(r) = slope(r) to obtain the local friction Γ(r).
-
-        This cross-speed approach averages over pulling-speed noise and is
-        complementary to the per-speed derivative method
-        (:meth:`gamma_from_wdiss_derivative`).
 
         Parameters
         ----------
@@ -537,9 +526,7 @@ class FrictionEstimator(BaseEstimator):
                 continue
             v = self._realized(speed)  # physical velocity for the /v division
             g = g.sort_values('r_coord')
-            # Friction is undefined at steps the regression trimmed (no Feq);
-            # drop them rather than zero-filling, which would bias the running
-            # cumulative integral for all subsequent steps.
+            # Drop steps without Feq; zero-filling would bias the cumulative integral.
             g = g[g['step'].isin(feq_by_step.keys())]
             if g.empty:
                 continue
@@ -658,9 +645,6 @@ def _find_pmf_peak(
         window (odd int, auto-adjusted); for 'gaussian', it is σ in grid points.
     prominence_factor : float
         Peak prominence threshold as a multiple of kBT (default 0.5).
-
-    Both ``KramersEstimator.detect_ts`` and ``SMDAnalysis._compute_barrier_rts``
-    delegate to this function so the algorithm stays in one place.
     """
     arr = dG.astype(float)
     if smooth == 'savgol':
@@ -692,11 +676,7 @@ NO_PER_SPEED_FREE_ENERGY = frozenset({"force"})
 class KramersEstimator:
     """Kramers/Pontryagin MFPT k_off from pre-computed PMF and friction profiles.
 
-    NOT a BaseEstimator subclass — operates on mixture_pmfs + friction DataFrames
-    produced by the sMD analysis pipeline rather than on raw per-step work values.
-
-    Called automatically at the end of ``SMDAnalysis.run()`` after ``mixture_pmfs.csv``
-    and ``friction.csv`` have been written.
+    Not a BaseEstimator: operates on mixture_pmfs + friction tables, not raw work.
 
     Output (one row per dG estimator present in *mixture_pmfs*) columns:
       estimator, source, speed_nm_per_ps, T_K, start_r_nm, abs_r_nm,
@@ -731,12 +711,8 @@ class KramersEstimator:
     ) -> pd.DataFrame:
         """Inner join of PMF and friction.
 
-        Merges on ``step`` (integer, protocol-anchored) when both DataFrames
-        carry the column, avoiding float jitter in ``r_coord`` that causes
-        spurious row drops after ``extrapolate_to_v0()`` end-trimming.
-        Falls back to ``r_coord`` for the per-path codepath where ``step``
-        is not available.  ``r_coord`` in the output always comes from
-        *pmf_df* (authoritative source).
+        Merges on integer ``step`` when both carry it (``r_coord`` float jitter
+        drops rows), else on ``r_coord``. Output ``r_coord`` comes from *pmf_df*.
         """
         use_step = "step" in pmf_df.columns and "step" in fric_df.columns
         key_label = "step" if use_step else "r_coord"
@@ -744,11 +720,10 @@ class KramersEstimator:
         if use_step:
             left = pmf_df[["step", "r_coord", "dG"]].copy()
             right = fric_df[["step", "Gamma"]].copy()
-            # Coerce to int64 defensively (float step can arise after CSV round-trip)
+            # step can become float after a CSV round-trip
             left["step"] = left["step"].astype("int64")
             right["step"] = right["step"].astype("int64")
             merged = pd.merge(left, right, on="step", how="inner")
-            # r_coord comes from pmf_df (left); no r_coord_x/r_coord_y ambiguity
         else:
             merged = pd.merge(
                 pmf_df[["r_coord", "dG"]],
@@ -933,19 +908,11 @@ class KramersEstimator:
     ) -> float | None:
         """Absorbing boundary from the pulling restraint force (kinetics-motivated).
 
-        The mean |force| along the reaction coordinate peaks at the rupture and
-        decays as the ligand leaves the pocket. The boundary is placed where the
-        (speed-matched) mean |force| has decayed to *frac* of its peak past that
-        peak. Estimator-independent (raw pulling data), so it avoids the failure
-        mode of :meth:`detect_ts` where a noisy/monotonic reconstructed PMF has no
-        clean interior barrier (jarzynski) or a spurious far peak (cumulant at
-        higher speed). Returns ``None`` when it cannot be located, in which case
-        the caller should fall back to :meth:`detect_ts`.
-
-        Validated on the HSP90 kinetics set (koff↔pKoff): with ``frac=0.3`` it
-        rescues the cumulant boundary failures and matches jarzynski. NOTE: this is
-        a *kinetic* boundary for the Kramers MFPT — it is not a thermodynamic
-        affinity readout (use max/end dG for that).
+        Placed where the speed-matched mean |force| has decayed to *frac* of its
+        peak, past the peak. Independent of the dG estimator, so it does not need a
+        clean PMF barrier. A kinetic boundary only, not an affinity readout.
+        Returns ``None`` when it cannot be located (caller falls back to
+        :meth:`detect_ts`).
 
         Parameters
         ----------
@@ -1065,15 +1032,9 @@ class KramersEstimator:
 
         Note
         ----
-        ΔF is referenced so ΔF(start_r) = 0; barriers are reported from there.
-        Only [reflect_r, abs_r] enters the integral, so every diagnostic is
-        evaluated there. Before integrating, ΔF is offset so its minimum in that
-        window is 0; the constant cancels between exp(+βΔF) and exp(−βΔF), so τ is
-        unchanged and exp(−βΔF) ≤ 1.
-
-        A warning is emitted when the β·ΔF span exceeds 100 (δlnτ = β·δΔF, so τ is
-        exponentially sensitive to ΔF errors). A hard guard at a span ≈ 708
-        (float64 overflow) returns ``tau_ps = inf``.
+        Barriers are reported with ΔF(start_r) = 0. For integration ΔF is offset to a
+        zero minimum in [reflect_r, abs_r]; the constant cancels, so τ is unchanged.
+        A β·ΔF span > 100 warns; > ~708 (float64 overflow) returns ``tau_ps = inf``.
         """
         df = (
             profile_df.dropna(subset=["r_coord", "dG", "Gamma"])
@@ -1257,8 +1218,6 @@ class KramersEstimator:
             peak, falling back to ``r_coord.max()``);
             ``"force_plateau"`` → :meth:`force_plateau_boundary` (restraint-force
             decay; falls back to ``detect_ts`` if the force profile is unusable).
-            Force-plateau (``plateau_frac=0.3``) is validated on HSP90 kinetics to
-            rescue cumulant boundary failures; it is a *kinetic* boundary only.
         plateau_frac : float
             Decay fraction for ``boundary_method="force_plateau"`` (default 0.3).
         reflect_r : float or None
@@ -1687,10 +1646,8 @@ def calculate_weighted_pmf(
 
     Note
     ----
-    The grid is restricted to the shortest path's last step so that all paths
-    contribute at every grid point.  Without this restriction, when a shorter
-    path terminates the p_eq renormalization denominator changes abruptly,
-    producing a visible discontinuity in the weighted PMF.
+    The grid stops at the shortest path's last step, so the p_eq normalisation
+    does not jump where a path ends.
     """
 
     results = smd_data.results.copy()
@@ -1776,17 +1733,13 @@ def calculate_weighted_pmf(
 def recover_spring_constant(raw_data: pd.DataFrame, logged_k: float | None = None) -> float:
     """Per-ligand SMD spring constant.
 
-    Prefers ``logged_k`` (the value SteeredMD wrote to the .dat header) when
-    available; otherwise recovers it from the identity
-    force = -k*(r_before - r_target). The averaged ``force`` column no longer
-    satisfies that identity exactly per row (it is a within-move mean, not the
-    pre-step sample), so the logged value is both exact and cheaper.
+    Prefers ``logged_k`` (from the .dat header); otherwise recovers k from
+    force = -k*(r_before - r_target), which holds only for logs whose ``force``
+    is the pre-step sample rather than a within-move mean.
     """
     if logged_k is not None and np.isfinite(logged_k) and logged_k > 0:
         return float(logged_k)
-    # Fallback for older logs without a header: there the `force` column is the
-    # single pre-step sample, which satisfies force = -k*(r_before - r_target)
-    # exactly. (New logs always carry the logged k above, so never reach here.)
+    # Logs without a header k: `force` is the pre-step sample, so the identity is exact.
     d = raw_data.dropna(subset=['force', 'r_before', 'r_target'])
     delta = (d['r_before'] - d['r_target']).to_numpy(dtype=float)
     f = d['force'].to_numpy(dtype=float)
@@ -1816,11 +1769,8 @@ def extrapolate_to_v0(
     Extrapolate a single parameter to zero pulling speed (v → 0)
     using per-step regression across speeds.
 
-    Because dx_per_move is fixed across all pulling speeds, the
-    protocol step index maps to the same r_target regardless of
-    speed.  The natural join key is therefore ``step``, not
-    ``r_coord`` (which may carry tiny r₀ jitter between speeds).
-    Only steps present at **all** included speeds are used.
+    dx_per_move is speed-independent, so steps are joined on ``step`` rather
+    than ``r_coord`` (which jitters with r₀).
 
     Parameters
     ----------
@@ -1858,17 +1808,8 @@ def extrapolate_to_v0(
 
     Note
     ----
-    **Step selection trade-off (min_speeds):** requiring all speeds (equivalent
-    to setting ``min_speeds`` equal to the total number of speeds) cuts the
-    extrapolated PMF to whichever speed has the shortest profile.  Allowing
-    fewer speeds via a lower ``min_speeds`` lets the tail extend further at the
-    cost of a less constrained fit (fewer data points per step).
-
-    **Edge trimming:** after the per-step regressions, leading and trailing steps
-    where fewer than the maximum number of available speeds contributed are
-    stripped.  Edge rows with only ``min_speeds`` data points have R²=1.0
-    trivially (zero degrees of freedom) and produce unconstrained intercept
-    spikes.
+    Leading/trailing steps with fewer than the maximum number of speeds are
+    trimmed: with few points the fit is unconstrained and the intercept spikes.
     """
 
     df = results.copy()
@@ -1884,9 +1825,7 @@ def extrapolate_to_v0(
         speeds = [float(s) for s in speeds]
         df = df[df['speed'].isin(speeds)]
 
-    # Regression x-axis: realized pulling speed (nominal is only a label). The
-    # v->0 intercept and slope are taken against `_xspeed`; falls back to the
-    # nominal speed when no map is supplied (older data).
+    # Regress against the realized speed; nominal is only a label.
     if realized_speed_map:
         df['_xspeed'] = df['speed'].map(
             lambda s: float(realized_speed_map.get(float(s), s))).astype(float)

@@ -1,4 +1,4 @@
-"""The window reference, and the fixture proving conv_window=1 is a no-op."""
+"""Windowed convergence reference and its conv_window=1 equivalence."""
 import numpy as np
 import pytest
 
@@ -6,8 +6,7 @@ from autopath.pulling.Convergence import window_mean_pmf, window_reference_scala
 
 
 def test_window_lags_a_drifting_series_more_than_a_pairwise_reference():
-    """Why the window fixes the bug: on a steady drift the pairwise step looks
-    small while the distance to the window average is w/2 times larger."""
+    """On a steady drift the gap to the window mean is ~w/2 times the pairwise step."""
     import pandas as pd
     drift = 1.0
     rungs = [pd.Series([k * drift, k * drift], index=[10, 11]) for k in range(6)]
@@ -25,9 +24,8 @@ def test_window_of_one_reproduces_the_pairwise_reference():
     assert window_reference_scalar([7.0]) == 7.0
 
 
-# --- end-to-end window plumbing (synthetic, no simulation data) -------------
-# These stubs drive the deque/history wiring inside check_convergence with a
-# hand-built, monotonically drifting PMF series.
+# --- end-to-end window plumbing (synthetic) ---------------------------------
+# Stubs feed check_convergence a monotonically drifting PMF series.
 
 import os
 from unittest import mock
@@ -45,11 +43,7 @@ _DRIFT = 2.5                       # kJ/mol added to every step, per rung
 
 
 class _StubSMD:
-    """SMDData stand-in: _N_LOGS replicas on one path, flat protocol grid.
-
-    Carries no 'force'/'r_coord' columns, so check_convergence finds no
-    force-plateau boundary and leaves the RMSD window uncapped.
-    """
+    """SMDData stand-in: _N_LOGS replicas on one path, no force columns."""
 
     def __init__(self, logs, **kw):
         import pandas as pd
@@ -72,8 +66,7 @@ class _StubSMD:
 
     @staticmethod
     def _replica_start_datetime(fn):
-        # check_convergence sorts replicas chronologically; these synthetic
-        # logs have no real mtime, so reuse the filename index as the key.
+        # synthetic logs have no mtime; order by filename index
         return _StubSMD._replica_idx_from_log(fn)
 
 
@@ -86,10 +79,9 @@ class _StubDTW:
 
 
 def _drifting_conv_df(conv_window, outdir):
-    """Run check_convergence where rung k's PMF is rung (k-1)'s + _DRIFT.
+    """Run check_convergence where each rung's PMF is the previous one + _DRIFT.
 
-    The PMF *shape* is identical at every rung (a uniform offset), so the
-    barrier and TS position never move and the RMSD alone decides.
+    The shape never changes, so barrier and TS are fixed and only the RMSD moves.
     """
     import pandas as pd
 
@@ -126,12 +118,7 @@ def _drifting_conv_df(conv_window, outdir):
 
 
 def test_wider_conv_window_is_stricter_on_a_drifting_pmf(tmp_path):
-    """The plumbing test: a steady drift passes pairwise, fails windowed.
-
-    Each rung moves the PMF by 2.5 kJ/mol, under the 4.0 kJ/mol RMSD
-    tolerance, so conv_window=1 declares convergence on every rung. Against a
-    5-rung mean the distance grows to ~w/2 * drift and the later rungs fail.
-    """
+    """A steady drift under the RMSD tolerance passes pairwise but fails windowed."""
     from autopath.pulling.Convergence import tail_converged
 
     narrow = _drifting_conv_df(1, tmp_path / "w1")
@@ -161,11 +148,7 @@ def test_wider_conv_window_is_stricter_on_a_drifting_pmf(tmp_path):
 
 
 def test_conv_window_1_matches_the_pairwise_reference_end_to_end(tmp_path):
-    """conv_window=1 must be a no-op: the audit hinge of the whole change.
-
-    With a uniform per-rung offset the pairwise RMSD is exactly the drift,
-    and barrier/TS deltas stay at zero because the PMF shape never changes.
-    """
+    """conv_window=1 gives RMSD equal to the drift and zero barrier/TS deltas."""
     narrow = _drifting_conv_df(1, tmp_path / "w1")
     assert narrow["dG_weighted-rmsd"].round(6).eq(_DRIFT).all()
     assert narrow["barrier_delta"].abs().max() < 1e-9

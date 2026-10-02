@@ -5,8 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --time=1-0
-# nodea0110 (titanv) and nodea0111 (gtx1080ti) are ~8x slower than the rest of
-# the pool; never let an MD job land there.
+# exclude the slow GPU nodes
 #SBATCH --exclude=nodea0110,nodea0111
 #SBATCH --job-name="3ptb_metad"
 

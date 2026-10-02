@@ -5,7 +5,7 @@ from autopath.clustering import read_positions
 
 
 def test_pdb_and_xml_of_same_frame_give_same_coms(tmp_path):
-    """A nm/Angstrom slip changes the CV silently; compare the derived COMs."""
+    """PDB and XML reads of the same frame agree in units (compared via COMs)."""
     n = 8
     pos_nm = np.linspace(0.0, 1.4, n * 3).reshape(n, 3)
 

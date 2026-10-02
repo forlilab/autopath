@@ -34,10 +34,8 @@ class CVSpec:
     """A collective variable bundled with its BiasVariable grid parameters.
 
     Pass one or more CVSpec objects to MetadynamicsMD.run() via cv_specs.
-    CVs that require input positions (RMSD-based) are deferred: they store a
-    factory callable and materialize inside run() once positions are available.
-    I had to do this because positions are available only after loading the checkpoint file,
-    but CVs need to be defined before run() to set up the BiasVariables and grid.
+    CVs that need input positions are deferred: they store a factory that
+    materializes inside run() once the checkpoint is loaded.
     """
     cv: Any
     grid_min: float
@@ -46,9 +44,7 @@ class CVSpec:
     grid_points: int
     periodic: bool = False
     name: str = "cv"
-    # Angstrom spanned per unit of this CV. The funnel correction integrates
-    # exp(-beta W) over the bound site in LENGTH units; a progress coordinate is
-    # dimensionless, so the integral needs this scale to mean anything.
+    # Angstrom per CV unit; the funnel correction integrates in length units.
     cv_length_per_unit_ang: Optional[float] = None
     _factory: Optional[Callable] = field(default=None, repr=False)
 
@@ -85,9 +81,8 @@ def com_cv(
 ) -> CVSpec:
     """Center-of-mass distance between pocket and ligand centroids (nm).
 
-    Deferred so that a fresh cvpack force is created on each run() call.
-    OpenMM transfers C++ ownership of the force when addCollectiveVariable()
-    is called, so reusing the same object across walkers causes an ownership error.
+    Deferred so each run() gets a fresh force: addCollectiveVariable() takes
+    C++ ownership, so reusing one object across walkers fails.
     """
     def factory(input_positions, n_atoms, topology):
         return cvpack.CentroidFunction(
@@ -120,19 +115,16 @@ def funnel_z_cv(
 ) -> CVSpec:
     """Guest position along the funnel axis, r_z = n·(COM_guest - COM_host) (nm).
 
-    The coordinate the funnel restraint itself uses (mass-weighted centroids, no PBC),
-    so the bias keeps acting up to the cylinder cap and the FES is in the length
-    coordinate Limongelli Eq. 15 integrates over. Clamped to [grid_min, grid_max]:
-    OpenMM's bias is zero outside its grid, so an unclamped CV crossing the soft
-    cap wall would drop the whole bias in one step.
+    Same coordinate as the funnel restraint, so the FES is in the length
+    coordinate Limongelli 2013 Eq. 15 integrates over. Clamped to the grid
+    because OpenMM's bias is zero outside it.
     """
     n = np.asarray(axis, dtype=float)
     n = n / np.linalg.norm(n)
     host, guest = [int(i) for i in host_atoms], [int(i) for i in guest_atoms]
 
     def factory(input_positions, n_atoms, topology):
-        # Per-collection parameters (1-element arrays): scalars would become global
-        # Context parameters and collide with the funnel force's nx/ny/nz.
+        # 1-element arrays: scalar cvpack parameters become global Context parameters.
         return cvpack.CentroidFunction(
             "min(max(fz_nx*(x2-x1) + fz_ny*(y2-y1) + fz_nz*(z2-z1), fz_lo), fz_hi)",
             openmmunit.nanometers,
@@ -163,10 +155,10 @@ def rmsd_cv(
     grid_points: int = 125,
 ) -> CVSpec:
     """Ligand RMSD relative to the starting conformation (deferred: needs positions).
-    Note: This cv is aligned so only captures ligand internal conformational changes, not translation or rotation.
+
+    Aligned RMSD: captures internal conformational change only.
     """
     def factory(input_positions, n_atoms, topology):
-        # input_positions in nm (OpenMM default); cvpack.RMSD expects nm
         return cvpack.RMSD(input_positions, ligand_atoms, n_atoms)
 
     return CVSpec(
@@ -202,9 +194,7 @@ def rmsd_states_cv(
             for atom in residue.atoms()
             if atom.name in atom_names
         ]
-        # RelaxMD writes <milestone>_relax.pdb into the same directory; matching
-        # those would build the path from relaxed structures instead of the
-        # milestones themselves.
+        # Skip RelaxMD's <milestone>_relax.pdb outputs.
         milestone_pdbs = sorted(
             (p for p in glob(f"{milestone_dir}/milestone_*_frame_*.pdb")
              if "_relax" not in os.path.basename(p)),
@@ -240,9 +230,8 @@ def rmsd_states_cv(
 def _milestone_sort_key(path: str) -> int:
     """Milestone index from a `<prefix>_<index>_frame_<frame>` filename.
 
-    Reads the token immediately before `_frame_`, so it is correct for both the
-    pooled scheme (`milestone_1_frame_12`) and the per-path scheme
-    (`milestone_0_1_frame_12`), where a positional split would return the path id.
+    Reads the token before `_frame_`, so it handles both `milestone_1_frame_12`
+    and per-path `milestone_0_1_frame_12`.
     """
     base = os.path.basename(path)
     try:
@@ -265,8 +254,7 @@ def path_rmsd_cv(
     sigma: float = 0.001,
 ) -> CVSpec:
     """Path-in-RMSD-space CV through ligand heavy-atom milestones (deferred: needs positions)."""
-    # _build_reference_dict reads each milestone with PDBFile, which fails with an
-    # opaque IndexError on a serialized State; reject non-PDB paths up front.
+    # PDBFile fails opaquely on serialized States; reject non-PDB paths up front.
     _bad = [m for m in milestones if not m.lower().endswith(".pdb")]
     if _bad:
         raise ValueError(
@@ -308,11 +296,8 @@ def _extend_milestones(milestones_array: np.ndarray,
                        extend_to_nm: float) -> np.ndarray:
     """Append milestones out to `extend_to_nm`, spaced like the existing ones.
 
-    The path's far end sets what the progress coordinate calls unbound, so a path
-    that stops while the guest still touches the host makes s=1 a contact state and
-    no amount of sampling produces a flat reference. Extending with ONE distant
-    milestone instead would leave a gap far wider than sigma, which degrades the
-    progress coordinate into a staircase; keep the existing spacing.
+    The far end defines "unbound", so it must clear host contact. Uniform spacing
+    avoids a gap much wider than sigma, which would make progress a staircase.
     """
     d = milestones_array.flatten().astype(float)
     last = float(d[-1])
@@ -346,13 +331,9 @@ def pathCV_cv(
 ) -> CVSpec:
     """Path-in-CV-space CV through milestones evaluated with COM distance (deferred: needs positions).
 
-    The path progress metric outputs values in [0, 1], so grid_min/grid_max should be 0.0/1.0.
-    sigma controls the Gaussian kernel width (in nm); tune it so adjacent milestones overlap
-    (a good rule of thumb: sigma ≈ half the minimum spacing between milestone COM distances).
-
-    Milestones may be ``.pdb`` or ``.xml`` (serialized OpenMM State) files. Atom indices in
-    pocket_atoms/ligand_atoms must match the atom ordering in the milestone files, which is
-    guaranteed when milestones are extracted from the same solvated system.
+    Progress is in [0, 1]. sigma (nm) is the kernel width; 'auto' uses half the
+    minimum milestone spacing. Milestones may be ``.pdb`` or ``.xml`` (OpenMM State)
+    and must share atom ordering with pocket_atoms/ligand_atoms.
     """
     def factory(input_positions, n_atoms, topology, sigma=sigma):
         pocket_masses = np.array([
@@ -392,11 +373,7 @@ def pathCV_cv(
                 int(np.sum(steps < 0)), steps.size)
 
         if sigma == 'auto':
-            # Half the minimum spacing — guarantees kernels overlap at the closest pair
-            # without over-smoothing at larger gaps.  mean-based sigma under-covers
-            # the largest gap when milestone spacings are uneven.
-            # Use |gaps|: a negative step (see the warning above) would otherwise make
-            # sigma negative, which cvpack accepts and which silently breaks the CV.
+            # |gaps|: cvpack silently accepts a negative sigma, which breaks the CV.
             gaps = np.abs(steps)
             usable = gaps[gaps > 1e-6]
             if usable.size == 0:
@@ -423,10 +400,7 @@ def pathCV_cv(
             sigma=sigma,
         )
 
-    # How much physical distance one unit of progress spans. Computed eagerly:
-    # it only needs the milestone files, not the deferred input positions. The
-    # funnel standard-state correction integrates over the bound site in LENGTH
-    # units, which a [0,1] progress coordinate cannot supply on its own.
+    # Angstrom per unit of progress, for the funnel correction; needs only the milestone files.
     _span_ang = None
     try:
         _ends = [read_positions(m) for m in (milestones[0], milestones[-1])]

@@ -169,50 +169,35 @@ class MetadynamicsMD:
         checkpoint_file : str, optional
             Path to an OpenMM binary checkpoint to resume from.
         state_xml_file : str, optional
-            Path to a portable OpenMM ``State`` XML (e.g. written by
-            ``Clustering``). Box, positions and velocities are set
-            individually from the deserialized state, since a stripped
-            system may no longer define global parameters the saved
-            state carries.
-
-            Precedence when more than one of the three is given:
-            ``checkpoint_file`` > ``state_xml_file`` > ``pdb_file``.
+            Path to a portable OpenMM ``State`` XML. Only box, positions and
+            velocities are applied (the state may carry stale global parameters).
+            Precedence: ``checkpoint_file`` > ``state_xml_file`` > ``pdb_file``.
         run_id : str, optional
             Label for all output files.  Auto-generated from wall-clock time
             when ``None`` (format ``W-HHMMSS``).
         cv_specs : list[CVSpec]
-            One or two ``CVSpec`` objects defining the collective variables.
-            CVSpecs may be deferred — they call ``.resolve()`` internally once
-            input positions are available.  Use CV factory functions such as
-            ``com_cv`` or ``rmsd_cv`` to construct them.
+            One or two ``CVSpec`` objects (e.g. from ``com_cv``); deferred
+            specs are resolved once input positions are available.
         mMD_time : int, optional
             Total simulation time in nanoseconds (default 10).
         bias_factor : float, optional
-            Well-tempered γ parameter controlling bias growth rate (default 10).
-            Higher values allow larger biases and faster exploration at the cost
-            of convergence noise.
+            Well-tempered bias factor γ (default 10).
         hill_height : float, optional
             Initial Gaussian hill height in kJ/mol (default 1.2, ≈ 0.5 k_B T at
             300 K).
         biasFrequency : int, optional
-            Frequency of Gaussian hill deposition in picoseconds (default 2 ps).
-            Converted internally to an integer step count.
+            Gaussian hill deposition interval in picoseconds (default 2 ps).
         saveFrequency : int, optional
             Frequency of on-disk bias saves in picoseconds (default 50 ps).
         funnel_force : openmm.Force, optional
-            Pre-built funnel restraint force.  Because ``system.addForce()``
-            transfers C++ ownership, the force is serialized/deserialized inside
-            ``run()`` to obtain a fresh owned copy.  Do not reuse the same
-            ``Force`` object across multiple ``run()`` calls.
+            Pre-built funnel restraint force; a serialized copy is added, since
+            ``addForce()`` transfers C++ ownership.
         funnel_params : dict, optional
-            Parameter dict passed to ``correct_fe_for_funnel`` for the
-            Limongelli 2013 standard-state correction.  Skipped when ``None``.
+            Funnel parameters for the Limongelli 2013 standard-state correction
+            and the funnel-axis trace.  Skipped when ``None``.
         bias_dir : str, optional
-            Directory where OpenMM reads and writes hill files.  Defaults to
-            ``None``, which maps to ``self.out_dir`` — all walkers writing to
-            the same directory accumulate each other's hills (OpenMM multi-walker
-            convention).  Pass a per-walker subdirectory to make a walker
-            independent.
+            Hill-file directory.  ``None`` uses ``self.out_dir``, shared by all
+            walkers (multi-walker); a per-walker directory makes it independent.
 
         Returns
         -------
@@ -223,8 +208,8 @@ class MetadynamicsMD:
         Warns
         -----
         UserWarning (via logging.warning)
-            Emitted after the simulation if the first CV never exceeded 0.5,
-            indicating the ligand may not have reached the unbound state.
+            If the first CV never passes the middle of its grid (ligand
+            probably never unbound).
 
         Raises
         ------
@@ -343,19 +328,14 @@ class MetadynamicsMD:
             biasDir=effective_bias_dir,
         )
 
-        # The funnel and the metadynamics bias force were both added to `system`
-        # AFTER this context was built. reinitialize(preserveState=True) restores
-        # global parameters by NAME, so a newly added force's default can be
-        # overwritten by a stale value and the force silently does nothing -- the
-        # same failure already fixed in equilibration.py and relax_md.py. Rebuild
-        # instead: a fresh context only knows the parameters `system` still defines.
+        # Rebuild rather than reinitialize(preserveState=True): the latter restores
+        # global parameters by name, so stale values could override new forces' defaults.
         simulation = rebuild_simulation(simulation, system)
         simulation.context.setTime(0)
         simulation.context.setStepCount(0)
         simulation.currentStep = 0
 
-        # Reporters are attached here, after the rebuild, because rebuild_simulation
-        # returns a new Simulation and anything attached earlier would be dropped.
+        # After the rebuild: it returns a new Simulation.
         logger.debug(f"Setting up reporters for {run_id}..")
         add_reporters(
             simulation,
@@ -365,8 +345,7 @@ class MetadynamicsMD:
             biasFrequency,
         )
         if self.use_GReweighting:
-            # simulation.integrator, not `integrator`: the rebuild handed the new
-            # context its own copy and the reporter must watch the live one.
+            # The rebuilt simulation has its own integrator copy.
             simulation.reporters.append(ReweightingReporter(f"{self.out_dir}/GR_WTMetaD_{run_id}.dat",
                                                             biasFrequency,
                                                             simulation.integrator,
@@ -375,8 +354,7 @@ class MetadynamicsMD:
                                                             ))
 
         colvar_list = [meta.getCollectiveVariables(simulation)]
-        # Funnel axis coordinate for every walker, whatever CV is biased: round trips
-        # are counted on it (FUNNELZ_<run_id>.npy, Å, same cadence as COLVAR).
+        # Funnel-axis z (Å) at COLVAR cadence, for counting round trips.
         funnelz_list = None
         if funnel_params is not None:
             _sysm = simulation.system
@@ -392,8 +370,7 @@ class MetadynamicsMD:
             funnelz_list = [_funnel_z()]
         # ~40 snapshots over the run, so the curve is readable at any length
         fe_hist, fe_hist_steps = [], []
-        # Shared-bias walkers run sequentially and inherit each other's hills, so
-        # the analysis needs their run order to lay the curves end to end.
+        # Start time orders sequential shared-bias walkers.
         _started_at = time.time()
         _fe_hist_every = max(self.record_CV,
                              (int(mMD_steps) // 40 // self.record_CV or 1) * self.record_CV)
@@ -409,10 +386,7 @@ class MetadynamicsMD:
             if funnelz_list is not None:
                 funnelz_list.append(_funnel_z())
 
-            # Snapshot the surface as it grows. Convergence is judged on how the
-            # FES (and the dG read off it) stops changing with time, and OpenMM
-            # deletes the previous bias index on every sync, so the history has to
-            # be kept here or it is gone.
+            # FES history for convergence; OpenMM does not keep past bias states.
             if i % _fe_hist_every == 0:
                 fe_hist.append(np.asarray(
                     meta.getFreeEnergy().value_in_unit(
@@ -451,8 +425,6 @@ class MetadynamicsMD:
         if funnel_params is not None:
             try:
                 temp_K = self.temperature.value_in_unit(openmmunit.kelvin)
-                # resolved[0] is the CV actually biased; it carries how much
-                # physical distance one unit of it spans, which Eq. 15 needs.
                 result = correct_fe_for_funnel(
                     fe_path,
                     funnel_params,
@@ -503,9 +475,7 @@ class MetadynamicsMD:
     def run2D(self, *args, **kwargs):
         """Deprecated stub — use ``run()`` with two ``CVSpec`` objects instead.
 
-        .. deprecated::
-            Pass a two-element ``cv_specs`` list to :meth:`run` to run 2D
-            metadynamics.  This method always raises ``NotImplementedError``.
+        Always raises ``NotImplementedError``.
         """
         raise NotImplementedError(
             "run2D() has been removed. Pass two CVSpec objects via cv_specs to run() instead. "

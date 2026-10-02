@@ -58,9 +58,7 @@ class RelaxMD:
 
     Note
     ----
-    Force-group 19 is reserved for the temporary harmonic ligand restraints
-    added during this stage. This is offset by 15 relative to other AutoPath
-    force groups to avoid collisions.
+    Force group 19 is reserved for the temporary ligand restraints.
     """
 
     def __init__(
@@ -111,10 +109,8 @@ class RelaxMD:
     ) -> System:
         """Run relaxation MD: minimize, warm up, and perform a short NPT run.
 
-        Applies temporary harmonic positional restraints to the ligand,
-        runs energy minimization and a gradual temperature ramp, then
-        integrates an NPT ensemble. Restraints are removed before writing
-        output so the returned system is unrestrained.
+        The ligand is harmonically restrained during the run; the restraints
+        are removed before the outputs are written.
 
         Parameters
         ----------
@@ -129,17 +125,14 @@ class RelaxMD:
             Path to a PDB file used to set initial positions when no
             checkpoint is available.
         state_xml_file : str, optional
-            Path to a portable OpenMM ``State`` XML (e.g. written by
-            ``Clustering``). Box, positions and velocities are set
-            individually from the deserialized state, since a stripped
-            system may no longer define global parameters the saved
-            state carries.
+            Path to a portable OpenMM ``State`` XML. Only box, positions and
+            velocities are applied, not its global parameters.
         run_id : str, optional
             Label used as a prefix for all output files written to
             ``self.out_dir``.
         npt_steps : int, optional
             Number of integration steps for both the warm-up phase and the
-            NPT run. At the default 4 fs timestep, 25 000 steps ≈ 0.1 ns.
+            NPT run.
 
         Returns
         -------
@@ -181,8 +174,7 @@ class RelaxMD:
         else:
             simulation.context.setPositions(PDBFile(pdb_file).positions)
 
-        # Read positions back from the context so every branch above (checkpoint,
-        # state XML, PDB) supplies the restraint reference.
+        # Restraint reference, whichever branch set the positions.
         initial_positions = simulation.context.getState(getPositions=True).getPositions()
 
         startdist = get_COM_dist(simulation, self.ligand_atoms, self.pocket_atoms)
@@ -195,7 +187,7 @@ class RelaxMD:
             self.ligand_atoms,
             restraint_force=5,
             force_name="k_harmonic_restrain",
-            force_group=19,  # offset by 15 to avoid overlap with other AutoPath force groups
+            force_group=19,
         )
 
         simulation.context.reinitialize(preserveState=True)
@@ -220,7 +212,7 @@ class RelaxMD:
         simulation.context.reinitialize(preserveState=True)
         logger.debug(f"Stepsize set to {integrator.getStepSize()}")
 
-        simulation.step(npt_steps)  # 0.1 ns at default settings
+        simulation.step(npt_steps)
 
         simulation, system = self._save_outputs(simulation, system, run_id)
 
@@ -250,8 +242,7 @@ class RelaxMD:
             The simulation holding the final state and the restraint-free system.
         """
         system = remove_openmm_force(system, "k_harmonic_restrain")
-        # A context keeps the global parameters of a removed force, and saveState would write
-        # them into a state that the saved system can no longer load. Rebuilding drops them.
+        # The context keeps a removed force's global parameters; rebuild so saved states drop them.
         simulation = rebuild_simulation(simulation, system)
 
         final_positions = simulation.context.getState(getPositions=True).getPositions()

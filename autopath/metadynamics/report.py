@@ -1,16 +1,14 @@
-"""End-of-run metadynamics report: one surface, one correction, three figures.
+"""End-of-run metadynamics report: FES, COLVAR and convergence figures plus ΔG°_b.
 
-The run mode decides how the free-energy surface and its history are assembled:
+Run modes:
 
-* single walker        its own bias and FES history;
-* shared bias          the summed self-biases are ONE surface; its history is laid
-                       end to end when walkers ran one after another and merged on
-                       an aggregate simulation-time axis when they ran concurrently;
-* isolated biases      every walker is an independent estimate, reported on its own
-                       and as mean ± sd (biases are never averaged).
+* single walker    its own bias and FES history;
+* shared bias      summed self-biases form one surface; history laid end to end
+                   (sequential) or on aggregate simulation time (concurrent);
+* isolated biases  each walker is an independent estimate, reported alone and as
+                   mean ± sd (biases are never averaged).
 
-Every ΔG shown or returned comes from correct_fe_for_funnel on that surface, so the
-figures and the log cannot disagree.
+Every ΔG comes from correct_fe_for_funnel, so figures and log agree.
 """
 import os
 import re
@@ -124,13 +122,10 @@ def reference_range_from_funnel(fp, grid, cv_is_funnel_z, sigma_ang, out_dir=Non
                                 cv_len=None, n_sigma=3.0, hill_width_cv=None):
     """Unbound reference window in CV units: the cylinder, clear of the wall.
 
-    z from z_cc to z_max - n_sigma·σ: the cylinder holds the unbound state, and the
-    last few σ before the wall carry the hill-deficit artifact of a hard CV edge. For
-    funnel z this is the window itself (nm). For another CV it is mapped through the
-    recorded funnel z (median z per CV bin); without it, linearly from the bound site
-    (grid_min) to the cap (grid_max), where a path extended to the cap ends. The window
-    also stays n_sigma hill widths inside the CV grid's own edges, where the artifact
-    lives whatever the mapping. Returns None when no window can be placed.
+    z in [z_cc, z_max - n_sigma·σ], avoiding the hill-deficit artifact near the wall.
+    Non-z CVs are mapped via the median recorded funnel z per CV bin, else linearly
+    from the bound site (grid_min) to the cap (grid_max). The window also stays
+    n_sigma hill widths inside the grid edges. Returns None if no window fits.
     """
     z_cc = float(fp["z_cc"].value_in_unit(unit_ang()))
     z_max = float(fp["z_max"].value_in_unit(unit_ang()))
@@ -232,9 +227,8 @@ def _end_to_end(hist_lists):
 def _aggregate_concurrent(hist_lists):
     """Merge concurrent walkers' snapshots on aggregate simulation time.
 
-    Each snapshot is placed at the wall-clock time it was taken (linear in the
-    walker's own progress); the aggregate time at that moment is the sum of every
-    walker's progress, which is how much sampling the shared bias had seen.
+    A snapshot's aggregate time is the summed progress of all walkers at its
+    wall-clock time (progress assumed linear in wall time).
     """
     walkers = []
     for files in hist_lists:
@@ -457,9 +451,8 @@ def plot_colvar(traces, mode, basins, grid, cv_name, out_path, z_max_ang=None):
 def _deposition_rate(t_ns, snapshots, grid, bias_factor, window=6):
     """Rate at which bias is added (kJ/mol · CV-unit / ns), from the FES snapshots.
 
-    V = -(γ-1)/γ · F; its integral only grows, so the running maximum removes the
-    small dips from walkers that synced at slightly different times. The rate is the
-    slope of a linear fit over ``window`` consecutive snapshots.
+    V = -(γ-1)/γ · F. Its integral is made monotone (running max, removes sync dips)
+    and the rate is a linear-fit slope over ``window`` snapshots.
     """
     V = -((bias_factor - 1.0) / bias_factor) * np.asarray(snapshots, float)
     dx = (grid[1] - grid[0]) / max(V.shape[1] - 1, 1)
@@ -545,8 +538,7 @@ def report(out_dir, temperature, bias_factor, grid_min=0.0, grid_max=1.0,
     fp_path = os.path.join(out_dir, "funnel_params.npz")
     fp = funnel_params if funnel_params is not None else (
         load_funnel_params(fp_path) if os.path.exists(fp_path) else None)
-    # Without a funnel there is no cylinder: no standard-state correction and no
-    # funnel axis, so round trips fall back to fractions of the CV grid.
+    # No funnel: no standard-state correction, round trips on CV grid fractions.
     basins = funnel_basins(fp) if fp is not None else None
     z_max = float(fp["z_max"].value_in_unit(fp["z_cc"].unit)) if fp is not None else None
     if fp is None:

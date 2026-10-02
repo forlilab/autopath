@@ -118,7 +118,7 @@ def align_trajectory_pytraj(
     out_fname: str = None,
 ) -> None:
 
-    """THis is kinda deprecated since we are now using mdtraj for trajectory processing, but keeping here for now in case we want to add back in some pytraj-specific processing down the line."""
+    """Deprecated: trajectory processing now uses mdtraj."""
     import pytraj as pt
 
     ptraj = pt.iterload(traj_file, prmtop_file, stride=stride)
@@ -152,11 +152,9 @@ def wrap_align_save_traj(traj_files, topology, remove_original=True, is_membrane
         (hundreds of lipids), and centering is sufficient for sMD/metadynamics.
     reference : str or mdtraj.Trajectory, optional
         Structure whose first frame is the superposition target. Default (None)
-        superposes each trajectory onto its OWN first frame, which puts every
-        trajectory in a *different* frame — fine for single-trajectory analysis, but
-        an external reference is required when several trajectories must share one
-        Cartesian frame (e.g. pooling cosolvent density maps across replicas or
-        probes). Must have a topology compatible with *align_select*.
+        superposes each trajectory onto its own first frame; pass a reference when
+        several trajectories must share one Cartesian frame. Must have a topology
+        compatible with *align_select*.
     align_select : str
         MDTraj selection used for the superposition (default ``"backbone"``).
     out_dir : str, optional
@@ -169,11 +167,8 @@ def wrap_align_save_traj(traj_files, topology, remove_original=True, is_membrane
 
     Notes
     -----
-    Superposition rotates the coordinates while the stored box lengths and angles
-    are rotation-invariant, so the saved box no longer records the periodic frame
-    of the coordinates. Treat aligned trajectories as geometry for superposition
-    and visualisation; do not run PBC-dependent calculations (minimum image,
-    re-wrapping, re-imaging) on them.
+    Superposition rotates the coordinates but not the box, so do not run
+    PBC-dependent calculations (minimum image, re-imaging) on aligned output.
     """
     import mdtraj as md
     if isinstance(traj_files, str):
@@ -196,13 +191,8 @@ def wrap_align_save_traj(traj_files, topology, remove_original=True, is_membrane
         if len(sel) > 0:
             try:
                 if ref_traj is None:
-                    # Image BEFORE superposing only (done above). Superposition
-                    # rotates the coordinates but not unitcell_vectors, so imaging
-                    # afterwards wraps against a box that no longer matches them and
-                    # translates whole molecules by vectors that are wrong in the
-                    # rotated frame -- dropping solvent on top of solvent. A uniform
-                    # rigid transform preserves every interatomic vector, so nothing
-                    # needs re-imaging after it.
+                    # Image only before superposing: superpose rotates coordinates
+                    # but not unitcell_vectors, so imaging afterwards is wrong.
                     traj = traj.superpose(traj[0], atom_indices=sel)
                 else:
                     ref_sel = ref_traj.topology.select(align_select)
@@ -210,10 +200,7 @@ def wrap_align_save_traj(traj_files, topology, remove_original=True, is_membrane
                         raise ValueError(
                             f"reference selection {align_select!r} has {len(ref_sel)} "
                             f"atoms but the trajectory has {len(sel)}")
-                    # Aligning to an EXTERNAL frame: a uniform rigid transform cannot
-                    # move any molecule into a different image relative to the solute,
-                    # so no second imaging pass is needed (and re-imaging here would
-                    # re-wrap against a box that no longer matches the coordinates).
+                    # No re-imaging after superposition (box no longer matches).
                     traj = traj.superpose(ref_traj, frame=0, atom_indices=sel,
                                           ref_atom_indices=ref_sel)
             except Exception as e:
@@ -762,13 +749,9 @@ def generate_smd_pocket_selection(
     structure elements (helices and sheets) are ranked first to minimise
     pulling artefacts; all selections use CA atoms only.
 
-    When *use_pdb_ss* is True (default), secondary structure is read from the
-    HELIX/SHEET records already present in the PDB file. This is preferred over
-    DSSP for SMD selection because crystal-structure annotations identify stable
-    structural elements regardless of local conformation in any given MD frame.
-    Loop residues are additionally restricted to within *cutoff* Å of the
-    ligand ensemble COM, so flexible loops that would shift during pulling are
-    excluded. Falls back to DSSP if the PDB contains no HELIX/SHEET records.
+    With *use_pdb_ss*, secondary structure comes from the PDB HELIX/SHEET
+    records (DSSP fallback) and loop residues are limited to *cutoff* Å of
+    the ligand COM.
 
     Parameters
     ----------
@@ -826,8 +809,7 @@ def generate_smd_pocket_selection(
 
     if not _use_pdb_ss:
         from MDAnalysis.analysis.dssp import DSSP
-        # Exclude terminal cap residues (ACE/NME/NMA): they lack a full N/CA/C/O
-        # backbone set and cause DSSP to raise a ValueError on the count check.
+        # Caps lack a full backbone and make DSSP raise.
         std_prot = u.select_atoms("protein and not resname ACE NME NMA")
         ss_codes = DSSP(std_prot).run().results.dssp[0]
         ss_residues = {
@@ -859,8 +841,7 @@ def generate_smd_pocket_selection(
         raise ValueError("No valid molecules could be loaded from the SDF files.")
 
     lig_positions = np.vstack(all_lig_positions)   # (N_heavy_atoms, 3)
-    # Average of per-ligand COMs so every ligand contributes equally regardless
-    # of how many heavy atoms it has (avoids bias from large vs small ligands).
+    # Mean of per-ligand COMs so each ligand counts equally regardless of size.
     ligand_com = np.mean([pos.mean(axis=0) for pos in all_lig_positions], axis=0)
 
     if verbose:
@@ -876,9 +857,7 @@ def generate_smd_pocket_selection(
     contacted_mask = np.array([len(h) > 0 for h in hits])
 
     # --- 4. Filter to residues near the ligand COM ---
-    # SS residues: within max_pocket_radius.
-    # Loop residues (when use_pdb_ss): within the tighter cutoff distance so
-    # that flexible loops contacted only by ligand tails are excluded.
+    # SS residues within max_pocket_radius; loops (use_pdb_ss) within cutoff.
     dist_to_com = np.linalg.norm(ca_positions - ligand_com, axis=1)
     if _use_pdb_ss:
         radius_mask = np.array([
@@ -934,11 +913,8 @@ def generate_smd_pocket_selection(
         def _fmt_pos(v: np.ndarray) -> str:
             return f"[{v[0]:.3f}, {v[1]:.3f}, {v[2]:.3f}]"
 
-        # Build PML that loads only the receptor and creates selections/
-        # pseudoatoms within PyMOL's own coordinate frame — avoids any
-        # misalignment that arises from loading separate MDAnalysis-written
-        # PDB files (which carry a triclinic CRYST1 that can shift coords).
-        # pocket_com is derived from pocket_sel directly so PyMOL computes it.
+        # Build everything inside PyMOL's frame: MDAnalysis-written PDBs carry a
+        # triclinic CRYST1 that can shift coordinates.
         pml_lines = [
             "reinitialize",
             f"load {os.path.abspath(pdb_path)}, receptor",
@@ -1227,7 +1203,6 @@ def get_ligand_anchor_atoms(
         except Exception as e:
             logging.warning(f"Could not generate 2D image with highlights: {e}")
         
-    #ligand_ag = u.atoms[anchor]
     
     return anchor
 
@@ -1365,9 +1340,7 @@ def get_COM_dist(simulation,
 
     Note
     ----
-    Positions are retrieved via ``getPositions(asNumpy=True) / openmmunit.nanometers``,
-    which strips the OpenMM unit wrapper while normalizing to nanometers. The
-    returned scalar is therefore dimensionless but numerically in nanometers.
+    The returned value is a unitless float in nanometers.
     """
     state = simulation.context.getState(getPositions=True, getVelocities=False)
     positions = state.getPositions(asNumpy=True) / openmmunit.nanometers
@@ -1487,12 +1460,9 @@ def _reimaging_ligand(u: mda.Universe, ligand_sel: str) -> bool:
     """
     Translate the ligand to the minimum-image position relative to the protein COM.
 
-    After backbone superposition the ligand may end up in a distant periodic image
-    in Cartesian space (especially with non-orthogonal boxes such as rhombic
-    dodecahedra). This helper corrects that by computing the minimum-image
-    displacement of the ligand COM relative to the protein COM and translating
-    all ligand atoms accordingly.  The modification is in-place on the Universe's
-    current frame positions and is NOT written back to the trajectory file.
+    The ligand residues are shifted by the minimum-image correction of the
+    ligand-protein COM vector. In-place on the current frame only; the
+    trajectory file is not modified.
 
     Parameters
     ----------
@@ -1527,9 +1497,7 @@ def _reimaging_ligand(u: mda.Universe, ligand_sel: str) -> bool:
 
     translation = min_disp - disp[0]
     if np.linalg.norm(translation) > 0.1:   # only apply if > 0.1 Å shift needed
-        # Translate whole residues, not just the selected atoms. Callers pass a
-        # heavy-atom selection, so shifting only `lig_atoms` would leave the
-        # ligand's hydrogens a box length behind their parent heavy atoms.
+        # Shift whole residues so hydrogens follow a heavy-atom selection.
         moved = lig_atoms.residues.atoms
         moved.positions += translation
         return True
@@ -1733,14 +1701,11 @@ def write_pocket_pymol(
 def read_surviving_paths(analysis_outdir: str) -> set[str]:
     """Path labels that passed the sMD analysis quality filters.
 
-    The analysis drops under-sampled, prematurely-terminated and
-    negative-well paths, but the medoid bookkeeping is written before that and
-    keeps a medoid for every cluster. Downstream stages that seed simulations
-    from medoids must intersect with this set, or they build milestones and
-    funnels around a path the analysis already rejected.
+    Medoid bookkeeping is written before the filters run, so medoid-seeded
+    stages must intersect with this set.
 
-    Returns an empty set when no quality table is present, which the caller
-    should treat as "unknown", not as "nothing survived".
+    Returns an empty set when no quality table is present, meaning "unknown",
+    not "nothing survived".
     """
     quality = os.path.join(analysis_outdir, "path_quality.csv")
     if os.path.exists(quality):
@@ -1762,19 +1727,14 @@ def read_surviving_paths(analysis_outdir: str) -> set[str]:
 def read_trajname_to_path(analysis_outdir: str) -> dict[str, str]:
     """Map each surviving sMD trajectory name to its path label.
 
-    Stages that build a per-path model (funnel, path CV) need to know which
-    trajectories belong to which path; pooling every trajectory merges
-    geometrically distinct routes into one over-wide model.
-
-    Only rows the analysis kept are returned; a missing ``path_ok`` column is
-    read as "all rows kept". Returns an empty dict when the table or the
-    columns it needs are absent, which the caller should treat as "unknown".
+    Only rows the analysis kept are returned; a missing ``path_ok`` column
+    means all rows were kept. Returns an empty dict ("unknown") when the table
+    or its columns are absent.
     """
     processed = os.path.join(analysis_outdir, "sMD_processed_data.csv")
     if not os.path.exists(processed):
         return {}
 
-    # the table is large; only the three columns below are ever needed
     wanted = ("trajname", "path", "path_ok")
     df = pd.read_csv(processed, usecols=lambda c: c in wanted)
     if "trajname" not in df.columns or "path" not in df.columns:
@@ -1790,11 +1750,9 @@ def filter_medoids_by_surviving_trajectories(medoid_to_path: dict,
                                             surviving: dict) -> tuple[dict, dict, dict]:
     """Keep medoids whose trajectory passed QC, relabelled from the analysis.
 
-    ``medoid_to_path`` is written before the quality filters run and its label
-    for a trajectory can disagree with the final assignment for that same
-    trajectory, so the label is not a safe key: filtering on it drops medoids
-    that actually passed. Decide on the trajectory and take the path from
-    ``surviving`` (trajname -> path), which is what the verdict was recorded on.
+    ``medoid_to_path`` labels can disagree with the final assignment, so
+    filtering is by trajectory and the path is taken from ``surviving``
+    (trajname -> path).
 
     Returns ``(kept, dropped, disagreements)`` where *kept* maps medoid to its
     analysis path, *dropped* maps medoid to its old label, and *disagreements*
@@ -1811,8 +1769,7 @@ def filter_medoids_by_surviving_trajectories(medoid_to_path: dict,
 
 
 ### DEPRECATED ###
-# Superseded by autopath/clustering.py. Retained: still imported by
-# Clustering (PairwiseDistances, write_pdbs, plot) and by any external caller.
+# Superseded by autopath/clustering.py; still imported by Clustering.
 
 def match_cluster_centroids_unique(X: np.ndarray,
                                    centroids: np.ndarray,
@@ -1897,10 +1854,7 @@ def compute_distance_features(u: mda.Universe,
 
     all_dists = []
     for ts in u.trajectory[::stride]:
-        # Pass box=u.dimensions so MDAnalysis uses the minimum-image convention.
-        # Without this, frames where the ligand is in a different periodic image
-        # from the pocket (e.g. after backbone superposition) produce inflated
-        # Euclidean distances that corrupt PCA-based milestone selection.
+        # Minimum-image distances.
         box = u.dimensions if u.dimensions is not None else None
         dists = distance_array(ligand_atoms.positions, pocket_atoms.positions, box=box)
         all_dists.append(dists.flatten() / 10.0)  # Angstroms -> nm
@@ -1918,8 +1872,7 @@ def _plot_pca_milestones(
 ) -> None:
     """Save a 2D PCA scatter plot coloured by cluster label with milestone frames annotated.
 
-    `labels` may be None (no clustering, e.g. time-spaced selection); the
-    scatter is then drawn in a single colour without a cluster legend.
+    `labels` may be None, giving a single-colour scatter without legend.
     """
     fig, ax = plt.subplots(figsize=(6, 5))
     if labels is None:
@@ -1989,13 +1942,9 @@ def extract_milestones(
     plot : bool
         If True and out_dir is provided, save a PCA cluster scatter plot.
     ligand_sel : str, optional
-        MDAnalysis selection string for the ligand. When provided, each milestone
-        frame is corrected for PBC imaging artifacts before the PDB is written:
-        the ligand is translated to the minimum-image position relative to the
-        protein COM. This is necessary because backbone superposition can displace
-        the ligand into a distant periodic image (particularly for non-orthogonal
-        boxes such as rhombic dodecahedra), which would corrupt PathCV reference
-        distances.
+        MDAnalysis selection string for the ligand. When provided, the ligand
+        is moved to its minimum-image position relative to the protein COM
+        before each milestone PDB is written.
 
     Returns
     -------
@@ -2038,8 +1987,7 @@ def extract_milestones(
         frame_index = int(frame_index)
         u.trajectory[frame_index]
 
-        # Correct any PBC imaging artifact before writing:
-        # backbone superposition can leave the ligand in a distant periodic image.
+        # Superposition can leave the ligand in a distant periodic image.
         if ligand_sel is not None:
             try:
                 reimaged = _reimaging_ligand(u, ligand_sel)

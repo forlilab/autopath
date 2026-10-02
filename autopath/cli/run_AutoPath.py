@@ -58,9 +58,7 @@ def cmd_lineparser():
 def main():
     """Entry point for the AutoPath CLI.
 
-    Parses command-line arguments, loads the JSON configuration, instantiates
-    an :class:`~autopath.autopath_core.AutoPath` simulation object, and runs
-    the full pipeline for each ligand in the provided SDF file or directory.
+    Runs the full pipeline for each ligand in the SDF file or directory.
 
     Arguments (via CLI)
     -------------------

@@ -17,8 +17,7 @@ def _tiny_system(n=6):
 
 
 def test_written_state_roundtrips_positions_and_box(tmp_path):
-    """Review Focus #3: box vectors must survive, else the restart silently
-    adopts the System default box."""
+    """A serialized State round-trips positions, box vectors and velocities."""
     system = _tiny_system()
     integ = mm.LangevinMiddleIntegrator(300 * ommunit.kelvin,
                                         1 / ommunit.picosecond,
@@ -46,8 +45,7 @@ def test_written_state_roundtrips_positions_and_box(tmp_path):
 
 
 def test_write_states_roundtrips_a_real_trajectory(tmp_path):
-    """write_states is this task's centrepiece; exercise it end-to-end against a
-    real Universe rather than only testing the reader."""
+    """write_states output matches the trajectory's positions and box."""
     import MDAnalysis as mda
     from MDAnalysis.tests.datafiles import PSF, DCD
     from openmm import app as _app
@@ -55,8 +53,7 @@ def test_write_states_roundtrips_a_real_trajectory(tmp_path):
 
     from MDAnalysis.transformations.boxdimensions import set_dimensions
     u = mda.Universe(PSF, DCD)
-    # PSF/DCD carries no unit cell; write_states refuses a box-less frame by
-    # design, so give the fixture a deterministic box.
+    # PSF/DCD has no unit cell; write_states needs one.
     u.trajectory.add_transformations(set_dimensions([60., 60., 60., 90., 90., 90.]))
     n = u.atoms.n_atoms
     system = mm.System()
@@ -103,7 +100,7 @@ def test_write_states_rejects_atom_count_mismatch(tmp_path):
 
 
 def test_write_states_refuses_a_boxless_frame(tmp_path):
-    """Substituting the System default box would restart at the wrong density."""
+    """write_states raises on a frame with no unit cell."""
     import MDAnalysis as mda
     from MDAnalysis.tests.datafiles import PSF, DCD
     from openmm import app as _app
@@ -173,9 +170,7 @@ def _six_atom_system_and_topology():
 
 
 def test_write_states_reimages_the_ligand_when_asked(tmp_path):
-    """I1: backbone superposition can leave the ligand a box away, and the
-    State inherits the frame's coordinates verbatim, so write_states needs the
-    same re-imaging write_pdbs does."""
+    """With ligand_sel, write_states moves the ligand to its minimum image."""
     from autopath.clustering import Clustering, PairwiseDistances
     u = _six_atom_universe()
     system, top = _six_atom_system_and_topology()
@@ -197,8 +192,7 @@ def test_write_states_reimages_the_ligand_when_asked(tmp_path):
 
 
 def test_write_pdbs_reindexes(tmp_path):
-    """M4: extract_milestones wrote with reindex=True; the replacement must
-    stay output-compatible."""
+    """write_pdbs renumbers atom serials from 1."""
     import MDAnalysis as mda
     from autopath.clustering import Clustering, PairwiseDistances
     u = _six_atom_universe()

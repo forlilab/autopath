@@ -1,15 +1,8 @@
-"""Isolate which force makes the milestone_2 walker blow up.
+"""Run a relaxed milestone state with one force at a time to find which one NaNs.
 
-milestone_2 NaNs in 3 of 4 metadynamics runs, independently of timestep (4 fs
-and 2 fs), of how the context is built (reinitialize vs rebuild), and of the
-funnel radius (2.0 A and 4.47 A). This splits the remaining possibilities:
-
-  plain   unbiased MD from the relaxed state, no funnel, no bias
-  funnel  funnel restraint only
-  bias    metadynamics bias only
-
-If `plain` blows up the state or the system is bad and metadynamics is
-innocent; otherwise whichever arm blows up names the force.
+--arm plain    unbiased MD, no funnel, no bias
+--arm funnel   funnel restraint only (zero hill height)
+--arm bias     metadynamics bias only
 """
 import argparse
 import logging

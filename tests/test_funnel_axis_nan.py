@@ -37,9 +37,7 @@ def _state(ctx, guest_nm):
 
 @pytest.mark.parametrize("z_ang", [2.0, 15.0, 26.0, 28.0])
 def test_force_is_finite_exactly_on_the_axis(z_ang):
-    """r_xy = sqrt(max(0, r2 - r_z^2)) has an infinite derivative at 0, and the zero
-    step() in front of the wall turns it into 0*inf = NaN. In single precision the
-    cancellation makes 'on the axis' a finite zone, which crashed walkers in solvent."""
+    """Energy and force stay finite on the axis, where d(r_xy)/dr diverges."""
     E, F = _state(_context(), AXIS * z_ang / 10.0)
     assert np.isfinite(E) and np.isfinite(F).all()
 

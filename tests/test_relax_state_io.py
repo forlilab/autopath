@@ -17,9 +17,7 @@ def test_run_does_not_use_loadState():
     assert "loadState" not in inspect.getsource(RelaxMD.run)
 
 
-# --- real execution: the signature/source assertions above cannot catch a
-# --- NameError inside run(), which is how the state_xml_file branch shipped
-# --- broken (initial_positions was bound only in the pdb_file branch).
+# --- real execution: source assertions above cannot catch runtime errors in run().
 
 import numpy as np
 import openmm as mm
@@ -36,7 +34,7 @@ def _tiny_state_and_system(tmp_path, n=6):
     for _ in range(n):
         system.addParticle(12.0)
         nb.addParticle(0.0, 0.3, 0.1)
-    # The barostat refuses a non-periodic system, so the toy needs a periodic force.
+    # the barostat needs a periodic system
     system.addForce(nb)
     system.setDefaultPeriodicBoxVectors(mm.Vec3(3, 0, 0) * ommunit.nanometer,
                                         mm.Vec3(0, 3, 0) * ommunit.nanometer,
@@ -64,8 +62,7 @@ def _tiny_state_and_system(tmp_path, n=6):
 
 
 def test_run_from_state_xml_executes(tmp_path, monkeypatch):
-    """Calls run(state_xml_file=...) for real; it used to raise
-    UnboundLocalError on initial_positions before the restraints were added."""
+    """run(state_xml_file=...) executes and restrains to the state's coordinates."""
     import autopath.relax_md as rmd
 
     state_xml, system, top, pos = _tiny_state_and_system(tmp_path)
@@ -85,7 +82,6 @@ def test_run_from_state_xml_executes(tmp_path, monkeypatch):
     out_system = relax.run(system=system, state_xml_file=state_xml,
                            run_id="milestone_1_frame_0", npt_steps=10)
 
-    # The restraint reference must be the state's coordinates, not a PDB's.
     assert "positions" in seen, "add_harmonic_restraints was never reached"
     np.testing.assert_allclose(seen["positions"], pos, rtol=0, atol=1e-4)
     assert out_system.getNumParticles() == 6

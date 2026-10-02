@@ -54,7 +54,7 @@ def test_reference_range_for_a_path_cv_is_mapped_through_the_recorded_z(tmp_path
 
 
 def test_reference_window_stays_clear_of_the_cv_edge():
-    """The artifact sits at the CV's own edge, so no mapping may put the window there."""
+    """The reference window ends at least 3 hill widths before the CV edge."""
     lo, hi = R.reference_range_from_funnel(_fp(), grid=(0.0, 1.0), cv_is_funnel_z=False,
                                            sigma_ang=1.0, hill_width_cv=0.05)
     assert hi <= 1.0 - 3 * 0.05 + 1e-9

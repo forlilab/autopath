@@ -83,16 +83,14 @@ class Clustering:
         self._stride = 1
 
     def fit(self, u):
-        # Feature rows are strided samples of the trajectory; row i is frame
-        # i*stride. select() maps back so its indices address u.trajectory.
+        # Feature row i is trajectory frame i*stride.
         self._stride = max(1, int(getattr(self.featurizer, "stride", 1) or 1))
         X = self.featurizer.compute(u)
         if X.ndim != 2:
             raise ValueError("featurizer must return a 2D (n_frames, n_features) array")
         self.X = X
         Xs = StandardScaler().fit_transform(X) if self.scale else X
-        # A featurizer may return fewer features than n_components (CoordinateRMSD
-        # returns one), and PCA refuses n_components > n_features.
+        # PCA refuses n_components > n_features.
         n_comp = min(self.n_components, Xs.shape[1])
         if n_comp < self.n_components:
             logger.warning("n_components=%d exceeds the %d available features; using %d",
@@ -126,8 +124,7 @@ class Clustering:
         if n > n_frames:
             raise ValueError(f"requested {n} frames but only {n_frames} are available")
 
-        # Clustering state belongs to a centroid run only; stale values after a
-        # time_spaced call would misrepresent which frames were chosen and why.
+        # Clustering state is only meaningful for a centroid run.
         self.labels_ = None
         self.centers_ = None
 
@@ -154,8 +151,7 @@ class Clustering:
         self.labels_ = model.transform(pc1)
         centers = model.cluster_centers
         self.centers_ = centers[np.argsort(centers[:, 0])]
-        # Returned in centroid (PC1, bound -> unbound) order, NOT frame order:
-        # sorting by frame index would scramble the milestone sequence.
+        # Returned in PC1 (centroid) order, not frame order.
         frames = np.asarray(match_cluster_centroids_unique(
             pc1, self.centers_, min_frame_separation=min_frame_separation), dtype=int)
         if len(frames) < n:
@@ -167,16 +163,12 @@ class Clustering:
 
     def write_states(self, u, frames, topology, system, out_dir, prefix,
                      temperature=300.0, ligand_sel=None):
-        """Serialized State per frame. Velocities are drawn fresh at
-        `temperature`: a trajectory frame carries none.
+        """Serialized State per frame, with velocities drawn at `temperature`.
 
-        `ligand_sel` re-images the ligand into the periodic image nearest the
-        protein before serializing: backbone superposition can leave it a box
-        away, and the State inherits the frame's coordinates verbatim."""
+        `ligand_sel` re-images the ligand next to the protein before serializing."""
         from autopath.utils import _reimaging_ligand
         os.makedirs(out_dir, exist_ok=True)
-        # The Universe, Topology and System must describe the same particles;
-        # a mismatch otherwise surfaces as an opaque error from setPositions.
+        # Otherwise a mismatch surfaces as an opaque setPositions error.
         n_u, n_sys = u.atoms.n_atoms, system.getNumParticles()
         n_top = topology.getNumAtoms()
         if not (n_u == n_sys == n_top):
@@ -186,8 +178,7 @@ class Clustering:
         integ = mm.LangevinMiddleIntegrator(
             temperature * ommunit.kelvin, 1 / ommunit.picosecond,
             0.002 * ommunit.picoseconds)
-        # Pin the CPU platform: this context only serializes coordinates, so it
-        # must not seize a GPU.
+        # CPU only: this context just serializes coordinates.
         ctx = mm.Context(system, integ, mm.Platform.getPlatformByName("CPU"))
         out = []
         try:
@@ -233,10 +224,6 @@ class Clustering:
     def plot(self, out_dir, prefix, frames=None):
         """PCA scatter with cluster labels and the selected frames annotated.
 
-        `_plot_pca_milestones` dereferences `pca.explained_variance_ratio_` for
-        its axis labels, so the fitted PCA object must be passed, never None.
-        Without labels (strategy="time_spaced") the scatter is drawn as one
-        unlabelled cluster, with the selected frames still annotated.
         `frames` are trajectory indices, as returned by select().
         """
         from autopath.utils import _plot_pca_milestones
@@ -275,15 +262,8 @@ def order_milestones_bound_to_unbound(milestones: list[str],
                                       pocket_atoms, ligand_atoms) -> list[str]:
     """Reverse `milestones` if they run unbound -> bound.
 
-    PC1's sign is arbitrary (sklearn anchors it deterministically, not
-    physically), so a centroid ordering along PC1 is as likely to start at the
-    unbound end as the bound one. Everything downstream -- the path CV's
-    progress coordinate, the [0, 1] grid, the stuck-walker test, the preseed
-    bias -- assumes index 0 is the most bound. Anchor the direction on the one
-    physical quantity available here: pocket-ligand separation.
-
-    Unweighted centroids are enough to pick a direction; the CV itself still
-    uses mass-weighted COMs.
+    PC1's sign is arbitrary, but downstream code assumes index 0 is the most
+    bound; the direction is anchored on pocket-ligand centroid separation.
     """
     if len(milestones) < 2:
         return milestones

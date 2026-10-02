@@ -1,14 +1,12 @@
-"""Milestone extraction + funnel metadynamics from an existing sMD run.
+"""Milestone extraction + funnel metadynamics on top of an existing sMD run.
 
-Everything upstream of milestone extraction is switched off and read back from
-disk: preparation, equilibration, sMD pulling and sMD analysis all already ran.
-The medoid trajectories and medoid_info.json under sMD/analysis_traces are the
-only inputs needed here.
+Preparation, equilibration, sMD pulling and analysis are skipped; the medoid
+trajectories and medoid_info.json under sMD/analysis_traces are reused.
 
-3 walkers, each seeded from its own milestone, all sharing one bias directory.
-Walkers run sequentially (most-unbound first), so each inherits the hills its
-predecessors deposited and the run accumulates one free-energy surface over
-3 x mMD_time. No bias pre-seeding.
+--walkers     shared (one bias, walkers run sequentially) or isolated
+--seed-order  order shared walkers are seeded in
+--cv          path progress or funnel z coordinate
+--no-extract  reuse existing milestones
 """
 import os
 import argparse
@@ -53,12 +51,10 @@ def main():
     sys_name = os.path.basename(ligand).split('.')[0]
     os.makedirs(sys_name, exist_ok=True)
 
-    # Separate log file on purpose: appending to autopath.log would interleave
-    # this run with the earlier sMD run's lines and make attribution ambiguous.
+    # separate log so it does not interleave with the sMD run's autopath.log
     logger = setup_logging(f"{sys_name}/autopath_metad{args.suffix}.log", log_level="INFO")
 
-    # Same pocket definition as the sMD run that produced the trajectories being
-    # reused; these are system.pdb sequential resids, not original PDB numbering.
+    # must match the sMD run; system.pdb sequential resids, not PDB numbering
     pocket_residues = [180, 181, 182, 183, 226, 227, 228, 229, 230, 204, 205, 206,
                        207, 208, 209, 210, 211, 212, 213, 214, 215, 196, 197, 198,
                        199, 200, 201, 133, 134, 135, 136, 137, 138, 139, 140, 156,
@@ -78,8 +74,7 @@ def main():
                   lig_ff='openff-2.3.0',
 
 
-                  # OpenCL, not CUDA: this is what the sMD run used on these same
-                  # RTX PRO 6000 (Blackwell) nodes.
+                  # same platform as the sMD run
                   platform='OpenCL',
 
                   run_equilibration=False,
@@ -96,8 +91,7 @@ def main():
                       0.015: 10,
                       0.010: 10,
                   },
-                  # Analysis already ran; medoids are read from
-                  # sMD/analysis_traces/path_analysis/medoid_info.json.
+                  # medoids read from sMD/analysis_traces/path_analysis/medoid_info.json
                   sMD_run_analysis=False,
 
                   # --- milestone extraction ---
@@ -108,7 +102,7 @@ def main():
                   # --- metadynamics ---
                   run_metadynamics=True,
                   mMD_use_funnel_potential=True,
-                  mMD_preseed_bias=False,       # no FES pre-filling
+                  mMD_preseed_bias=False,
                   mMD_multiple_walkers=args.walkers == "shared",
                   mMD_cv=args.cv,
                   mMD_seed_order=args.seed_order,

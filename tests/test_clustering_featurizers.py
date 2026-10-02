@@ -10,14 +10,7 @@ def u():
 
 
 def test_pairwise_distances_matches_independent_reference(u):
-    """Independent reference built from MDAnalysis primitives, NOT from
-    compute_distance_features (the implementation delegates to that, so
-    comparing against it would be vacuous).
-
-    Two details the reference must match or the test is wrong rather than the
-    code: the distances are MINIMUM-IMAGE (box= is passed) and the output is in
-    NANOMETRES (Angstrom / 10).
-    """
+    """Distances match an MDAnalysis reference: minimum-image, in nanometres."""
     from MDAnalysis.lib.distances import distance_array
     lig, pock = "resid 1-5 and name CA", "resid 20-30 and name CA"
     X = PairwiseDistances(lig, pock).compute(u)

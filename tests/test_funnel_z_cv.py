@@ -39,8 +39,7 @@ def test_value_is_the_mass_weighted_projection_on_the_funnel_axis():
 
 
 def test_moving_the_guest_along_the_axis_changes_z_by_the_same_amount():
-    """Unlike path progress, z keeps changing beyond any milestone, so the bias can
-    act all the way to the funnel cap."""
+    """Translating the guest along the axis shifts z by the same distance."""
     rng = np.random.default_rng(2)
     pos = rng.normal(0, 1.0, (4, 3))
     n = AXIS / np.linalg.norm(AXIS)
@@ -60,8 +59,7 @@ def test_spec_is_a_length_in_nm():
 
 
 def test_round_trips_are_counted_in_fractions_of_the_grid():
-    """Thresholds 0.1 / 0.9 are fractions of the CV grid, so a length CV in nm
-    counts the same transitions as the [0, 1] path progress."""
+    """Round-trip thresholds are grid fractions, so a rescaled CV counts the same trips."""
     from autopath.metadynamics.Analysis import MetadynamicsAnalysis
     s = np.r_[np.full(50, 0.05), np.full(50, 0.95), np.full(50, 0.05)]
     z = s * 2.77                                   # same trajectory in nm on [0, 2.77]
@@ -88,8 +86,7 @@ def test_mmd_cv_option_is_validated(kw, ok):
 
 
 def test_z_is_clamped_to_the_grid():
-    """OpenMM's metadynamics bias is zero outside [grid_min, grid_max], so a CV that
-    leaves the grid drops the whole bias in one step. Clamping keeps it continuous."""
+    """z is clamped to [grid_min, grid_max], outside which the bias would vanish."""
     rng = np.random.default_rng(3)
     pos = rng.normal(0, 0.1, (4, 3))
     n = AXIS / np.linalg.norm(AXIS)

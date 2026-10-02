@@ -28,8 +28,7 @@ def test_funnel_z_is_the_mass_weighted_projection():
 
 
 def test_excursions_into_the_cylinder_count_as_round_trips():
-    """A ligand that leaves the pocket, enters the cylinder and comes back is a round
-    trip even if it never reaches the last 10% of the CV grid."""
+    """Pocket -> cylinder -> pocket counts as a round trip regardless of CV grid fraction."""
     bound_max, unbound_min = funnel_basins(_params())
     z = np.r_[np.full(30, 2.0), np.full(30, 16.0), np.full(30, 2.5),   # trip 1
               np.full(30, 18.0), np.full(30, 3.0),                     # trip 2

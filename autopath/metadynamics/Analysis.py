@@ -29,9 +29,6 @@ KJ_TO_KCAL = 0.239006  # kJ/mol → kcal/mol conversion factor
 def plot_colvar(out_dir: str = None, colvar_name: str = None):
     """Plot 1D collective variable (CV) time traces for each walker.
 
-    Loads all ``COLVAR_*.npy`` files from ``out_dir`` and draws one line per
-    walker on a shared axes, using walker filename as the legend label.
-
     Parameters
     ----------
     out_dir : str
@@ -70,9 +67,6 @@ def plot_colvar(out_dir: str = None, colvar_name: str = None):
 def plot_bias(out_dir: str = None, x_min: float = None, x_max: float = None, grid_points: int = None, colvar_name: str = None):
     """Plot per-walker accumulated bias profiles (hill deposition) over the CV grid.
 
-    Loads all ``bias_*.npy`` files from ``out_dir``, converts from kJ/mol to
-    kcal/mol, and draws one line per walker on a shared axes.
-
     Parameters
     ----------
     out_dir : str
@@ -92,10 +86,7 @@ def plot_bias(out_dir: str = None, x_min: float = None, x_max: float = None, gri
     axis_values = np.linspace(x_min, x_max, grid_points)
     axis_values = [round(i, 2) for i in axis_values]
 
-    # Shared-bias mode writes bias_*.npy straight into out_dir. Isolated mode
-    # (mMD_multiple_walkers=False) gives each walker its own bias_<run_id>/
-    # subdirectory, so out_dir holds DIRECTORIES named bias_* and no .npy at all --
-    # a bare bias_* glob then hands np.load a directory (IsADirectoryError).
+    # Shared bias: bias_*.npy in out_dir; isolated: one bias_<run_id>/ subdir per walker.
     entries = []
     for f in sorted(glob(f"{out_dir}/bias_*.npy")):
         if os.path.isfile(f):
@@ -136,12 +127,7 @@ def plot_bias(out_dir: str = None, x_min: float = None, x_max: float = None, gri
 
 
 def plot_FE(out_dir, x_min, x_max, grid_points, colvar_name):
-    """Plot biased FE profiles (raw FE_*.npy, excluding _rw files).
-
-    Each file is a sequential walker that also accumulated all previous walkers'
-    bias (shared biasDir), so later files are more converged estimates.  All
-    walker traces are shown together to visualise convergence.
-    """
+    """Plot biased FE profiles (raw FE_*.npy, excluding _rw files), one line per walker."""
     sys_name = Path(out_dir).parts[0]
     axis_values = np.linspace(x_min, x_max, grid_points)
     axis_values = [round(i, 2) for i in axis_values]
@@ -177,10 +163,7 @@ def plot_FE(out_dir, x_min, x_max, grid_points, colvar_name):
 def plot_FE_rw(out_dir, x_min, x_max, grid_points, colvar_name, temperature: float = 298.15):
     """Plot standard-state-corrected FE profiles (FE_*_rw.npy).
 
-    Each _rw file shows the FES normalised to the unbound endpoint (s=1 ≈ 0) with
-    the Limongelli 2013 standard-state correction applied.  ΔG°_b is read from the
-    bound-basin minimum (first 20 % of the CV).  Each legend entry includes the
-    per-walker ΔG°_b.  The title reports the best (most negative valid) estimate.
+    ΔG°_b per walker is the minimum over the first 20 % of the CV.
 
     Parameters
     ----------
@@ -224,9 +207,7 @@ def plot_FE_rw(out_dir, x_min, x_max, grid_points, colvar_name, temperature: flo
         df.index = axis_values
         df["walker"] = label
         data.append(df)
-        # Best = last walker (most accumulated bias = most converged) with a
-        # valid negative bound-basin ΔG AND a roughly flat plateau (|mean| of
-        # mid-CV region s=0.4–0.8 within 5 kcal/mol of zero).
+        # Best = last walker with a negative ΔG and a flat mid-CV plateau (s=0.4-0.8).
         if dG < 0:
             mid_lo = int(0.40 * len(fe_kcal))
             mid_hi = int(0.80 * len(fe_kcal))
@@ -262,9 +243,7 @@ def plot_FE_2D(
 ):
     """Plot a 2D free energy surface (FES) heatmap from 2D metadynamics.
 
-    Loads all ``FE_*.npy`` files from ``out_dir`` — each expected to be a 2D
-    array of shape ``(y_grid_points, x_grid_points)`` in kJ/mol — converts to
-    kcal/mol, and saves one heatmap per walker using a Spectral colormap.
+    Each ``FE_*.npy`` is a ``(y_grid_points, x_grid_points)`` array in kJ/mol.
 
     Parameters
     ----------
@@ -319,11 +298,6 @@ def plot_FE_2D(
 
 def plot_colvar_2D(out_dir, xCV_name, yCV_name):
     """Plot 2D CV time traces for each walker as separate line plots.
-
-    Loads all ``COLVAR_*.npy`` files from ``out_dir``, expecting each array
-    to have two columns (one per CV).  Produces two figures: one for
-    ``xCV_name`` vs frame index and one for ``yCV_name`` vs frame index,
-    with one line per walker on each.
 
     Parameters
     ----------
@@ -392,32 +366,14 @@ def correct_fe_for_funnel(
 ) -> dict:
     """Apply the Limongelli 2013 standard-state correction to a funnel metadynamics FE profile.
 
-    ``reference_range`` (CV units) sets the unbound zero to the FES mean over that
-    window; without it the last ``n_plateau_points`` grid points are used, which sit
-    on the hill-deficit artifact at a hard CV edge.
-
-    Accepts a single FE_*.npy path, a numpy array (kJ/mol), or a list of paths.
-    When a list is given the last file is used, as each sequential walker already
-    contains all previous walkers' accumulated bias (shared biasDir).
-
-    The function normalises the profile so the unbound-state plateau is 0 in the biased
-    simulation, then applies the standard-state correction (Eq. 3, Limongelli 2013):
-
-        FE_rw = FE_norm − correction
-        correction = kT × ln(πR²_cyl × C°)          [typically negative]
-
-    so the bound-state minimum of ``FE_rw`` directly reads as ΔG°_b and the unbound
-    plateau sits at |correction| above zero.
+    The FES is zeroed on the unbound reference, then (Limongelli 2013 Eq. 15)
+    ΔG°_b = -kT ln ∫_site exp(-βW) dz − kT ln(πR²_cyl C°).
 
     Parameters
     ----------
     fe_files : str, list of str, or np.ndarray
-        Path(s) to FE_*.npy (kJ/mol), or the array itself. Each FE file holds
-        ``getFreeEnergy()`` for one walker, i.e. its ``_totalBias``. With a SHARED
-        biasDir that total already includes every walker, so the last file is the
-        accumulated surface; with a per-walker biasDir it is only that walker's own
-        estimate and the last file is not "the most converged". Passing a list
-        therefore assumes shared accumulation and warns.
+        Path(s) to FE_*.npy (kJ/mol), or the array itself. For a list only the last
+        file is used, which is the full surface only with a shared biasDir.
     funnel_params : dict
         From ``generate_funnel_parameters_from_trajectory()``. Must contain
         ``"R_cylinder"``, ``"z_cc"``, and ``"z_max"`` as OpenMM Quantities in angstroms.
@@ -429,14 +385,21 @@ def correct_fe_for_funnel(
         Last N grid points averaged to define the unbound-state reference.
     C0_per_A3 : float
         Standard concentration in Å⁻³ (default 1/1660 = 1 M).
+    cv_length_per_unit_ang : float
+        Å spanned per CV unit; required, the site integral is in length units.
+    strict : bool
+        Raise if the bound basin is not resolved; otherwise only flag it.
+    reference_range : tuple, optional
+        CV window for the unbound zero. Without it the last ``n_plateau_points`` are
+        used, which sit on the hill-deficit artifact at a hard CV edge.
 
     Returns
     -------
     dict with keys:
-        fe_corrected        — numpy array (kJ/mol): FE_norm − correction; save as _rw.npy
-        dG_bind_sim_kj_mol  — min(FE_norm); binding ΔG from simulation (negative)
+        fe_corrected        — FE_norm shifted so its minimum is ΔG°_b (kJ/mol)
+        dG_bind_sim_kj_mol  — min(FE_norm) in the bound basin (well depth)
         correction_kj_mol   — kT·ln(πR²_cyl·C°); negative for typical R values
-        dG_bind_std_kj_mol  — min(FE_rw) = ΔG°_b (standard-state binding free energy)
+        dG_bind_std_kj_mol  — ΔG°_b (standard-state binding free energy)
         R_cylinder_ang      — cylinder radius used (Å)
         pKd                 — predicted pKd
         cv_at_minimum       — PathCV progress at the FE minimum
@@ -445,19 +408,9 @@ def correct_fe_for_funnel(
 
     Notes
     -----
-    **Unbound-state normalization:** The last ``n_plateau_points`` grid points
-    (s ≈ 1, funnel endpoint) are averaged and subtracted to set the unbound
-    reference to zero — the assumption underlying the Limongelli 2013
-    standard-state correction (Eq. 3).  Walkers that over-biased s ≈ 1 produce
-    a deeply-negative endpoint; the bound-depth check below catches them
-    (their bound basin stays positive relative to the reference) and raises
-    a ``ValueError`` before a spurious ΔG is reported.
-
-    **Bound-basin ΔG (20 % rule):** ΔG is read from the minimum within the first
-    20 % of the CV grid (s < 0.20), so an over-biased unbound region can never
-    masquerade as the binding minimum.  This replaces an older ``unsampled_gap``
-    check (``fe_max − plateau < 10``) that misfired when the entire FES was
-    deeply negative (heavily biased at both ends — more sampled, not less).
+    The bound site is the first 20 % of the CV grid, so an over-biased unbound
+    region cannot pass as the binding minimum; the site must sit ≥10 kJ/mol below
+    the unbound reference to count as sampled.
     """
     import math
     from openmm import unit as openmmunit
@@ -481,7 +434,6 @@ def correct_fe_for_funnel(
 
     cv = np.linspace(grid_min, grid_max, len(fe))
 
-    # Unbound reference: an explicit window, else the last N points (s ≈ 1).
     n_tail = min(n_plateau_points, len(fe))
     if reference_range is not None:
         ref_mask = (cv >= reference_range[0]) & (cv <= reference_range[1])
@@ -495,11 +447,10 @@ def correct_fe_for_funnel(
 
     fe_norm = fe - plateau_val
 
-    # First 20 % of CV = bound basin; see Notes in docstring.
+    # First 20 % of CV = bound basin.
     bound_bins = max(1, int(0.20 * len(fe_norm)))
 
-    # Sanity check: bound basin must be meaningfully below the unbound reference.
-    bound_depth = float(fe_norm[:bound_bins].min())   # should be negative
+    bound_depth = float(fe_norm[:bound_bins].min())
     bound_state_sampled = bound_depth <= -10.0
     if not bound_state_sampled:
         sign = "above" if bound_depth >= 0 else "only"
@@ -508,10 +459,7 @@ def correct_fe_for_funnel(
             f"sits {sign} {bound_depth:.1f} kJ/mol relative to the unbound reference. "
             "The walker may not have visited the binding site; ΔG would be meaningless."
         )
-        # Reported numbers stay gated. Convergence curves pass strict=False: a
-        # walker seeded outside the site has no basin yet by construction, and
-        # the integral is Boltzmann-weighted, so an empty site yields a small
-        # integral and a large positive ΔG -- well defined, just not an estimate.
+        # strict=False (convergence curves): an empty site still gives a finite, large ΔG.
         if strict:
             raise ValueError(msg)
         logger.debug("%s", msg)
@@ -530,11 +478,8 @@ def correct_fe_for_funnel(
     R_cyl_ang = float(funnel_params["R_cylinder"].value_in_unit(openmmunit.angstrom))
     z_cc_ang = float(funnel_params["z_cc"].value_in_unit(openmmunit.angstrom))
     z_max_ang = float(funnel_params["z_max"].value_in_unit(openmmunit.angstrom))
-    # Limongelli 2013 Eq. 15:  K_b = pi*R_cyl^2 * INTEGRAL_site dz exp(-beta W(z))
-    # Only the CROSS-SECTION enters the analytic term; the length comes from the
-    # integral over the BOUND SITE. Using the cylinder length instead, with the
-    # well depth in place of the integral, treats the bound basin as if it were as
-    # wide as the whole cylinder and overestimates affinity by kT*ln(L/dz_site).
+    # Limongelli 2013 Eq. 15: K_b = pi*R_cyl^2 * INTEGRAL_site dz exp(-beta W(z)).
+    # Only the cross-section is analytic; the length comes from the site integral.
     d_cv = (grid_max - grid_min) / max(1, len(fe_norm) - 1)
     site = fe_norm[:bound_bins]
     integral_ang = float(np.trapz(np.exp(-site / kT), dx=d_cv)
@@ -545,8 +490,7 @@ def correct_fe_for_funnel(
     correction = kT * math.log(math.pi * R_cyl_ang ** 2 * C0_per_A3)
     dG_bind_std = dG_basin - correction
 
-    # Reported surface keeps the old meaning: the normalised FES shifted so its
-    # minimum sits at the standard-state binding free energy.
+    # Normalised FES shifted so its minimum sits at ΔG°_b.
     fe_rw = fe_norm + (dG_bind_std - dG_bind_sim)
     L_cyl_ang = z_max_ang - z_cc_ang
     pKd = -dG_bind_std / (kT * math.log(10))
@@ -573,8 +517,7 @@ def correct_fe_for_funnel(
         "bound_state_sampled": bool(bound_state_sampled),
         "bound_depth_kj_mol": bound_depth,
         "cv_at_minimum": cv_at_min,
-        # The exact CV ranges used: the bound site integrated over, and the unbound
-        # plateau the surface is referenced to.
+        # CV ranges of the integrated bound site and the unbound reference.
         "site_range": (float(cv[0]), float(cv[bound_bins - 1])),
         "plateau_range": _plateau_range,
         "n_fe_files": n_files,
@@ -602,22 +545,13 @@ def write_metad_preseed(
 ) -> str | None:
     """Pre-seed the metadynamics bias surface from a sMD PMF profile.
 
-    Writes ``bias_0_0.npy`` into ``bias_dir`` so all walkers load it
-    via ``_syncWithDisk()`` at initialisation (before any hills are deposited).
+    Writes ``bias_0_0.npy`` into ``bias_dir``, loaded by every walker via
+    ``_syncWithDisk()`` before any hills are deposited:
 
-    The preseed is a fraction (``alpha``) of the well-tempered-metadynamics bias
-    that would be deposited at full convergence:
-        V_preseed(s) = alpha × (gamma-1)/gamma × (ΔG_unbind − F_sMD(r(s)))
-    where F_sMD is the sMD PMF in kJ/mol (0 at bound state) mapped onto the
-    path-CV progress coordinate s ∈ [0,1] using the milestone COM distances.
+        V_preseed(s) = alpha(s) × (gamma-1)/gamma × (ΔG_unbind − F_sMD(r(s)))
 
-    The preseed is tapered toward the transition state (PMF peak) and set to zero
-    beyond it, so metadynamics explores the post-barrier region without bias from
-    the sMD profile.  The taper accounts for the heteroskedastic reliability of
-    the sMD PMF: the bound-state region (s ≈ 0) has low cumulative variance and
-    is seeded at full ``alpha``; variance accumulates toward the barrier, so the
-    effective seeding fraction smoothly declines to zero at s_TS (``taper='cosine'``
-    default) rather than applying a uniform bias up to a hard cutoff.
+    with F_sMD mapped onto s ∈ [0,1] through the milestone COM distances. alpha(s)
+    tapers to zero at the PMF peak (s_TS), since sMD variance grows along the path.
 
     Parameters
     ----------
@@ -634,32 +568,25 @@ def write_metad_preseed(
     temperature : float
         Temperature in K (default 298.15).
     alpha : float
-        Maximum fraction of the converged bias to pre-seed, applied at s=0
-        (default 0.3; values 0.1–0.5 are reasonable — too large risks
-        over-constraining the walker).  With a taper, the effective fraction
-        declines toward zero at the TS.
+        Fraction of the converged bias pre-seeded at s=0 (default 0.3; 0.1–0.5 is
+        reasonable, larger risks over-constraining the walker).
     grid_points : int
         Must match the CVSpec.grid_points used in the run (default 125).
     grid_min, grid_max : float
         Path CV grid bounds (default 0.0/1.0 for PathCV progress).
     speed : float or None
-        sMD pulling speed to use.  ``None`` (default) picks the minimum available:
-        ``dG_extrapolated.csv`` (speed=0, v→0) if present, otherwise the slowest
-        speed in ``mixture_pmfs.csv``.  Pass an explicit ``0.0`` to force the
-        extrapolated PMF, or a non-zero float to select a specific pulling speed.
+        sMD pulling speed. ``None``: the v→0 ``dG_extrapolated.csv`` if present, else
+        the slowest speed in ``mixture_pmfs.csv``; ``0.0`` forces the extrapolated PMF.
     estimator : str
-        Estimator to use (``'cumulant'`` or ``'jarzynski'``, default ``'cumulant'``).
+        ``'cumulant'`` or ``'jarzynski'`` (default ``'jarzynski'``).
     taper : str
-        Shape of the position-dependent alpha(s) decay from ``alpha`` at s=0 to
-        0 at s=s_TS.  ``'cosine'`` (default): smooth cos²(π/2 · s/s_TS) ramp —
-        no discontinuity at s_TS and steeper near the bound state.
-        ``'linear'``: alpha × (1 − s/s_TS) — linear decline.
-        ``'step'``: original flat-then-zero behaviour (uniform alpha up to s_TS).
+        alpha(s) from ``alpha`` at s=0 to 0 at s_TS: ``'cosine'`` (default)
+        cos²(π/2 · s/s_TS), ``'linear'`` 1 − s/s_TS, or ``'step'`` (uniform up to s_TS).
 
     Returns
     -------
-    str
-        Path to the written preseed file.
+    str or None
+        Path to the written preseed file; None if the PMF has no barrier.
     """
     os.makedirs(bias_dir, exist_ok=True)
 
@@ -746,26 +673,20 @@ def write_metad_preseed(
         )
         return None
 
-    # Position-dependent taper: alpha_s(s) declines from alpha at s=0 to 0 at s_ts.
-    # The sMD PMF (Jarzynski/cumulant) accumulates variance along the path, so it is
-    # most reliable near the bound state and least reliable near the barrier.  Grading
-    # the preseed strength by position seeds most strongly where sMD statistics are best.
+    # Seed strongest near the bound state, where the sMD PMF is most reliable.
     if taper == 'cosine':
-        # Smooth cos²(π/2 · s/s_ts) ramp — no kink at s_ts, steeper near bound state.
         alpha_s = np.where(
             s_grid <= s_ts,
             alpha * np.cos(0.5 * np.pi * s_grid / s_ts) ** 2,
             0.0,
         )
     elif taper == 'linear':
-        # Linear ramp: alpha × (1 − s/s_ts).
         alpha_s = np.where(
             s_grid <= s_ts,
             alpha * (1.0 - s_grid / s_ts),
             0.0,
         )
     elif taper == 'step':
-        # Original behaviour: uniform alpha up to s_ts, hard zero beyond.
         alpha_s = np.where(s_grid <= s_ts, float(alpha), 0.0)
     else:
         raise ValueError(
@@ -827,16 +748,11 @@ class MetadynamicsAnalysis:
     def load_bias_files(bias_dir: str) -> dict:
         """Load all walker self-bias arrays from bias_dir.
 
-        Returns {walker_id (int): bias_array (np.ndarray, kJ/mol)}.
-        Only the latest snapshot for each walker is loaded (OpenMM
-        overwrites with a higher save-index at each sync interval).
+        Returns {walker_id (int): bias_array (kJ/mol)}, latest save-index per walker.
         """
         import re
         pattern = re.compile(r'bias_(\d+)_(\d+)\.npy')
-        # Shared-bias mode writes bias_<id>_<idx>.npy directly into bias_dir.
-        # Isolated mode (mMD_multiple_walkers=False) gives each walker its own
-        # bias_<run_id>/ subdirectory, so bias_dir itself holds no matching files
-        # and a flat listdir silently returns nothing.
+        # Isolated mode keeps each walker's files in a bias_<run_id>/ subdirectory.
         search_dirs = [bias_dir]
         search_dirs += sorted(
             d for d in glob(os.path.join(bias_dir, "bias_*")) if os.path.isdir(d))
@@ -856,10 +772,7 @@ class MetadynamicsAnalysis:
     def shared_bias_run_order(hist_files) -> list:
         """Execution order of walkers that shared one bias directory.
 
-        Shared-bias walkers run sequentially, so each inherits its predecessors'
-        hills and its history continues theirs rather than restarting. Alphabetical
-        order is not run order -- the loop starts from the most unbound milestone --
-        so the files are ordered by the time each walker finished writing them.
+        Ordered by ``started_at`` (else file mtime): alphabetical order is not run order.
         """
         def _key(f):
             try:
@@ -876,12 +789,9 @@ class MetadynamicsAnalysis:
                       grid_min: float = 0.0, grid_max: float = 1.0,
                       cv_length_per_unit_ang: float = None,
                       strict: bool = False) -> tuple:
-        """ΔG°(t) from a saved FES history — the Box 2 convergence curve.
+        """ΔG°(t) from a saved FES history (Raniolo & Limongelli, Box 2).
 
-        Raniolo & Limongelli judge convergence on the free-energy difference
-        between bound and unbound as a function of simulation time: it is
-        converged once that value fluctuates about a constant. A single final
-        number cannot show that, so each snapshot is corrected independently.
+        Each snapshot is corrected independently.
 
         Parameters
         ----------
@@ -890,10 +800,8 @@ class MetadynamicsAnalysis:
             ``time_ns``.
 
         strict : bool
-            Default False, so every snapshot gets a value and the third array
-            flags which ones had a resolved bound basin. Dropping the rest cuts
-            the curve exactly where a path-seeded walker starts, which is the
-            part worth seeing.
+            If False (default) every snapshot gets a value and the third array flags
+            those with a resolved bound basin.
 
         Returns
         -------
@@ -923,25 +831,16 @@ class MetadynamicsAnalysis:
                    drift_tol_kj: float = 4.0, both_basins: bool = True) -> dict:
         """Has ΔG°(t) settled?
 
-        Measures the spread of ΔG over the trailing ``tail_frac`` of the run.
-        This is the primary convergence test: a surface can look flat at one
-        instant and still be drifting.
-
-        ``both_basins`` must be True for the plateau to count. A walker that never
-        enters the binding site produces the flattest curve of all -- it is flat
-        near zero because nothing is happening -- so flatness alone would rank the
-        least informative walker as the best converged.
+        Settled = peak-to-peak spread over the trailing ``tail_frac`` ≤ ``drift_tol_kj``,
+        the last snapshot resolved, and ``both_basins`` True (a walker that never
+        enters the site gives a flat curve too).
         """
         t = np.asarray(time_ns, dtype=float)
         g = np.asarray(dG_kj, dtype=float)
         ok = np.isfinite(g)
         if sampled is not None:
-            # Values now exist for unsampled snapshots too; only the resolved
-            # ones can settle onto a ΔG.
             ok = ok & np.asarray(sampled, dtype=bool)
-        # Settling is a statement about the END of the run. A walker that
-        # resolved a basin early and then left has not settled, however flat the
-        # points it did produce.
+        # Settling is judged at the end of the run.
         ends_resolved = bool(ok[-1]) if ok.size else False
         if ok.sum() < 3:
             return {"settled": False, "n_points": int(ok.sum()), "drift_kj": float("nan"),
@@ -978,12 +877,8 @@ class MetadynamicsAnalysis:
                            reference_range: tuple = None) -> dict:
         """Limongelli 2013's two convergence conditions, as a verdict.
 
-        The paper reports a binding free energy only once (i) the system has
-        recrossed between bound and unbound several times, and (ii) the FES is
-        flat in the fully solvated region -- "the flatness of the FES gives a
-        measure of the convergence of our calculations". A single outward pass
-        with a sloping plateau is not a converged surface, and a dG read off one
-        is not interpretable.
+        (i) bound<->unbound recrossings, and (ii) a flat FES in the solvated region;
+        optionally also a settled ΔG(t).
 
         Parameters
         ----------
@@ -997,6 +892,10 @@ class MetadynamicsAnalysis:
             Recrossings required, summed over walkers.
         flatness_tol_kj : float
             Peak-to-peak spread allowed across the plateau.
+    dG_plateau_result : dict, optional
+        ``dG_plateau`` output; must be settled to converge.
+    reference_range : tuple, optional
+        CV window used as the plateau instead of ``plateau_frac``.
 
         Returns
         -------
@@ -1037,8 +936,6 @@ class MetadynamicsAnalysis:
     def bias_layout(bias_dir: str) -> str:
         """'isolated' if each walker owns a bias_<run_id>/ subdirectory, else 'shared'.
 
-        Decides how walker biases combine: summed when they are partial
-        contributions to one shared bias, averaged when each is complete.
         """
         import re
         pattern = re.compile(r'bias_(\d+)_(\d+)\.npy')
@@ -1055,35 +952,29 @@ class MetadynamicsAnalysis:
                     combine: str = "sum") -> tuple:
         """Compute the WT-MetaD FES from a collection of bias arrays.
 
-        Uses the standard estimator:
-            FE(s) = -(gamma / (gamma − 1)) × V_total(s)
-        where V_total = sum of all provided arrays.  Pass a subset of
-        walkers' bias arrays to get a FES that excludes stuck walkers.
+        FE(s) = -(gamma / (gamma − 1)) × V(s), V combined over the given arrays.
 
         Parameters
         ----------
         bias_arrays : list/array of np.ndarray
             Self-bias arrays in kJ/mol from load_bias_files().
         temperature : float
-            Simulation temperature in K (not used in the formula but
-            kept for API completeness / future extensions).
+            Simulation temperature in K (unused; kept for API compatibility).
         bias_factor : float
-            WT-MetaD bias factor γ.  Must be > 1; γ = 1 corresponds to
-            unbiased MD where the FES estimator is undefined (divide-by-zero).
+            WT-MetaD bias factor γ; must be > 1.
         grid_min, grid_max : float
             CV grid bounds — used only to build the returned axis.
+        combine : str
+            ``'sum'`` for a shared biasDir (each file is one walker's self-bias),
+            ``'mean'`` for per-walker biasDirs (each file is a complete bias).
 
         Returns
         -------
         axis : np.ndarray   — CV values at each grid point
         fes  : np.ndarray   — Free energy in kJ/mol
         """
-        # OpenMM writes each walker's SELF bias (metadynamics.py: np.save(..., 
-        # self._selfBias)) and rebuilds the total by summing every walker's file.
-        # So with a shared biasDir the arrays are partial contributions to ONE bias
-        # and must be summed. With a per-walker biasDir each array is already that
-        # walker's complete bias -- an independent estimate of the same surface --
-        # and summing them scales the free energy by the number of walkers.
+        # OpenMM saves each walker's self-bias; summing complete per-walker biases
+        # would scale the FES by the number of walkers.
         stacked = np.stack(bias_arrays)
         if combine == "sum":
             V = np.sum(stacked, axis=0)
@@ -1105,9 +996,11 @@ class MetadynamicsAnalysis:
 
     def walker_transitions(self, colvar_path, basins, bound_threshold=0.1,
                            unbound_threshold=0.9, grid_min=None, grid_max=None) -> dict:
-        """Transitions of one walker: on its recorded funnel z (``FUNNELZ_<run_id>.npy``,
-        Å) with ``basins = (bound_max, unbound_min)`` when both exist, else on the CV
-        with grid-fraction thresholds."""
+        """Transitions of one walker on its funnel z (``FUNNELZ_<run_id>.npy``, Å).
+
+        Uses ``basins = (bound_max, unbound_min)`` when both exist, else the CV with
+        grid-fraction thresholds.
+        """
         run_id = os.path.splitext(os.path.basename(colvar_path))[0].replace('COLVAR_', '')
         z_path = os.path.join(os.path.dirname(colvar_path), f"FUNNELZ_{run_id}.npy")
         if basins is not None and os.path.exists(z_path):
@@ -1130,30 +1023,25 @@ class MetadynamicsAnalysis:
                                     grid_max: float = None) -> dict:
         """Detect basin transitions in a 1D CV time series.
 
-        A bound→unbound transition is counted each time the CV rises above
-        unbound_threshold after having been below bound_threshold.  A round
-        trip additionally requires a return below bound_threshold. When
-        ``grid_min``/``grid_max`` are given, both thresholds are fractions of the
-        CV grid, so a length CV and the [0, 1] path progress are judged alike.
+        A transition is a rise above ``unbound_threshold``; a round trip adds a return
+        below ``bound_threshold``. With ``grid_min``/``grid_max`` the thresholds are
+        fractions of the CV grid.
 
         Returns
         -------
         dict with keys:
             n_transitions        — bound→unbound crossings
             n_round_trips        — complete B→U→B cycles
+            exit_frames, return_frames — frame indices of those crossings
+            bound_threshold, unbound_threshold — thresholds in CV units
             first_transition_frame — frame index of first B→U crossing (-1 = never)
             max_cv               — maximum CV value reached
             frac_bound           — fraction of frames in bound basin
             frac_unbound         — fraction of frames in unbound basin
             reached_unbound      — bool: crossed unbound_threshold at least once
+            started_unbound      — bool: first frame already unbound
 
-        Notes
-        -----
-        **Asymmetric seeding:** Walkers seeded from an unbound sMD milestone
-        start with CV ≈ 1 (already in the unbound basin).  ``in_unbound`` is
-        initialised to ``True`` in that case so the first return below
-        ``bound_threshold`` is correctly counted as a round trip rather than
-        discarded.
+        A walker starting unbound counts its first return as a round trip.
         """
         cv = colvar_array[:, 0] if np.ndim(colvar_array) > 1 else np.asarray(colvar_array)
         if grid_min is not None and grid_max is not None:
@@ -1163,7 +1051,6 @@ class MetadynamicsAnalysis:
         n_trans, n_rt, first_frame = 0, 0, -1
         exit_frames, return_frames = [], []
 
-        # Initialise starting basin; unbound-seeded walkers get in_unbound=True.
         in_unbound = cv[0] > unbound_threshold
         in_bound   = cv[0] < bound_threshold
 
@@ -1201,9 +1088,7 @@ class MetadynamicsAnalysis:
     def bias_coverage(bias_array: np.ndarray, threshold_frac: float = 1e-3) -> float:
         """Fraction of CV grid bins with non-negligible bias.
 
-        A stuck walker deposits hills only near CV=0, leaving most of the
-        grid at zero.  This metric is a proxy for convergence that can be
-        computed from bias files alone, without needing COLVAR data.
+        Convergence proxy from bias files alone: a stuck walker biases only near CV=0.
         """
         if bias_array.max() <= 0:
             return 0.0
@@ -1214,9 +1099,7 @@ class MetadynamicsAnalysis:
     def select_converged_biases(self, min_coverage: float = 0.6) -> list:
         """Return bias arrays from walkers that covered ≥ min_coverage of the CV grid.
 
-        Stuck walkers (deposited hills only in the bound basin) have low
-        grid coverage and are excluded.  This is the bias-file proxy for
-        the transition criterion when COLVAR data is not available.
+        Falls back to all walkers if none pass.
 
         Returns
         -------
@@ -1256,8 +1139,8 @@ class MetadynamicsAnalysis:
     ) -> dict:
         """End-of-run analysis: see :func:`autopath.metadynamics.report.report`.
 
-        Kept for existing callers; walkers are discovered from ``out_dir``, so
-        ``colvar_files`` and the threshold/coverage arguments are ignored.
+        Walkers are discovered from ``out_dir``; ``colvar_files`` and the
+        threshold/coverage arguments are ignored.
         """
         from autopath.metadynamics.report import report
         return report(self.out_dir, temperature, bias_factor, grid_min=grid_min,

@@ -86,9 +86,9 @@ def main():
                     sMD_pulling_speeds={
                                         0.020: 10,
                                         0.015: 10,
-                                        0.010: 10, # nm/ps equivalent to 10.0 m/s nm/ns
-                                        # 0.0050: 25, # nm/ps equivalent to 5.0 m/s nm/ns
-                                        # 0.0010: 25, # nm/ps equivalent to 1.0 m/s nm/ns
+                                        0.010: 10, # nm/ps (= 10 m/s)
+                                        # 0.0050: 25, # nm/ps (= 5 m/s)
+                                        # 0.0010: 25, # nm/ps (= 1 m/s)
                                         },
 
                     sMD_run_analysis=True,

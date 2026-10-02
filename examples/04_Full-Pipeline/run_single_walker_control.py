@@ -1,13 +1,12 @@
-"""Single-walker control for the path-seeding comparison.
+"""Single funnel-metadynamics walker on the same funnel and path CV as a seeded run.
 
-One walker for 3 x mMD_time, started from the equilibrated bound pose. This is
-the reference a path-seeded run has to beat: same GPU, same total sampling, same
-path CV and funnel, only the restart points differ.
+The funnel is loaded from saved parameters and the path CV is built from the
+existing milestones (bound -> unbound), so results are on the same coordinate.
 
-Everything that could shift the free-energy surface is pinned to the seeded run:
-the funnel is loaded from its saved parameters rather than re-derived, and the
-path CV is built from the same milestone files in the same bound -> unbound
-order, so the [0, 1] progress coordinate means the same thing in both.
+--seed-from         'equil' or a milestone name to start from
+--bias-dir          shared bias directory for concurrent walkers
+--cv                path progress or funnel z coordinate
+--expect-cv-length  abort if the path CV length (Å/unit) differs
 """
 import argparse
 import logging
@@ -69,9 +68,7 @@ def main():
                   log_level="INFO")
     log = logging.getLogger("autopath")
 
-    # Selections have to come from the same helpers the pipeline uses. A plain
-    # heavy-atom selection is NOT the same anchor: the run being compared against
-    # pulls on the Murcko scaffold, and the two differ by ~1 Å of CV length.
+    # use the pipeline's selection helpers; a heavy-atom selection is a different anchor than murcko
     pocket_selection = f'resid {" ".join(map(str, POCKET_RESIDUES))} and name CA'
     eq_pdb = f"{base}/equilibration/3ptb_equilibrated.pdb"
     eq_traj = f"{base}/equilibration/equilibration_3ptb_aligned.dcd"
@@ -84,8 +81,7 @@ def main():
     log.info("pocket atoms: %d; ligand anchor atoms: %s", len(pocket), list(lig))
     topology = PDBFile(f"{base}/system.pdb").topology
 
-    # Same milestone files and same direction as the seeded run: the path CV has
-    # to be identical or the two dG(t) curves are not on the same coordinate.
+    # same milestones and order as the seeded run, so the path CV is identical
     milestones = sorted(
         (m for m in glob(f"{base}/milestones/milestone_*_frame_*.xml")
          if "_relax" not in os.path.basename(m)),
@@ -109,8 +105,7 @@ def main():
         if not os.path.exists(_f):
             raise SystemExit(f"missing seed file: {_f}")
 
-    # The path is extended to the funnel cap, as the pipeline does, unless a target
-    # is given explicitly.
+    # extend the path to the funnel cap unless a target is given
     z_max = params["z_max"].value_in_unit(ommunit.angstrom)
     extend = args.extend_path
     if extend is None:
@@ -123,9 +118,7 @@ def main():
                      extend_path_to_nm=extend)
     span = path.cv_length_per_unit_ang
 
-    # Fail loudly rather than produce a curve on a different coordinate: the
-    # comparison is only meaningful if one unit of progress means the same
-    # distance in both runs.
+    # abort if one unit of progress is not the same distance as in the reference run
     if args.expect_cv_length is not None and (
             span is None or abs(span - args.expect_cv_length) > 0.01):
         raise SystemExit(
@@ -139,13 +132,13 @@ def main():
             cv.hill_width = args.hill_width
         log.info("CV: path progress, %.2f Å per unit, hills 0.05 (= %.2f Å)", span, 0.05 * span)
     else:
-        # Same physical hill width as the path arm, so only the coordinate differs.
+        # same physical hill width as the path CV
         width_nm = args.hill_width if args.hill_width is not None else 0.05 * span / 10.0
         cv = funnel_z_cv(params["host_index"], params["guest_index"],
                          params["unbinding_axis"], grid_min=0.0, grid_max=z_max / 10.0,
                          hill_width=width_nm)
         if args.cv == "funnel_z_unclamped":
-            # Experiment-only: the pre-clamp CV, which can leave the bias grid
+            # unclamped CV, can leave the bias grid
             import cvpack
             _n = np.asarray(params["unbinding_axis"], float)
             _n = _n / np.linalg.norm(_n)

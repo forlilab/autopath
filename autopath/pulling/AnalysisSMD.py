@@ -39,28 +39,15 @@ from autopath.pulling.support import SupportPolicy
 
 logger = logging.getLogger("autopath.pulling")
 
-# Trace-feature names that exist on SMDData.raw_data after __init__:
-# the .dat columns (force, U_cvpack, dW_protocol, m_eff, r_before, r_after)
-# plus 'lag' (computed in SMDData.__init__) and 'work' (added by
-# integrate_force_dx). 'NC' is contact-related and forward-pull-specific,
-# so deliberately excluded.
+# Trace features available on SMDData.raw_data ('NC' excluded: forward-pull only).
 TRACE_FEATURE_POOL = frozenset({
     "lag", "work",
     "r_before", "r_after",
     "force", "U_cvpack", "dW_protocol", "m_eff",
 })
 
-# Default clustering feature set (hybrid) when the caller passes features=None.
-# Two trace channels — reaction-coordinate progress (r_before) and spring
-# fluctuation (lag) — plus inline-geom columns selected by name from the sidecar
-# (geom_features=True): ligand shape (rog, npr1, npr2) and exit-direction
-# (exit_1/2/3, the unbinding-route discriminator). All of these are PCA'd
-# TOGETHER in DTWPathModel (pca_all_features=True → n_geom_pcs components).
-#
-# geom_* names here are selected from the loaded sidecar (no DCD read). Shape is
-# NOT requested as bare lig_* names (that would use the un-PCA'd post-processing
-# path). The pocket-distance dist_* PCA is a separate reference route and is
-# never merged into this set.
+# Default clustering features (features=None): trace channels plus inline-geom
+# sidecar columns (shape and exit direction), PCA'd together in DTWPathModel.
 _DEFAULT_TRACE_FEATURES = (
                         #    "lag", 
                            "r_before",
@@ -96,18 +83,6 @@ class SMDAnalysis:
     5. Compute friction (γ) from the dissipative work profile and
        estimate k_off via Kramers/Pontryagin MFPT.
     6. Write CSV outputs and optional diagnostic plots.
-
-    Feature design: ``TRACE_FEATURE_POOL``
-    ---------------------------------------
-    Trace features (RC progress + energetics: ``lag``, ``work``,
-    ``r_before``, …) capture what distinguishes genuinely different
-    unbinding routes.  Shape features (``npr1``, ``npr2``, ``pbf``) are
-    optional — they are useful only when trajectories diverge spatially
-    AND ligand conformation varies across those routes.  Including shape
-    features by default causes paths to split on conformation rather than
-    exit route when trajectories are kinematically similar (e.g. all
-    autostop at the same barrier).  Pass them explicitly via the
-    ``features`` argument to :meth:`run` when needed.
 
     Parameters
     ----------
@@ -240,8 +215,7 @@ class SMDAnalysis:
                                   recompute_distances=False):
         """Build the clustering feature DataFrame for an ``SMDData``.
 
-        Shared by :meth:`run` and :meth:`check_convergence` so both cluster on the
-        same feature set. Supports three modes (mirroring ``run``):
+        Shared by :meth:`run` and :meth:`check_convergence`. Three modes:
 
         * **trace-only** — no clustering selection (``group_A``/``group_B`` unset).
         * **distance-only** — a clustering selection is given and ``merge_features``
@@ -251,10 +225,7 @@ class SMDAnalysis:
         Returns a DataFrame with the ``trajname/speed/step/time`` index columns plus
         the selected feature columns, ready for ``DTWPathModel.fit_transform``.
         """
-        # Resolve & validate the flat feature list. Names may be:
-        #   - trace features (TRACE_FEATURE_POOL),
-        #   - bare ligand-shape names (LIGAND_FEATURE_POOL -> un-PCA'd lig_* path), or
-        #   - inline-geom column names prefixed 'geom_' (selected from the sidecar).
+        # Names: TRACE_FEATURE_POOL, LIGAND_FEATURE_POOL, or 'geom_*' sidecar columns.
         if features is None:
             features = list(DEFAULT_FEATURES)
         geom_named = [f for f in features if f.startswith("geom_")]
@@ -274,8 +245,7 @@ class SMDAnalysis:
                 "No trace features requested; clustering will rely on ligand "
                 "and/or pocket-distance features only."
             )
-            # get_trace_features still emits the four index columns
-            # (trajname/speed/step/time) — needed for merge_feature_sets.
+            # still yields the index columns needed by merge_feature_sets
             traces_feat_df = smd.get_trace_features(features=[])
         else:
             traces_feat_df = smd.get_trace_features(features=trace_feats)
@@ -292,8 +262,6 @@ class SMDAnalysis:
                 recompute=recompute_distances,
             )
 
-        # Compute ligand trajectory features (RoG and/or RDKit 3D shape
-        # descriptors) once — used for clustering when requested.
         ligand_feat_dfs = []
         if ligand_feats:
             ref_pdb = self.reference_pdb or smd.reference_pdb
@@ -316,12 +284,7 @@ class SMDAnalysis:
 
         distance_only = dist_feat_df is not None and not merge_features
         if distance_only:
-            # Distance-only clustering: when a clustering selection is provided
-            # but merge_features is False, cluster purely on the pocket–ligand
-            # distance features (PCA-reduced downstream in DTWPathModel). Trace
-            # and ligand/shape features are deliberately excluded so paths split
-            # on geometric exit route alone. dist_feat_df already carries the
-            # trajname/speed/step/time index columns required for clustering.
+            # Trace and shape features excluded so paths split on exit route alone.
             feat_df = dist_feat_df
             _feat_cols = [c for c in feat_df.columns
                           if c not in ('trajname', 'speed', 'step', 'time')]
@@ -342,13 +305,8 @@ class SMDAnalysis:
                 feat_df = traces_feat_df
                 logger.info('Clustering will be performed using trace features only')
 
-        # Inline geom features logged during pulling (sMD_*_geom.dat sidecars).
-        # A near-free, pre-computed alternative to post-processing the DCDs. When
-        # explicit geom_ names are given (geom_named), only those columns are used;
-        # otherwise (geom_features=True with no names) all geom_ columns are merged.
-        # Skipped entirely in distance-only mode: geom features are computed on a
-        # different time stride than dist_feat_df, and merging them in would also
-        # contradict the "pure distance" clustering this mode is meant to provide.
+        # Inline geom features from the _geom.dat sidecars: the named geom_ columns,
+        # or all of them if none are named. Not used in distance-only mode.
         if not distance_only and (geom_features or geom_named):
             geom_df = smd.load_geom_features()
             if geom_df.empty:
@@ -403,9 +361,8 @@ class SMDAnalysis:
             ``"m_eff"``, ``"r_after"``) or in ``LIGAND_FEATURE_POOL`` (e.g.
             ``"rog"``, ``"asphericity"``, ``"npr1"``, …). Pocket distances
             are still controlled by ``group_A``/``group_B``, not this list.
-            If ``None`` (default), uses :data:`DEFAULT_FEATURES`
-            (``['lag','work','r_before']``). To add shape descriptors pass
-            e.g. ``features=['lag','work','r_before','npr1','npr2','pbf']``.
+            Names prefixed ``geom_`` select inline-geom sidecar columns.
+            If ``None`` (default), uses :data:`DEFAULT_FEATURES`.
         ligand_sdf : str | None
             Path to an SDF with the ligand and correct bond orders.
             Required if any RDKit feature is in ``features``.
@@ -415,11 +372,8 @@ class SMDAnalysis:
             self.reference_pdb = sMDDdata.reference_pdb
             logger.warning(f"No reference PDB provided, using from SMDData: {self.reference_pdb}")
 
-        # Derive the clustering boundary (bound -> rupture) from the force-plateau
-        # so clustering ignores the bulk-solvent tail. This is applied to the
-        # CLUSTERING feature matrix ONLY (below) — never to raw_data, so the
-        # estimators/PMF keep the full pull. An explicit user r_range still
-        # restricts everything via filter_by_r_range (legacy behavior).
+        # Force-plateau boundary limits CLUSTERING only (not the estimators) to the
+        # bound -> rupture range; an explicit r_range still restricts everything.
         boundary_cap = None
         if r_range is None and cluster_to_boundary:
             rd = sMDDdata.raw_data
@@ -450,8 +404,6 @@ class SMDAnalysis:
                 and merge_features and cluster_across_speeds):
             logger.warning("Clustering using all speeds together on trace features. Those depend on speed, so this may lead to suboptimal clustering. Consider setting cluster_across_speeds=False or using only distance features for clustering.")
 
-        # Build the clustering feature DataFrame (trace-only / distance-only /
-        # merged) — shared with check_convergence so both cluster identically.
         feat_df, ligand_feat_dfs = self._build_cluster_feature_df(
             sMDDdata, group_A=group_A, group_B=group_B,
             features=features, merge_features=merge_features, ligand_sdf=ligand_sdf,
@@ -459,9 +411,7 @@ class SMDAnalysis:
             recompute_distances=recompute_distances,
         )
 
-        # Apply the force-plateau boundary to the CLUSTERING matrix only. raw_data
-        # (and hence the estimators/PMF) is left at full range. Map r via raw_data's
-        # (trajname, step) -> r_coord so it works regardless of which features are used.
+        # r_coord via (trajname, step) so the cut works for any feature set.
         if boundary_cap is not None and not feat_df.empty:
             _rc = sMDDdata.raw_data[['trajname', 'step', 'r_coord']]
             feat_df = feat_df.merge(_rc, on=['trajname', 'step'], how='left')
@@ -496,8 +446,7 @@ class SMDAnalysis:
                 min_support_ratio=self.min_support_ratio,
             )
 
-        # Fit estimators sequentially; some may rely on path assignments,
-        # so this must run before any path filtering.
+        # Must run before path filtering.
         n_speeds = int(sMDDdata.raw_data['speed'].nunique())
         self.estimators = self._drop_force_if_single_speed(self.estimators, n_speeds)
         for estimator in self.estimators:
@@ -514,9 +463,7 @@ class SMDAnalysis:
                 "Consider running more SMD replicas or using slower pulling speeds."
             )
 
-        # Determine which estimators still have results after path filtering.
-        # Path filtering may drop cumulant rows (e.g. frac_neg_dG_first_half filter)
-        # while leaving jarzynski intact — continue with whatever survives.
+        # Path filtering may drop one estimator's rows only; continue with the rest.
         results_estimators = set(sMDDdata.results['estimator'].dropna().unique())
         active_estimators = [e for e in self.estimators if e.name in results_estimators]
         if len(active_estimators) < len(self.estimators):
@@ -526,12 +473,8 @@ class SMDAnalysis:
                 f"continuing with {[e.name for e in active_estimators]} only."
             )
 
-        # Compute p_eq once from a robustness-selected reference estimator and
-        # share it across all active estimators (including 'force', which has
-        # no dG of its own to derive weights from). Paths with negative dG
-        # values trigger a warning; those bins are excluded from the
-        # integrand (contribute 0 to Z), which smoothly downweights
-        # artifact-heavy paths in the mixture.
+        # One p_eq from a reference estimator, shared by all (force has no dG to
+        # weight by). Negative-dG bins contribute 0 to Z, downweighting those paths.
         ref_estimator = SMDData.choose_reference_estimator(sMDDdata.results)
         logger.info(f"[p_eq] shared reference estimator (robustness): {ref_estimator}")
         ref_weights = self.compute_p_eq(sMDDdata, estimator=ref_estimator)
@@ -630,7 +573,7 @@ class SMDAnalysis:
                 friction_df=friction_df,
                 dG_extrapolated=_dG_v0,
                 force_df=sMDDdata.raw_data,          # restraint force for boundary detection
-                boundary_method="force_plateau",     # kinetics-motivated abs_r (HSP90-validated)
+                boundary_method="force_plateau",     # kinetics-motivated abs_r
                 plateau_frac=plateau_frac,
             )
             if not _koff_df.empty:
@@ -654,9 +597,7 @@ class SMDAnalysis:
         except Exception as _exc:
             logger.warning(f"[Kramers/per-path] skipped: {_exc}")
 
-        # Regenerate the unbinding-paths PSE with friction colouring now that friction.csv is ready.
-        # path_model.fit_transform ran earlier (before friction was computed) so the first PSE has
-        # no friction overlay. We rebuild paths_dict from medoid_to_path and overwrite that PSE.
+        # Rebuild the unbinding-paths PSE now that friction.csv exists.
         if hasattr(self.path_model, 'medoid_to_path') and self.path_model.medoid_to_path:
             try:
                 friction_csv_path = os.path.join(self.outdir, 'friction.csv')
@@ -675,8 +616,7 @@ class SMDAnalysis:
                         color_by_friction=False,
                         friction_csv=friction_csv_path,
                         pocket_select=group_B if group_B is not None else self.pocket_select,
-                        # Mirror the path model's figure settings so this rebuild
-                        # does not silently revert to the legacy PSE defaults.
+                        # keep the path model's figure settings
                         output_format=getattr(self.path_model, 'viz_output_format', 'pse'),
                         n_lig_conformations=getattr(
                             self.path_model, 'viz_n_lig_conformations', 5),
@@ -688,10 +628,7 @@ class SMDAnalysis:
                 logger.warning(f"Could not regenerate friction-coloured PSE: {_exc}")
 
         if self.do_plots:
-            # Two dashed markers on the profiles: the transition state (mean|force|
-            # peak / rupture) and the Kramers absorbing boundary (force-plateau
-            # decay point that the MFPT integrates to). Both from the same
-            # per-speed force profile as the kinetics.
+            # Markers: TS (mean|force| peak) and Kramers absorbing boundary (force plateau).
             ts_r = abs_r = None
             _rd = sMDDdata.raw_data
             if {'r_coord', 'force', 'speed'}.issubset(_rd.columns):
@@ -723,8 +660,6 @@ class SMDAnalysis:
                 )
 
         # Merge trajectory-derived features into raw_data so they appear in the CSV.
-        # ligand_feat_dfs was populated early (before clustering) and is reused here
-        # to avoid redundant trajectory reads.
         _BASE_COLS = {
             "step", "time", "r_target", "r_before", "r_after", "NC",
             "force", "U_cvpack", "dW_protocol", "m_eff",
@@ -825,12 +760,8 @@ class SMDAnalysis:
         if speeds is None:
             speeds = sorted(set(SMDData._speed_from_log(fn) for fn in logs))
 
-        # 'force' needs >=2 speeds simultaneously for its v->0 extrapolation,
-        # so it cannot use the per-speed loop below; dispatch to the
-        # multi-speed ladder instead. No per-rung PMF traces are produced
-        # (the ladder mixes speeds, not a single-speed running PMF), so the
-        # traces frame returned here is deliberately empty rather than
-        # fabricated.
+        # 'force' needs >=2 speeds for v->0, so it uses the multi-speed ladder; it
+        # has no single-speed running PMF, so no traces are returned.
         if estimator_name == 'force':
             from .ConvergenceLadder import force_convergence_ladder
             conv_df = force_convergence_ladder(
@@ -847,7 +778,6 @@ class SMDAnalysis:
 
         for speed in speeds:
             
-            # filter logs by speed
             speed_logs = [fn for fn in logs if SMDData._speed_from_log(fn) == speed]
 
             if len(speed_logs) < min_replicas:
@@ -855,9 +785,7 @@ class SMDAnalysis:
                     f"Not enough replicas for speed={speed}: {len(speed_logs)}"
                 )
 
-            # Chronological, not by filename ID: the ID is a bare HHMMSS with
-            # no date, so it would order multi-day cells by time of day and
-            # rung k would not be "the first k replicas run".
+            # Chronological: the filename ID is HHMMSS without a date.
             speed_logs = sorted(speed_logs, key=SMDData._replica_start_datetime)
             logger.info(f"Checking convergence for speed={speed} with {len(speed_logs)} replicas")
 
@@ -868,9 +796,6 @@ class SMDAnalysis:
                 reference_pdb=self.reference_pdb,
             )
 
-            # Build clustering features the same way run() does (trace-only /
-            # distance-only / merged), so convergence clustering matches the
-            # main analysis for every classification.
             feat_df, _ = self._build_cluster_feature_df(
                 smd, group_A=group_A, group_B=group_B,
                 features=features, merge_features=merge_features, ligand_sdf=ligand_sdf,
@@ -880,10 +805,8 @@ class SMDAnalysis:
 
             protocol_grid = smd.protocol_grids[speed].set_index('step')['r_target_protocol']
 
-            # Force-plateau boundary (+buffer) for this speed, computed once from the
-            # full per-speed force data (stable across replica counts). Used to (a)
-            # restrict clustering to the unbinding route and (b) cap the PMF-RMSD
-            # window — both excluding the noisy, dissipation-dominated solvent tail.
+            # Force-plateau boundary (+buffer) from all replicas at this speed; caps
+            # clustering and the PMF-RMSD window to exclude the solvent tail.
             boundary_cap = None
             if cluster_to_boundary or restrict_rmsd_to_boundary:
                 _rd = smd.raw_data[smd.raw_data['speed'] == speed]
@@ -905,9 +828,7 @@ class SMDAnalysis:
                             "PMF range for clustering and RMSD."
                         )
 
-            # Cluster (mirroring run()): when cluster_to_boundary and the boundary is
-            # found, restrict clustering to r <= boundary; otherwise fall back to the
-            # fraction-trim that keeps the first (1-trim_fraction) of frames.
+            # Without a boundary, fall back to keeping the first (1-trim_fraction) of frames.
             feat_df_cl = feat_df
             fit_r_range = 1 - trim_fraction
             if cluster_to_boundary and boundary_cap is not None:
@@ -999,13 +920,10 @@ class SMDAnalysis:
                     return_paths=True,
                 )
 
-                # Empty PMF at this k: skip without touching the history — appending an
-                # empty Series would make hist_pmf non-empty and bypass the
-                # initialization guard below, leaving hist_barrier/hist_r_ts unset.
+                # Do not append an empty PMF: it would bypass the history initialization below.
                 if pmf_k.empty:
                     continue
 
-                # always store PMF trace (from trace_min_replicas onwards)
                 for step, val in pmf_k.items():
                     r_coord = protocol_grid.loc[step]
                     pmf_records.append({
@@ -1017,13 +935,8 @@ class SMDAnalysis:
                         "quantity": main_quantity,
                         "value": val,
                     })
-                    # Per-path PMF at this step, one row per path that actually
-                    # contributed weight to the mixture value above (same
-                    # gating as _weighted_series_from_results). Lets a stalled
-                    # RMSD be diagnosed as genuine under-sampling vs. a DTW
-                    # path-model relabeling between rungs. Opt-in: doubles (or
-                    # more) the size of the traces frame, so gated behind
-                    # trace_per_path (default False).
+                    # Per-path rows (paths contributing weight) separate under-sampling
+                    # from path relabeling between rungs; opt-in because of size.
                     if trace_per_path:
                         for path_label, path_val in per_path_pmf_k.get(step, {}).items():
                             pmf_records.append({
@@ -1036,8 +949,7 @@ class SMDAnalysis:
                                 "value": path_val,
                             })
 
-                # Running per-k restraint-force profile (first k replicas) for the
-                # force-plateau TS detector; None when using the PMF-peak method.
+                # Force from the first k replicas, for the force-plateau TS detector.
                 force_k = (speed_data[speed_data['trajname'].isin(traj_order[:k])]
                            if boundary_method == "force_plateau" else None)
 
@@ -1054,8 +966,7 @@ class SMDAnalysis:
                     continue
 
                 # === convergence comparison (all k > trace_min_replicas) ===
-                # Metrics are computed from here regardless of min_replicas, so plots
-                # show early trends even when convergence is declared just after the floor.
+                # Computed regardless of min_replicas so plots show early trends.
 
                 barrier_height, r_ts = self._compute_barrier_rts(
                     pmf_k, 1.0/smd.beta, protocol_grid,
@@ -1063,32 +974,20 @@ class SMDAnalysis:
                     boundary_method=boundary_method, plateau_frac=plateau_frac,
                 )
 
-                # compare PMF(k) vs the window-averaged reference over the last _w rungs
+                # reference: window over the last _w rungs
                 ref_pmf = window_mean_pmf(hist_pmf)
                 ref_barrier = window_reference_scalar(hist_barrier)
                 ref_r_ts = window_reference_scalar(hist_r_ts)
 
                 common_r = pmf_k.index.intersection(ref_pmf.index)
 
-                # Cap the RMSD window at the force-plateau boundary (+buffer): drop
-                # steps past rupture whose noisy plateau otherwise dominates the RMSD.
+                # Drop steps past the boundary: the noisy plateau would dominate the RMSD.
                 if rmsd_r_cap is not None and len(common_r) > 0:
                     _r_of_step = protocol_grid.reindex(common_r).to_numpy()
                     common_r = common_r[_r_of_step <= rmsd_r_cap]
 
-                # NaN-aware barrier/r_ts deltas between PMF(k) and the window
-                # reference (the median over the last conv_window rungs; with
-                # conv_window=1 that reference is the previous rung):
-                # - both NaN: no peak in either → criterion waived (True)
-                # - one NaN: peak appeared/disappeared → not converged (inf)
-                # - both finite: normal absolute difference
-                # The two NaN branches are defensive only and are currently
-                # unreachable: _compute_barrier_rts always returns finite values
-                # (force_plateau interpolates onto the PMF; pmf_peak falls back to
-                # nanargmax(dG) when no prominent peak is found), and the PMF
-                # itself is NaN-free, so window_reference_scalar never sees an
-                # all-NaN window either. They are kept in case a future TS
-                # detector is allowed to report "no peak".
+                # NaN-aware deltas: both NaN -> criterion waived; one NaN -> inf (peak
+                # appeared/disappeared). Defensive: current TS detectors are always finite.
                 if np.isnan(barrier_height) and np.isnan(ref_barrier):
                     barrier_delta = np.nan
                 elif np.isnan(barrier_height) or np.isnan(ref_barrier):
@@ -1123,11 +1022,7 @@ class SMDAnalysis:
                     hist_r_ts.append(r_ts)
                     continue
 
-                # Trim to well-supported steps: keep only steps where the fraction
-                # of replicas that reached that step >= (1 - trim_fraction).
-                # This is adaptive — low-coverage tails (noisy region) are excluded
-                # automatically regardless of where they fall in the r range.
-                # Set trim_fraction=0.0 to use the full range (e.g. membrane pulls).
+                # Keep steps reached by >= (1 - trim_fraction) of replicas; 0.0 keeps all.
                 if trim_fraction > 0.0 and not results_df.empty and 'n_samples' in results_df.columns:
                     step_support = results_df.groupby('step')['n_samples'].max()
                     n_ref = float(step_support.max())
@@ -1183,7 +1078,6 @@ class SMDAnalysis:
                     "n_paths": n_paths_k,
                 })
 
-                # append to bounded history (window reference for next comparison)
                 hist_pmf.append(pmf_k)
                 hist_barrier.append(barrier_height)
                 hist_r_ts.append(r_ts)
@@ -1264,12 +1158,9 @@ class SMDAnalysis:
         - ``"pmf_peak"`` (default): highest-prominence PMF peak via
           ``_find_pmf_peak`` (shared with ``KramersEstimator.detect_ts``); falls
           back to the position/height of ``max(dG)`` when no peak is found.
-        - ``"force_plateau"``: transition state from the restraint-force decay via
-          ``KramersEstimator.force_plateau_boundary`` (estimator-independent, from
-          the running per-k force in *force_df*); ``barrier_height`` is then
-          ``dG(r_ts) − dG(start)``. Falls back to ``"pmf_peak"`` when the force
-          profile is unusable. This keeps the convergence TS consistent with the
-          Kramers k_off absorbing boundary.
+        - ``"force_plateau"``: TS from ``KramersEstimator.force_plateau_boundary``
+          on *force_df* (consistent with the Kramers boundary); ``barrier_height`` is
+          ``dG(r_ts) − dG(start)``. Falls back to ``"pmf_peak"`` if unusable.
         """
         steps = pmf_k.index.to_numpy()
         r = np.array([float(protocol_grid.loc[s]) for s in steps], dtype=float)
@@ -1284,8 +1175,7 @@ class SMDAnalysis:
             # force profile unusable → fall through to PMF-peak detection
         r_ts, barrier = _find_pmf_peak(r, dG, kBT)
         if r_ts is None:
-            # No prominent peak — fall back to the position and height of max(dG),
-            # consistent with KramersEstimator's r_coord.max() fallback.
+            # No prominent peak: use max(dG).
             best = int(np.nanargmax(dG))
             return float(dG[best] - dG[0]), float(r[best])
         return barrier, r_ts
@@ -1300,19 +1190,11 @@ class SMDAnalysis:
         policy: "SupportPolicy | None" = None,
         return_paths: bool = False,
     ) -> "pd.Series | tuple[pd.Series, dict, int]":
-        """Build the mixture PMF series (unchanged default behaviour).
+        """Build the mixture PMF series.
 
-        ``return_paths=False`` (default) reproduces the original single-Series
-        return exactly, so existing callers (``ConvergenceLadder``, scratch
-        notebooks) are unaffected.
-
-        ``return_paths=True`` additionally returns ``(per_path, n_paths)``:
-        ``per_path`` is ``{step: {path: value}}`` for every path that carries
-        non-zero equilibrium weight (``p_eq > 0``) at that step — the same set
-        used to build the mixture value — and ``n_paths`` is the count of such
-        paths overall (paths that survived the count-based support policy
-        *and* contribute non-zero weight to the mixture, i.e. excludes paths
-        whose dG is entirely negative and therefore Zk=0).
+        ``return_paths=True`` also returns ``(per_path, n_paths)``: ``per_path`` is
+        ``{step: {path: value}}`` over paths with ``p_eq > 0``, and ``n_paths`` is
+        the number of such paths.
         """
         empty = (pd.Series(dtype=float), {}, 0) if return_paths else pd.Series(dtype=float)
 
@@ -1320,10 +1202,7 @@ class SMDAnalysis:
             return empty
 
         if policy is not None:
-            # Belt-and-suspenders: _results_from_running_stats skips below-threshold
-            # steps (estimable_step); this apply() gate re-enforces the same floor
-            # on n_samples + path counts. Both gates are intentional — this apply()
-            # is authoritative for weighting computation downstream.
+            # Authoritative support gate for the weighting (also on path counts).
             results_df, path_traj_counts = policy.apply(results_df, path_traj_counts)
             if results_df.empty or not path_traj_counts:
                 return empty
@@ -1336,11 +1215,8 @@ class SMDAnalysis:
         if not p_eq:
             return empty
 
-        # Restrict to the shortest path's extent so all convergence traces
-        # are compared over the same r-range at every replica count.
-        # Singleton paths (one trajectory) from an outlier/short traj must not
-        # chop the extent of all other paths — use only multi-traj paths to
-        # determine the common step ceiling.
+        # Common extent = shortest usable path, so every rung covers the same range;
+        # singleton paths must not truncate the others.
         path_last = results_df.groupby('path')['step'].max()
         if policy is not None:
             usable = set(path_traj_counts)   # already gated to usable paths
@@ -1358,9 +1234,7 @@ class SMDAnalysis:
                 supported = step_support[step_support / n_ref >= (1.0 - trim_fraction)].index
                 grid_steps = [s for s in grid_steps if s in supported]
 
-        # Paths with non-zero equilibrium weight are the ones that actually move
-        # the mixture value (a p_eq==0 path — e.g. all-negative dG, Zk=0 — is
-        # still gated-in above but contributes nothing to any weighted sum).
+        # p_eq == 0 paths pass the gate but contribute nothing.
         contributing_paths = {p for p, w in p_eq.items() if w > 0}
 
         out = {}
@@ -1397,21 +1271,15 @@ class SMDAnalysis:
     ) -> None:
         """Write a per-(estimator, speed, path) quality summary to disk.
 
-        Captures negative-dG counts, replica counts, dG endpoints and the
-        final p_eq weight so the user can audit which paths the cumulant
-        estimator is struggling with.
-
-        Cumulant reliability diagnostics (cumulant rows only — the jarzynski
-        ``Wdiss`` is ``<W> - dG_exp``, not a variance, and force reports NaN):
+        Negative-dG counts, replica counts, dG endpoints and final p_eq per path.
+        Cumulant-only reliability columns (NaN otherwise):
 
         ``beta_sigma``
-            ``sqrt(2 * beta * Wdiss)``, the dimensionless work spread, since
-            ``Wdiss == beta*Var(W)/2`` for the cumulant.
-            ``beta_sigma_advisory_exceeded`` compares it to
-            a threshold.
-            ``Wdiss/Wmean``. Threshold-free and the more direct warning: since
-            ``dG = Wmean - Wdiss``, a ratio > 1 is identically ``dG < 0``, and a
-            ratio near 1 means dG is a difference of two large, near-equal numbers.
+            ``sqrt(2 * beta * Wdiss)``, the dimensionless work spread
+            (``Wdiss == beta*Var(W)/2`` for the cumulant).
+        ``cumulant_correction_ratio``
+            ``Wdiss/Wmean``; > 1 is identically ``dG < 0``, near 1 means dG is a
+            difference of two large, near-equal numbers.
         """
         max_steps_per_speed = sMDDdata.results.groupby('speed')['step'].max().to_dict()
         beta = sMDDdata.beta
@@ -1474,10 +1342,8 @@ class SMDAnalysis:
     def _path_filtering(self, sMDDdata: SMDData) -> SMDData:
         """Drop (speed, path) groups that are under-sampled or prematurely terminated.
 
-        Must be called after path assignments have been written to
-        ``sMDDdata.raw_data['path']`` and estimators have been fitted,
-        because the filtering logic reads both ``raw_data`` and
-        ``sMDDdata.results``.
+        Call after paths are assigned in ``raw_data['path']`` and estimators are
+        fitted, and before p_eq and PMF construction.
 
         Three passes, controlled by instance attributes:
 
@@ -1485,24 +1351,17 @@ class SMDAnalysis:
         with fewer than that many trajectories.
 
         Pass 2 — step ratio (``self.min_path_steps_ratio``): drop paths whose
-        ``n_steps < ratio × max_steps_at_that_speed``.  A ratio of 0 disables
-        this filter.  This catches clusters formed by trajectories that hit an
-        early stopping condition (e.g. premature unbinding at high speed),
+        ``n_steps < ratio × max_steps_at_that_speed`` (premature termination).
+        0 disables it.
 
         Pass 3 — binding-well quality (``self.max_frac_neg_dG_first_half``):
         drop (speed, path, estimator) rows where the fraction of negative-dG
-        bins in the **first half** of the r-range exceeds the threshold.  The
-        check is performed per estimator so that a cumulant failure at slow
-        speed does not falsely condemn a valid jarzynski profile for the same
-        path.  If all estimators fail for a (speed, path), the path is also
-        removed from raw_data.  Paths where negativity is confined to the
-        second half are kept: the TS lies in the first half and p_eq is
-        naturally suppressed by the negative-bin exclusion in
-        ``_compute_p_eq``.  Set to ≤ 0 to disable.
+        bins in the **first half** of the r-range exceeds the threshold. Per
+        estimator, so one estimator's failure does not drop another's profile; a
+        (speed, path) failing for all estimators is flagged in raw_data. ≤ 0 disables.
 
-        Applied after estimator fitting and before p_eq computation and PMF
-        construction.  Also logs a per-speed replica imbalance warning when
-        the ratio of max/min replica counts exceeds ``self.replica_imbalance_threshold``.
+        Also warns when the max/min replica ratio exceeds
+        ``self.replica_imbalance_threshold``.
         """
         sMDDdata.raw_data['path_ok'] = True
 
@@ -1624,13 +1483,8 @@ class SMDAnalysis:
     ) -> dict:
         """Compute normalised equilibrium path probabilities for a single speed.
 
-        Negative dG bins are treated as missing data: the integrand is set to
-        ``0`` at those bins (equivalent to "infinite barrier, contributes
-        nothing to Z").  This naturally downweights paths whose cumulant
-        produced artifact bins, instead of inflating Z by ``exp(0)=1`` per bin
-        as a clip-to-0 strategy would.  A path whose dG is entirely negative
-        ends up with Zk=0 and p_eq=0.  Diagnostics for negative bins are
-        reported separately by :meth:`compute_p_eq` and ``path_quality.csv``.
+        Negative dG bins contribute 0 to Z (clipping dG to 0 would instead add
+        exp(0)=1 per bin), so an all-negative path gets p_eq=0.
 
         Parameters
         ----------
@@ -1658,8 +1512,7 @@ class SMDAnalysis:
             shift = log_integrand.max()
             integrand = np.zeros_like(dG)
             integrand[mask] = np.exp(log_integrand - shift)
-            # abs() handles backward pulling where r_coord decreases with step,
-            # causing trapz to return a negative value for a non-negative integrand.
+            # abs(): r_coord decreases with step for backward pulls
             Zk = abs(np.trapz(integrand, x)) * np.exp(shift)
             p_eq_raw = p_neq[path] * Zk
             if not np.isfinite(p_eq_raw) or p_eq_raw < 0.0:
@@ -1677,11 +1530,7 @@ class SMDAnalysis:
     ) -> dict:
         """Compute equilibrium path probabilities.
 
-        Negative dG bins are excluded from the partition-function integral
-        (see :meth:`_compute_p_eq`): they contribute 0 to Z, so paths with
-        many artifact bins are smoothly downweighted in the mixture rather
-        than inflating it.  The negative-bin counts are reported per path
-        via warnings and ``path_quality.csv``.
+        Negative dG bins contribute 0 to Z (see :meth:`_compute_p_eq`).
 
         Parameters
         ----------

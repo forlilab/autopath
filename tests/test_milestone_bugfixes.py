@@ -1,4 +1,4 @@
-"""Regression tests for the milestone bugs found in the final branch review."""
+"""Regression tests for milestone extraction, metadynamics setup and analysis."""
 import os
 import numpy as np
 import pytest
@@ -22,18 +22,13 @@ def _lig_universe():
 
 
 def test_reimaging_moves_ligand_hydrogens_with_their_heavy_atoms():
-    """A heavy-atom selection must not strand the ligand's hydrogens.
-
-    Callers pass "(ligand) and not name H*". Translating only the selected atoms
-    left the H a box length behind, giving a 41 A C-H bond in the structure that
-    then gets serialized and minimised.
-    """
+    """Re-imaging via a heavy-atom selection also moves the ligand's hydrogens."""
     u = _lig_universe()
     assert _reimaging_ligand(u, "resname LIG and not name H*") is True
 
     c1, h1 = u.atoms[1].position, u.atoms[2].position
     assert np.linalg.norm(h1 - c1) == pytest.approx(1.0, abs=1e-4)
-    # and it really did move, i.e. the test is not passing because nothing happened
+    # the ligand actually moved
     assert c1[0] == pytest.approx(-6.0, abs=1e-4)
     assert h1[0] == pytest.approx(-5.0, abs=1e-4)
 
@@ -98,10 +93,7 @@ def _auto_sigma(com_dists):
 
 
 def test_auto_sigma_is_positive_for_a_non_monotone_milestone_list():
-    """A backwards step must not produce a negative sigma.
-
-    cvpack accepts a negative sigma without complaint, so this failed silently.
-    """
+    """A backwards step must not produce a negative sigma."""
     sigma = _auto_sigma([0.40, 1.20, 0.50, 0.90, 1.10])
     assert sigma > 0
     assert sigma == pytest.approx(0.5 * 0.20, abs=1e-9)
@@ -129,8 +121,7 @@ def test_pathcv_source_guards_sigma_and_warns_on_non_monotone():
 # --- no loadState anywhere -------------------------------------------------
 
 def test_no_module_calls_load_state():
-    """loadState restores global parameters by name, so it silently keeps stale
-    values on a system whose forces were stripped and re-added."""
+    """loadState is forbidden: it restores global parameters by name and keeps stale values."""
     import autopath
     root = os.path.dirname(os.path.abspath(autopath.__file__))
     offenders = []
@@ -150,11 +141,7 @@ def test_no_module_calls_load_state():
 # --- medoid_info.json lookup ------------------------------------------------
 
 def test_core_looks_for_medoid_info_under_path_analysis():
-    """PathModel writes medoid_info.json into path_analysis/.
-
-    Reading it from the analysis dir instead silently fell back to using every
-    sMD trajectory rather than the medoids, with only a warning.
-    """
+    """medoid_info.json is written and read under path_analysis/."""
     import inspect
     from autopath import autopath_core
     from autopath.pulling import PathModel as pm
@@ -169,23 +156,19 @@ def test_core_looks_for_medoid_info_under_path_analysis():
 # --- bias plot glob (isolated-walker mode) ---------------------------------
 
 def test_plot_bias_skips_walker_bias_directories(tmp_path, monkeypatch):
-    """With mMD_multiple_walkers=False each walker gets its own bias_<run_id>/
-    directory inside out_dir, so a bare `bias_*` glob hands np.load a directory."""
+    """plot_bias ignores per-walker bias_<run_id>/ directories in isolated mode."""
     import numpy as np
     from autopath.metadynamics.Analysis import plot_bias
 
-    # plot_bias takes sys_name from Path(out_dir).parts[0], so out_dir must be
-    # relative the way the pipeline passes it.
+    # plot_bias takes sys_name from Path(out_dir).parts[0], so out_dir is relative
     monkeypatch.chdir(tmp_path)
     out = tmp_path / "3ptb" / "metadynamics_funnel"
     out.mkdir(parents=True)
-    # the layout the pipeline actually produces in isolated mode:
-    # directories named bias_<run_id>, each holding the real arrays
+    # isolated-mode layout: bias_<run_id>/ directories holding the arrays
     for run_id in ("milestone_1_frame_0", "milestone_2_frame_145"):
         d = out / f"bias_{run_id}"
         d.mkdir()
         np.save(d / "bias_12345_7.npy", np.linspace(0.0, 5.0, 25))
-    # must not raise IsADirectoryError, and must produce the plot
     plot_bias("3ptb/metadynamics_funnel", x_min=0.0, x_max=1.0, grid_points=25,
               colvar_name="PathCV_progress")
     assert (out / "3ptb_quicklook_BIAS.png").exists()
@@ -202,12 +185,7 @@ def test_plot_bias_returns_quietly_when_no_bias_arrays(tmp_path, monkeypatch):
 
 
 def test_load_bias_files_finds_isolated_walker_subdirs(tmp_path):
-    """Isolated mode hides each walker's bias inside bias_<run_id>/.
-
-    A flat os.listdir of out_dir matches nothing there (the entries are
-    directories named bias_<run_id>, not bias_<int>_<int>.npy), so the post-run
-    diagnosis got an empty dict and died on np.stack([]).
-    """
+    """load_bias_files finds each isolated walker's bias inside bias_<run_id>/."""
     import numpy as np
     from autopath.metadynamics.Analysis import MetadynamicsAnalysis
 
@@ -244,12 +222,8 @@ def test_load_bias_files_still_reads_flat_shared_bias_layout(tmp_path):
 # --- metadynamics context rebuild + state-xml restart ----------------------
 
 def test_metad_rebuilds_context_instead_of_reinitialising():
-    """The funnel and bias forces are added to the System AFTER the Context is
-    built. reinitialize(preserveState=True) restores globals by name, so a newly
-    added force's default can be overwritten by a stale value and the force
-    silently does nothing. equilibration.py and relax_md.py already use
-    rebuild_simulation for this; MetadynamicsMD must too.
-    """
+    """Forces added after Context creation require rebuild_simulation, not reinitialize,
+    which restores globals by name and can override the new force's defaults."""
     import inspect
     from autopath.metadynamics.MetadynamicsMD import MetadynamicsMD
 
@@ -260,8 +234,7 @@ def test_metad_rebuilds_context_instead_of_reinitialising():
 
 
 def test_metad_attaches_reporters_after_the_rebuild():
-    """rebuild_simulation returns a NEW Simulation, so reporters attached before
-    it would be silently dropped and the run would write no output."""
+    """Reporters are attached to the new Simulation returned by rebuild_simulation."""
     import inspect
     from autopath.metadynamics.MetadynamicsMD import MetadynamicsMD
 
@@ -270,23 +243,19 @@ def test_metad_attaches_reporters_after_the_rebuild():
 
 
 def test_core_seeds_metadynamics_from_state_xml_not_checkpoint():
-    """A checkpoint is only valid for an identical Context, and metadynamics adds
-    the funnel and bias forces on top of the relaxed system."""
+    """Metadynamics starts from a state XML, since its Context differs from the relax run's."""
     import inspect
     from autopath import autopath_core
 
     src = inspect.getsource(autopath_core)
     assert "_relax_state.xml" in src
-    # the metadynamics seeds must not come from a relax checkpoint any more
     assert "_relax_checkpoint.chk" not in src
 
 
 # --- funnel cylinder radius ------------------------------------------------
 
 def _funnel_universe(n_frames=400, r_bound=0.5, r_cyl=4.0, seed=0):
-    """Ligand walks out along +x; radial spread is SMALL while bound and LARGE
-    once it is in the cylinder region. That is the real shape of an unbinding
-    path, and the case a bound-state-derived radius gets wrong."""
+    """Ligand exits along +x with small radial spread while bound and large spread in the cylinder."""
     import numpy as np
     import MDAnalysis as mda
     rng = np.random.default_rng(seed)
@@ -309,8 +278,7 @@ def _funnel_universe(n_frames=400, r_bound=0.5, r_cyl=4.0, seed=0):
 
 
 def test_cylinder_radius_is_derived_from_the_cylinder_region():
-    """A hardcoded 2 A wall that the reference path itself violates does not
-    guide sampling, it just injects force."""
+    """The derived cylinder radius contains most of the reference path's cylinder region."""
     from autopath.metadynamics.Funnel import generate_funnel_parameters_from_trajectory
     import numpy as np
 
@@ -325,7 +293,6 @@ def test_cylinder_radius_is_derived_from_the_cylinder_region():
     z = np.abs(np.asarray(p["axial_distances"]))
     zcc = p["z_cc"].value_in_unit(ommunit.angstrom)
     outside = float((r[z >= zcc] > R).mean())
-    # the whole point: the derived wall must not exclude most of the path
     assert outside < 0.25, f"R_cylinder={R:.2f} excludes {100*outside:.0f}% of the path"
     assert R > 2.0, f"derived radius {R:.2f} collapsed to the old hardcoded value"
 
@@ -380,8 +347,7 @@ def test_read_trajname_to_path_is_empty_when_the_table_is_missing(tmp_path):
 
 
 def test_grouping_splits_subdirectory_milestones_by_path(tmp_path):
-    """per_path extraction writes one subdir per path; each must become its own
-    group so it gets its own path CV and its own funnel."""
+    """Each per-path milestone subdirectory becomes its own group."""
     from autopath.autopath_core import group_milestones_by_path
 
     root = tmp_path / "milestones"
@@ -402,8 +368,7 @@ def test_grouping_splits_subdirectory_milestones_by_path(tmp_path):
 
 
 def test_grouping_keeps_the_flat_layout_as_one_unlabelled_group(tmp_path):
-    """all_medoids (the default) writes milestones flat. That layout must stay a
-    single group keyed None, or the default pipeline changes its output paths."""
+    """Flat milestones form a single group keyed None."""
     from autopath.autopath_core import group_milestones_by_path
 
     root = tmp_path / "milestones"
@@ -438,13 +403,11 @@ def test_grouping_puts_the_unlabelled_group_first(tmp_path):
 # --- medoid filtering keys on the trajectory, not the stale label ----------
 
 def test_medoid_filter_keeps_a_medoid_whose_label_is_stale():
-    """medoid_info.json is written before the quality filters run and can label a
-    trajectory differently from the final assignment. Filtering on the LABEL drops
-    medoids whose trajectory actually passed QC."""
+    """Medoids are kept by surviving trajectory, even when their path label is stale."""
     from autopath.utils import filter_medoids_by_surviving_trajectories
 
     medoid_to_path = {"repA": "path-0_v0.02", "repB": "path-1_v0.02"}
-    surviving = {"repA": "path-0_v0.02", "repB": "path-0_v0.02"}  # repB really passed
+    surviving = {"repA": "path-0_v0.02", "repB": "path-0_v0.02"}  # repB relabelled
 
     kept, dropped, disagree = filter_medoids_by_surviving_trajectories(
         medoid_to_path, surviving)
@@ -512,8 +475,7 @@ def _funnel_params(z_cc=8.0, z_max=20.0, R=4.0, k=10.0):
 
 
 def test_funnel_is_continuous_across_z_max():
-    """Gating the cylinder on step(z_max - |r_z|) zeroes the whole potential past
-    z_max, so the energy drops discontinuously and the guest is released."""
+    """Funnel energy is continuous across z_max."""
     p = _funnel_params()
     r_xy = 10.0  # well outside R_cylinder, so the radial wall is active
     inside = _funnel_energy(p, 19.99, r_xy)
@@ -538,7 +500,7 @@ def test_funnel_pushes_back_axially_beyond_z_max():
 
 
 def test_funnel_unchanged_inside_the_cone_and_cylinder():
-    """The fix must not perturb the region the funnel already handled."""
+    """The cone and cylinder regions keep their expected free/walled behaviour."""
     p = _funnel_params()
     # inside the cone, within R_funnel -> free
     assert _funnel_energy(p, 2.0, 1.0) == pytest.approx(0.0, abs=1e-6)
@@ -551,9 +513,7 @@ def test_funnel_unchanged_inside_the_cone_and_cylinder():
 # --- z_cc must put the binding site inside the cone ------------------------
 
 def _unbinding_universe(n_frames=400, seed=1):
-    """Ligand leaves along +x. Radial spread is LARGE while bound (the pocket
-    lets it rattle) and small far out, which is the shape that exposes a z_cc
-    placed at the median: the site ends up in the cylinder."""
+    """Ligand exits along +x with large radial spread while bound and small spread far out."""
     import numpy as np
     import MDAnalysis as mda
     rng = np.random.default_rng(seed)
@@ -583,8 +543,7 @@ def _cone_radius_at(params, z_ang):
 
 
 def test_default_zcc_keeps_the_binding_site_inside_the_cone():
-    """Limongelli 2013 requires z_cc > the site's outer edge, so that exploring
-    the site is unaffected by the restraint."""
+    """Default z_cc lies beyond the binding site, so the site is unrestrained (Limongelli 2013)."""
     from autopath.metadynamics.Funnel import generate_funnel_parameters_from_trajectory
     from openmm import unit as ommunit
     import numpy as np
@@ -604,7 +563,7 @@ def test_default_zcc_keeps_the_binding_site_inside_the_cone():
 
 
 def test_median_zcc_would_put_the_site_in_the_cylinder():
-    """Pins WHY the default matters: percentile_z=50 reproduces the old bug."""
+    """A median z_cc (percentile_z=50) narrows the cone at the site relative to the default."""
     from autopath.metadynamics.Funnel import generate_funnel_parameters_from_trajectory
     from openmm import unit as ommunit
     import numpy as np
@@ -637,12 +596,7 @@ def test_core_does_not_force_a_median_zcc():
 # --- walker biases: sum when shared, average when isolated -----------------
 
 def test_openmm_writes_self_bias_and_sums_to_get_the_total():
-    """Pins WHY shared-bias files must be summed.
-
-    OpenMM's Metadynamics saves each walker's SELF bias and rebuilds the total by
-    adding every walker's file, so one file is a partial contribution -- reading
-    only the last walker would give a fraction of the total.
-    """
+    """OpenMM saves each walker's self bias and sums them, so shared-bias files must be summed."""
     import inspect
     import openmm.app.metadynamics as m
 
@@ -654,8 +608,7 @@ def test_openmm_writes_self_bias_and_sums_to_get_the_total():
 
 
 def test_isolated_walkers_are_averaged_not_summed():
-    """Each per-walker biasDir holds a COMPLETE bias, so summing n of them scales
-    the free energy by n."""
+    """Each isolated walker holds a complete bias, so they are averaged, not summed."""
     import numpy as np
     from autopath.metadynamics.Analysis import MetadynamicsAnalysis
 
@@ -724,8 +677,7 @@ def _well(depth_kj=-40.0, n=125, width_frac=0.10):
 
 
 def test_correction_uses_cross_section_not_cylinder_volume():
-    """Eq. 3 subtracts kT*ln(pi R^2 C0). Multiplying by the cylinder LENGTH as
-    well treats the bound basin as if it were as wide as the whole cylinder."""
+    """The standard-state correction uses the cylinder cross-section, kT*ln(pi R^2 C0)."""
     import numpy as np, math
     from autopath.metadynamics.Analysis import correct_fe_for_funnel
 
@@ -752,7 +704,7 @@ def test_correction_is_independent_of_the_cylinder_length():
 
 
 def test_a_wider_bound_basin_binds_more_strongly():
-    """The integral rewards basin WIDTH; the old min() ignored it entirely."""
+    """The basin integral makes a wider bound basin bind more strongly."""
     from autopath.metadynamics.Analysis import correct_fe_for_funnel
     narrow = correct_fe_for_funnel(_well(width_frac=0.04), _flat_funnel_params(),
                                    temperature=298.15, cv_length_per_unit_ang=10.0)
@@ -830,8 +782,7 @@ def test_dG_plateau_detects_a_settled_run():
 
 
 def test_dG_plateau_detects_a_drifting_run():
-    """A surface can look flat at one instant while ΔG is still moving; this is
-    the test the single-snapshot flatness check cannot make."""
+    """A drifting ΔG(t) is reported as not settled."""
     import numpy as np
     from autopath.metadynamics.Analysis import MetadynamicsAnalysis as MA
     t = np.linspace(0, 5, 20)
@@ -851,8 +802,7 @@ def test_convergence_fails_when_dG_has_not_settled():
 
 
 def test_metad_keeps_a_fes_history_for_the_curve():
-    """OpenMM deletes the previous bias index each sync, so unless the run loop
-    snapshots the surface there is no history to build ΔG(t) from."""
+    """The run loop snapshots the FES, since OpenMM keeps no bias history."""
     import inspect
     from autopath.metadynamics.MetadynamicsMD import MetadynamicsMD
     src = inspect.getsource(MetadynamicsMD.run)
@@ -860,8 +810,7 @@ def test_metad_keeps_a_fes_history_for_the_curve():
 
 
 def test_a_flat_curve_without_both_basins_is_not_settled():
-    """The failure this caught on real data: a walker seeded unbound that never
-    enters the site gives the flattest curve of all, because nothing happens."""
+    """A flat ΔG(t) only counts as settled once both basins were visited."""
     import numpy as np
     from autopath.metadynamics.Analysis import MetadynamicsAnalysis as MA
     t = np.linspace(0, 5, 20)
@@ -869,16 +818,13 @@ def test_a_flat_curve_without_both_basins_is_not_settled():
     v = MA.dG_plateau(t, flat_but_empty, both_basins=False)
     assert not v["settled"]
     assert "did not visit both basins" in v["reason"]
-    # the same curve counts once the walker has actually sampled both
     assert MA.dG_plateau(t, flat_but_empty, both_basins=True)["settled"]
 
 
 # --- the gate belongs on the reported number, not on the curve -------------
 
 def test_correction_flags_an_empty_basin_instead_of_raising_when_not_strict():
-    """The reported ΔG must still refuse an unsampled site; the convergence
-    curve needs the same snapshot as a flagged value, because a walker seeded
-    along the unbinding path has no basin yet by construction."""
+    """An empty bound basin raises when strict, and is flagged with a finite ΔG otherwise."""
     import numpy as np
     from autopath.metadynamics.Analysis import correct_fe_for_funnel
     empty = np.zeros(125)                       # no well anywhere
@@ -889,17 +835,14 @@ def test_correction_flags_an_empty_basin_instead_of_raising_when_not_strict():
                               cv_length_per_unit_ang=10.0, strict=False)
     assert r["bound_state_sampled"] is False
     assert np.isfinite(r["dG_bind_std_kj_mol"])
-    # an empty site is Boltzmann-weighted to a small integral, so ΔG comes out
-    # unfavourable rather than undefined
+    # an empty site gives a small basin integral, hence an unfavourable ΔG
     assert r["dG_bind_std_kj_mol"] > 0
-    # and a real well is still flagged as sampled
     assert correct_fe_for_funnel(_well(), _flat_funnel_params(), temperature=298.15,
                                  cv_length_per_unit_ang=10.0)["bound_state_sampled"]
 
 
 def test_dG_timeseries_keeps_snapshots_whose_basin_is_not_yet_filled():
-    """A path-seeded walker starts outside the site. Dropping those snapshots
-    breaks the curve exactly where its transient lives."""
+    """Snapshots without a filled basin keep a value and are flagged as unsampled."""
     import numpy as np
     from autopath.metadynamics.Analysis import MetadynamicsAnalysis as MA
     h = _fe_history(n_snap=10)
@@ -912,8 +855,7 @@ def test_dG_timeseries_keeps_snapshots_whose_basin_is_not_yet_filled():
 
 
 def test_dG_plateau_will_not_settle_on_unsampled_snapshots():
-    """Now that unsampled snapshots carry values, flatness over them would read
-    as convergence. The mask, not finiteness, has to gate the plateau."""
+    """The plateau test uses only snapshots marked as sampled."""
     import numpy as np
     from autopath.metadynamics.Analysis import MetadynamicsAnalysis as MA
     t = np.linspace(0, 5, 20)
@@ -924,16 +866,14 @@ def test_dG_plateau_will_not_settle_on_unsampled_snapshots():
     assert v["n_points"] == 4, "the mask, not finiteness, must select the points"
     assert not v["settled"] and not v["ends_resolved"]
     assert "not resolved at the end" in v["reason"]
-    # without a mask the same curve settles, which is the behaviour being guarded
+    # without a mask the same curve settles
     assert MA.dG_plateau(t, g)["settled"]
 
 
 # --- shared bias: sequential walkers form one curve ------------------------
 
 def test_shared_bias_run_order_is_not_alphabetical(tmp_path):
-    """Shared-bias walkers run most-unbound first, so alphabetical order is the
-    reverse of run order and laying the curves end to end on it would put the
-    walker that inherited 10 ns of hills at t=0."""
+    """Shared-bias histories are ordered by start time, not by filename."""
     import numpy as np
     from autopath.metadynamics.Analysis import MetadynamicsAnalysis as MA
     # milestone_3 ran first, milestone_1 last
@@ -950,8 +890,7 @@ def test_shared_bias_run_order_is_not_alphabetical(tmp_path):
 
 
 def test_shared_bias_run_order_falls_back_to_mtime(tmp_path):
-    """Histories written before started_at was recorded still have to order, and
-    they are written when each walker finishes, so mtime is run order."""
+    """Without started_at, histories are ordered by file mtime."""
     import numpy as np, os as _os
     from autopath.metadynamics.Analysis import MetadynamicsAnalysis as MA
     for name, mtime in (("milestone_1", 3000), ("milestone_2", 2000),
@@ -968,9 +907,7 @@ def test_shared_bias_run_order_falls_back_to_mtime(tmp_path):
 # --- walker seed order -----------------------------------------------------
 
 def test_walker_seed_order_reverses_only_for_unbound_first():
-    """path_milestones runs bound -> unbound. Getting this backwards decides
-    whether the last walker inherits bias that helps it leave the basin or bias
-    deposited somewhere it never visits."""
+    """Milestones are ordered bound -> unbound and reversed only for unbound_first."""
     from autopath.autopath_core import walker_seed_order
     m = ["bound", "mid", "unbound"]
     assert walker_seed_order(m, "unbound_first") == ["unbound", "mid", "bound"]
@@ -1000,8 +937,7 @@ def _two_atom_universe(guest_z=2.0):
 
 
 def test_z_for_bulk_is_where_the_guest_clears_the_cutoff():
-    """A cap taken from how far the pulling happened to reach can leave the guest
-    in the first solvation shell, which makes the unbound plateau a contact state."""
+    """Returns the first axial z at which the guest clears the bulk cutoff."""
     import numpy as np
     from autopath.metadynamics.Funnel import z_where_guest_reaches_bulk
     u = _two_atom_universe(guest_z=2.0)
@@ -1026,8 +962,7 @@ def test_z_for_bulk_raises_when_the_axis_never_escapes():
 
 
 def test_extend_milestones_keeps_the_existing_spacing():
-    """One distant milestone would leave a gap far wider than sigma and turn the
-    progress coordinate into a staircase."""
+    """Extending the path adds milestones no wider apart than the existing ones."""
     import numpy as np
     from autopath.metadynamics.CV import _extend_milestones
     m = np.array([[0.70], [1.10], [1.50]])
@@ -1047,8 +982,7 @@ def test_extend_milestones_rejects_a_target_inside_the_path():
 
 
 def test_com_distance_at_z_converts_the_wall_into_a_path_target():
-    """The wall is axial, the path's far end is a COM separation. Setting them
-    independently is how one ends up capping sampling before the other."""
+    """Converts an axial wall position into the corresponding COM separation."""
     import numpy as np
     from autopath.metadynamics.Funnel import com_distance_at_z
     pos = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 2.0]])   # host, guest (A)
@@ -1061,8 +995,7 @@ def test_com_distance_at_z_converts_the_wall_into_a_path_target():
 
 
 def test_z_max_for_bulk_takes_the_worst_probed_frame():
-    """Reading the cap off one frame lets a single lateral excursion set the
-    geometry; the wall has to clear bulk from all of them."""
+    """The cap is the maximum required over all probed frames."""
     import numpy as np
     from autopath.metadynamics.Funnel import z_max_for_bulk
     u = _two_atom_universe(guest_z=2.0)
@@ -1077,19 +1010,13 @@ def test_z_max_for_bulk_takes_the_worst_probed_frame():
 # --- aligned trajectories must not gain atomic overlaps --------------------
 
 def _triclinic_solvent_traj(tmp_path, n_wat=80, rot=0.7):
-    """Two frames in a dodecahedron-shaped cell.
-
-    Frame 1 has the solute rotated in place while the solvent stays put, which is
-    what tumbling during MD looks like. Superposing frame 1 onto frame 0 therefore
-    applies a net rotation to the solvent relative to the box.
-    """
+    """Two frames in a dodecahedron cell; in frame 1 only the solute is rotated, so
+    superposing onto frame 0 rotates the solvent relative to the box."""
     import numpy as np, mdtraj as md
     top = md.Topology()
     ch = top.add_chain()
-    # Real backbone residues: the topology is round-tripped through a PDB, so
-    # bonds have to come from standard residue templates, not add_bond. Three
-    # ALA give one peptide-bonded molecule (>3 atoms, the image_molecules anchor)
-    # and three CA atoms for the superposition.
+    # standard residues, since bonds must survive a PDB round-trip; they form one
+    # molecule for image_molecules to anchor on
     ca = []
     bb_atoms = []
     for i in range(4):
@@ -1111,10 +1038,7 @@ def _triclinic_solvent_traj(tmp_path, n_wat=80, rot=0.7):
     box = np.array([[L, 0, 0], [0, L, 0], [L/2, L/2, L*0.7071]])
     n_at = top.n_atoms
     xyz = np.zeros((2, n_at, 3))
-    # Solute near the middle of the cell, at plausible bond distances, and
-    # deliberately NOT collinear: three points on a line give superpose no unique
-    # rotation and mdtraj silently returns identity, which would make this fixture
-    # exercise nothing.
+    # non-collinear solute, otherwise superpose has no unique rotation
     for k, (n, c_a, c, o) in enumerate(bb_atoms):
         base = np.array([1.20 + 0.30*np.cos(2.1*k),
                          1.50 + 0.30*np.sin(2.1*k),
@@ -1123,7 +1047,7 @@ def _triclinic_solvent_traj(tmp_path, n_wat=80, rot=0.7):
         xyz[:, c_a.index] = base + [0.147, 0.0, 0.0]
         xyz[:, c.index]   = base + [0.147 + 0.153, 0.0, 0.0]
         xyz[:, o.index]   = base + [0.147 + 0.153, 0.123, 0.0]
-    # solvent on a REGULAR fractional lattice so the input cannot start clashing
+    # solvent on a regular fractional lattice so the input has no clashes
     g = np.array([(i, j, k) for i in range(5) for j in range(4) for k in range(4)],
                  dtype=float)
     f = (g + 0.5) / np.array([5.0, 4.0, 4.0])
@@ -1155,29 +1079,16 @@ def _rigid_rmsd(A, B):
 
 
 def test_alignment_applies_only_a_rigid_transform(tmp_path):
-    """Superposition rotates coordinates but not unitcell_vectors, so imaging
-    afterwards translates whole molecules by vectors that are wrong in the rotated
-    frame -- measured on real data as 942 overlapping pairs appearing in a frame
-    that had none, and 32-107 per extracted milestone driving NonbondedForce to
-    +1e11 kJ/mol.
-
-    Asserting on overlap COUNTS needs realistic solvent density to be reliable; the
-    density-independent statement is that alignment may only apply a rigid
-    transform, which preserves every interatomic distance.
-    """
+    """Alignment applies only a rigid transform; imaging after superposition would not,
+    because the unit cell vectors are not rotated with the coordinates."""
     import copy
     import mdtraj as md
     from autopath.utils import wrap_align_save_traj
     pdb, dcd, top = _triclinic_solvent_traj(tmp_path)
-    # Baseline = the legitimate pre-superposition steps. Imaging BEFORE superposing
-    # is allowed to move molecules by lattice vectors; only what happens AFTER the
-    # rotation has to be rigid.
+    # baseline: imaging before superposition may shift molecules by lattice vectors
     src = md.load(dcd, top=pdb).center_coordinates().image_molecules(make_whole=True)
 
-    # Fixture validity. This assertion exists because an earlier version of this
-    # test passed while the bug was present: the solute was collinear, so mdtraj
-    # could not derive a rotation, silently returned identity, and there was
-    # nothing for the stray imaging pass to corrupt.
+    # fixture check: imaging after the rotation must visibly damage the frame
     sel = src.topology.select('name CA')
     rot = copy.deepcopy(src).superpose(src[0], atom_indices=sel)
     buggy = copy.deepcopy(rot).image_molecules(make_whole=True)
@@ -1199,8 +1110,7 @@ def test_alignment_applies_only_a_rigid_transform(tmp_path):
 # --- cylinder cap always reaches bulk ----------------------------------------
 
 def test_cylinder_cap_is_set_by_the_bulk_cutoff_not_the_trajectory_end():
-    """The cap must clear the host by bulk_cutoff_ang; how far sMD happened to
-    pull is irrelevant, so a stricter cutoff has to push the wall outwards."""
+    """The cylinder cap is set by bulk_cutoff_ang, not by where the trajectory ends."""
     from autopath.metadynamics.Funnel import generate_funnel_parameters_from_trajectory
     from openmm import unit as ommunit
 

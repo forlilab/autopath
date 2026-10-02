@@ -57,11 +57,8 @@ def group_milestones_by_path(milestones: list[str],
                              ) -> list[tuple[str | None, list[str]]]:
     """Group milestone state files by the unbinding path they came from.
 
-    ``milestone_mode="per_path"`` writes each path's milestones into a
-    subdirectory of ``milestones_outdir`` named after the path label, while
-    ``all_medoids`` writes them flat. Files sitting directly in
-    ``milestones_outdir`` therefore have no path label and form a single
-    pooled group keyed by ``None``.
+    Per-path milestones live in a subdirectory named after the path label;
+    files directly in ``milestones_outdir`` form one unlabelled group (``None``).
 
     Returns ``[(path_label_or_None, files)]`` sorted by key, ``None`` first.
     """
@@ -70,7 +67,6 @@ def group_milestones_by_path(milestones: list[str],
     for m in milestones:
         rel = os.path.relpath(os.path.abspath(m), root)
         head = os.path.dirname(rel)
-        # no directory component (or a path outside the root) means "unlabelled"
         if head and not head.startswith(os.pardir):
             key = head.split(os.sep)[0]
         else:
@@ -83,9 +79,8 @@ def walker_seed_order(path_milestones: list, order: str) -> list:
     """Order the seeds for sequential shared-bias walkers.
 
     `path_milestones` runs bound -> unbound. 'unbound_first' makes the most-bound
-    walker inherit every earlier walker's bias; 'bound_first' starts each walker
-    further out than the last, so accumulated bias pushes it along the path rather
-    than piling into a basin its seed cannot leave.
+    walker inherit every earlier walker's bias; 'bound_first' lets accumulated
+    bias push each later walker along the path instead of filling its basin.
     """
     if order == "unbound_first":
         return list(reversed(path_milestones))
@@ -170,36 +165,15 @@ class AutoPath:
 
     Notes
     -----
-    **hill_height guideline** — The default ``mMD_hill_height=1.2`` kJ/mol is
-    approximately 0.5 kBT at 300 K, which is the recommended starting point.
-    Lower values converge more slowly; higher values risk over-filling barriers
-    and producing noisy free-energy surfaces.
-
-    **CVSpec / deferred CV pattern** — Collective variables are specified as
-    :class:`~autopath.metadynamics.CVSpec` objects and instantiated inside the
-    metadynamics loop rather than at construction time so that the OpenMM
-    ``System`` object (which must already contain the force) is available when
-    the CV is created.
-
-    **Multi-walker seeding modes** — Two independent flags control walker
-    initialisation:
-
-    * ``mMD_milestone_seeding=True`` (default): each walker starts from the
-      relaxed checkpoint of its own milestone, providing diverse starting
-      positions along the path.
-    * ``mMD_milestone_seeding=False``: all walkers start from the first
-      (most-bound) milestone's checkpoint.
-
-    **Multi-walker bias sharing** — ``mMD_multiple_walkers=True`` directs all
-    walkers to read from and write to the same bias directory so that OpenMM
-    accumulates hills from every walker (true multi-walker metadynamics).
-    ``mMD_multiple_walkers=False`` (default) gives each walker its own bias
-    subdirectory so walkers run independently without cross-walker coupling.
-
-    **Stuck-walker retry** — After the main loop, any walker whose PathCV never
-    exceeds 0.5 is considered stuck and is re-run.  In shared-bias mode the
-    retry benefits from hills deposited by successful walkers; in isolated mode
-    the walker continues from its own partial bias.
+    * ``mMD_hill_height=1.2`` kJ/mol is ~0.5 kBT at 300 K; larger values
+      over-fill barriers and give noisy FES.
+    * CVs are :class:`~autopath.metadynamics.CVSpec` objects instantiated inside
+      the metadynamics loop, once the OpenMM ``System`` is available.
+    * ``mMD_milestone_seeding``: each walker starts from its own relaxed
+      milestone (True) or all from the most-bound one (False).
+    * ``mMD_multiple_walkers``: one shared bias directory (True) or one per
+      walker (False).
+    * Walkers whose CV never passes the grid midpoint are re-run once.
     """
 
     def __init__(
@@ -247,8 +221,8 @@ class AutoPath:
         sMD_steps_per_move: int = None,
         sMD_dx_per_move: float = 0.001,  # nm, this is the displacement per move
         sMD_spring_cte: float = None,  # KJ/mol/nm2
-        sMD_force_n_samples: int = 10,  # cap on restraint-force samples time-averaged per move (>=1); 1 = legacy single pre-step sample
-        sMD_force_sample_stride: int = 5,  # MD steps between force samples; samples-per-move adapts to move length (capped by sMD_force_n_samples)
+        sMD_force_n_samples: int = 10,  # max restraint-force samples averaged per move (>=1)
+        sMD_force_sample_stride: int = 5,  # MD steps between force samples
         sMD_ligand_anchor_mode: str = 'murcko',
         sMD_max_replicas: int = 50,  # max replicas per speed in convergence mode
         sMD_run_analysis: bool = True,
@@ -258,9 +232,9 @@ class AutoPath:
         sMD_max_frac_neg_dG_first_half: float = 0.25,  # pass-3 binding-well filter; <=0 disables
         sMD_features: list | None = None,
         sMD_log_geom_features: bool | list = True,  # hybrid: log geom during pulling + merge into clustering
-        sMD_plateau_frac: float = 0.4,  # force-plateau TS boundary: fraction of peak |force| (higher -> boundary nearer rupture, off the tail)
-        sMD_cluster_to_boundary: bool = True,  # cluster + RMSD-converge only up to the force-plateau boundary (exclude bulk-solvent tail)
-        sMD_boundary_buffer_frac: float = 0.1,  # extend the boundary cap by this fraction of r_ts (a little buffer past rupture)
+        sMD_plateau_frac: float = 0.4,  # force-plateau TS boundary as a fraction of peak |force|
+        sMD_cluster_to_boundary: bool = True,  # cluster/converge only up to the force-plateau boundary
+        sMD_boundary_buffer_frac: float = 0.1,  # boundary buffer as a fraction of r_ts
         cluster_across_speeds: bool = False,
         sMD_min_replicas_per_path: int = 5,
         extract_milestones: bool = True,
@@ -613,8 +587,8 @@ class AutoPath:
         
         # sMD_collision_frequency = 1  # ps^-1
         # sMD_outdir = f"{sys_name}/sMD_{lig_anchor_mode}_{sMD_timestep}ps_{sMD_collision_frequency}ps_200stm"
-        # in this paper they used 80 kcal·mol−1? units don match tho. Ziada et al 2022.
-        sMD_spring_cte_per_atom = 100 * 4.184  # KJ/mol/nm2, converted from kcal. This affects thermal fluctuations
+        # cf. Ziada et al. 2022
+        sMD_spring_cte_per_atom = 100 * 4.184  # KJ/mol/nm2, converted from kcal
         sMD_traj_outdir = f"{self.sMD_outdir}/trajectories"
         
         sMD_analysis_outdir = f"{self.sMD_outdir}/analysis_traces"
@@ -659,12 +633,8 @@ class AutoPath:
             )
 
             if self.sMD_alternate_speeds and self.sMD_converge_speeds:
-                # Round-robin: run one replica per live speed in turn so that
-                # the 'force' estimator always has >=2 speeds advancing
-                # together (it needs a joint v->0 extrapolation, not a single
-                # speed's running PMF). Per-speed estimators still retire
-                # each speed independently; 'force' retires all of them at
-                # once when the joint ladder converges.
+                # Round-robin keeps >=2 speeds advancing for the 'force' v->0
+                # extrapolation; 'force' retires all speeds at once.
                 live = {s: True for s in self.sMD_pulling_speeds}
                 failures = {s: 0 for s in live}
                 force_ladder_dead = False   # log the "<2 live speeds" ERROR once
@@ -701,14 +671,9 @@ class AutoPath:
                             continue
                         if len(log_files) + 1 < reps:
                             continue
-                        # decision: per-speed estimators check that speed; force
-                        # checks the joint ladder and retires every speed at once
                         if self.sMD_autostop_estimator == "force":
-                            # Only *live* speeds may feed the ladder. Its depth K is
-                            # min(replicas) over the speeds it is given, so a retired
-                            # speed — whose .dat files stay on disk — would freeze K
-                            # at the replica count it died on and the force criterion
-                            # could never fire again.
+                            # Only live speeds: ladder depth is min(replicas), so a
+                            # retired speed left on disk would freeze it.
                             live_speeds = [
                                 s for s in self.sMD_pulling_speeds
                                 if live[s] and glob(
@@ -736,9 +701,7 @@ class AutoPath:
                                 speed=speed)
                         if conv_df is None or conv_df.empty:
                             continue
-                        # Tail-anchored, not first_streak: the question here is
-                        # "are we converged right now", and conv_df is rebuilt from
-                        # scratch each call (not append-only).
+                        # tail-anchored: conv_df is rebuilt from scratch each call
                         if tail_converged(conv_df, k_consec=self.sMD_conv_streak):
                             n_conv = float(conv_df["n_replicas"].max())
                             if self.sMD_autostop_estimator == "force":
@@ -761,9 +724,7 @@ class AutoPath:
                 if self.sMD_converge_speeds:
                     logger.info(f"Running sMD for speed {speed} nm/ps until convergence (min {reps} replicas).")
                     CONVERGED = False
-                    # Guard against livelock: a failing sMD.run() writes no .dat file, so the
-                    # replica count never advances and the sMD_max_replicas cap never trips.
-                    # Abort after too many consecutive failures that make no progress.
+                    # a failed run writes no .dat, so the replica cap alone cannot stop a livelock
                     consecutive_failures = 0
                     MAX_CONSECUTIVE_FAILURES = 5
                     while not CONVERGED:
@@ -803,17 +764,8 @@ class AutoPath:
                                 plot_convergence_traces(conv_traces, outdir=sMD_analysis_outdir)
                                 plot_convergence_metrics(conv_metrics, outdir=sMD_analysis_outdir, tolerances=CONVERGENCE_TOLERANCES)
 
-                                # Convergence = the readouts hold a plateau for
-                                # sMD_conv_streak consecutive rungs. Two adjacent
-                                # passes are not evidence: on WDR5 the per-rung flag
-                                # flickers with a pass rate around 0.13, so a pair
-                                # arises by chance.
-                                # The streak must be the TAIL of the history, not any
-                                # streak in it (first_streak): conv_df is rebuilt from
-                                # scratch on every call, so an old streak followed by a
-                                # failing latest rung — a restarted campaign, or a
-                                # re-clustering that flipped an earlier rung — must not
-                                # stop the run.
+                                # Converged = the last sMD_conv_streak rungs all pass.
+                                # Must be the tail streak: conv_df is rebuilt each call.
                                 if len(conv_df) >= self.sMD_conv_streak:
                                     CONVERGED = tail_converged(conv_df, k_consec=self.sMD_conv_streak)
                                     n_conv = float(conv_df["n_replicas"].max())
@@ -903,9 +855,7 @@ class AutoPath:
             smd_data = SMDData(logs, sys_name, temperature=self.temperature,
                                reference_pdb=equilibrated_pdb)
             
-            # cluster trajectories into pathways
-            # 'null' bypasses clustering entirely (all trajectories -> one path); it is the
-            # no-clustering reference for isolating what the path split actually buys.
+            # cluster trajectories into pathways ('null' = one path, no clustering)
             if self.sMD_path_model == 'null':
                 cluster_model = NullPathModel()
                 logger.info("sMD_path_model='null': clustering bypassed, all trajectories "
@@ -949,12 +899,8 @@ class AutoPath:
             # Store for downstream milestone extraction
             self._smdanalysis = smdanalysis
 
-            # check convergence regardless of speed and autopstop.
-            # Cluster with the same feature config as the main analysis run() above.
-            # conv_window/estimator_name must mirror the deployment loop's autostop
-            # settings: this vALL frame (plus its plots) is the only surviving
-            # convergence artefact, so it has to be the criterion that actually
-            # made the stopping decision, not the function defaults.
+            # Convergence over all speeds, with the same features as run() above and
+            # the same estimator/window as the autostop loop (this is the kept record).
             conv_df, traces_df = smdanalysis.check_convergence(logs=logs,
                 estimator_name=self.sMD_autostop_estimator,
                 conv_window=self.sMD_conv_window,
@@ -1013,10 +959,7 @@ class AutoPath:
             if len(sMD_trajs) == 0:
                 raise RuntimeError("No sMD trajectories found. Please check the sMD pulling step.")
 
-            # Load medoid info (from analysis or from saved file)
-            # PathModel writes this under path_analysis/; keep the flat path as a
-            # fallback so older analysis directories still load. Getting this wrong
-            # silently falls back to every sMD trajectory instead of the medoids.
+            # Load medoid info (from analysis or from saved file); flat path is the legacy layout
             medoid_info_path = f"{sMD_analysis_outdir}/path_analysis/medoid_info.json"
             if not os.path.exists(medoid_info_path):
                 medoid_info_path = f"{sMD_analysis_outdir}/medoid_info.json"
@@ -1029,9 +972,7 @@ class AutoPath:
             elif os.path.exists(medoid_info_path):
                 with open(medoid_info_path, "r") as f:
                     medoid_info = json.load(f)
-                # Current schema stores only per-speed medoid → path maps under
-                # "by_speed"; flatten them into a single map. Fall back to the
-                # legacy top-level "medoid_to_path" for older files.
+                # flatten per-speed "by_speed" maps; top-level "medoid_to_path" is legacy
                 medoid_to_path = dict(medoid_info.get("medoid_to_path", {}))
                 for mapping in medoid_info.get("by_speed", {}).values():
                     medoid_to_path.update(mapping)
@@ -1043,11 +984,8 @@ class AutoPath:
                     "Falling back to using all sMD trajectories."
                 )
 
-            # medoid_info.json is written before the analysis drops under-sampled and
-            # artefactual paths, and its labels can disagree with the final assignment
-            # for the very same trajectory. Decide per TRAJECTORY against the analysis
-            # output, which is what the quality verdict was actually recorded on, and
-            # re-label from it -- keying on the stale label drops good medoids.
+            # medoid_info.json predates the path filters and its labels can be stale;
+            # filter and re-label per trajectory from the final analysis output.
             if medoid_to_path:
                 surviving = read_trajname_to_path(sMD_analysis_outdir)
                 if not surviving:
@@ -1172,16 +1110,14 @@ class AutoPath:
             logger.info(f"sMD COM distance range: [{min_com:.3f}, {max_com:.3f}] nm (informational; path CV uses [0.0, 1.0])")
 
             milestones = glob(f'{milestones_outdir}/**/milestone_*_frame_*.xml', recursive=True)
-            # RelaxMD writes both _relax_system.xml and _relax_state.xml alongside the
-            # milestones; drop every _relax_* output so only the input states remain.
+            # drop RelaxMD outputs (_relax_*) written beside the milestones
             milestones = [m for m in milestones if '_relax' not in os.path.basename(m)]
 
             if len(milestones) == 0:
                 raise RuntimeError("No milestones found. Please check the milestone extraction step.")
 
-            # One metadynamics stage per path. Pooling geometrically distinct routes
-            # forces a single path CV and a single funnel wide enough to contain the
-            # widest of them, which is no longer a funnel.
+            # One metadynamics stage per path: pooling distinct routes would need one
+            # path CV and a funnel wide enough for all of them.
             milestone_groups = group_milestones_by_path(milestones, milestones_outdir)
             has_path_labels = any(key is not None for key, _ in milestone_groups)
 
@@ -1205,9 +1141,7 @@ class AutoPath:
                             "analysis or relax its filters.")
 
             base_system = load_system(f"{sys_name}/system.xml")
-            # {trajname: path}. Selects each labelled group's own trajectories, and
-            # for an unlabelled group still drops the ones the analysis rejected, so
-            # it is needed either way. Only the two columns are read.
+            # {trajname: path}: per-group trajectory selection, and rejection filter for the unlabelled group
             trajname_to_path = (read_trajname_to_path(sMD_analysis_outdir)
                                 if self.mMD_use_funnel_potential or has_path_labels
                                 else {})
@@ -1227,16 +1161,13 @@ class AutoPath:
                     f"Metadynamics for {group_name}: {len(group_milestones)} milestone(s) "
                     f"-> {group_out_dir}")
 
-                #sort the milestones by their index (milestone number is the last token before 'frame')
+                # sort by milestone index (last token before '_frame_')
                 path_milestones = sorted(
                     group_milestones,
                     key=lambda x: int(os.path.basename(x).split('_frame_')[0].rsplit('_', 1)[-1]))
 
-                # The index order follows PC1, whose sign is arbitrary, so anchor the
-                # direction on pocket-ligand separation before anything consumes the
-                # list. Every consumer below (path CV, preseed, funnel PSE, the relax
-                # loop, first_milestone_name) reads this same list, so they stay
-                # consistent only if the flip happens here.
+                # Index order follows PC1 (arbitrary sign): orient bound -> unbound here,
+                # before any consumer below reads the list.
                 path_milestones = order_milestones_bound_to_unbound(
                     path_milestones, pocket_atom_indices, ligand_atoms_indices)
 
@@ -1249,21 +1180,15 @@ class AutoPath:
                     grid_min=0.0,
                     grid_max=1.0,
                     hill_width=self.mMD_hill_width,
-                    sigma='auto', # related to distance between milestones
-                    #sigma approz min milestone spacings
+                    sigma='auto', # ~ milestone spacing
                 )
                 metad_cv = path_cv
-                # when you first run, check the logged line
-                # PathCV milestone COM distances (nm): [...].
-                # If adjacent milestones differ by more than 3 × sigma = 0.3 nm,
-                # the Gaussian kernels won't overlap well and you'll want to increase sigma.
-                # If they're closer than 0.5 × sigma = 0.05 nm, decrease it.
+                # sigma should be ~0.5-3x the logged adjacent-milestone COM spacing
 
-                # Pre-seed the metadynamics bias surface from the sMD PMF (optional).
-                # Done before any walker starts so all walkers load the preseed via _syncWithDisk().
+                # Pre-seed the bias from the sMD PMF before any walker starts (loaded via _syncWithDisk()).
                 if self.mMD_preseed_bias:
                     try:
-                        # Compute milestone COM distances (same formula as in pathCV_cv factory)
+                        # milestone COM distances (same formula as pathCV_cv)
                         _pocket_masses = np.array([
                             base_system.getParticleMass(i).value_in_unit(dalton)
                             for i in pocket_atom_indices
@@ -1320,14 +1245,10 @@ class AutoPath:
                 if self.mMD_use_funnel_potential:
                     logger.info("Generating funnel potential from sMD trajectories...")
                     try:
-                        # Restrict the funnel to this path's own trajectories; pooling
-                        # every path widens the cone until it restrains nothing.
+                        # Build the funnel from this path's trajectories only; pooling widens the cone.
                         smd_trajs = all_smd_trajs
                         if group_key is None:
-                            # Unlabelled group pools every medoid, so there is no single
-                            # path to restrict to. Still drop the trajectories the
-                            # analysis rejected: they are exactly the under-sampled ones
-                            # that widen the cone without describing a real route.
+                            # no single path: just drop the trajectories the analysis rejected
                             _ok = {os.path.basename(self._trajname_to_dcd(n))
                                    for n in trajname_to_path}
                             _kept = [t for t in all_smd_trajs
@@ -1366,17 +1287,12 @@ class AutoPath:
                         if not smd_trajs:
                             logger.warning("No sMD trajectories found. Skipping funnel potential generation.")
                         else:
-                            # Create MDAnalysis Universe with all trajectories
                             universe = mda.Universe(solvated_system_pdb, smd_trajs)
                             logger.info(f"Loaded {len(universe.trajectory)} frames total")
 
-                            # Determine funnel host selection.
-                            # The funnel axis must pass through the binding site so the
-                            # bound-state ligand is inside the cone (r_xy ≈ 0).
-                            # pocket_selection is intentionally wide (whole-helix CAs for sMD
-                            # stability) and its COM sits far from the pocket — do NOT reuse it
-                            # here.  Default: CA atoms of residues contacting the ligand in
-                            # the equilibrated structure, derived automatically.
+                            # Funnel host: the axis must pass through the site (bound r_xy ~ 0).
+                            # pocket_selection may be wide with an off-site COM, so default to
+                            # CAs of residues contacting the equilibrated ligand.
                             if self.mMD_funnel_host_selection is not None:
                                 funnel_host_sel = self.mMD_funnel_host_selection
                                 logger.info(f"Using user-specified funnel host selection: {funnel_host_sel}")
@@ -1410,27 +1326,20 @@ class AutoPath:
                                 universe,
                                 host_selection=funnel_host_sel,
                                 guest_selection=ligand_selection,
-                                # z_cc must sit BEYOND the binding site so the cone
-                                # covers it and the restraint is not felt there; the
-                                # default high percentile does that. A median z_cc puts
-                                # the site in the cylinder, at the tightest radius.
-                                # R_cylinder is derived from the trajectory's own radial
-                                # spread beyond z_cc; pass R_cylinder_ang to override.
-                                # z_cc_ang=5, # this overrides the default automatic z_cc calculation (floor is 5A)
+                                # z_cc must lie beyond the binding site so the cone covers it;
+                                # R_cylinder comes from the radial spread beyond z_cc.
+                                # z_cc_ang=5, # overrides the automatic z_cc (floor 5 A)
                                 alpha_cone_degrees=45.0,
                                 bulk_cutoff_ang=self.mMD_bulk_cutoff_ang,
                                 verbose=True,
                             )
 
-                            # Create funnel force from parameters
                             _zmax = float(funnel_params["z_max"].value_in_unit(
                                 openmmunit.angstrom))
                             _zcc = float(funnel_params["z_cc"].value_in_unit(
                                 openmmunit.angstrom))
                             if self.mMD_cv == "path":
-                                # Derive the path's far end FROM the wall so the two
-                                # caps cannot disagree. Hand-setting it means guessing
-                                # a number the funnel only produces later.
+                                # derive the path's far end from the wall so the two caps agree
                                 _target_nm = com_distance_at_z(
                                     read_positions(path_milestones[-1]) * 10.0,
                                     ligand_atoms_indices, pocket_atom_indices,
@@ -1467,12 +1376,8 @@ class AutoPath:
                                         _last_nm, _target_nm)
                                 _span = path_cv.cv_length_per_unit_ang
                                 if _span is not None:
-                                    # The funnel wall and the CV range are independent
-                                    # caps; the shorter one decides where the unbound
-                                    # reference sits. A path that cannot even cross the
-                                    # cylinder puts s=1 back inside the cone.
-                                    # Put the path's far end in the funnel's own z so
-                                    # the two caps are directly comparable.
+                                    # Wall and CV range are independent caps; compare them in
+                                    # funnel z (s=1 must lie in the cylinder, not past the wall).
                                     try:
                                         _ax = np.asarray(funnel_params["unbinding_axis"],
                                                          dtype=float)
@@ -1532,9 +1437,7 @@ class AutoPath:
                             funnel_force = create_funnel_force_from_trajectory_analysis(funnel_params)
                             logger.info("Funnel potential successfully generated from trajectories")
 
-                            # Persist funnel parameters so they can be reloaded for
-                            # post-hoc PMF correction or funnel visualisation
-
+                            # persist for post-hoc correction / visualisation
                             save_funnel_params(
                                 funnel_params,
                                 os.path.join(group_out_dir, "funnel_params"),
@@ -1557,8 +1460,7 @@ class AutoPath:
                         logger.warning("Continuing without funnel potential")
                         funnel_force = None
 
-                # Single-walker mode: all walkers start from the most-bound (first) milestone.
-                # Resolve this before reversing the loop so it is milestone-order independent.
+                # most-bound milestone, resolved before the walker order is applied
                 first_milestone_name = os.path.basename(path_milestones[0]).split('.')[0]
                 first_milestone_state = f"{group_milestones_dir}/{first_milestone_name}_relax_state.xml"
                 walker_run_info = {}  # {run_id: (state_xml_path, system_xml_path)} for stuck-walker retry
@@ -1584,25 +1486,17 @@ class AutoPath:
                             logger.error(f"Error relaxing {milestone_name}: {e}")
                             continue
 
-                    # mMD_milestone_seeding=True : each walker starts from its own milestone's checkpoint.
-                    # mMD_milestone_seeding=False: all walkers start from the first (bound-state) checkpoint.
-                    # Restart from the serialized state, not the relax checkpoint. A
-                    # checkpoint is only valid for an identical Context, and metadynamics
-                    # adds the funnel and bias forces on top of the relaxed system.
+                    # Use the serialized state, not the checkpoint: metadynamics adds forces,
+                    # so the Context differs from the relax one.
                     state_to_use = milestone_state if self.mMD_milestone_seeding else first_milestone_state
 
-                    # mMD_multiple_walkers=False (default): each walker gets its own bias subdir so
-                    #   hills are NOT shared — walkers run independently without bias communication.
-                    # mMD_multiple_walkers=True: all walkers share the group's out dir as biasDir so
-                    #   OpenMM accumulates hills from all of them (true multi-walker metadynamics).
+                    # isolated walkers get their own bias subdir; None = shared group biasDir
                     walker_bias_dir = (
                         os.path.join(group_out_dir, f"bias_{milestone_name}")
                         if not self.mMD_multiple_walkers else None
                     )
 
-                    # In isolated mode the preseed file lives in the group's out dir but each
-                    # walker's biasDir is a subdirectory, so OpenMM would not find it.  Copy it
-                    # there before the walker initialises its Metadynamics object.
+                    # isolated mode: copy the preseed into the walker's own biasDir
                     if walker_bias_dir is not None and self.mMD_preseed_bias:
                         preseed_src = os.path.join(group_out_dir, "bias_0_0.npy")
                         if os.path.exists(preseed_src):
@@ -1629,13 +1523,8 @@ class AutoPath:
                         logger.error(f"Error during WTMetaD for {milestone_name}: {e}")
                         continue
 
-                # Retry walkers that never left the bound state (max PathCV < 0.5).
-                # mMD_multiple_walkers=True (shared bias): by this point the biasDir contains
-                #   accumulated hills from all successful walkers, so a stuck walker benefits
-                #   from a warm landscape.
-                # mMD_multiple_walkers=False (isolated): each walker retries with its own
-                #   previously-deposited hills; no cross-walker benefit, but the walker may
-                #   still climb out given its own partial bias.
+                # Retry walkers that never passed the CV grid midpoint, on the accumulated
+                # bias (shared, or the walker's own in isolated mode).
                 stuck_walkers = [
                     (run_id, state_xml, xml)
                     for run_id, (state_xml, xml) in walker_run_info.items()
@@ -1713,14 +1602,9 @@ class AutoPath:
                      speeds=None):
         """Build the analysis and run the convergence check for one speed.
 
-        ``speed=None`` and ``speeds=None`` mean "every speed on disk jointly",
-        which is what the force ladder needs. Pass ``speeds=[...]`` to restrict
-        the joint check to a subset (the still-live speeds): the ladder's depth
-        is min(replicas) over the speeds it is handed, so a retired speed left
-        on disk would otherwise cap it forever.
-        `min_replicas` is passed explicitly rather than derived from
-        sMD_pulling_speeds, whose values are None in the Config default
-        (`config.py:46`) and would raise on min().
+        ``speed=None`` and ``speeds=None`` check every speed on disk jointly (the
+        force ladder); ``speeds=[...]`` restricts the joint check to a subset.
+        `min_replicas` is explicit because sMD_pulling_speeds values may be None.
         Returns (convergence_df, traces_df); convergence_df is empty when it
         cannot be computed yet.
         """

@@ -43,9 +43,9 @@ class Config(object):
         run_sMDpulling: bool = True,
         sMD_outdir: str = "sMD",
         sMD_pulling_dir: str = "forward",  # "forward" or "backward"
-        sMD_pulling_speeds: dict = {0.005: 5, 0.0025: 5, 0.001: 5},  # nm/ps; value = min reps (floor) if sMD_converge_speeds, else total reps
+        sMD_pulling_speeds: dict = {0.005: 5, 0.0025: 5, 0.001: 5},  # nm/ps -> replicas
         sMD_max_pulling_dist: float = 3.5,  # nm
-        sMD_max_r_offset: float = 3.0,  # max displacement offset (nm): cap pull at r0 + offset nm (also capped at half-box - 0.5 nm)
+        sMD_max_r_offset: float = 3.0,  # nm, from r0
         sMD_autostop_nc: float = 0.01,  # fraction of NC_initial; None disables
         sMD_autostop_nc_window: int = 5,
         sMD_autostop_min_displacement: float = 0.5,
@@ -237,8 +237,7 @@ class Config(object):
             ligand heavy-atom count.  Default ``None``.
         sMD_force_n_samples : int, optional
             Cap on the number of restraint-force samples time-averaged per pull
-            move (``1`` reproduces the legacy single pre-step sample).  Default
-            ``10``.
+            move.  Default ``10``.
         sMD_force_sample_stride : int, optional
             MD steps between force samples within a move; the number of samples
             actually taken adapts to the move length, capped by
@@ -321,8 +320,7 @@ class Config(object):
             Interval (ps) at which Gaussian hills are deposited.  Default ``2``.
         mMD_hill_height : float, optional
             Initial Gaussian hill height in kJ/mol.  Default ``1.2`` (~0.5 kBT
-            at 300 K), which is the recommended starting point; lower values
-            slow convergence, higher values risk overfilling barriers.
+            at 300 K).
         mMD_hill_width : float, optional
             Gaussian hill width (sigma) along the path CV.  Default ``0.05``.
         mMD_time : int, optional

@@ -11,8 +11,7 @@ def c():
 
 
 def test_single_feature_featurizer_does_not_explode():
-    """CoordinateRMSD returns one feature; the default n_components=2 would
-    make PCA raise. fit() must clamp instead."""
+    """fit() clamps n_components when the featurizer yields a single feature."""
     from autopath.clustering import CoordinateRMSD
     u = mda.Universe(PSF, DCD)
     c = Clustering(CoordinateRMSD("name CA")).fit(u)
@@ -20,14 +19,14 @@ def test_single_feature_featurizer_does_not_explode():
 
 
 def test_select_before_fit_raises():
-    """_require_fit guard; select() lives in this task so the test does too."""
+    """select() before fit() raises."""
     c2 = Clustering(PairwiseDistances("a", "b"))
     with pytest.raises(RuntimeError, match="fit"):
         c2.select(3, strategy="centroid")
 
 
 def test_unknown_strategy_raises(c):
-    """No default: a typo must fail loudly, not silently seed the wrong way."""
+    """An unknown strategy name raises instead of falling back."""
     with pytest.raises(ValueError, match="strategy"):
         c.select(3, strategy="centroids")
 
@@ -67,7 +66,7 @@ def test_n_exceeding_frames_raises(c):
 
 
 def test_labels_reset_when_switching_to_time_spaced(c):
-    """Stale clustering state would misrepresent a time_spaced selection."""
+    """A time_spaced selection clears labels and centres from a prior centroid run."""
     c.select(4, strategy="centroid")
     assert c.labels_ is not None
     c.select(4, strategy="time_spaced")
@@ -75,15 +74,13 @@ def test_labels_reset_when_switching_to_time_spaced(c):
 
 
 def test_time_spaced_honours_min_frame_separation(c):
-    """The signature accepts it for both strategies; ignoring it silently
-    would be a contract violation."""
+    """time_spaced enforces min_frame_separation rather than ignoring it."""
     with pytest.raises(ValueError, match="min_frame_separation"):
         c.select(50, strategy="time_spaced", min_frame_separation=10)
 
 
 def test_degenerate_pc1_raises_and_names_the_alternative():
-    """A converged trajectory has no PC1 spread; RegularSpace then returns one
-    centre regardless of n, which would silently under-deliver frames."""
+    """Zero PC1 spread makes centroid selection raise and suggest time_spaced."""
     import numpy as _np
     from autopath.clustering import Clustering as _C, Featurizer as _F
 
@@ -97,11 +94,7 @@ def test_degenerate_pc1_raises_and_names_the_alternative():
 
 
 def test_centroid_uses_pc1_not_full_matrix(c, monkeypatch):
-    """Review Focus #1: selection runs on the 1-D PC1 column.
-
-    Pins the argument actually handed to match_cluster_centroids_unique;
-    asserting on centers_ alone passes even if the full matrix is passed.
-    """
+    """Centroid matching is given the 1-D PC1 column, not the full matrix."""
     import autopath.utils as U
     real = U.match_cluster_centroids_unique
     seen = {}
@@ -119,16 +112,14 @@ def test_centroid_uses_pc1_not_full_matrix(c, monkeypatch):
 
 
 def test_centroid_frames_are_returned_in_pc1_order(c):
-    """B2: centroids are sorted bound -> unbound along PC1, and select() must
-    preserve that order; re-sorting by frame index scrambles the path CV."""
+    """Centroid frames are returned sorted along PC1, not by frame index."""
     f = c.select(5, strategy="centroid")
     pc1 = c.X_reduced[f, 0]
     assert np.all(np.diff(pc1) > 0), pc1
 
 
 def test_pc1_order_differs_from_frame_order():
-    """The regression only bites when PC1 is non-monotone in frame index,
-    which is the normal case for pooled medoid trajectories."""
+    """PC1 ordering holds when PC1 is non-monotone in frame index."""
     from autopath.clustering import Clustering as _C, Featurizer as _F
 
     rng = np.random.default_rng(0)
@@ -145,8 +136,7 @@ def test_pc1_order_differs_from_frame_order():
 
 
 def test_stride_maps_selected_indices_back_to_trajectory_frames():
-    """I4: select() indexes the strided feature matrix; the writers index the
-    trajectory. Without the *stride mapping every written frame is wrong."""
+    """Selected indices refer to trajectory frames, not strided feature rows."""
     u = mda.Universe(PSF, DCD)
     lig, poc = "resid 1-5 and name CA", "resid 20-30 and name CA"
     c1 = Clustering(PairwiseDistances(lig, poc)).fit(u)
@@ -164,7 +154,7 @@ def test_stride_maps_selected_indices_back_to_trajectory_frames():
 
 
 def test_plot_after_time_spaced_has_no_labels(c, tmp_path):
-    """M2: select() clears labels_; plot() must still render."""
+    """plot() renders when labels_ is None after a time_spaced selection."""
     import os
     f = c.select(4, strategy="time_spaced")
     assert c.labels_ is None
