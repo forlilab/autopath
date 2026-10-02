@@ -134,16 +134,16 @@ def test_report_without_a_funnel_gives_the_uncorrected_well_depth(tmp_path):
         assert os.path.exists(f)
 
 
-def test_sequential_retry_is_placed_by_its_own_start_time(tmp_path):
-    """A retry that runs after another walker must not be replayed next to its original."""
-    d = tmp_path / "seq_retry"
+def test_sequential_walkers_are_replayed_in_start_order(tmp_path):
+    """Sequential walkers are laid end to end by start time, not by name."""
+    d = tmp_path / "seq_order"
     d.mkdir()
     np.save(d / "bias_0_1.npy", _bias(F))
-    # wall-clock order: a, b, a_retry; the bias grows by one unit per segment
-    for k, (rid, start) in enumerate((("a", 1000.0), ("b", 2000.0), ("a_retry", 3000.0))):
+    # wall-clock order c, a, b; the bias grows by one unit per walker
+    for k, (rid, start) in enumerate((("c", 1000.0), ("a", 2000.0), ("b", 3000.0))):
         _walker(d, rid, frac=k + 1.0, start=start, end=start + 600.0)
     mode = R.detect_mode(str(d))
     assert (mode.layout, mode.schedule) == ("shared", "sequential")
     est = R.build_estimates(str(d), mode, _fp(), 300.0, GAMMA, (0.0, 1.0), 20.0)[0]
-    depth = est.snapshots[9::10].min(axis=1)              # end of each segment
+    depth = est.snapshots[9::10].min(axis=1)              # end of each walker
     assert np.all(np.diff(depth) < 0)                     # the well only deepens

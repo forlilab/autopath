@@ -114,9 +114,7 @@ class AutoPath:
        downstream milestone extraction.
     5. **Metadynamics** — multi-walker well-tempered funnel metadynamics via
        :class:`~autopath.metadynamics.MetadynamicsMD`.  Each milestone from
-       stage 4 seeds a separate walker.  Walkers that remain stuck in the bound
-       state (max PathCV < 0.5) are automatically retried with the accumulated
-       bias surface.  Optionally, the sMD PMF is used to pre-seed the
+       stage 4 seeds a separate walker.  Optionally, the sMD PMF is used to pre-seed the
        metadynamics bias (``mMD_preseed_bias=True``).
     6. **Analysis & funnel correction** — :class:`~autopath.metadynamics.MetadynamicsAnalysis`
        computes the FES, applies the funnel volume correction, and reports
@@ -1467,7 +1465,6 @@ class AutoPath:
                 # most-bound milestone, resolved before the walker order is applied
                 first_milestone_name = os.path.basename(path_milestones[0]).split('.')[0]
                 first_milestone_state = f"{group_milestones_dir}/{first_milestone_name}_relax_state.xml"
-                walker_run_info = {}  # {run_id: (state_xml_path, system_xml_path)} for stuck-walker retry
 
                 _walker_order = walker_seed_order(path_milestones,
                                                   self.mMD_seed_order)
@@ -1522,46 +1519,9 @@ class AutoPath:
                             funnel_params=funnel_params if funnel_force is not None else None,
                             bias_dir=walker_bias_dir,
                         )
-                        walker_run_info[milestone_name] = (state_to_use, milestone_system_xml)
                     except Exception as e:
                         logger.error(f"Error during WTMetaD for {milestone_name}: {e}")
                         continue
-
-                # Retry walkers that never got halfway from the bound end, on the accumulated
-                # bias (shared, or the walker's own in isolated mode).
-                stuck_walkers = [
-                    (run_id, state_xml, xml)
-                    for run_id, (state_xml, xml) in walker_run_info.items()
-                    if os.path.exists(f"{group_out_dir}/COLVAR_{run_id}.npy")
-                    and float(np.load(f"{group_out_dir}/COLVAR_{run_id}.npy")[:, 0].max())
-                    < metad_cv.bound_end + 0.5 * (metad_cv.grid_max - metad_cv.bound_end)
-                ]
-                if stuck_walkers:
-                    logger.info(
-                        f"{len(stuck_walkers)} stuck walker(s) detected "
-                        f"({[r for r, _, _ in stuck_walkers]}); retrying with accumulated bias."
-                    )
-                    for run_id, state_xml, xml in stuck_walkers:
-                        retry_bias_dir = (
-                            os.path.join(group_out_dir, f"bias_{run_id}")
-                            if not self.mMD_multiple_walkers else None
-                        )
-                        try:
-                            WTMetaD.run(
-                                state_xml_file=state_xml,
-                                system=load_system(xml),
-                                run_id=f"{run_id}_retry",
-                                cv_specs=[metad_cv],
-                                mMD_time=self.mMD_time,
-                                bias_factor=self.mMD_bias_factor,
-                                hill_height=self.mMD_hill_height,
-                                biasFrequency=self.mMD_bias_frequency,
-                                funnel_force=funnel_force,
-                                funnel_params=funnel_params if funnel_force is not None else None,
-                                bias_dir=retry_bias_dir,
-                            )
-                        except Exception as e:
-                            logger.error(f"Retry failed for {run_id}: {e}")
 
                 # Post-run diagnosis: FES, walker stats, and ΔG°_b from the coverage-filtered FES.
                 try:

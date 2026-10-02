@@ -50,10 +50,9 @@ class RunMode:
 
 
 def _hist_files(out_dir: str, run_id: str) -> list:
-    """FEhist files of one walker in run order (a retry continues its walker)."""
-    files = [f for f in glob(os.path.join(out_dir, f"FEhist_{run_id}*.npz"))
-             if os.path.basename(f)[len("FEhist_"):-len(".npz")] in (run_id, f"{run_id}_retry")]
-    return sorted(files, key=os.path.getmtime)
+    """FEhist file of one walker, as a list (empty if it never finished)."""
+    path = os.path.join(out_dir, f"FEhist_{run_id}.npz")
+    return [path] if os.path.exists(path) else []
 
 
 def _wall_window(hist_path: str) -> tuple:
@@ -69,7 +68,6 @@ def _wall_window(hist_path: str) -> tuple:
 def detect_mode(out_dir: str) -> RunMode:
     run_ids = sorted(os.path.basename(f)[len("COLVAR_"):-len(".npy")]
                      for f in glob(os.path.join(out_dir, "COLVAR_*.npy")))
-    run_ids = [r for r in run_ids if not r.endswith("_retry")]
     if len(run_ids) <= 1:
         return RunMode("single", None, run_ids)
     if MetadynamicsAnalysis.bias_layout(out_dir) == "isolated":
@@ -290,8 +288,7 @@ def build_estimates(out_dir, mode, fp, temperature, bias_factor, grid, cv_len,
     if mode.layout == "shared" and mode.schedule == "concurrent":
         t, snaps = _aggregate_concurrent(hist_lists)
     else:
-        # sequential retries run after other walkers, so order files, not walkers
-        order = sorted(([f] for h in hist_lists for f in h), key=lambda h: _wall_window(h[0])[0])
+        order = sorted((h for h in hist_lists if h), key=lambda h: _wall_window(h[0])[0])
         t, snaps = _end_to_end(order)
     dG, ok = _history(snaps, fp, temperature, grid, cv_len, reference_range, origin)
     label = mode.run_ids[0] if mode.layout == "single" and mode.run_ids else "shared bias"
@@ -315,23 +312,22 @@ class Trace:
 def walker_traces(out_dir, run_ids, basins, grid, cv_is_funnel_z=False) -> list:
     ma = MetadynamicsAnalysis.__new__(MetadynamicsAnalysis)
     traces = []
-    for rid in run_ids:
-        for r in (rid, f"{rid}_retry"):
-            cpath = os.path.join(out_dir, f"COLVAR_{r}.npy")
-            if not os.path.exists(cpath):
-                continue
-            col = np.load(cpath)
-            cv = col[:, 0] if col.ndim > 1 else col
-            zpath = os.path.join(out_dir, f"FUNNELZ_{r}.npy")
-            z = np.load(zpath) if os.path.exists(zpath) else None
-            if z is None and cv_is_funnel_z and basins is not None:
-                z = cv * 10.0                      # the biased CV is z itself (nm)
-                stats = ma.analyze_colvar_transitions(z[:, None], bound_threshold=basins[0],
-                                                      unbound_threshold=basins[1])
-                stats["coordinate"] = "funnel_z"
-            else:
-                stats = ma.walker_transitions(cpath, basins, grid_min=grid[0], grid_max=grid[1])
-            traces.append(Trace(r, np.arange(len(cv)) * COLVAR_DT_NS, cv, z, stats))
+    for r in run_ids:
+        cpath = os.path.join(out_dir, f"COLVAR_{r}.npy")
+        if not os.path.exists(cpath):
+            continue
+        col = np.load(cpath)
+        cv = col[:, 0] if col.ndim > 1 else col
+        zpath = os.path.join(out_dir, f"FUNNELZ_{r}.npy")
+        z = np.load(zpath) if os.path.exists(zpath) else None
+        if z is None and cv_is_funnel_z and basins is not None:
+            z = cv * 10.0                      # the biased CV is z itself (nm)
+            stats = ma.analyze_colvar_transitions(z[:, None], bound_threshold=basins[0],
+                                                  unbound_threshold=basins[1])
+            stats["coordinate"] = "funnel_z"
+        else:
+            stats = ma.walker_transitions(cpath, basins, grid_min=grid[0], grid_max=grid[1])
+        traces.append(Trace(r, np.arange(len(cv)) * COLVAR_DT_NS, cv, z, stats))
     return traces
 
 
@@ -584,7 +580,7 @@ def report(out_dir, temperature, bias_factor, grid_min=0.0, grid_max=1.0,
 
     plateau_results, verdicts = {}, {}
     for e in estimates:
-        ids = [e.label, f"{e.label}_retry"] if mode.layout == "isolated" else list(walker_stats)
+        ids = [e.label] if mode.layout == "isolated" else list(walker_stats)
         if e.t_ns.size:
             plateau_results[e.label] = ma.dG_plateau(e.t_ns, e.dG_kj, sampled=e.resolved,
                                                      both_basins=visited_both(ids))
