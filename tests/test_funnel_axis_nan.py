@@ -45,13 +45,14 @@ def test_force_is_finite_exactly_on_the_axis(z_ang):
 def test_off_axis_energy_and_force_are_unchanged():
     rng = np.random.default_rng(0)
     legacy = (
-        "U_funnel + U_cylinder + U_axial;"
-        "U_funnel = step(z_cc - abs(r_z))*step(r_xy - R_funnel)*Wall_funnel;"
-        "U_cylinder = step(abs(r_z) - z_cc)*step(r_xy - R_cylinder)*Wall_cylinder;"
-        "U_axial = step(abs(r_z) - z_max)*0.5*k_z*(abs(r_z) - z_max)^2;"
+        "U_funnel + U_cylinder + U_axial + U_lower;"
+        "U_funnel = step(z_cc - r_z)*step(r_xy - R_funnel)*Wall_funnel;"
+        "U_cylinder = step(r_z - z_cc)*step(r_xy - R_cylinder)*Wall_cylinder;"
+        "U_axial = step(r_z - z_max)*0.5*k_z*(r_z - z_max)^2;"
+        "U_lower = step(z_low - r_z)*0.5*k_z*(z_low - r_z)^2;"
         "Wall_funnel = 0.5 * k_xy * (r_xy - R_funnel)^2;"
         "Wall_cylinder = 0.5 * k_xy * (r_xy - R_cylinder)^2;"
-        "R_funnel = (z_cc-abs(r_z))*tan(alpha) + R_cylinder;"
+        "R_funnel = max(z_cc-abs(r_z), 0)*tan(alpha) + R_cylinder;"
         "r_xy = sqrt(max(0, r2 - r_z*r_z));"
         "r_z = nx*(x2-x1) + ny*(y2-y1) + nz*(z2-z1);"
         "r2 = (x2-x1)^2 + (y2-y1)^2 + (z2-z1)^2;")

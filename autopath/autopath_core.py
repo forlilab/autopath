@@ -35,7 +35,8 @@ from autopath.metadynamics import (
     com_cv,
     pathCV_cv,
     funnel_z_cv,
-    FUNNEL_Z_BELOW_ORIGIN_ANG,
+    funnel_z_grid_min_ang,
+    funnel_lower_wall_ang,
     write_metad_preseed,
     generate_funnel_parameters_from_trajectory,
     create_funnel_force_from_trajectory_analysis,
@@ -1411,8 +1412,8 @@ class AutoPath:
                             else:
                                 # Bias the funnel axis coordinate itself: it keeps changing up to the
                                 # cap and is the length Eq. 15 integrates over, so no path extension.
-                                # Extend below z=0 so the clamp is not a hard edge at the bound site.
-                                _zlo = -FUNNEL_Z_BELOW_ORIGIN_ANG
+                                # Grid starts below the funnel's lower wall, so the clamp is never reached.
+                                _zlo = funnel_z_grid_min_ang(funnel_params)
                                 metad_cv = funnel_z_cv(
                                     funnel_params["host_index"], funnel_params["guest_index"],
                                     funnel_params["unbinding_axis"],
@@ -1430,8 +1431,9 @@ class AutoPath:
                                     np.average(_pos0[_gm], axis=0, weights=_w(_gm))
                                     - np.average(_pos0[_hm], axis=0, weights=_w(_hm)), _ax0 / np.linalg.norm(_ax0)))
                                 logger.info(
-                                    "Biasing the funnel axis coordinate z on [%.2f, %.2f] A; bound milestone at "
-                                    "z=%.2f A.", _zlo, _zmax, _z_bound)
+                                    "Biasing the funnel axis coordinate z on [%.2f, %.2f] A (lower wall at "
+                                    "%.2f A); bound milestone at z=%.2f A.", _zlo, _zmax,
+                                    funnel_lower_wall_ang(funnel_params), _z_bound)
                                 if _z_bound > 0.2 * _zmax:
                                     logger.warning(
                                         "The bound milestone (z=%.2f A) lies beyond 20%% of the way to the cap, "
@@ -1545,7 +1547,9 @@ class AutoPath:
                             logger.info(
                                 f"Final ΔG°_b = {diag['dG_bind_std_kcal']:.2f} kcal/mol  "
                                 f"pKd = {diag['pKd']:.2f}  "
-                                f"({diag['n_converged_cv']}/{diag['n_walkers']} walkers converged)"
+                                f"({'converged' if diag['convergence']['converged'] else 'NOT converged'}; "
+                                f"{diag['n_reached_unbound']}/{diag['n_walkers']} walkers reached the "
+                                f"unbound state, {diag['n_round_trips']} round trips)"
                             )
                 except Exception as _diag_err:
                     logger.warning(f"Post-run metadynamics diagnosis failed (non-fatal): {_diag_err}")

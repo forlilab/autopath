@@ -97,6 +97,28 @@ def funnel_basins(params, bound_percentile_z: float = 10.0):
     return z_site + 0.5 * (z_cc - z_site), z_cc
 
 
+# Lower wall on z, this far below the sMD bound site (Å).
+FUNNEL_WALL_BELOW_SITE_ANG = 6.0
+# Funnel z bias grid starts this far below the lower wall (Å).
+FUNNEL_Z_GRID_BELOW_WALL_ANG = 3.0
+
+
+def funnel_lower_wall_ang(params, bound_percentile_z: float = 10.0) -> float:
+    """z (Å) below which the one-sided funnel pushes the guest back up the axis."""
+    if "z_low" in params:
+        return float(params["z_low"].value_in_unit(openmmunit.angstrom))
+    if "axial_distances" not in params:
+        return -float(params["z_cc"].value_in_unit(openmmunit.angstrom))
+    z_site = float(np.percentile(np.abs(np.asarray(params["axial_distances"])),
+                                 bound_percentile_z))
+    return z_site - FUNNEL_WALL_BELOW_SITE_ANG
+
+
+def funnel_z_grid_min_ang(params) -> float:
+    """Lower edge (Å) of the funnel z bias grid, clear of the lower wall."""
+    return funnel_lower_wall_ang(params) - FUNNEL_Z_GRID_BELOW_WALL_ANG
+
+
 def funnel_z_ang(positions_nm, host_idx, guest_idx, masses, axis) -> float:
     """Guest position on the funnel axis (Å): n·(COM_guest − COM_host), mass-weighted."""
     pos = np.asarray(positions_nm, dtype=float)
@@ -517,7 +539,9 @@ def create_funnel_force_from_trajectory_analysis(
     CustomCentroidBondForce
         Configured funnel force ready to use in metadynamics
 
-    Funnel along the trajectory-derived axis, capped by a ``z_max`` wall.
+    Funnel along the trajectory-derived axis, one-sided: a cone up to ``z_cc``,
+    a cylinder up to a ``z_max`` wall, and a lower wall at ``z_low`` (default
+    from :func:`funnel_lower_wall_ang`) so the guest cannot leave through z < 0.
     """
 
     host_index = params_dict["host_index"]
@@ -531,19 +555,22 @@ def create_funnel_force_from_trajectory_analysis(
     force_group = params_dict.get("force_group", 10)
     force_name = params_dict.get("force_name", "k_funnel_trajectory")
     unbinding_axis = params_dict["unbinding_axis"]  # unit vector (3,)
+    z_low = funnel_lower_wall_ang(params_dict) * openmmunit.angstrom
 
     # r_z, r_xy are relative to the unbinding axis (nx, ny, nz).
     funnel = CustomCentroidBondForce(
         2,
         # z_max is a harmonic wall (U_axial), not a switch: gating the cylinder off
         # beyond z_max would free the guest and make the energy discontinuous.
-        "U_funnel + U_cylinder + U_axial;"
-        "U_funnel = step(z_cc - abs(r_z))*step(r_xy - R_funnel)*Wall_funnel;"
-        "U_cylinder = step(abs(r_z) - z_cc)*step(r_xy - R_cylinder)*Wall_cylinder;"
-        "U_axial = step(abs(r_z) - z_max)*0.5*k_z*(abs(r_z) - z_max)^2;"
+        "U_funnel + U_cylinder + U_axial + U_lower;"
+        "U_funnel = step(z_cc - r_z)*step(r_xy - R_funnel)*Wall_funnel;"
+        "U_cylinder = step(r_z - z_cc)*step(r_xy - R_cylinder)*Wall_cylinder;"
+        "U_axial = step(r_z - z_max)*0.5*k_z*(r_z - z_max)^2;"
+        "U_lower = step(z_low - r_z)*0.5*k_z*(z_low - r_z)^2;"
         "Wall_funnel = 0.5 * k_xy * (r_xy - R_funnel)^2;"
         "Wall_cylinder = 0.5 * k_xy * (r_xy - R_cylinder)^2;"
-        "R_funnel = (z_cc-abs(r_z))*tan(alpha) + R_cylinder;"
+        # the cone narrows again below z=0, to R_cylinder at -z_cc
+        "R_funnel = max(z_cc-abs(r_z), 0)*tan(alpha) + R_cylinder;"
         # r_xy = |n x r|: sqrt(r2 - r_z^2) cancels in single precision and has an
         # infinite derivative at 0, which the zero step() turns into NaN.
         "r_xy = sqrt(cx^2 + cy^2 + cz^2 + 1e-12);"
@@ -560,6 +587,7 @@ def create_funnel_force_from_trajectory_analysis(
     funnel.addGlobalParameter("k_z", k_z)
     funnel.addGlobalParameter("z_cc", z_cc)
     funnel.addGlobalParameter("z_max", z_max)
+    funnel.addGlobalParameter("z_low", z_low)
     funnel.addGlobalParameter("alpha", alpha)
     funnel.addGlobalParameter("R_cylinder", R_cylinder)
     funnel.addGlobalParameter("nx", float(unbinding_axis[0]))
