@@ -107,7 +107,7 @@ class RelaxMD:
         pdb_file: str = None,
         state_xml_file: str = None,
         run_id: str = None,
-        npt_steps: int = 25000,
+        npt_steps: int = 12500,
     ) -> System:
         """Run relaxation MD: minimize, warm up, and perform a short NPT run.
 
@@ -201,7 +201,7 @@ class RelaxMD:
         simulation.context.reinitialize(preserveState=True)
 
         logger.debug("Minimizing..")
-        simulation.minimizeEnergy(maxIterations=1000)
+        simulation.minimizeEnergy() # till convergence
 
         logger.debug("Warming up the system..")
         warm_up_system(simulation, integrator,
