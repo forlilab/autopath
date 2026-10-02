@@ -290,7 +290,8 @@ def build_estimates(out_dir, mode, fp, temperature, bias_factor, grid, cv_len,
     if mode.layout == "shared" and mode.schedule == "concurrent":
         t, snaps = _aggregate_concurrent(hist_lists)
     else:
-        order = sorted((h for h in hist_lists if h), key=lambda h: _wall_window(h[0])[0])
+        # sequential retries run after other walkers, so order files, not walkers
+        order = sorted(([f] for h in hist_lists for f in h), key=lambda h: _wall_window(h[0])[0])
         t, snaps = _end_to_end(order)
     dG, ok = _history(snaps, fp, temperature, grid, cv_len, reference_range)
     label = mode.run_ids[0] if mode.layout == "single" and mode.run_ids else "shared bias"
@@ -432,9 +433,17 @@ def plot_colvar(traces, mode, basins, grid, cv_name, out_path, z_max_ang=None):
         for f in tr.stats["return_frames"]:
             ax.axvline(f * COLVAR_DT_NS, color="seagreen", lw=1.2)
         if use_z and not np.allclose(tr.cv * 10.0, tr.z_ang[:len(tr.cv)], atol=0.05):
-            ax2 = ax.twinx()
-            ax2.plot(tr.t_ns, tr.cv, lw=0.6, color="0.6")
-            ax2.set_ylabel(cv_name, fontsize=7, color="0.5")
+            z = tr.z_ang[:len(tr.cv)]
+            free = (tr.cv > grid[0] + 1e-4) & (tr.cv < grid[1] - 1e-4)   # CV is float32
+            if free.any() and np.allclose(tr.cv[free] * 10.0, z[free], atol=0.05):
+                # funnel z CV: differs from z only where clamped, so share the axis
+                ax.plot(tr.t_ns[:len(tr.cv)], tr.cv * 10.0, lw=0.6, color="0.6",
+                        label="biased CV (clamped)")
+                ax.legend(fontsize=6, loc="upper right")
+            else:
+                ax2 = ax.twinx()
+                ax2.plot(tr.t_ns, tr.cv, lw=0.6, color="0.6")
+                ax2.set_ylabel(cv_name, fontsize=7, color="0.5")
         ax.set_ylabel("funnel z (Å)" if use_z else cv_name, fontsize=8)
         ax.set_title(f"{tr.run_id}: {tr.stats['n_round_trips']} round trip(s), "
                      f"{tr.stats['n_transitions']} exit(s); bound {100 * tr.stats['frac_bound']:.0f}%, "
