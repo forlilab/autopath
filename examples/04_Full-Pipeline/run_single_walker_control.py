@@ -28,7 +28,7 @@ from autopath.clustering import read_positions
 from autopath.metadynamics.CV import pathCV_cv, funnel_z_cv
 from autopath.metadynamics.Funnel import (create_funnel_force_from_trajectory_analysis,
                                           load_funnel_params, com_distance_at_z,
-                                          funnel_z_grid_min_ang)
+                                          funnel_z_grid_min_ang, funnel_lower_wall_ang)
 
 POCKET_RESIDUES = [180, 181, 182, 183, 226, 227, 228, 229, 230, 204, 205, 206,
                    207, 208, 209, 210, 211, 212, 213, 214, 215, 196, 197, 198,
@@ -61,6 +61,8 @@ def main():
     ap.add_argument("--cv", choices=["path", "funnel_z", "funnel_z_unclamped"], default="path",
                     help="path: progress along the milestones, extended to the funnel "
                          "cap; funnel_z: the funnel axis coordinate, from below the lower wall to z_max")
+    ap.add_argument("--boundary-correction", action="store_true",
+                    help="divide each hill by its fraction inside the walls (McGovern-de Pablo)")
     args = ap.parse_args()
 
     base = args.base
@@ -139,7 +141,8 @@ def main():
         cv = funnel_z_cv(params["host_index"], params["guest_index"],
                          params["unbinding_axis"], grid_min=z_lo / 10.0, grid_max=z_max / 10.0,
                          hill_width=width_nm,
-                         grid_points=int(round(124 * (z_max - z_lo) / z_max)) + 1)
+                         grid_points=int(round(124 * (z_max - z_lo) / z_max)) + 1,
+                         bounds=(funnel_lower_wall_ang(params) / 10.0, z_max / 10.0))
         if args.cv == "funnel_z_unclamped":
             # unclamped CV, can leave the bias grid
             import cvpack
@@ -168,7 +171,8 @@ def main():
               run_id=run_id, cv_specs=[cv],
               mMD_time=args.ns, bias_factor=15, hill_height=1.2,
               biasFrequency=2, funnel_force=funnel_force,
-              funnel_params=params, bias_dir=bias_dir)
+              funnel_params=params, bias_dir=bias_dir,
+              boundary_correction=args.boundary_correction)
     log.info("finished: %.1f ns, seed=%s", args.ns, args.seed_from)
 
 

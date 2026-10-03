@@ -5,6 +5,7 @@ This package provides tools for running, analysing, and post-processing
 funnel metadynamics simulations:
 
 - MetadynamicsMD          : run OpenMM WT-MetaD simulations
+- BoundaryCorrectedMetadynamics : WT-MetaD with McGovern–de Pablo edge-corrected hills
 - MetadynamicsAnalysis    : post-run diagnostics and convergence analysis
 - correct_fe_for_funnel   : Limongelli 2013 standard-state correction
 - write_metad_preseed     : pre-seed metadynamics bias from sMD PMF
@@ -14,6 +15,7 @@ funnel metadynamics simulations:
 
 # --- Simulation ---
 from .MetadynamicsMD import MetadynamicsMD
+from .BoundaryCorrection import BoundaryCorrectedMetadynamics
 
 # --- Analysis ---
 from .Analysis import (
@@ -56,6 +58,7 @@ from .Funnel import (
 
 __all__ = [
     "MetadynamicsMD",
+    "BoundaryCorrectedMetadynamics",
     "MetadynamicsAnalysis",
     "correct_fe_for_funnel",
     "write_metad_preseed",

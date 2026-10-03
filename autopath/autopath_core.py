@@ -161,7 +161,7 @@ class AutoPath:
         ``mMD_bias_factor``, ``mMD_bias_frequency``, ``mMD_hill_height``,
         ``mMD_hill_width``, ``mMD_time``, ``mMD_milestone_seeding``,
         ``mMD_multiple_walkers``, ``mMD_preseed_bias``, ``mMD_preseed_speed``,
-        ``mMD_funnel_host_selection``
+        ``mMD_funnel_host_selection``, ``mMD_boundary_correction``
 
     Notes
     -----
@@ -173,7 +173,11 @@ class AutoPath:
       milestone (True) or all from the most-bound one (False).
     * ``mMD_multiple_walkers``: one shared bias directory (True) or one per
       walker (False).
-    * Walkers whose CV never passes the grid midpoint are re-run once.
+    * Walkers whose CV never passes the grid midpoint are flagged in the log.
+    * ``mMD_boundary_correction``: divide each hill by its fraction inside the
+      sampled range (McGovern–de Pablo), removing the bias deficit at the edges.
+      The range is the funnel's lower and upper walls for the funnel z CV, the
+      grid otherwise.
     """
 
     def __init__(
@@ -257,6 +261,7 @@ class AutoPath:
         mMD_preseed_bias: bool = False,
         mMD_preseed_speed: float = None,
         mMD_funnel_host_selection: str | None = None,
+        mMD_boundary_correction: bool = False,
     ):
         # General
         self.pocket_selection = pocket_selection
@@ -354,6 +359,7 @@ class AutoPath:
         self.mMD_preseed_bias = mMD_preseed_bias
         self.mMD_preseed_speed = mMD_preseed_speed
         self.mMD_funnel_host_selection = mMD_funnel_host_selection
+        self.mMD_boundary_correction = mMD_boundary_correction
         # VS mode
         self.equilibration_checkpoint = False
         self.pulling_checkpoint = False
@@ -1420,6 +1426,8 @@ class AutoPath:
                                     grid_min=_zlo / 10.0, grid_max=_zmax / 10.0,
                                     hill_width=self.mMD_hill_width,
                                     grid_points=int(round(124 * (_zmax - _zlo) / _zmax)) + 1,
+                                    bounds=(funnel_lower_wall_ang(funnel_params) / 10.0,
+                                            _zmax / 10.0),
                                 )
                                 _pos0 = read_positions(path_milestones[0]) * 10.0
                                 _hm = [int(i) for i in funnel_params["host_index"]]
@@ -1520,6 +1528,7 @@ class AutoPath:
                             funnel_force=funnel_force,
                             funnel_params=funnel_params if funnel_force is not None else None,
                             bias_dir=walker_bias_dir,
+                            boundary_correction=self.mMD_boundary_correction,
                         )
                     except Exception as e:
                         logger.error(f"Error during WTMetaD for {milestone_name}: {e}")

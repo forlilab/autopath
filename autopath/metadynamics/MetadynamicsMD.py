@@ -12,6 +12,7 @@ import openmm.unit as openmmunit
 import cvpack
 
 from autopath.metadynamics.CV import CVSpec
+from autopath.metadynamics.BoundaryCorrection import BoundaryCorrectedMetadynamics
 from autopath.metadynamics.Funnel import funnel_z_ang
 from autopath.metadynamics.Analysis import (
     correct_fe_for_funnel,
@@ -157,6 +158,7 @@ class MetadynamicsMD:
         funnel_force: Force = None,
         funnel_params: dict = None,
         bias_dir: str = None,
+        boundary_correction: bool = False,
     ) -> str:
         """Run a single WT-MetaD trajectory and return the run identifier.
 
@@ -198,6 +200,10 @@ class MetadynamicsMD:
         bias_dir : str, optional
             Hill-file directory.  ``None`` uses ``self.out_dir``, shared by all
             walkers (multi-walker); a per-walker directory makes it independent.
+        boundary_correction : bool, optional
+            Divide each hill by its fraction inside ``CVSpec.bounds`` (default the
+            grid), the McGovern–de Pablo edge correction. Walkers sharing a bias
+            must all use the same setting.
 
         Returns
         -------
@@ -317,16 +323,18 @@ class MetadynamicsMD:
         effective_bias_dir = bias_dir if bias_dir is not None else self.out_dir
         os.makedirs(effective_bias_dir, exist_ok=True)
 
-        meta = Metadynamics(
-            system,
-            bias_variables,
-            self.temperature,
-            bias_factor,
-            hill_height,
-            frequency=biasFrequency,
-            saveFrequency=saveFrequency,
-            biasDir=effective_bias_dir,
-        )
+        meta_args = (system, bias_variables, self.temperature, bias_factor, hill_height)
+        meta_kwargs = dict(frequency=biasFrequency, saveFrequency=saveFrequency,
+                           biasDir=effective_bias_dir)
+        if boundary_correction:
+            bounds = [s.bounds if s.bounds is not None else (s.grid_min, s.grid_max)
+                      for s in resolved]
+            meta = BoundaryCorrectedMetadynamics(*meta_args, bounds=bounds, **meta_kwargs)
+            logger.info("Boundary-corrected hills on %s (max factor %.2f)",
+                        ", ".join(f"[{lo:.3f}, {hi:.3f}]" for lo, hi in bounds),
+                        float(meta.boundaryFactor.max()))
+        else:
+            meta = Metadynamics(*meta_args, **meta_kwargs)
 
         # Rebuild rather than reinitialize(preserveState=True): the latter restores
         # global parameters by name, so stale values could override new forces' defaults.

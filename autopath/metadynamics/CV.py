@@ -48,6 +48,8 @@ class CVSpec:
     cv_length_per_unit_ang: Optional[float] = None
     # Bound end of the CV, if the grid extends past it (default: grid_min).
     origin: Optional[float] = None
+    # (lo, hi) the walker can reach, for the boundary correction (default: the grid).
+    bounds: Optional[tuple] = None
     _factory: Optional[Callable] = field(default=None, repr=False)
 
     def is_deferred(self) -> bool:
@@ -69,6 +71,7 @@ class CVSpec:
             name=self.name,
             cv_length_per_unit_ang=self.cv_length_per_unit_ang,
             origin=self.origin,
+            bounds=self.bounds,
         )
 
     @property
@@ -119,13 +122,15 @@ def funnel_z_cv(
     grid_max: float,
     hill_width: float = 0.05,
     grid_points: int = 125,
+    bounds: Optional[tuple] = None,
 ) -> CVSpec:
     """Guest position along the funnel axis, r_z = n·(COM_guest - COM_host) (nm).
 
     Same coordinate as the funnel restraint, so the FES is in the length
     coordinate Limongelli 2013 Eq. 15 integrates over. Clamped to the grid
     because OpenMM's bias is zero outside it. z = 0 is the bound end; set
-    grid_min < 0 so the bias also acts below the host COM.
+    grid_min < 0 so the bias also acts below the host COM. ``bounds`` are the
+    funnel's lower and upper walls (nm), the edges of the boundary correction.
     """
     n = np.asarray(axis, dtype=float)
     n = n / np.linalg.norm(n)
@@ -152,6 +157,7 @@ def funnel_z_cv(
         name="funnel_z",
         cv_length_per_unit_ang=10.0,
         origin=0.0,
+        bounds=bounds,
         _factory=factory,
     )
 
