@@ -40,6 +40,8 @@ def cmd_lineparser():
     parser.add_argument("--cv", choices=["path", "funnel_z"], default="path")
     parser.add_argument("--no-extract", dest="extract", action="store_false",
                         help="reuse the milestones already in <sys>/milestones")
+    parser.add_argument("--boundary-correction", action="store_true",
+                        help="divide each hill by its fraction inside the walls (McGovern-de Pablo)")
     return parser.parse_args()
 
 
@@ -114,6 +116,7 @@ def main():
                   mMD_hill_width=0.05,
                   mMD_hill_height=1.2,
                   mMD_bias_factor=15,
+                  mMD_boundary_correction=args.boundary_correction,
                   )
 
     ap.run(ligand_file=ligand)
