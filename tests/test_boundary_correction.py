@@ -109,3 +109,37 @@ def test_bounds_survive_resolve():
     assert spec.resolve(None, 2, None).bounds == (-0.39, 2.65)
     assert CVSpec(cv=None, grid_min=0, grid_max=1, hill_width=0.05,
                   grid_points=10).bounds is None
+
+
+def _toy2d(corrected):
+    system = mm.System()
+    system.addParticle(12.0)
+    fx, fy = mm.CustomExternalForce("x"), mm.CustomExternalForce("y")
+    fx.addParticle(0, [])
+    fy.addParticle(0, [])
+    # unequal grids, widths and ranges so a transposed or mis-multiplied factor fails
+    bx = BiasVariable(fx, 0.0, 1.0, 0.05, gridWidth=51)
+    by = BiasVariable(fy, 0.0, 2.0, 0.10, gridWidth=41)
+    args = (system, [bx, by], 300 * u.kelvin, 15, 1.0 * u.kilojoule_per_mole, 10)
+    meta = (BoundaryCorrectedMetadynamics(*args, bounds=[(0.1, 1.0), (0.0, 2.0)]) if corrected
+            else Metadynamics(*args))
+    ctx = mm.Context(system, mm.VerletIntegrator(0.001),
+                     mm.Platform.getPlatformByName("Reference"))
+    ctx.setPositions([[0.5, 1.0, 0]])
+    for x in np.arange(0.1 + 0.01, 1.0, 0.02):        # midpoints: uniform sampling of the box
+        for y in np.arange(0.02, 2.0, 0.04):
+            meta._addGaussian([x, y], 1.0 * u.kilojoule_per_mole, ctx)
+    return meta
+
+
+def test_uniform_2d_sampling_gives_a_flat_bias_into_the_corners():
+    plain, corr = _toy2d(False), _toy2d(True)
+    gx, gy = np.linspace(0, 1, 51), np.linspace(0, 2, 41)
+    inside = (gy[:, None] >= 0) & (gx[None, :] >= 0.1 - 1e-9)
+    assert corr._totalBias.shape == (41, 51)
+    centre = (np.argmin(abs(gy - 1.0)), np.argmin(abs(gx - 0.55)))
+    p = plain._totalBias / plain._totalBias[centre]
+    c = corr._totalBias / corr._totalBias[centre]
+    corner = (0, np.argmin(abs(gx - 0.1)))
+    assert p[corner] == pytest.approx(0.25, abs=0.02)
+    assert np.all(abs(c[inside] - 1.0) < 0.02)
