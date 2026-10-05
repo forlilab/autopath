@@ -143,3 +143,25 @@ def test_uniform_2d_sampling_gives_a_flat_bias_into_the_corners():
     corner = (0, np.argmin(abs(gx - 0.1)))
     assert p[corner] == pytest.approx(0.25, abs=0.02)
     assert np.all(abs(c[inside] - 1.0) < 0.02)
+
+
+def test_inside_fraction_matches_the_erratum_normalization():
+    """McGovern & de Pablo erratum (JCP 140, 229901): Eq. 12 with prod sigma_i/(U_i-L_i)
+    restored is the domain average of a unit hill; N(s) is that over the full-Gaussian value."""
+    from scipy.integrate import dblquad
+    from scipy.special import erf
+    lo, hi, sig = np.array([-0.391, 0.0]), np.array([2.650, 1.0]), np.array([0.05, 0.08])
+
+    def erratum_eq12(s):
+        b = erf((s - lo) / (np.sqrt(2) * sig)) + erf((hi - s) / (np.sqrt(2) * sig))
+        return (np.pi / 2) ** (len(s) / 2) * np.prod(sig / (hi - lo)) * np.prod(b)
+
+    for s in ([-0.441, 0.5], [-0.391, 0.0], [1.0, 0.04], [2.65, 1.03], [1.2, 0.5]):
+        s = np.array(s)
+        avg, _ = dblquad(lambda y, x: np.exp(-((x - s[0]) / sig[0]) ** 2 / 2
+                                             - ((y - s[1]) / sig[1]) ** 2 / 2),
+                         lo[0], hi[0], lo[1], hi[1], epsabs=1e-12)
+        avg /= np.prod(hi - lo)
+        n = np.prod([inside_fraction([s[i]], lo[i], hi[i], sig[i])[0] for i in range(2)])
+        assert erratum_eq12(s) == pytest.approx(avg, rel=1e-6)
+        assert n * np.prod(np.sqrt(2 * np.pi) * sig / (hi - lo)) == pytest.approx(avg, rel=1e-6)
