@@ -158,7 +158,7 @@ class MetadynamicsMD:
         funnel_force: Force = None,
         funnel_params: dict = None,
         bias_dir: str = None,
-        boundary_correction: bool = False,
+        boundary_correction: bool = True,
     ) -> str:
         """Run a single WT-MetaD trajectory and return the run identifier.
 
@@ -202,8 +202,8 @@ class MetadynamicsMD:
             walkers (multi-walker); a per-walker directory makes it independent.
         boundary_correction : bool, optional
             Divide each hill by its fraction inside ``CVSpec.bounds`` (default the
-            grid), the McGovern–de Pablo edge correction. Walkers sharing a bias
-            must all use the same setting.
+            grid), the McGovern–de Pablo edge correction (default True). Walkers
+            sharing a bias must all use the same setting.
 
         Returns
         -------

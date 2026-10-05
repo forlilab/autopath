@@ -235,6 +235,7 @@ AutoPath configuration files use a nested JSON structure: each top-level key is 
 | `mMD_milestone_seeding` | bool | `true` | Start each walker from its own milestone's relaxed checkpoint, instead of all walkers sharing the first milestone |
 | `mMD_multiple_walkers` | bool | `false` | Share one bias directory across all walkers (true multi-walker metadynamics) instead of independent per-walker bias |
 | `mMD_preseed_bias` | bool | `false` | Pre-seed the metadynamics bias from the sMD PMF before launching walkers |
+| `mMD_boundary_correction` | bool | `true` | Divide each hill by its fraction inside the reachable CV range (McGovern–de Pablo), removing the bias deficit at the edges |
 
 All parameters, including equilibration and milestone extraction options, are documented in `autopath/config.py`.
 

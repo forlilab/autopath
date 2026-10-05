@@ -177,7 +177,7 @@ class AutoPath:
     * ``mMD_boundary_correction``: divide each hill by its fraction inside the
       sampled range (McGovern–de Pablo), removing the bias deficit at the edges.
       The range is the funnel's lower and upper walls for the funnel z CV, the
-      grid otherwise.
+      grid otherwise. On by default.
     """
 
     def __init__(
@@ -261,7 +261,7 @@ class AutoPath:
         mMD_preseed_bias: bool = False,
         mMD_preseed_speed: float = None,
         mMD_funnel_host_selection: str | None = None,
-        mMD_boundary_correction: bool = False,
+        mMD_boundary_correction: bool = True,
     ):
         # General
         self.pocket_selection = pocket_selection

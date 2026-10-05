@@ -61,7 +61,7 @@ def main():
     ap.add_argument("--cv", choices=["path", "funnel_z", "funnel_z_unclamped"], default="path",
                     help="path: progress along the milestones, extended to the funnel "
                          "cap; funnel_z: the funnel axis coordinate, from below the lower wall to z_max")
-    ap.add_argument("--boundary-correction", action="store_true",
+    ap.add_argument("--boundary-correction", action=argparse.BooleanOptionalAction, default=True,
                     help="divide each hill by its fraction inside the walls (McGovern-de Pablo)")
     args = ap.parse_args()
 
