@@ -119,6 +119,15 @@ def funnel_z_grid_min_ang(params) -> float:
     return funnel_lower_wall_ang(params) - FUNNEL_Z_GRID_BELOW_WALL_ANG
 
 
+def funnel_z_bounds_nm(params) -> tuple:
+    """Boundary-correction edges (nm) for the funnel z CV: only the clamped cap.
+
+    The lower wall is soft; under bias the guest pushes into it, and amplified
+    hills there build a false minimum, so it gets no correction.
+    """
+    return (-np.inf, float(params["z_max"].value_in_unit(openmmunit.nanometer)))
+
+
 def funnel_z_ang(positions_nm, host_idx, guest_idx, masses, axis) -> float:
     """Guest position on the funnel axis (Å): n·(COM_guest − COM_host), mass-weighted."""
     pos = np.asarray(positions_nm, dtype=float)

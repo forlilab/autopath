@@ -165,3 +165,31 @@ def test_inside_fraction_matches_the_erratum_normalization():
         n = np.prod([inside_fraction([s[i]], lo[i], hi[i], sig[i])[0] for i in range(2)])
         assert erratum_eq12(s) == pytest.approx(avg, rel=1e-6)
         assert n * np.prod(np.sqrt(2 * np.pi) * sig / (hi - lo)) == pytest.approx(avg, rel=1e-6)
+
+
+def test_funnel_z_corrects_only_the_cap():
+    from autopath.metadynamics import funnel_z_bounds_nm
+    lo, hi = funnel_z_bounds_nm({"z_max": 26.5 * u.angstrom})
+    assert lo == -np.inf and hi == pytest.approx(2.65)
+
+
+def test_no_amplification_past_a_soft_lower_wall():
+    bv = BiasVariable(mm.CustomExternalForce("x"), 0.0, HI, SIGMA, gridWidth=101)
+    c = boundary_factor([bv], [(-np.inf, HI)])
+    grid = np.linspace(0, HI, 101)
+    assert np.allclose(c[grid < HI - 4 * SIGMA], 1.0, atol=1e-3)
+    assert c[-1] == pytest.approx(2.0, abs=1e-6)
+    # a hill dropped inside the lower wall region matches stock OpenMM exactly
+    plain, ctx_p = _toy(False)
+    system = mm.System()
+    system.addParticle(12.0)
+    cv = mm.CustomExternalForce(f"min(max(x, 0), {HI})")
+    cv.addParticle(0, [])
+    corr = BoundaryCorrectedMetadynamics(
+        system, [BiasVariable(cv, 0.0, HI, SIGMA, gridWidth=101)], 300 * u.kelvin, 15,
+        1.0 * u.kilojoule_per_mole, 10, bounds=[(-np.inf, HI)])
+    ctx_c = mm.Context(system, mm.VerletIntegrator(0.001), mm.Platform.getPlatformByName("Reference"))
+    ctx_c.setPositions([[0.5, 0, 0]])
+    plain._addGaussian([0.05], 1.0 * u.kilojoule_per_mole, ctx_p)
+    corr._addGaussian([0.05], 1.0 * u.kilojoule_per_mole, ctx_c)
+    assert np.allclose(corr._totalBias, plain._totalBias)

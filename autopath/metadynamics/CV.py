@@ -130,7 +130,7 @@ def funnel_z_cv(
     coordinate Limongelli 2013 Eq. 15 integrates over. Clamped to the grid
     because OpenMM's bias is zero outside it. z = 0 is the bound end; set
     grid_min < 0 so the bias also acts below the host COM. ``bounds`` are the
-    funnel's lower and upper walls (nm), the edges of the boundary correction.
+    boundary-correction edges (nm), see ``funnel_z_bounds_nm``.
     """
     n = np.asarray(axis, dtype=float)
     n = n / np.linalg.norm(n)

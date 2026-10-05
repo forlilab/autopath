@@ -37,6 +37,7 @@ from autopath.metadynamics import (
     funnel_z_cv,
     funnel_z_grid_min_ang,
     funnel_lower_wall_ang,
+    funnel_z_bounds_nm,
     write_metad_preseed,
     generate_funnel_parameters_from_trajectory,
     create_funnel_force_from_trajectory_analysis,
@@ -176,8 +177,8 @@ class AutoPath:
     * Walkers whose CV never passes the grid midpoint are flagged in the log.
     * ``mMD_boundary_correction``: divide each hill by its fraction inside the
       sampled range (McGovern–de Pablo), removing the bias deficit at the edges.
-      The range is the funnel's lower and upper walls for the funnel z CV, the
-      grid otherwise. On by default.
+      For the funnel z CV only the clamped cap (z_max) is corrected; the soft
+      lower wall is not. Other CVs use the grid ends. On by default.
     """
 
     def __init__(
@@ -1426,8 +1427,7 @@ class AutoPath:
                                     grid_min=_zlo / 10.0, grid_max=_zmax / 10.0,
                                     hill_width=self.mMD_hill_width,
                                     grid_points=int(round(124 * (_zmax - _zlo) / _zmax)) + 1,
-                                    bounds=(funnel_lower_wall_ang(funnel_params) / 10.0,
-                                            _zmax / 10.0),
+                                    bounds=funnel_z_bounds_nm(funnel_params),
                                 )
                                 _pos0 = read_positions(path_milestones[0]) * 10.0
                                 _hm = [int(i) for i in funnel_params["host_index"]]

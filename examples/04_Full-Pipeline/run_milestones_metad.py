@@ -41,7 +41,7 @@ def cmd_lineparser():
     parser.add_argument("--no-extract", dest="extract", action="store_false",
                         help="reuse the milestones already in <sys>/milestones")
     parser.add_argument("--boundary-correction", action=argparse.BooleanOptionalAction, default=True,
-                        help="divide each hill by its fraction inside the walls (McGovern-de Pablo)")
+                        help="divide each hill by its fraction inside the CV range (McGovern-de Pablo)")
     return parser.parse_args()
 
 
