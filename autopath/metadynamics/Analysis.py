@@ -160,6 +160,29 @@ def plot_FE(out_dir, x_min, x_max, grid_points, colvar_name):
     return
 
 
+def rct_weights(bias_kj, rct_kj, temperature: float) -> np.ndarray:
+    """Normalised frame weights exp[(V(s_t, t) - c(t)) / kT] (Tiwary & Parrinello 2015).
+
+    Inputs are the ``bias_kj`` and ``rct_kj`` arrays of ``REWEIGHT_<run_id>.npz``;
+    drop the early, still-filling frames before using them.
+    """
+    lw = (np.asarray(bias_kj, float) - np.asarray(rct_kj, float)) / (0.0083144626 * temperature)
+    w = np.exp(lw - lw.max())
+    return w / w.sum()
+
+
+def reweighted_fes(values, weights, bins, temperature: float):
+    """Unbiased free energy (kJ/mol, min 0) of any per-frame quantity from rct_weights.
+
+    Returns (bin centres, F); empty bins are NaN.
+    """
+    p, edges = np.histogram(values, bins=bins, weights=weights)
+    with np.errstate(divide="ignore"):
+        f = -0.0083144626 * temperature * np.log(p)
+    f[~np.isfinite(f)] = np.nan
+    return 0.5 * (edges[1:] + edges[:-1]), f - np.nanmin(f)
+
+
 def bound_site_bins(grid_min, grid_max, n_points, origin=None, frac=0.20) -> int:
     """Grid points from grid_min up to ``frac`` of the way from the origin to grid_max."""
     origin = grid_min if origin is None else float(origin)

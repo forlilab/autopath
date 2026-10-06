@@ -21,6 +21,8 @@ from .BoundaryCorrection import BoundaryCorrectedMetadynamics
 from .Analysis import (
     MetadynamicsAnalysis,
     correct_fe_for_funnel,
+    rct_weights,
+    reweighted_fes,
     write_metad_preseed,
     plot_colvar,
     plot_bias,
@@ -62,6 +64,8 @@ __all__ = [
     "BoundaryCorrectedMetadynamics",
     "MetadynamicsAnalysis",
     "correct_fe_for_funnel",
+    "rct_weights",
+    "reweighted_fes",
     "write_metad_preseed",
     "plot_colvar",
     "plot_bias",

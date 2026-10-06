@@ -9,6 +9,9 @@ smoothly below the in-domain minimum so the bias stays finite past the edge
 
 The factor depends only on s, so it is applied per hill: the self-bias files,
 the shared total and getFreeEnergy() all carry the corrected bias.
+
+The class also logs every hill and gives the bias at the walker and c(t)
+(Tiwary & Parrinello, J. Phys. Chem. B 119, 736, 2015) for frame reweighting.
 """
 
 from functools import reduce
@@ -16,7 +19,7 @@ from functools import reduce
 import numpy as np
 import openmm.unit as unit
 from openmm.app.metadynamics import Metadynamics
-from scipy.special import erf
+from scipy.special import erf, logsumexp
 
 
 def inside_fraction(grid, lo, hi, sigma) -> np.ndarray:
@@ -54,7 +57,11 @@ def boundary_factor(variables, bounds) -> np.ndarray:
 
 
 class BoundaryCorrectedMetadynamics(Metadynamics):
-    """OpenMM Metadynamics whose hills are divided by the in-domain fraction N(s)."""
+    """OpenMM Metadynamics whose hills are divided by the in-domain fraction N(s).
+
+    ``bounds=[None, ...]`` gives plain hills. ``hills`` holds one
+    (step, cv..., height kJ/mol) row per deposited hill.
+    """
 
     def __init__(self, system, variables, temperature, biasFactor, height, frequency,
                  saveFrequency=None, biasDir=None, bounds=None):
@@ -63,6 +70,7 @@ class BoundaryCorrectedMetadynamics(Metadynamics):
         if len(bounds) != len(variables):
             raise ValueError("bounds needs one (lo, hi) or None per variable")
         self.boundaryFactor = boundary_factor(variables, bounds)
+        self.hills = []
         super().__init__(system, variables, temperature, biasFactor, height, frequency,
                          saveFrequency=saveFrequency, biasDir=biasDir)
 
@@ -82,7 +90,9 @@ class BoundaryCorrectedMetadynamics(Metadynamics):
         else:
             gaussian = reduce(np.multiply.outer, reversed(axisGaussians))
 
-        hill = height.value_in_unit(unit.kilojoules_per_mole) * gaussian * self.boundaryFactor
+        h = height.value_in_unit(unit.kilojoules_per_mole)
+        self.hills.append((context.getStepCount(), *[float(p) for p in position], h))
+        hill = h * gaussian * self.boundaryFactor
         self._selfBias += hill
         self._totalBias += hill
         if len(self.variables) == 1:
@@ -90,3 +100,14 @@ class BoundaryCorrectedMetadynamics(Metadynamics):
         else:
             self._table.setFunctionParameters(*self._widths, self._totalBias.flatten(), *self._limits)
         self._force.updateParametersInContext(context)
+
+    def bias_energy(self, simulation) -> float:
+        """Current bias at the walker, V(s_t, t), in kJ/mol."""
+        state = simulation.context.getState(getEnergy=True, groups={self._force.getForceGroup()})
+        return state.getPotentialEnergy().value_in_unit(unit.kilojoules_per_mole)
+
+    def rct(self) -> float:
+        """c(t) in kJ/mol: frame weights are exp[(V(s_t, t) - c(t)) / kT]."""
+        kt = (unit.MOLAR_GAS_CONSTANT_R * self.temperature).value_in_unit(unit.kilojoules_per_mole)
+        a = self._totalBias.ravel() / (kt * (self.biasFactor - 1.0))
+        return kt * (logsumexp(self.biasFactor * a) - logsumexp(a))

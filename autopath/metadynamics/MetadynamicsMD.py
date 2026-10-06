@@ -209,7 +209,8 @@ class MetadynamicsMD:
         -------
         str
             The ``run_id`` string used for all output file names produced by
-            this call (COLVAR, FE, checkpoint, PDB, system XML).
+            this call (COLVAR, FE, checkpoint, PDB, system XML). ``REWEIGHT_<run_id>.npz``
+            holds V(s_t, t) and c(t) per COLVAR frame, ``HILLS_<run_id>.npz`` every hill.
 
         Warns
         -----
@@ -329,12 +330,13 @@ class MetadynamicsMD:
         if boundary_correction:
             bounds = [s.bounds if s.bounds is not None else (s.grid_min, s.grid_max)
                       for s in resolved]
-            meta = BoundaryCorrectedMetadynamics(*meta_args, bounds=bounds, **meta_kwargs)
+        else:
+            bounds = [None] * len(resolved)
+        meta = BoundaryCorrectedMetadynamics(*meta_args, bounds=bounds, **meta_kwargs)
+        if boundary_correction:
             logger.info("Boundary-corrected hills on %s (max factor %.2f)",
                         ", ".join(f"[{lo:.3f}, {hi:.3f}]" for lo, hi in bounds),
                         float(meta.boundaryFactor.max()))
-        else:
-            meta = Metadynamics(*meta_args, **meta_kwargs)
 
         # Rebuild rather than reinitialize(preserveState=True): the latter restores
         # global parameters by name, so stale values could override new forces' defaults.
@@ -362,6 +364,19 @@ class MetadynamicsMD:
                                                             ))
 
         colvar_list = [meta.getCollectiveVariables(simulation)]
+        # Bias at the walker and c(t) per COLVAR frame, for reweighting.
+        bias_list, rct_list = [meta.bias_energy(simulation)], [meta.rct()]
+        _ps_per_step = self.timestep.value_in_unit(openmmunit.picoseconds)
+
+        def _save_reweight():
+            np.savez(os.path.join(self.out_dir, f"REWEIGHT_{run_id}.npz"),
+                     time_ns=np.arange(len(bias_list)) * self.record_CV * _ps_per_step / 1000.0,
+                     bias_kj=np.array(bias_list), rct_kj=np.array(rct_list),
+                     temperature=self.temperature.value_in_unit(openmmunit.kelvin),
+                     bias_factor=float(bias_factor))
+            h = np.array(meta.hills, dtype=float).reshape(-1, len(resolved) + 2)
+            np.savez(os.path.join(self.out_dir, f"HILLS_{run_id}.npz"),
+                     time_ns=h[:, 0] * _ps_per_step / 1000.0, cv=h[:, 1:-1], height_kj=h[:, -1])
         # Funnel-axis z (Å) at COLVAR cadence, for counting round trips.
         funnelz_list = None
         if funnel_params is not None:
@@ -388,9 +403,12 @@ class MetadynamicsMD:
                 if funnelz_list is not None:
                     np.save(os.path.join(self.out_dir, f"FUNNELZ_{run_id}.npy"),
                             np.array(funnelz_list))
+                _save_reweight()
 
             meta.step(simulation, self.record_CV)
             colvar_list.append(meta.getCollectiveVariables(simulation))
+            bias_list.append(meta.bias_energy(simulation))
+            rct_list.append(meta.rct())
             if funnelz_list is not None:
                 funnelz_list.append(_funnel_z())
 
@@ -402,8 +420,8 @@ class MetadynamicsMD:
                 fe_hist_steps.append(i + self.record_CV)
         colvar_array = np.array(colvar_list)
 
+        _save_reweight()
         if fe_hist:
-            _ps_per_step = self.timestep.value_in_unit(openmmunit.picoseconds)
             np.savez(
                 os.path.join(self.out_dir, f"FEhist_{run_id}.npz"),
                 fes_kj=np.array(fe_hist),
