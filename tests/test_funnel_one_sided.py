@@ -71,3 +71,25 @@ def test_upper_side_is_unchanged():
     p = _params()
     assert _energy(p, 20.0, r_xy_ang=6.0) == pytest.approx(0.5 * K_KJ_PER_A2 * 2.0 ** 2, rel=1e-4)
     assert _energy(p, 27.0) == pytest.approx(0.5 * K_KJ_PER_A2 * 1.0, rel=1e-4)
+
+
+def test_k_z_is_saved_loaded_and_used(tmp_path):
+    from autopath.metadynamics.Funnel import save_funnel_params, load_funnel_params
+    kcal_a2 = unit.kilocalorie_per_mole / A**2
+    p = dict(_params(), k_z=500.0 * kcal_a2, unbinding_axis=np.array([0.0, 0.0, 1.0]),
+             com_trajectory=np.zeros((2, 3)), host_com_trajectory=np.zeros((2, 3)),
+             guest_com_trajectory=np.zeros((2, 3)), radial_distances=np.zeros(2),
+             axial_distances=np.array([4.0, 4.0]), trajectory_length=2, force_group=10)
+    save_funnel_params(p, str(tmp_path / "fp"))
+    loaded = load_funnel_params(str(tmp_path / "fp.npz"))
+    assert loaded["k_z"].value_in_unit(kcal_a2) == pytest.approx(500.0)
+    force = create_funnel_force_from_trajectory_analysis(loaded)
+    k = {force.getGlobalParameterName(i): force.getGlobalParameterDefaultValue(i)
+         for i in range(force.getNumGlobalParameters())}
+    assert k["k_z"] == pytest.approx((500.0 * kcal_a2).value_in_unit(
+        unit.kilojoule_per_mole / unit.nanometer**2))
+    assert k["k_xy"] == pytest.approx((10.0 * kcal_a2).value_in_unit(
+        unit.kilojoule_per_mole / unit.nanometer**2))
+    del p["k_z"]
+    save_funnel_params(p, str(tmp_path / "old"))
+    assert "k_z" not in load_funnel_params(str(tmp_path / "old.npz"))

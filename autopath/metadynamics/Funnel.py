@@ -199,6 +199,9 @@ def generate_funnel_parameters_from_trajectory(
     k_xy: Optional[openmmunit.Quantity] = 10.0
     * openmmunit.kilocalorie_per_mole
     / openmmunit.angstrom**2,
+    k_z: Optional[openmmunit.Quantity] = 500.0
+    * openmmunit.kilocalorie_per_mole
+    / openmmunit.angstrom**2,
     use_pca: bool = True,
     percentile_z: float = 95.0,
     z_cc_ang: Optional[float] = None,
@@ -223,6 +226,9 @@ def generate_funnel_parameters_from_trajectory(
         MDAnalysis selection string for guest/ligand atoms (default: "resname UNK")
     k_xy : openmmunit.Quantity
         Force constant for XY plane restraint
+    k_z : openmmunit.Quantity
+        Force constant of the lower and z_max walls (default 500 kcal/mol/Å²);
+        the bias presses the guest into a soft wall.
     use_pca : bool
         If True, use PCA to determine the unbinding axis. If False, use the axis
         with largest COM displacement (default: True)
@@ -252,6 +258,7 @@ def generate_funnel_parameters_from_trajectory(
         - "host_index": List of host atom indices
         - "guest_index": List of guest atom indices
         - "k_xy": Force constant
+        - "k_z": Axial wall force constant
         - "z_cc": Z-crossing point parameter
         - "alpha": Cone angle parameter
         - "R_cylinder": Inner cylinder radius
@@ -425,6 +432,8 @@ def generate_funnel_parameters_from_trajectory(
         logger.info("Cylinder radius (R_cylinder): %.2f Å%s", R_cylinder, _ref)
         logger.info(f"Bound-state radial spread (informational): {R_funnel_bound:.2f} Å")
         logger.info(f"Cone angle (alpha): {alpha_cone_degrees}°")
+        logger.info("Axial wall force constant (k_z): %.0f kcal/mol/Å²",
+                    k_z.value_in_unit(openmmunit.kilocalorie_per_mole / openmmunit.angstrom**2))
         logger.info(f"Radial distances - min: {radial_distances.min():.2f}, max: {radial_distances.max():.2f}, mean: {radial_distances.mean():.2f} Å")
         logger.info(f"Axial distances - min: {z_distances.min():.2f}, max: {z_distances.max():.2f}, mean: {z_distances.mean():.2f} Å")
 
@@ -432,6 +441,7 @@ def generate_funnel_parameters_from_trajectory(
         "host_index": host_indices,
         "guest_index": guest_indices,
         "k_xy": k_xy,
+        "k_z": k_z,
         "z_cc": z_cc_quantity,
         "z_max": z_max_quantity,
         "alpha": alpha_quantity,
@@ -457,10 +467,15 @@ def save_funnel_params(params_dict: Dict, filepath: str) -> None:
     post-hoc PMF correction or funnel visualisation.
 
     Units: z_cc, z_max, R_cylinder and trajectory arrays in Å; alpha in degrees;
-    k_xy in kcal/mol/Å².
+    k_xy and k_z in kcal/mol/Å².
     """
+    extra = {}
+    if "k_z" in params_dict:
+        extra["k_z_kcal_per_mol_per_ang2"] = np.array(params_dict["k_z"].value_in_unit(
+            openmmunit.kilocalorie_per_mole / openmmunit.angstrom**2))
     np.savez(
         filepath,
+        **extra,
         z_cc_ang=np.array(
             params_dict["z_cc"].value_in_unit(openmmunit.angstrom)
         ),
@@ -505,7 +520,12 @@ def load_funnel_params(filepath: str) -> Dict:
         Path to the .npz file (with or without the .npz extension).
     """
     data = np.load(filepath if filepath.endswith(".npz") else filepath + ".npz")
+    kcal_a2 = openmmunit.kilocalorie_per_mole / openmmunit.angstrom**2
+    # older files have no k_z; the force then falls back to k_xy
+    extra = ({"k_z": float(data["k_z_kcal_per_mol_per_ang2"]) * kcal_a2}
+             if "k_z_kcal_per_mol_per_ang2" in data.files else {})
     return {
+        **extra,
         "z_cc": float(data["z_cc_ang"]) * openmmunit.angstrom,
         "z_max": float(data["z_max_ang"]) * openmmunit.angstrom,
         "R_cylinder": float(data["R_cylinder_ang"]) * openmmunit.angstrom,
