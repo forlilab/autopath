@@ -43,14 +43,13 @@ def test_reference_range_for_funnel_z_is_the_cylinder_clear_of_the_wall():
     assert (lo, hi) == pytest.approx((1.4, 2.3))                 # 14 A .. 26 - 3 A, in nm
 
 
-def test_reference_range_for_a_path_cv_is_mapped_through_the_recorded_z(tmp_path):
-    s = np.linspace(0.0, 1.0, 4000)
-    np.save(tmp_path / "COLVAR_w.npy", s[:, None])
-    np.save(tmp_path / "FUNNELZ_w.npy", 2.0 + 24.0 * s)          # z = 2 + 24 s (A)
+def test_reference_range_for_a_path_cv_is_mapped_linearly_from_the_site():
+    from autopath.metadynamics.Funnel import funnel_basins
+    z0 = 2.0 * funnel_basins(_fp())[0] - 14.0                     # sMD bound-site z
     lo, hi = R.reference_range_from_funnel(_fp(), grid=(0.0, 1.0), cv_is_funnel_z=False,
-                                           sigma_ang=1.0, out_dir=str(tmp_path))
-    assert lo == pytest.approx((14.0 - 2.0) / 24.0, abs=0.01)
-    assert hi == pytest.approx((23.0 - 2.0) / 24.0, abs=0.01)
+                                           sigma_ang=1.0)
+    assert lo == pytest.approx((14.0 - z0) / (26.0 - z0))
+    assert hi == pytest.approx((23.0 - z0) / (26.0 - z0))
 
 
 def test_reference_window_stays_clear_of_the_cv_edge():

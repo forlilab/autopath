@@ -1036,21 +1036,21 @@ class MetadynamicsAnalysis:
         return axis, fes
 
     def walker_transitions(self, colvar_path, basins, bound_threshold=0.1,
-                           unbound_threshold=0.9, grid_min=None, grid_max=None) -> dict:
-        """Transitions of one walker on its funnel z (``FUNNELZ_<run_id>.npy``, Å).
+                           unbound_threshold=0.9, grid_min=None, grid_max=None,
+                           cv_is_funnel_z=False) -> dict:
+        """Transitions of one walker.
 
-        Uses ``basins = (bound_max, unbound_min)`` when both exist, else the CV with
-        grid-fraction thresholds.
+        A funnel z CV (nm) is tested in Å against ``basins = (bound_max, unbound_min)``;
+        any other CV uses grid-fraction thresholds.
         """
-        run_id = os.path.splitext(os.path.basename(colvar_path))[0].replace('COLVAR_', '')
-        z_path = os.path.join(os.path.dirname(colvar_path), f"FUNNELZ_{run_id}.npy")
-        if basins is not None and os.path.exists(z_path):
-            ts = self.analyze_colvar_transitions(np.load(z_path)[:, None],
-                                                 bound_threshold=basins[0],
+        col = np.load(colvar_path)
+        if cv_is_funnel_z and basins is not None:
+            cv = col[:, 0] if col.ndim > 1 else col
+            ts = self.analyze_colvar_transitions(cv[:, None] * 10.0, bound_threshold=basins[0],
                                                  unbound_threshold=basins[1])
             ts["coordinate"] = "funnel_z"
             return ts
-        ts = self.analyze_colvar_transitions(np.load(colvar_path), bound_threshold,
+        ts = self.analyze_colvar_transitions(col, bound_threshold,
                                              unbound_threshold, grid_min=grid_min,
                                              grid_max=grid_max)
         ts["coordinate"] = "cv"

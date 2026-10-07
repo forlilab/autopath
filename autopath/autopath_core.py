@@ -181,8 +181,8 @@ class AutoPath:
       For the funnel z CV only the clamped cap (z_max) is corrected; the soft
       lower wall is not. Other CVs use the grid ends. On by default.
     * ``mMD_reweight`` records V(s_t, t) and c(t) per frame (REWEIGHT_*.npz);
-      ``mMD_rct_ustride`` is the number of hills between frames (COLVAR, FUNNELZ
-      and REWEIGHT share it); ``mMD_dcd_interval`` is the trajectory interval (ps).
+      ``mMD_rct_ustride`` is the number of hills between frames (COLVAR and
+      REWEIGHT share it); ``mMD_dcd_interval`` is the trajectory interval (ps).
     """
 
     def __init__(

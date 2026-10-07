@@ -38,14 +38,13 @@ def test_excursions_into_the_cylinder_count_as_round_trips():
     assert ts["n_round_trips"] == 2
 
 
-def test_walker_transitions_prefer_the_recorded_funnel_z(tmp_path):
-    s = np.r_[np.full(30, 0.05), np.full(30, 0.6), np.full(30, 0.05)]     # never > 0.9
-    z = np.r_[np.full(30, 2.0), np.full(30, 16.0), np.full(30, 2.0)]      # reaches the cylinder
-    np.save(tmp_path / "COLVAR_w.npy", s[:, None])
+def test_funnel_z_cv_is_tested_in_angstrom_against_the_basins(tmp_path):
+    z_nm = np.r_[np.full(30, 0.2), np.full(30, 1.6), np.full(30, 0.2)]   # pocket -> cylinder -> pocket
+    np.save(tmp_path / "COLVAR_w.npy", z_nm[:, None])
     a = MetadynamicsAnalysis.__new__(MetadynamicsAnalysis)
     basins = funnel_basins(_params())
-    no_z = a.walker_transitions(str(tmp_path / "COLVAR_w.npy"), basins, grid_min=0.0, grid_max=1.0)
-    assert no_z["coordinate"] == "cv" and no_z["n_round_trips"] == 0
-    np.save(tmp_path / "FUNNELZ_w.npy", z)
-    with_z = a.walker_transitions(str(tmp_path / "COLVAR_w.npy"), basins, grid_min=0.0, grid_max=1.0)
-    assert with_z["coordinate"] == "funnel_z" and with_z["n_round_trips"] == 1
+    as_z = a.walker_transitions(str(tmp_path / "COLVAR_w.npy"), basins, grid_min=-0.7, grid_max=2.65,
+                                cv_is_funnel_z=True)
+    assert as_z["coordinate"] == "funnel_z" and as_z["n_round_trips"] == 1
+    as_cv = a.walker_transitions(str(tmp_path / "COLVAR_w.npy"), basins, grid_min=-0.7, grid_max=2.65)
+    assert as_cv["coordinate"] == "cv" and as_cv["n_round_trips"] == 0    # 1.6 nm < 0.9 of the grid

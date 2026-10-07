@@ -13,7 +13,6 @@ import cvpack
 
 from autopath.metadynamics.CV import CVSpec
 from autopath.metadynamics.BoundaryCorrection import BoundaryCorrectedMetadynamics
-from autopath.metadynamics.Funnel import funnel_z_ang
 from autopath.metadynamics.Analysis import (
     correct_fe_for_funnel,
     plot_bias,
@@ -209,7 +208,7 @@ class MetadynamicsMD:
             ``REWEIGHT_<run_id>.npz`` (Tiwary & Parrinello 2015; default True).
         rct_ustride : int, optional
             Hills between per-frame records (default 5, i.e. 10 ps at a 2 ps
-            pace). COLVAR, FUNNELZ and REWEIGHT rows all use this interval.
+            pace). COLVAR and REWEIGHT rows use this interval.
         dcd_interval : float, optional
             Trajectory (and state CSV) interval in ps (default 10).
 
@@ -400,20 +399,6 @@ class MetadynamicsMD:
             h = np.array(meta.hills, dtype=float).reshape(-1, len(resolved) + 2)
             np.savez(os.path.join(self.out_dir, f"HILLS_{run_id}.npz"),
                      time_ns=h[:, 0] * _ps_per_step / 1000.0, cv=h[:, 1:-1], height_kj=h[:, -1])
-        # Funnel-axis z (Å) per COLVAR row, for counting round trips.
-        funnelz_list = None
-        if funnel_params is not None:
-            _sysm = simulation.system
-            _masses = np.array([_sysm.getParticleMass(i).value_in_unit(openmmunit.dalton)
-                                for i in range(_sysm.getNumParticles())])
-            _host = [int(i) for i in funnel_params["host_index"]]
-            _guest = [int(i) for i in funnel_params["guest_index"]]
-
-            def _funnel_z():
-                pos = simulation.context.getState(getPositions=True).getPositions(asNumpy=True)
-                return funnel_z_ang(pos.value_in_unit(openmmunit.nanometer), _host, _guest,
-                                    _masses, funnel_params["unbinding_axis"])
-            funnelz_list = [_funnel_z()]
         # ~40 snapshots over the run, so the curve is readable at any length
         fe_hist, fe_hist_steps = [], []
         # Start time orders sequential shared-bias walkers.
@@ -424,9 +409,6 @@ class MetadynamicsMD:
         for k, i in enumerate(range(0, int(mMD_steps), record_steps)):
             if self.verbose and k % _store_every == 0:
                 np.save(os.path.join(self.out_dir, f"COLVAR_{run_id}.npy"), np.array(colvar_list))
-                if funnelz_list is not None:
-                    np.save(os.path.join(self.out_dir, f"FUNNELZ_{run_id}.npy"),
-                            np.array(funnelz_list))
                 _save_reweight()
 
             meta.step(simulation, record_steps)
@@ -434,8 +416,6 @@ class MetadynamicsMD:
             if reweight:
                 bias_list.append(meta.bias_energy(simulation))
                 rct_list.append(meta.rct())
-            if funnelz_list is not None:
-                funnelz_list.append(_funnel_z())
 
             # FES history for convergence; OpenMM does not keep past bias states.
             if i % _fe_hist_every == 0:
@@ -457,8 +437,6 @@ class MetadynamicsMD:
                         len(fe_hist), f"FEhist_{run_id}.npz")
 
         np.save(os.path.join(self.out_dir, f"COLVAR_{run_id}.npy"), colvar_array)
-        if funnelz_list is not None:
-            np.save(os.path.join(self.out_dir, f"FUNNELZ_{run_id}.npy"), np.array(funnelz_list))
 
         max_cv = float(colvar_array[:, 0].max())
         _lo = resolved[0].bound_end

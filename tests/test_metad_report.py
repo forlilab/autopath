@@ -24,10 +24,9 @@ def _bias(fes):
 
 
 def _walker(d, run_id, frac=1.0, z=None, start=None, end=None, hist=True, n_snap=10, t_ns=5.0):
-    """COLVAR, FUNNELZ and FEhist for one walker; start/end fix its wall-clock window."""
-    z = np.r_[np.full(50, 2.0), np.full(50, 18.0), np.full(50, 2.0)] if z is None else z
+    """COLVAR and FEhist for one walker; start/end fix its wall-clock window."""
+    z = np.r_[np.full(50, 2.0), np.full(50, 24.0), np.full(50, 2.0)] if z is None else z
     np.save(d / f"COLVAR_{run_id}.npy", (z / 26.0)[:, None])
-    np.save(d / f"FUNNELZ_{run_id}.npy", z)
     if hist:
         snaps = np.array([F * frac * (k + 1) / n_snap for k in range(n_snap)])
         p = d / f"FEhist_{run_id}.npz"
@@ -85,7 +84,7 @@ def test_shared_report_uses_one_surface_and_one_correction(tmp_path):
     expected = correct_fe_for_funnel(-(GAMMA / (GAMMA - 1.0)) * _bias(F), _fp(), temperature=300.0,
                                      grid_min=0.0, grid_max=1.0, cv_length_per_unit_ang=20.0)
     assert out["dG_bind_std_kj"] == pytest.approx(expected["dG_bind_std_kj_mol"])
-    assert out["n_round_trips"] == 3                    # one per walker, on FUNNELZ
+    assert out["n_round_trips"] == 3                    # one per walker, on the CV
     for f in out["files"].values():
         assert os.path.exists(f)
 
@@ -127,9 +126,9 @@ def test_report_without_a_funnel_gives_the_uncorrected_well_depth(tmp_path):
     assert out["funnel"] is False and out["dG_bind_std_kj"] is None
     (label, depth), = out["well_depth_kj"]
     assert depth == pytest.approx(-50.0, abs=1.0)          # the synthetic well
-    # no funnel axis: round trips use fractions of the CV grid (this trace stops at 69%)
+    # no funnel axis: round trips use fractions of the CV grid (this trace reaches 92%)
     assert all(st["coordinate"] == "cv" for st in out["walker_stats"].values())
-    assert out["n_round_trips"] == 0
+    assert out["n_round_trips"] == 3
     for f in out["files"].values():
         assert os.path.exists(f)
 

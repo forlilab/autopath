@@ -121,8 +121,7 @@ def reference_range_from_funnel(fp, grid, cv_is_funnel_z, sigma_ang, out_dir=Non
     """Unbound reference window in CV units: the cylinder, clear of the wall.
 
     z in [z_cc, z_max - n_sigma·σ], avoiding the hill-deficit artifact near the wall.
-    Non-z CVs are mapped via the median recorded funnel z per CV bin, else linearly
-    from the bound site (grid_min) to the cap (grid_max). The window also stays
+    Non-z CVs are mapped linearly from the bound site (grid_min) to the cap (grid_max). The window also stays
     n_sigma hill widths inside the grid edges. Returns None if no window fits.
     """
     z_cc = float(fp["z_cc"].value_in_unit(unit_ang()))
@@ -135,37 +134,10 @@ def reference_range_from_funnel(fp, grid, cv_is_funnel_z, sigma_ang, out_dir=Non
     if cv_is_funnel_z:
         lo, hi = z_lo / 10.0, z_hi / 10.0
     else:
-        pairs = []
-        for c in glob(os.path.join(out_dir or "", "COLVAR_*.npy")):
-            zf = c.replace("COLVAR_", "FUNNELZ_")
-            if os.path.exists(zf):
-                cv = np.load(c)
-                cv = cv[:, 0] if cv.ndim > 1 else cv
-                z = np.load(zf)
-                n = min(len(cv), len(z))
-                pairs.append(np.c_[cv[:n], z[:n]])
-        if pairs:
-            P = np.concatenate(pairs)
-            edges = np.linspace(grid[0], grid[1], 126)
-            idx = np.clip(np.digitize(P[:, 0], edges) - 1, 0, 124)
-            centres, med = [], []
-            for b in range(125):
-                zb = P[idx == b, 1]
-                if zb.size >= 5:
-                    centres.append(0.5 * (edges[b] + edges[b + 1]))
-                    med.append(np.median(zb))
-            inside = [c for c, m in zip(centres, med) if z_lo <= m <= z_hi]
-            if not inside:
-                logger.warning("No CV bin has its recorded funnel z inside the cylinder window.")
-                return None
-            lo, hi = min(inside), max(inside)
-        else:
-            from autopath.metadynamics.Funnel import funnel_basins as _fb
-            z0 = 2.0 * _fb(fp)[0] - z_cc                     # = the sMD bound-site z
-            span = (grid[1] - grid[0]) / max(z_max - z0, 1e-9)
-            lo, hi = grid[0] + (z_lo - z0) * span, grid[0] + (z_hi - z0) * span
-            logger.info("Reference window mapped linearly bound site -> cap (no FUNNELZ): "
-                        "approximate.")
+        z0 = 2.0 * funnel_basins(fp)[0] - z_cc               # = the sMD bound-site z
+        span = (grid[1] - grid[0]) / max(z_max - z0, 1e-9)
+        lo, hi = grid[0] + (z_lo - z0) * span, grid[0] + (z_hi - z0) * span
+        logger.info("Reference window mapped linearly bound site -> cap: approximate.")
     margin = n_sigma * float(hill_width_cv) if hill_width_cv else 0.0
     lo, hi = max(lo, grid[0] + margin), min(hi, grid[1] - margin)
     return (lo, hi) if hi > lo else None
@@ -318,15 +290,9 @@ def walker_traces(out_dir, run_ids, basins, grid, cv_is_funnel_z=False) -> list:
             continue
         col = np.load(cpath)
         cv = col[:, 0] if col.ndim > 1 else col
-        zpath = os.path.join(out_dir, f"FUNNELZ_{r}.npy")
-        z = np.load(zpath) if os.path.exists(zpath) else None
-        if z is None and cv_is_funnel_z and basins is not None:
-            z = cv * 10.0                      # the biased CV is z itself (nm)
-            stats = ma.analyze_colvar_transitions(z[:, None], bound_threshold=basins[0],
-                                                  unbound_threshold=basins[1])
-            stats["coordinate"] = "funnel_z"
-        else:
-            stats = ma.walker_transitions(cpath, basins, grid_min=grid[0], grid_max=grid[1])
+        stats = ma.walker_transitions(cpath, basins, grid_min=grid[0], grid_max=grid[1],
+                                      cv_is_funnel_z=cv_is_funnel_z)
+        z = cv * 10.0 if stats["coordinate"] == "funnel_z" else None
         fpath = os.path.join(out_dir, f"FRAMES_{r}.npz")
         t_ns = (np.load(fpath)["time_ns"][:len(cv)] if os.path.exists(fpath)
                 else np.arange(len(cv)) * COLVAR_DT_NS)
@@ -429,18 +395,6 @@ def plot_colvar(traces, mode, basins, grid, cv_name, out_path, z_max_ang=None):
             ax.axvline(tr.t_ns[f], color="tomato", lw=0.8, ls=":")
         for f in tr.stats["return_frames"]:
             ax.axvline(tr.t_ns[f], color="seagreen", lw=1.2)
-        if use_z and not np.allclose(tr.cv * 10.0, tr.z_ang[:len(tr.cv)], atol=0.05):
-            z = tr.z_ang[:len(tr.cv)]
-            free = (tr.cv > grid[0] + 1e-4) & (tr.cv < grid[1] - 1e-4)   # CV is float32
-            if free.any() and np.allclose(tr.cv[free] * 10.0, z[free], atol=0.05):
-                # funnel z CV: differs from z only where clamped, so share the axis
-                ax.plot(tr.t_ns[:len(tr.cv)], tr.cv * 10.0, lw=0.6, color="0.6",
-                        label="biased CV (clamped)")
-                ax.legend(fontsize=6, loc="upper right")
-            else:
-                ax2 = ax.twinx()
-                ax2.plot(tr.t_ns, tr.cv, lw=0.6, color="0.6")
-                ax2.set_ylabel(cv_name, fontsize=7, color="0.5")
         ax.set_ylabel("funnel z (Å)" if use_z else cv_name, fontsize=8)
         ax.set_title(f"{tr.run_id}: {tr.stats['n_round_trips']} round trip(s), "
                      f"{tr.stats['n_transitions']} exit(s); bound {100 * tr.stats['frac_bound']:.0f}%, "
