@@ -63,6 +63,11 @@ def main():
                          "cap; funnel_z: the funnel axis coordinate, from below the lower wall to z_max")
     ap.add_argument("--boundary-correction", action=argparse.BooleanOptionalAction, default=True,
                     help="divide each hill by its fraction inside the CV range (McGovern-de Pablo)")
+    ap.add_argument("--reweight", action=argparse.BooleanOptionalAction, default=True,
+                    help="record V(s_t, t) and c(t) per frame for reweighting")
+    ap.add_argument("--rct-ustride", type=int, default=5,
+                    help="hills between recorded frames (5 x 2 ps = 10 ps)")
+    ap.add_argument("--dcd-interval", type=float, default=10.0, help="trajectory interval (ps)")
     args = ap.parse_args()
 
     base = args.base
@@ -172,7 +177,9 @@ def main():
               mMD_time=args.ns, bias_factor=15, hill_height=1.2,
               biasFrequency=2, funnel_force=funnel_force,
               funnel_params=params, bias_dir=bias_dir,
-              boundary_correction=args.boundary_correction)
+              boundary_correction=args.boundary_correction,
+              reweight=args.reweight, rct_ustride=args.rct_ustride,
+              dcd_interval=args.dcd_interval)
     log.info("finished: %.1f ns, seed=%s", args.ns, args.seed_from)
 
 
