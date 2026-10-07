@@ -450,7 +450,9 @@ class MetadynamicsMD:
         fe_path = os.path.join(self.out_dir, f"FE_{run_id}.npy")
         np.save(fe_path, meta.getFreeEnergy())
 
-        if funnel_params is not None:
+        # Eq. 15 needs a 1D CV with a length scale (funnel z or path); others are reweighted later.
+        if (funnel_params is not None and len(resolved) == 1
+                and resolved[0].cv_length_per_unit_ang is not None):
             try:
                 temp_K = self.temperature.value_in_unit(openmmunit.kelvin)
                 result = correct_fe_for_funnel(

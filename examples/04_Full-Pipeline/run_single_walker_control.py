@@ -25,7 +25,7 @@ import numpy as np
 from openmm import unit as ommunit
 
 from autopath.clustering import read_positions
-from autopath.metadynamics.CV import pathCV_cv, funnel_z_cv
+from autopath.metadynamics.CV import pathCV_cv, funnel_z_cv, com_cv
 from autopath.metadynamics.Funnel import (create_funnel_force_from_trajectory_analysis,
                                           load_funnel_params, com_distance_at_z,
                                           funnel_z_grid_min_ang, funnel_z_bounds_nm)
@@ -58,9 +58,15 @@ def main():
                          "against; the control aborts if its own CV disagrees")
     ap.add_argument("--hill-width", dest="hill_width", type=float, default=None,
                     help="hill width in CV units (overrides the matched-width default)")
-    ap.add_argument("--cv", choices=["path", "funnel_z", "funnel_z_unclamped"], default="path",
+    ap.add_argument("--cv", choices=["path", "funnel_z", "funnel_z_unclamped", "dist", "funnel_z_dist"],
+                    default="path",
                     help="path: progress along the milestones, extended to the funnel "
-                         "cap; funnel_z: the funnel axis coordinate, from below the lower wall to z_max")
+                         "cap; funnel_z: the funnel axis coordinate, from below the lower wall to z_max; "
+                         "dist: two-atom distance (Limongelli 2013); funnel_z_dist: both, 2D")
+    ap.add_argument("--dist-atoms", nargs=2, default=["resid 172 and name CG", "resname UNK and name C7x"],
+                    help="MDAnalysis selections (system.pdb) of the two atoms; default Asp189 CG, benzamidine C7")
+    ap.add_argument("--dist-grid", nargs=3, type=float, default=[0.2, 3.6, 171],
+                    help="distance grid min, max (nm) and points")
     ap.add_argument("--boundary-correction", action=argparse.BooleanOptionalAction, default=True,
                     help="divide each hill by its fraction inside the CV range (McGovern-de Pablo)")
     ap.add_argument("--reweight", action=argparse.BooleanOptionalAction, default=True,
@@ -134,7 +140,9 @@ def main():
             f"{args.expect_cv_length}. The selections or milestones differ, so the "
             "two ΔG(t) curves would not be comparable.")
 
-    if args.cv == "path":
+    if args.cv == "dist":
+        cv = None
+    elif args.cv == "path":
         cv = path
         if args.hill_width is not None:
             cv.hill_width = args.hill_width
@@ -162,6 +170,21 @@ def main():
             log.info("funnel z NOT clamped (experiment arm)")
         log.info("CV: funnel z on [%.2f, %.2f] Å, hills %.3f nm (= the path arm's %.2f Å)",
                  z_lo, z_max, width_nm, 0.05 * span)
+    cvs = [] if cv is None else [cv]
+    if args.cv in ("dist", "funnel_z_dist"):
+        u_sys = mda.Universe(f"{base}/system.pdb")
+        a1, a2 = (u_sys.select_atoms(s) for s in args.dist_atoms)
+        if len(a1) != 1 or len(a2) != 1:
+            raise SystemExit(f"--dist-atoms must select one atom each: {len(a1)}, {len(a2)}")
+        lo, hi, npts = args.dist_grid
+        dcv = com_cv([int(a1.indices[0])], [int(a2.indices[0])], grid_min=lo, grid_max=hi,
+                     hill_width=args.hill_width or 0.05, grid_points=int(npts))
+        dcv.name = "dist"
+        dcv.bounds = (-np.inf, np.inf)          # both ends soft: no boundary correction
+        cvs.append(dcv)
+        log.info("CV: distance %s (%d) - %s (%d) on [%.2f, %.2f] nm, hills %.3f nm",
+                 args.dist_atoms[0], a1.indices[0], args.dist_atoms[1], a2.indices[0],
+                 lo, hi, dcv.hill_width)
 
     metad = MetadynamicsMD(topology=topology, ligand_atoms=lig,
                            pocket_atoms=pocket, restrained_atoms=None,
@@ -175,7 +198,7 @@ def main():
              if args.bias_dir and os.path.abspath(bias_dir) == os.path.abspath(args.out)
              else "private")
     metad.run(state_xml_file=state, system=load_system(system_xml),
-              run_id=run_id, cv_specs=[cv],
+              run_id=run_id, cv_specs=cvs,
               mMD_time=args.ns, bias_factor=15, hill_height=1.2,
               biasFrequency=2, funnel_force=funnel_force,
               funnel_params=params, bias_dir=bias_dir,
