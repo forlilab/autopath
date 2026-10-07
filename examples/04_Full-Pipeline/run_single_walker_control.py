@@ -171,7 +171,9 @@ def main():
     bias_dir = args.bias_dir or args.out
     os.makedirs(bias_dir, exist_ok=True)
     log.info("run_id=%s bias_dir=%s (%s)", run_id, bias_dir,
-             "SHARED with concurrent walkers" if args.bias_dir else "private")
+             "SHARED with concurrent walkers"
+             if args.bias_dir and os.path.abspath(bias_dir) == os.path.abspath(args.out)
+             else "private")
     metad.run(state_xml_file=state, system=load_system(system_xml),
               run_id=run_id, cv_specs=[cv],
               mMD_time=args.ns, bias_factor=15, hill_height=1.2,

@@ -473,29 +473,34 @@ class MetadynamicsMD:
             except Exception as e:
                 logger.warning(f"Funnel standard-state correction failed for {run_id}: {e}", exc_info=True)
 
-        if len(resolved) == 1:
-            s = resolved[0]
-            plot_colvar(self.out_dir, s.name)
-            plot_bias(self.out_dir, s.grid_min, s.grid_max, s.grid_points, s.name)
-            plot_FE(self.out_dir, s.grid_min, s.grid_max, s.grid_points, s.name)
-            if funnel_params is not None:
-                plot_FE_rw(self.out_dir, s.grid_min, s.grid_max, s.grid_points, s.name,
-                           temperature=self.temperature.value_in_unit(openmmunit.kelvin),
-                           origin=s.bound_end)
-        else:
-            a, b = resolved[0], resolved[1]
-            plot_colvar_2D(self.out_dir, a.name, b.name)
-            plot_FE_2D(
-                self.out_dir,
-                a.grid_min, a.grid_max, a.grid_points, a.name,
-                b.grid_min, b.grid_max, b.grid_points, b.name,
-            )
-
         final_positions = simulation.context.getState(getPositions=True).getPositions()
         self.topology.setPeriodicBoxVectors(simulation.context.getState(getPositions=True).getPeriodicBoxVectors())
         save_system(system, f"{self.out_dir}/WTMetaD_system_{run_id}.xml")
         save_simulation(simulation, f"{self.out_dir}/WTMetaD_checkpoint_{run_id}")
         save_pdb(self.topology, final_positions, f"{self.out_dir}/WTMetaD_{run_id}.pdb")
+
+        # Quick looks read every walker's files in out_dir; concurrent walkers rewrite
+        # theirs meanwhile, so a failed plot must not kill a finished run.
+        try:
+            if len(resolved) == 1:
+                s = resolved[0]
+                plot_colvar(self.out_dir, s.name)
+                plot_bias(self.out_dir, s.grid_min, s.grid_max, s.grid_points, s.name)
+                plot_FE(self.out_dir, s.grid_min, s.grid_max, s.grid_points, s.name)
+                if funnel_params is not None:
+                    plot_FE_rw(self.out_dir, s.grid_min, s.grid_max, s.grid_points, s.name,
+                               temperature=self.temperature.value_in_unit(openmmunit.kelvin),
+                               origin=s.bound_end)
+            else:
+                a, b = resolved[0], resolved[1]
+                plot_colvar_2D(self.out_dir, a.name, b.name)
+                plot_FE_2D(
+                    self.out_dir,
+                    a.grid_min, a.grid_max, a.grid_points, a.name,
+                    b.grid_min, b.grid_max, b.grid_points, b.name,
+                )
+        except Exception as e:
+            logger.warning(f"Quick-look plots failed for {run_id} (non-fatal): {e}")
 
         simulation_time = time.monotonic() - start_time
         logger.info(f"Finished {run_id} metadynamics in {simulation_time/60:.2f} min.")

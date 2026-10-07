@@ -78,3 +78,22 @@ def test_report_reads_the_row_interval_from_fehist(tmp_path):
     os.remove(tmp_path / "FEhist_w.npz")
     (tr,) = walker_traces(str(tmp_path), ["w"], None, (0.0, 1.0))
     assert tr.t_ns[-1] == pytest.approx(0.10)                  # older runs: 10 ps rows
+
+
+def test_failed_quick_look_plot_does_not_lose_the_finished_run(tmp_path, monkeypatch):
+    """A concurrent walker swapping its bias file must not kill a finished walker."""
+    import sys
+    M = sys.modules["autopath.metadynamics.MetadynamicsMD"]    # the package re-exports the class
+
+    def boom(*a, **k):
+        raise FileNotFoundError("bias file replaced by another walker")
+    monkeypatch.setattr(M, "plot_bias", boom)
+    top, s, pdb = _toy(tmp_path)
+    md = MetadynamicsMD(topology=top, ligand_atoms=[0], pocket_atoms=[0],
+                        platform="Reference", out_dir=str(tmp_path))
+    assert md.run(pdb_file=pdb, system=s, run_id="w", cv_specs=[_spec()], mMD_time=0.02,
+                  bias_factor=10, hill_height=1.0, biasFrequency=2,
+                  bias_dir=str(tmp_path / "b")) == "w"
+    for f in ("WTMetaD_system_w.xml", "WTMetaD_w.pdb"):
+        assert os.path.exists(tmp_path / f)
+    assert any(p.name.startswith("WTMetaD_checkpoint_w") for p in tmp_path.iterdir())
