@@ -34,6 +34,16 @@ from autopath.customForces import add_harmonic_restraints
 
 logger = logging.getLogger(__name__)
 
+
+def _atomic_save(path, array=None, **arrays):
+    """np.save / np.savez via a temporary file, so readers never see a partial file."""
+    tmp = f"{path[:-4]}.tmp{path[-4:]}"
+    if arrays:
+        np.savez(tmp, **arrays)
+    else:
+        np.save(tmp, array)
+    os.replace(tmp, path)
+
 try:
     from openmmtools.integrators import LangevinSplittingGirsanov
     from reweightingreporter import ReweightingReporter
@@ -387,14 +397,14 @@ class MetadynamicsMD:
 
         def _save_reweight():
             if reweight:
-                np.savez(os.path.join(self.out_dir, f"REWEIGHT_{run_id}.npz"),
+                _atomic_save(os.path.join(self.out_dir, f"REWEIGHT_{run_id}.npz"),
                          time_ns=np.arange(len(bias_list)) * intervals["record_dt_ns"],
                          bias_kj=np.array(bias_list), rct_kj=np.array(rct_list),
                          **intervals,
                          temperature=self.temperature.value_in_unit(openmmunit.kelvin),
                          bias_factor=float(bias_factor), rct_ustride=int(rct_ustride))
             h = np.array(meta.hills, dtype=float).reshape(-1, len(resolved) + 2)
-            np.savez(os.path.join(self.out_dir, f"HILLS_{run_id}.npz"),
+            _atomic_save(os.path.join(self.out_dir, f"HILLS_{run_id}.npz"),
                      time_ns=h[:, 0] * _ps_per_step / 1000.0, cv=h[:, 1:-1], height_kj=h[:, -1])
         # ~40 snapshots over the run, so the curve is readable at any length
         fe_hist, fe_hist_steps = [], []
@@ -405,7 +415,7 @@ class MetadynamicsMD:
         _store_every = max(1, round(self.store_CV / record_steps))
         for k, i in enumerate(range(0, int(mMD_steps), record_steps)):
             if self.verbose and k % _store_every == 0:
-                np.save(os.path.join(self.out_dir, f"COLVAR_{run_id}.npy"), np.array(colvar_list))
+                _atomic_save(os.path.join(self.out_dir, f"COLVAR_{run_id}.npy"), np.array(colvar_list))
                 _save_reweight()
 
             meta.step(simulation, record_steps)
@@ -434,7 +444,7 @@ class MetadynamicsMD:
             logger.info("Saved %d FES snapshots for the convergence curve (%s).",
                         len(fe_hist), f"FEhist_{run_id}.npz")
 
-        np.save(os.path.join(self.out_dir, f"COLVAR_{run_id}.npy"), colvar_array)
+        _atomic_save(os.path.join(self.out_dir, f"COLVAR_{run_id}.npy"), colvar_array)
 
         max_cv = float(colvar_array[:, 0].max())
         _lo = resolved[0].bound_end
