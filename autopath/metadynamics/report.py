@@ -27,7 +27,7 @@ from autopath.metadynamics.Funnel import load_funnel_params, funnel_basins
 logger = logging.getLogger("autopath")
 
 KJ_TO_KCAL = 1.0 / 4.184
-COLVAR_DT_NS = 0.01          # COLVAR row interval when FRAMES_<run_id>.npz is missing
+COLVAR_DT_NS = 0.01          # COLVAR row interval when FEhist lacks record_dt_ns
 _BIAS_RE = re.compile(r"bias_(\d+)_(\d+)\.npy")
 
 
@@ -293,9 +293,12 @@ def walker_traces(out_dir, run_ids, basins, grid, cv_is_funnel_z=False) -> list:
         stats = ma.walker_transitions(cpath, basins, grid_min=grid[0], grid_max=grid[1],
                                       cv_is_funnel_z=cv_is_funnel_z)
         z = cv * 10.0 if stats["coordinate"] == "funnel_z" else None
-        fpath = os.path.join(out_dir, f"FRAMES_{r}.npz")
-        t_ns = (np.load(fpath)["time_ns"][:len(cv)] if os.path.exists(fpath)
-                else np.arange(len(cv)) * COLVAR_DT_NS)
+        hpath = os.path.join(out_dir, f"FEhist_{r}.npz")
+        dt = COLVAR_DT_NS
+        if os.path.exists(hpath):
+            h = np.load(hpath)
+            dt = float(h["record_dt_ns"]) if "record_dt_ns" in h.files else dt
+        t_ns = np.arange(len(cv)) * dt
         traces.append(Trace(r, t_ns, cv, z, stats))
     return traces
 

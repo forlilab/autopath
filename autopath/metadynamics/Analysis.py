@@ -171,6 +171,17 @@ def rct_weights(bias_kj, rct_kj, temperature: float) -> np.ndarray:
     return w / w.sum()
 
 
+def dcd_frame_of_rows(n_rows: int, record_dt_ns: float, dcd_interval_ns: float) -> np.ndarray:
+    """Trajectory frame of each COLVAR/REWEIGHT row, -1 where none.
+
+    Row k is at k*record_dt; OpenMM writes DCD frames at D, 2D, ..., so a row
+    maps to frame k*record_dt/D - 1 when that is a whole number.
+    """
+    r = np.arange(n_rows) * float(record_dt_ns) / float(dcd_interval_ns)
+    hit = (r > 0.5) & (np.abs(r - np.round(r)) < 1e-6)
+    return np.where(hit, np.round(r).astype(int) - 1, -1)
+
+
 def reweighted_fes(values, weights, bins, temperature: float):
     """Unbiased free energy (kJ/mol, min 0) of any per-frame quantity from rct_weights.
 

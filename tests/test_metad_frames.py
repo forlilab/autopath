@@ -7,7 +7,7 @@ import openmm.unit as u
 import pytest
 from openmm.app import Element, PDBFile, Topology
 
-from autopath.metadynamics import CVSpec, MetadynamicsMD
+from autopath.metadynamics import CVSpec, MetadynamicsMD, dcd_frame_of_rows
 from autopath.metadynamics.report import walker_traces
 
 
@@ -43,25 +43,38 @@ def test_rows_follow_rct_ustride_and_map_onto_dcd_frames(tmp_path, reweight):
            bias_factor=10, hill_height=1.0, biasFrequency=2, bias_dir=str(tmp_path / "b"),
            reweight=reweight, rct_ustride=1, dcd_interval=10.0)
     colvar = np.load(tmp_path / "COLVAR_w.npy")[:, 0]
-    frames = np.load(tmp_path / "FRAMES_w.npz")
+    hist = np.load(tmp_path / "FEhist_w.npz")
     assert len(colvar) == 101                                  # every hill (2 ps) + t=0
-    assert np.allclose(frames["time_ns"], np.arange(101) * 0.002)
+    assert float(hist["record_dt_ns"]) == pytest.approx(0.002)
+    assert float(hist["dcd_interval_ns"]) == pytest.approx(0.010)
     assert os.path.exists(tmp_path / "REWEIGHT_w.npz") == reweight
     if reweight:
         rw = np.load(tmp_path / "REWEIGHT_w.npz")
         assert len(rw["bias_kj"]) == len(rw["rct_kj"]) == 101
         assert rw["bias_kj"][0] == 0.0 and rw["rct_kj"][-1] > 0.0
+        assert float(rw["record_dt_ns"]) == float(hist["record_dt_ns"])
     traj = mda.Universe(pdb, str(tmp_path / "WTMetaD_w.dcd"))
     assert len(traj.trajectory) == 20                          # one frame per 10 ps
-    rows = np.flatnonzero(frames["dcd_frame"] >= 0)
+    dcd_frame = dcd_frame_of_rows(len(colvar), hist["record_dt_ns"], hist["dcd_interval_ns"])
+    rows = np.flatnonzero(dcd_frame >= 0)
     assert list(rows) == list(range(5, 101, 5))
     for k in rows:
-        traj.trajectory[int(frames["dcd_frame"][k])]
+        traj.trajectory[int(dcd_frame[k])]
         assert traj.atoms.positions[0, 0] / 10.0 == pytest.approx(colvar[k], abs=1e-4)
 
 
-def test_report_reads_row_times_from_frames(tmp_path):
+def test_dcd_frame_of_rows():
+    assert list(dcd_frame_of_rows(7, 0.002, 0.004)) == [-1, -1, 0, -1, 1, -1, 2]
+    assert list(dcd_frame_of_rows(4, 0.010, 0.002)) == [-1, 4, 9, 14]   # coarser rows
+    assert list(dcd_frame_of_rows(3, 0.010, 0.010)) == [-1, 0, 1]
+
+
+def test_report_reads_the_row_interval_from_fehist(tmp_path):
     np.save(tmp_path / "COLVAR_w.npy", np.linspace(0.0, 1.0, 11)[:, None])
-    np.savez(tmp_path / "FRAMES_w.npz", time_ns=np.arange(11) * 0.002)
+    np.savez(tmp_path / "FEhist_w.npz", fes_kj=np.zeros((1, 5)), time_ns=np.array([0.02]),
+             record_dt_ns=0.002, dcd_interval_ns=0.01)
     (tr,) = walker_traces(str(tmp_path), ["w"], None, (0.0, 1.0))
     assert tr.t_ns[-1] == pytest.approx(0.02)
+    os.remove(tmp_path / "FEhist_w.npz")
+    (tr,) = walker_traces(str(tmp_path), ["w"], None, (0.0, 1.0))
+    assert tr.t_ns[-1] == pytest.approx(0.10)                  # older runs: 10 ps rows

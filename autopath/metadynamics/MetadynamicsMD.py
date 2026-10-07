@@ -216,9 +216,10 @@ class MetadynamicsMD:
         -------
         str
             The ``run_id`` string used for all output file names produced by
-            this call (COLVAR, FE, checkpoint, PDB, system XML). ``FRAMES_<run_id>.npz``
-            gives each COLVAR row's time and DCD frame (-1 if none),
-            ``REWEIGHT_<run_id>.npz`` V(s_t, t) and c(t) per row, ``HILLS_<run_id>.npz`` every hill.
+            this call (COLVAR, FE, checkpoint, PDB, system XML). ``REWEIGHT_<run_id>.npz``
+            holds V(s_t, t) and c(t) per COLVAR row, ``HILLS_<run_id>.npz`` every hill.
+            FEhist and REWEIGHT store ``record_dt_ns`` and ``dcd_interval_ns``; see
+            ``Analysis.dcd_frame_of_rows`` for the row -> trajectory frame map.
 
         Warns
         -----
@@ -381,19 +382,15 @@ class MetadynamicsMD:
         rct_list = [meta.rct()] if reweight else None
         _ps_per_step = self.timestep.value_in_unit(openmmunit.picoseconds)
 
+        intervals = dict(record_dt_ns=record_steps * _ps_per_step / 1000.0,
+                         dcd_interval_ns=dcd_steps * _ps_per_step / 1000.0)
+
         def _save_reweight():
-            steps = np.arange(len(colvar_list)) * record_steps
-            # DCDReporter writes at steps D, 2D, ... so row k maps to frame k*R/D - 1
-            dcd_frame = np.where((steps > 0) & (steps % dcd_steps == 0), steps // dcd_steps - 1, -1)
-            time_ns = steps * _ps_per_step / 1000.0
-            np.savez(os.path.join(self.out_dir, f"FRAMES_{run_id}.npz"),
-                     time_ns=time_ns, dcd_frame=dcd_frame,
-                     record_dt_ns=record_steps * _ps_per_step / 1000.0,
-                     dcd_interval_ns=dcd_steps * _ps_per_step / 1000.0)
             if reweight:
                 np.savez(os.path.join(self.out_dir, f"REWEIGHT_{run_id}.npz"),
-                         time_ns=time_ns[:len(bias_list)],
+                         time_ns=np.arange(len(bias_list)) * intervals["record_dt_ns"],
                          bias_kj=np.array(bias_list), rct_kj=np.array(rct_list),
+                         **intervals,
                          temperature=self.temperature.value_in_unit(openmmunit.kelvin),
                          bias_factor=float(bias_factor), rct_ustride=int(rct_ustride))
             h = np.array(meta.hills, dtype=float).reshape(-1, len(resolved) + 2)
@@ -432,6 +429,7 @@ class MetadynamicsMD:
                 fes_kj=np.array(fe_hist),
                 time_ns=np.array(fe_hist_steps, dtype=float) * _ps_per_step / 1000.0,
                 started_at=np.array(_started_at, dtype=float),
+                **intervals,
             )
             logger.info("Saved %d FES snapshots for the convergence curve (%s).",
                         len(fe_hist), f"FEhist_{run_id}.npz")
