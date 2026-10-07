@@ -74,6 +74,8 @@ def main():
     ap.add_argument("--rct-ustride", type=int, default=5,
                     help="hills between recorded frames (5 x 2 ps = 10 ps)")
     ap.add_argument("--dcd-interval", type=float, default=10.0, help="trajectory interval (ps)")
+    ap.add_argument("--bias-factor", type=float, default=15.0, help="well-tempered bias factor")
+    ap.add_argument("--hill-height", type=float, default=1.2, help="initial hill height (kJ/mol)")
     args = ap.parse_args()
 
     base = args.base
@@ -199,7 +201,7 @@ def main():
              else "private")
     metad.run(state_xml_file=state, system=load_system(system_xml),
               run_id=run_id, cv_specs=cvs,
-              mMD_time=args.ns, bias_factor=15, hill_height=1.2,
+              mMD_time=args.ns, bias_factor=args.bias_factor, hill_height=args.hill_height,
               biasFrequency=2, funnel_force=funnel_force,
               funnel_params=params, bias_dir=bias_dir,
               boundary_correction=args.boundary_correction,
