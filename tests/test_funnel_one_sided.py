@@ -59,11 +59,12 @@ def test_below_the_wall_only_the_wall_acts_inside_the_cylinder():
     assert _energy(p, z, r_xy_ang=3.0) == pytest.approx(expected, rel=1e-4)
 
 
-def test_cone_is_unchanged_above_the_wall():
-    """Between the wall and z_cc the cone radius is (z_cc - |z|) tan(alpha) + R_cylinder."""
+def test_cone_keeps_widening_down_to_the_wall():
+    """Between the wall and z_cc the cone radius is (z_cc - z) tan(alpha) + R_cylinder,
+    so below z = 0 it keeps widening (FMAP), it is not mirrored."""
     p = _params()
     for z, r_extra in [(5.0, 1.0), (-2.0, 1.5)]:
-        r = (14.0 - abs(z)) + 4.0 + r_extra
+        r = (14.0 - z) + 4.0 + r_extra
         assert _energy(p, z, r_xy_ang=r) == pytest.approx(0.5 * K_KJ_PER_A2 * r_extra ** 2, rel=1e-4)
 
 

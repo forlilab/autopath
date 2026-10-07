@@ -598,8 +598,8 @@ def create_funnel_force_from_trajectory_analysis(
         "U_lower = step(z_low - r_z)*0.5*k_z*(z_low - r_z)^2;"
         "Wall_funnel = 0.5 * k_xy * (r_xy - R_funnel)^2;"
         "Wall_cylinder = 0.5 * k_xy * (r_xy - R_cylinder)^2;"
-        # the cone narrows again below z=0, to R_cylinder at -z_cc
-        "R_funnel = max(z_cc-abs(r_z), 0)*tan(alpha) + R_cylinder;"
+        # the cone keeps widening below z=0, down to the lower wall (as in FMAP)
+        "R_funnel = max(z_cc-r_z, 0)*tan(alpha) + R_cylinder;"
         # r_xy = |n x r|: sqrt(r2 - r_z^2) cancels in single precision and has an
         # infinite derivative at 0, which the zero step() turns into NaN.
         "r_xy = sqrt(cx^2 + cy^2 + cz^2 + 1e-12);"
@@ -652,7 +652,7 @@ def _perp_basis(axis: np.ndarray):
 
 def _funnel_radius(z, z_cc: float, R_cylinder: float, alpha_deg: float):
     """Funnel radius at axial z (Å), as in the force expression."""
-    return np.maximum(z_cc - np.abs(z), 0.0) * np.tan(np.radians(alpha_deg)) + R_cylinder
+    return np.maximum(z_cc - np.asarray(z, float), 0.0) * np.tan(np.radians(alpha_deg)) + R_cylinder
 
 
 def _funnel_cgo(
