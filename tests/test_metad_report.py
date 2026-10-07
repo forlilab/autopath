@@ -111,12 +111,34 @@ def test_concurrent_history_is_on_aggregate_time(tmp_path):
     np.testing.assert_allclose(est.t_ns[:3], 1.5)
 
 
-def test_deposition_rate_falls_as_the_bias_converges():
-    t = np.linspace(0.5, 20, 40)
-    snaps = np.array([F * (1 - np.exp(-ti / 5.0)) for ti in t])     # bias saturates
-    tr, rate = R._deposition_rate(t, snaps, (0.0, 1.0), GAMMA)
-    assert rate.size and np.all(rate > 0)
-    assert rate[-1] < 0.1 * rate[0]
+def _hills(d, run_id, n=2500, t_ns=5.0):
+    t = np.linspace(t_ns / n, t_ns, n)
+    np.savez(d / f"HILLS_{run_id}.npz", time_ns=t, cv=np.zeros((n, 1)),
+             height_kj=1.2 * np.exp(-t / 2.0))                     # well-tempered decay
+
+
+def test_hill_heights_fall_on_walker_time(tmp_path):
+    d = _isolated(tmp_path)
+    for rid in ("m1", "m2"):
+        _hills(d, rid)
+    traces = R._hill_traces(str(d), R.detect_mode(str(d)))
+    assert {r for r, _, _ in traces} == {"m1", "m2"}
+    for _, t, h in traces:
+        assert t[-1] == pytest.approx(5.0)
+        ok = np.isfinite(h)
+        assert h[ok][-1] < 0.1 * h[ok][0]
+
+
+def test_sequential_hills_are_laid_end_to_end_in_start_order(tmp_path):
+    d = tmp_path / "seq_hills"
+    d.mkdir()
+    for k, rid in enumerate(("b", "a")):                       # b started first
+        np.save(d / f"bias_{k}_1.npy", _bias(F) / 2)
+        _walker(d, rid, start=1000.0 + 700 * k, end=1600.0 + 700 * k)
+        _hills(d, rid)
+    traces = R._hill_traces(str(d), R.detect_mode(str(d)))
+    assert [r for r, _, _ in traces] == ["b", "a"]
+    assert traces[1][1][0] == pytest.approx(5.0 + 5.0 / 2500)
 
 
 def test_report_without_a_funnel_gives_the_uncorrected_well_depth(tmp_path):

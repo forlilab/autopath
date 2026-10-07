@@ -411,31 +411,53 @@ def plot_colvar(traces, mode, basins, grid, cv_name, out_path, z_max_ang=None):
     return out_path
 
 
-def _deposition_rate(t_ns, snapshots, grid, bias_factor, window=6):
-    """Rate at which bias is added (kJ/mol · CV-unit / ns), from the FES snapshots.
+def _rolling_median(x, n):
+    if len(x) < n:
+        return np.asarray(x, float)
+    w = np.lib.stride_tricks.sliding_window_view(np.asarray(x, float), n)
+    return np.r_[np.full(n - 1, np.nan), np.median(w, axis=1)]
 
-    V = -(γ-1)/γ · F. Its integral is made monotone (running max, removes sync dips)
-    and the rate is a linear-fit slope over ``window`` snapshots.
+
+def _hill_traces(out_dir, mode, window=100) -> list:
+    """(run_id, t_ns, rolling-median hill height kJ/mol) per walker, from HILLS_<run_id>.npz.
+
+    Time axis as in the ΔG(t) panel: walker time, end to end for sequential
+    shared walkers, aggregate progress for concurrent ones.
     """
-    V = -((bias_factor - 1.0) / bias_factor) * np.asarray(snapshots, float)
-    dx = (grid[1] - grid[0]) / max(V.shape[1] - 1, 1)
-    vol = np.maximum.accumulate(V.sum(axis=1) * dx)
-    t = np.asarray(t_ns, float)
-    out_t, out_r = [], []
-    for i in range(0, len(t) - window + 1):
-        tt, vv = t[i:i + window], vol[i:i + window]
-        if np.ptp(tt) <= 0:
-            continue
-        slope = np.polyfit(tt, vv, 1)[0]
-        if slope > 0:
-            out_t.append(tt.mean())
-            out_r.append(slope)
-    return np.array(out_t), np.array(out_r)
+    hills = {}
+    for r in mode.run_ids:
+        p = os.path.join(out_dir, f"HILLS_{r}.npz")
+        if os.path.exists(p):
+            d = np.load(p)
+            if d["time_ns"].size:
+                hills[r] = (np.asarray(d["time_ns"], float), np.asarray(d["height_kj"], float))
+    if not hills:
+        return []
+    windows = {r: _wall_window(_hist_files(out_dir, r)[0]) for r in hills if _hist_files(out_dir, r)}
+    out = []
+    if mode.layout == "shared" and mode.schedule == "concurrent" and len(windows) == len(hills):
+        def progress(w, r):
+            s, e = windows[r]
+            return hills[r][0][-1] * np.clip((w - s) / max(e - s, 1e-9), 0.0, 1.0)
+        for r, (t, h) in hills.items():
+            s, e = windows[r]
+            w = s + (e - s) * t / max(t[-1], 1e-12)
+            out.append((r, sum(progress(w, q) for q in hills), _rolling_median(h, window)))
+    elif mode.layout == "shared":
+        order = sorted(hills, key=lambda r: windows.get(r, (np.inf,))[0])
+        offset = 0.0
+        for r in order:
+            t, h = hills[r]
+            out.append((r, t + offset, _rolling_median(h, window)))
+            offset += t[-1]
+    else:
+        out = [(r, t, _rolling_median(h, window)) for r, (t, h) in hills.items()]
+    return out
 
 
 @_styled
 def plot_convergence(estimates, mode, grid, bias_factor, plateau_results, out_path,
-                     corrected=True):
+                     corrected=True, out_dir=None):
     fig, (a1, a2, a3) = plt.subplots(3, 1, figsize=(9, 10))
     colors = plt.cm.tab10(np.linspace(0, 1, max(len(estimates), 1)))
     xlab = ("aggregate simulation time (ns)" if mode.layout == "shared" and mode.schedule == "concurrent"
@@ -453,11 +475,6 @@ def plot_convergence(estimates, mode, grid, bias_factor, plateau_results, out_pa
             t0 = 0.6 * e.t_ns[-1]
             last = e.dG_kj[ok][-1]
             a1.fill_between([t0, e.t_ns[-1]], last - 4.0, last + 4.0, color=colors[k], alpha=0.12)
-        # bias deposition rate: d/dt of the integrated bias, V = -(γ-1)/γ F
-        if e.snapshots.size and len(e.t_ns) > 3:
-            t_r, rate = _deposition_rate(e.t_ns, e.snapshots, grid, bias_factor)
-            if t_r.size:
-                a3.plot(t_r, rate, color=colors[k], lw=1.2, label=e.label)
     a1.set_xlabel(xlab)
     a1.set_ylabel("ΔG°_b (kJ/mol)" if corrected else "well depth (kJ/mol)")
     a1.set_title("ΔG°_b(t)  (filled = bound basin resolved; band = ±4 kJ/mol over the last 40%)",
@@ -479,10 +496,18 @@ def plot_convergence(estimates, mode, grid, bias_factor, plateau_results, out_pa
         fig.colorbar(sm, ax=a2, label=xlab)
         a2.set_title(f"FES snapshots ({main.label}), unbound = 0", fontsize=9)
     a2.set_ylabel("FES (kJ/mol)")
+    traces = _hill_traces(out_dir, mode) if out_dir else []
+    hc = plt.cm.tab10(np.linspace(0, 1, max(len(traces), 1)))
+    same = {e.label: colors[k] for k, e in enumerate(estimates)}    # same walker, same colour
+    for k, (r, t, h) in enumerate(traces):
+        a3.plot(t, h, color=same.get(r, hc[k]), lw=1.0, label=r)
+    if traces:
+        a3.legend(fontsize=7)
     a3.set_yscale("log")
     a3.set_xlabel(xlab)
-    a3.set_ylabel("bias deposition rate\n(kJ/mol · CV / ns)")
-    a3.set_title("Bias deposition rate (falls as the well-tempered bias converges)", fontsize=9)
+    a3.set_ylabel("hill height (kJ/mol)")
+    a3.set_title("Well-tempered hill height, median of 100 hills (falls as the bias converges)",
+                 fontsize=9)
     fig.suptitle(f"Convergence — {mode.describe()}", fontsize=10)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
@@ -574,7 +599,7 @@ def report(out_dir, temperature, bias_factor, grid_min=0.0, grid_max=1.0,
                               z_max_ang=z_max),
         "convergence": plot_convergence(estimates, mode, grid, float(bias_factor),
                                         plateau_results, f"{out_prefix}_convergence.png",
-                                        corrected=fp is not None),
+                                        corrected=fp is not None, out_dir=out_dir),
     }
     for e in estimates:
         logger.info("  %-28s ΔG°_b = %s kJ/mol%s", e.label,
