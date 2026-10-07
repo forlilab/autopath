@@ -97,14 +97,6 @@ def main():
     log.info("pocket atoms: %d; ligand anchor atoms: %s", len(pocket), list(lig))
     topology = PDBFile(f"{base}/system.pdb").topology
 
-    # same milestones and order as the seeded run, so the path CV is identical
-    milestones = sorted(
-        (m for m in glob(f"{base}/milestones/milestone_*_frame_*.xml")
-         if "_relax" not in os.path.basename(m)),
-        key=lambda x: int(os.path.basename(x).split("_frame_")[0].rsplit("_", 1)[-1]))
-    milestones = order_milestones_bound_to_unbound(milestones, pocket, lig)
-    log.info("path CV milestones: %s", [os.path.basename(m) for m in milestones])
-
     params = load_funnel_params(args.funnel_from)
     funnel_force = create_funnel_force_from_trajectory_analysis(params)
     log.info("funnel reused from %s", args.funnel_from)
@@ -121,18 +113,30 @@ def main():
         if not os.path.exists(_f):
             raise SystemExit(f"missing seed file: {_f}")
 
-    # extend the path to the funnel cap unless a target is given
     z_max = params["z_max"].value_in_unit(ommunit.angstrom)
-    extend = args.extend_path
-    if extend is None:
-        extend = com_distance_at_z(read_positions(milestones[-1]) * 10.0, lig, pocket,
-                                   params["unbinding_axis"], z_max)
-    path = pathCV_cv(topology=topology, milestones=milestones,
-                     pocket_atoms=pocket, ligand_atoms=lig,
-                     system=load_system(f"{base}/system.xml"),
-                     grid_min=0.0, grid_max=1.0, hill_width=0.05, sigma="auto",
-                     extend_path_to_nm=extend)
-    span = path.cv_length_per_unit_ang
+    # the path CV is only needed to bias it, to match its hill width, or to check its length
+    need_path = (args.cv == "path" or args.expect_cv_length is not None
+                 or (args.cv.startswith("funnel_z") and args.hill_width is None))
+    path, span = None, None
+    if need_path:
+        # same milestones and order as the seeded run, so the path CV is identical
+        milestones = sorted(
+            (m for m in glob(f"{base}/milestones/milestone_*_frame_*.xml")
+             if "_relax" not in os.path.basename(m)),
+            key=lambda x: int(os.path.basename(x).split("_frame_")[0].rsplit("_", 1)[-1]))
+        milestones = order_milestones_bound_to_unbound(milestones, pocket, lig)
+        log.info("path CV milestones: %s", [os.path.basename(m) for m in milestones])
+        # extend the path to the funnel cap unless a target is given
+        extend = args.extend_path
+        if extend is None:
+            extend = com_distance_at_z(read_positions(milestones[-1]) * 10.0, lig, pocket,
+                                       params["unbinding_axis"], z_max)
+        path = pathCV_cv(topology=topology, milestones=milestones,
+                         pocket_atoms=pocket, ligand_atoms=lig,
+                         system=load_system(f"{base}/system.xml"),
+                         grid_min=0.0, grid_max=1.0, hill_width=0.05, sigma="auto",
+                         extend_path_to_nm=extend)
+        span = path.cv_length_per_unit_ang
 
     # abort if one unit of progress is not the same distance as in the reference run
     if args.expect_cv_length is not None and (
@@ -170,8 +174,7 @@ def main():
                 [_h, _g], weighByMass=True, pbc=False,
                 fz_nx=[float(_n[0])], fz_ny=[float(_n[1])], fz_nz=[float(_n[2])])
             log.info("funnel z NOT clamped (experiment arm)")
-        log.info("CV: funnel z on [%.2f, %.2f] Å, hills %.3f nm (= the path arm's %.2f Å)",
-                 z_lo, z_max, width_nm, 0.05 * span)
+        log.info("CV: funnel z on [%.2f, %.2f] Å, hills %.3f nm", z_lo, z_max, width_nm)
     cvs = [] if cv is None else [cv]
     if args.cv in ("dist", "funnel_z_dist"):
         u_sys = mda.Universe(f"{base}/system.pdb")
