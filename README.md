@@ -235,6 +235,9 @@ AutoPath configuration files use a nested JSON structure: each top-level key is 
 | `mMD_milestone_seeding` | bool | `true` | Start each walker from its own milestone's relaxed checkpoint, instead of all walkers sharing the first milestone |
 | `mMD_multiple_walkers` | bool | `false` | Share one bias directory across all walkers (true multi-walker metadynamics) instead of independent per-walker bias |
 | `mMD_preseed_bias` | bool | `false` | Pre-seed the metadynamics bias from the sMD PMF before launching walkers |
+| `mMD_reweight` | bool | `true` | Record the bias at the walker and c(t) every frame (`REWEIGHT_*.npz`) for Tiwary–Parrinello reweighting |
+| `mMD_rct_ustride` | int | `5` | Hills between recorded frames (COLVAR, FUNNELZ, REWEIGHT); 5 × 2 ps = 10 ps |
+| `mMD_dcd_interval` | float | `10.0` | Trajectory interval in ps |
 | `mMD_boundary_correction` | bool | `true` | Divide each hill by its fraction inside the reachable CV range (McGovern–de Pablo), removing the bias deficit at the edges |
 
 All parameters, including equilibration and milestone extraction options, are documented in `autopath/config.py`.

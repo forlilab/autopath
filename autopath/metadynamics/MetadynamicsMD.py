@@ -88,8 +88,6 @@ class MetadynamicsMD:
         Temperature as an OpenMM Quantity (kelvin).
     platform : openmm.Platform
         Selected OpenMM platform.
-    record_CV : int
-        Steps between CV snapshots (~every 10 ps at default timestep).
     store_CV : int
         Steps between on-disk COLVAR saves (~every 100 ps at default timestep).
     """
@@ -137,7 +135,6 @@ class MetadynamicsMD:
                 logger.info("Using Girsanov reweighting for steered MD.")
 
         self.verbose = verbose
-        self.record_CV = int((1/self.timestep.value_in_unit(openmmunit.picoseconds)) * 10)
         self.store_CV = int((1/self.timestep.value_in_unit(openmmunit.picoseconds)) * 100)
 
         return
@@ -159,6 +156,9 @@ class MetadynamicsMD:
         funnel_params: dict = None,
         bias_dir: str = None,
         boundary_correction: bool = True,
+        reweight: bool = True,
+        rct_ustride: int = 5,
+        dcd_interval: float = 10.0,
     ) -> str:
         """Run a single WT-MetaD trajectory and return the run identifier.
 
@@ -204,13 +204,22 @@ class MetadynamicsMD:
             Divide each hill by its fraction inside ``CVSpec.bounds`` (default the
             grid), the McGovern–de Pablo edge correction (default True). Walkers
             sharing a bias must all use the same setting.
+        reweight : bool, optional
+            Record the bias at the walker and c(t) per frame in
+            ``REWEIGHT_<run_id>.npz`` (Tiwary & Parrinello 2015; default True).
+        rct_ustride : int, optional
+            Hills between per-frame records (default 5, i.e. 10 ps at a 2 ps
+            pace). COLVAR, FUNNELZ and REWEIGHT rows all use this interval.
+        dcd_interval : float, optional
+            Trajectory (and state CSV) interval in ps (default 10).
 
         Returns
         -------
         str
             The ``run_id`` string used for all output file names produced by
-            this call (COLVAR, FE, checkpoint, PDB, system XML). ``REWEIGHT_<run_id>.npz``
-            holds V(s_t, t) and c(t) per COLVAR frame, ``HILLS_<run_id>.npz`` every hill.
+            this call (COLVAR, FE, checkpoint, PDB, system XML). ``FRAMES_<run_id>.npz``
+            gives each COLVAR row's time and DCD frame (-1 if none),
+            ``REWEIGHT_<run_id>.npz`` V(s_t, t) and c(t) per row, ``HILLS_<run_id>.npz`` every hill.
 
         Warns
         -----
@@ -239,6 +248,10 @@ class MetadynamicsMD:
         mMD_steps = math.ceil(mMD_time / self.timestep.value_in_unit(openmmunit.picoseconds) * 1000.0)
         biasFrequency = int((1/self.timestep.value_in_unit(openmmunit.picoseconds)) * biasFrequency)
         saveFrequency = int((1/self.timestep.value_in_unit(openmmunit.picoseconds)) * saveFrequency)
+        record_steps = int(rct_ustride) * biasFrequency
+        dcd_steps = int(round(dcd_interval / self.timestep.value_in_unit(openmmunit.picoseconds)))
+        if record_steps < 1 or dcd_steps < 1:
+            raise ValueError("rct_ustride and dcd_interval must give at least one step")
 
         hill_height = hill_height * openmmunit.kilojoules_per_mole
 
@@ -352,7 +365,7 @@ class MetadynamicsMD:
             self.out_dir,
             f"WTMetaD_{run_id}",
             mMD_steps,
-            biasFrequency,
+            dcd_steps,
         )
         if self.use_GReweighting:
             # The rebuilt simulation has its own integrator copy.
@@ -364,20 +377,30 @@ class MetadynamicsMD:
                                                             ))
 
         colvar_list = [meta.getCollectiveVariables(simulation)]
-        # Bias at the walker and c(t) per COLVAR frame, for reweighting.
-        bias_list, rct_list = [meta.bias_energy(simulation)], [meta.rct()]
+        # Bias at the walker and c(t) per COLVAR row, for reweighting.
+        bias_list = [meta.bias_energy(simulation)] if reweight else None
+        rct_list = [meta.rct()] if reweight else None
         _ps_per_step = self.timestep.value_in_unit(openmmunit.picoseconds)
 
         def _save_reweight():
-            np.savez(os.path.join(self.out_dir, f"REWEIGHT_{run_id}.npz"),
-                     time_ns=np.arange(len(bias_list)) * self.record_CV * _ps_per_step / 1000.0,
-                     bias_kj=np.array(bias_list), rct_kj=np.array(rct_list),
-                     temperature=self.temperature.value_in_unit(openmmunit.kelvin),
-                     bias_factor=float(bias_factor))
+            steps = np.arange(len(colvar_list)) * record_steps
+            # DCDReporter writes at steps D, 2D, ... so row k maps to frame k*R/D - 1
+            dcd_frame = np.where((steps > 0) & (steps % dcd_steps == 0), steps // dcd_steps - 1, -1)
+            time_ns = steps * _ps_per_step / 1000.0
+            np.savez(os.path.join(self.out_dir, f"FRAMES_{run_id}.npz"),
+                     time_ns=time_ns, dcd_frame=dcd_frame,
+                     record_dt_ns=record_steps * _ps_per_step / 1000.0,
+                     dcd_interval_ns=dcd_steps * _ps_per_step / 1000.0)
+            if reweight:
+                np.savez(os.path.join(self.out_dir, f"REWEIGHT_{run_id}.npz"),
+                         time_ns=time_ns[:len(bias_list)],
+                         bias_kj=np.array(bias_list), rct_kj=np.array(rct_list),
+                         temperature=self.temperature.value_in_unit(openmmunit.kelvin),
+                         bias_factor=float(bias_factor), rct_ustride=int(rct_ustride))
             h = np.array(meta.hills, dtype=float).reshape(-1, len(resolved) + 2)
             np.savez(os.path.join(self.out_dir, f"HILLS_{run_id}.npz"),
                      time_ns=h[:, 0] * _ps_per_step / 1000.0, cv=h[:, 1:-1], height_kj=h[:, -1])
-        # Funnel-axis z (Å) at COLVAR cadence, for counting round trips.
+        # Funnel-axis z (Å) per COLVAR row, for counting round trips.
         funnelz_list = None
         if funnel_params is not None:
             _sysm = simulation.system
@@ -395,20 +418,22 @@ class MetadynamicsMD:
         fe_hist, fe_hist_steps = [], []
         # Start time orders sequential shared-bias walkers.
         _started_at = time.time()
-        _fe_hist_every = max(self.record_CV,
-                             (int(mMD_steps) // 40 // self.record_CV or 1) * self.record_CV)
-        for i in range(0, int(mMD_steps), self.record_CV):
-            if self.verbose and i % self.store_CV == 0:
+        _fe_hist_every = max(record_steps,
+                             (int(mMD_steps) // 40 // record_steps or 1) * record_steps)
+        _store_every = max(1, round(self.store_CV / record_steps))
+        for k, i in enumerate(range(0, int(mMD_steps), record_steps)):
+            if self.verbose and k % _store_every == 0:
                 np.save(os.path.join(self.out_dir, f"COLVAR_{run_id}.npy"), np.array(colvar_list))
                 if funnelz_list is not None:
                     np.save(os.path.join(self.out_dir, f"FUNNELZ_{run_id}.npy"),
                             np.array(funnelz_list))
                 _save_reweight()
 
-            meta.step(simulation, self.record_CV)
+            meta.step(simulation, record_steps)
             colvar_list.append(meta.getCollectiveVariables(simulation))
-            bias_list.append(meta.bias_energy(simulation))
-            rct_list.append(meta.rct())
+            if reweight:
+                bias_list.append(meta.bias_energy(simulation))
+                rct_list.append(meta.rct())
             if funnelz_list is not None:
                 funnelz_list.append(_funnel_z())
 
@@ -417,7 +442,7 @@ class MetadynamicsMD:
                 fe_hist.append(np.asarray(
                     meta.getFreeEnergy().value_in_unit(
                         openmmunit.kilojoule_per_mole), dtype=float))
-                fe_hist_steps.append(i + self.record_CV)
+                fe_hist_steps.append(i + record_steps)
         colvar_array = np.array(colvar_list)
 
         _save_reweight()

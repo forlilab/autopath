@@ -162,7 +162,8 @@ class AutoPath:
         ``mMD_bias_factor``, ``mMD_bias_frequency``, ``mMD_hill_height``,
         ``mMD_hill_width``, ``mMD_time``, ``mMD_milestone_seeding``,
         ``mMD_multiple_walkers``, ``mMD_preseed_bias``, ``mMD_preseed_speed``,
-        ``mMD_funnel_host_selection``, ``mMD_boundary_correction``
+        ``mMD_funnel_host_selection``, ``mMD_boundary_correction``,
+        ``mMD_reweight``, ``mMD_rct_ustride``, ``mMD_dcd_interval``
 
     Notes
     -----
@@ -179,6 +180,9 @@ class AutoPath:
       sampled range (McGovern–de Pablo), removing the bias deficit at the edges.
       For the funnel z CV only the clamped cap (z_max) is corrected; the soft
       lower wall is not. Other CVs use the grid ends. On by default.
+    * ``mMD_reweight`` records V(s_t, t) and c(t) per frame (REWEIGHT_*.npz);
+      ``mMD_rct_ustride`` is the number of hills between frames (COLVAR, FUNNELZ
+      and REWEIGHT share it); ``mMD_dcd_interval`` is the trajectory interval (ps).
     """
 
     def __init__(
@@ -263,6 +267,9 @@ class AutoPath:
         mMD_preseed_speed: float = None,
         mMD_funnel_host_selection: str | None = None,
         mMD_boundary_correction: bool = True,
+        mMD_reweight: bool = True,
+        mMD_rct_ustride: int = 5,
+        mMD_dcd_interval: float = 10.0,  # ps
     ):
         # General
         self.pocket_selection = pocket_selection
@@ -361,6 +368,9 @@ class AutoPath:
         self.mMD_preseed_speed = mMD_preseed_speed
         self.mMD_funnel_host_selection = mMD_funnel_host_selection
         self.mMD_boundary_correction = mMD_boundary_correction
+        self.mMD_reweight = mMD_reweight
+        self.mMD_rct_ustride = mMD_rct_ustride
+        self.mMD_dcd_interval = mMD_dcd_interval
         # VS mode
         self.equilibration_checkpoint = False
         self.pulling_checkpoint = False
@@ -1529,6 +1539,9 @@ class AutoPath:
                             funnel_params=funnel_params if funnel_force is not None else None,
                             bias_dir=walker_bias_dir,
                             boundary_correction=self.mMD_boundary_correction,
+                            reweight=self.mMD_reweight,
+                            rct_ustride=self.mMD_rct_ustride,
+                            dcd_interval=self.mMD_dcd_interval,
                         )
                     except Exception as e:
                         logger.error(f"Error during WTMetaD for {milestone_name}: {e}")

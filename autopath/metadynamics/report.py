@@ -27,7 +27,7 @@ from autopath.metadynamics.Funnel import load_funnel_params, funnel_basins
 logger = logging.getLogger("autopath")
 
 KJ_TO_KCAL = 1.0 / 4.184
-COLVAR_DT_NS = 0.01          # MetadynamicsMD records COLVAR and FUNNELZ every 10 ps
+COLVAR_DT_NS = 0.01          # COLVAR row interval when FRAMES_<run_id>.npz is missing
 _BIAS_RE = re.compile(r"bias_(\d+)_(\d+)\.npy")
 
 
@@ -327,7 +327,10 @@ def walker_traces(out_dir, run_ids, basins, grid, cv_is_funnel_z=False) -> list:
             stats["coordinate"] = "funnel_z"
         else:
             stats = ma.walker_transitions(cpath, basins, grid_min=grid[0], grid_max=grid[1])
-        traces.append(Trace(r, np.arange(len(cv)) * COLVAR_DT_NS, cv, z, stats))
+        fpath = os.path.join(out_dir, f"FRAMES_{r}.npz")
+        t_ns = (np.load(fpath)["time_ns"][:len(cv)] if os.path.exists(fpath)
+                else np.arange(len(cv)) * COLVAR_DT_NS)
+        traces.append(Trace(r, t_ns, cv, z, stats))
     return traces
 
 
@@ -423,9 +426,9 @@ def plot_colvar(traces, mode, basins, grid, cv_name, out_path, z_max_ang=None):
         ax.axhspan(min(0.0, float(np.nanmin(y))), lo, color="royalblue", alpha=0.10)
         ax.axhspan(hi, max(top, hi), color="tomato", alpha=0.10)
         for f in tr.stats["exit_frames"]:
-            ax.axvline(f * COLVAR_DT_NS, color="tomato", lw=0.8, ls=":")
+            ax.axvline(tr.t_ns[f], color="tomato", lw=0.8, ls=":")
         for f in tr.stats["return_frames"]:
-            ax.axvline(f * COLVAR_DT_NS, color="seagreen", lw=1.2)
+            ax.axvline(tr.t_ns[f], color="seagreen", lw=1.2)
         if use_z and not np.allclose(tr.cv * 10.0, tr.z_ang[:len(tr.cv)], atol=0.05):
             z = tr.z_ang[:len(tr.cv)]
             free = (tr.cv > grid[0] + 1e-4) & (tr.cv < grid[1] - 1e-4)   # CV is float32
