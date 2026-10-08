@@ -205,3 +205,17 @@ def test_combined_converges_to_the_well_tempered_estimate():
     ref = A * np.cos(2 * np.pi * grid[inner] / 0.45)
     assert np.sqrt(np.mean(((fe - ref) - (fe - ref).mean()) ** 2)) < 1.5
     assert max(meta.vstar_log) > 0 and meta.hills[-1][-1] < 0.2
+
+
+def test_vstar_lower_bound_and_ties_give_the_exact_answer():
+    rng = np.random.default_rng(11)
+    for _ in range(20):
+        v = np.round(rng.random((40, 60)) * 10, 1)          # many tied values
+        a, b = (3, 4), (35, 55)
+        ref = _widest_path(v, a, b, (True, False))
+        assert vstar(v, [a, b], (True, False)) == pytest.approx(ref)
+        assert vstar(v, [a, b], (True, False), lower=ref * rng.random()) == pytest.approx(ref)
+        assert vstar(v, [a, b], (True, False), lower=ref + 1.0) == pytest.approx(ref)   # bad hint
+    flat = np.zeros((50, 50))
+    flat[10:40, 25] = 5.0
+    assert vstar(flat, [(5, 5), (45, 45)]) == 0.0

@@ -44,25 +44,41 @@ def _linked(mask, basins, periodic):
     return len(roots) == 1
 
 
-def vstar(bias, basins, periodic=None) -> float:
+def vstar(bias, basins, periodic=None, lower=None) -> float:
     """Minimum bias on the maximally biased path linking all ``basins``.
 
     ``bias`` is an N-D grid, ``basins`` a list of index tuples into it and
     ``periodic`` one flag per grid axis (face-adjacent cells are neighbours).
+    ``lower`` is a level known to link the basins (the previous V*: the bias
+    only grows); it narrows the search. Exact: the result is a grid value.
     """
     bias = np.asarray(bias, dtype=float)
     basins = [tuple(int(i) for i in np.atleast_1d(b)) for b in basins]
     periodic = [False] * bias.ndim if periodic is None else list(periodic)
     top = min(bias[b] for b in basins)
-    levels = np.unique(bias[bias <= top])
-    lo, hi = 0, len(levels) - 1                    # levels[0] (global min) always links
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        if _linked(bias >= levels[mid], basins, periodic):
+    if _linked(bias >= top, basins, periodic):
+        return float(top)
+    lo = float(bias.min())                          # every cell: always linked
+    if lower is not None and lo < lower < top and _linked(bias >= lower, basins, periodic):
+        lo = float(lower)
+    hi = float(top)                                 # invariant: linked at lo, not at hi
+    for _ in range(60):                             # ties can keep the count high: cap it
+        if np.count_nonzero((bias >= lo) & (bias < hi)) <= 64:
+            break
+        mid = 0.5 * (lo + hi)
+        if _linked(bias >= mid, basins, periodic):
             lo = mid
         else:
-            hi = mid - 1
-    return float(levels[lo])
+            hi = mid
+    levels = np.unique(bias[(bias >= lo) & (bias < hi)])
+    i, j = 0, len(levels) - 1                       # levels[0] links: same set as level lo
+    while i < j:
+        mid = (i + j + 1) // 2
+        if _linked(bias >= levels[mid], basins, periodic):
+            i = mid
+        else:
+            j = mid - 1
+    return float(levels[i])
 
 
 class TransitionTemperedMetadynamics(BoundaryCorrectedMetadynamics):
@@ -104,7 +120,8 @@ class TransitionTemperedMetadynamics(BoundaryCorrectedMetadynamics):
         return tuple(reversed(idx))                 # grid axes run in reverse variable order
 
     def vstar(self) -> float:
-        return vstar(self._totalBias, self.basins, [v.periodic for v in reversed(self.variables)])
+        return vstar(self._totalBias, self.basins, [v.periodic for v in reversed(self.variables)],
+                     lower=self.vstar_log[-1] if self.vstar_log else None)
 
     def step(self, simulation, steps):
         stepsToGo = steps
