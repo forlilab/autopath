@@ -25,7 +25,8 @@ import numpy as np
 from openmm import unit as ommunit
 
 from autopath.clustering import read_positions
-from autopath.metadynamics.CV import pathCV_cv, funnel_z_cv, com_cv
+from autopath.metadynamics.CV import CVSpec, pathCV_cv, funnel_z_cv, com_cv
+from cvpack import Torsion
 from autopath.metadynamics.Funnel import (create_funnel_force_from_trajectory_analysis,
                                           load_funnel_params, com_distance_at_z,
                                           funnel_z_grid_min_ang, funnel_z_bounds_nm)
@@ -58,7 +59,8 @@ def main():
                          "against; the control aborts if its own CV disagrees")
     ap.add_argument("--hill-width", dest="hill_width", type=float, default=None,
                     help="hill width in CV units (overrides the matched-width default)")
-    ap.add_argument("--cv", choices=["path", "funnel_z", "funnel_z_unclamped", "dist", "funnel_z_dist"],
+    ap.add_argument("--cv", choices=["path", "funnel_z", "funnel_z_unclamped", "dist", "funnel_z_dist",
+                                       "dist_torsion"],
                     default="path",
                     help="path: progress along the milestones, extended to the funnel "
                          "cap; funnel_z: the funnel axis coordinate, from below the lower wall to z_max; "
@@ -76,6 +78,12 @@ def main():
     ap.add_argument("--dcd-interval", type=float, default=10.0, help="trajectory interval (ps)")
     ap.add_argument("--bias-factor", type=float, default=15.0, help="well-tempered bias factor")
     ap.add_argument("--hill-height", type=float, default=1.2, help="initial hill height (kJ/mol)")
+    ap.add_argument("--torsion-atoms", nargs=4,
+                    default=["resid 205 and name CA", "resid 195 and name CA",
+                             "resname UNK and name C1x", "resname UNK and name C4x"],
+                    help="torsion for --cv dist_torsion (Gly226 CA - Gly216 CA - C1 - C4)")
+    ap.add_argument("--torsion-width", type=float, default=0.15, help="torsion hill width (rad)")
+    ap.add_argument("--torsion-points", type=int, default=211, help="torsion grid points")
     ap.add_argument("--tt-basins", nargs="+", default=None,
                     help="transition-tempered basins in CV units, one per point; "
                          "comma-separate the coordinates of 2D CVs (e.g. 0.4 2.8 or 0.4,1.0 2.8,1.0)")
@@ -151,7 +159,7 @@ def main():
             f"{args.expect_cv_length}. The selections or milestones differ, so the "
             "two ΔG(t) curves would not be comparable.")
 
-    if args.cv == "dist":
+    if args.cv in ("dist", "dist_torsion"):
         cv = None
     elif args.cv == "path":
         cv = path
@@ -181,7 +189,7 @@ def main():
             log.info("funnel z NOT clamped (experiment arm)")
         log.info("CV: funnel z on [%.2f, %.2f] Å, hills %.3f nm", z_lo, z_max, width_nm)
     cvs = [] if cv is None else [cv]
-    if args.cv in ("dist", "funnel_z_dist"):
+    if args.cv in ("dist", "funnel_z_dist", "dist_torsion"):
         u_sys = mda.Universe(f"{base}/system.pdb")
         a1, a2 = (u_sys.select_atoms(s) for s in args.dist_atoms)
         if len(a1) != 1 or len(a2) != 1:
@@ -195,6 +203,18 @@ def main():
         log.info("CV: distance %s (%d) - %s (%d) on [%.2f, %.2f] nm, hills %.3f nm",
                  args.dist_atoms[0], a1.indices[0], args.dist_atoms[1], a2.indices[0],
                  lo, hi, dcv.hill_width)
+    if args.cv == "dist_torsion":
+        # OpenMM needs all CVs periodic or none: d is periodic on a grid it never wraps
+        dcv.periodic = True
+        tor = [u_sys.select_atoms(s) for s in args.torsion_atoms]
+        if any(len(a) != 1 for a in tor):
+            raise SystemExit(f"--torsion-atoms must select one atom each: {[len(a) for a in tor]}")
+        tidx = [int(a.indices[0]) for a in tor]
+        cvs.append(CVSpec(cv=None, grid_min=-np.pi, grid_max=np.pi, hill_width=args.torsion_width,
+                          grid_points=args.torsion_points, periodic=True, name="torsion",
+                          _factory=lambda pos, n, top: Torsion(*tidx, pbc=False)))
+        log.info("CV: torsion %s (%s), hills %.2f rad; distance grid treated as periodic",
+                 args.torsion_atoms, tidx, args.torsion_width)
 
     metad = MetadynamicsMD(topology=topology, ligand_atoms=lig,
                            pocket_atoms=pocket, restrained_atoms=None,
