@@ -4,7 +4,7 @@ import openmm.unit as u
 import pytest
 from openmm.app.metadynamics import BiasVariable, Metadynamics
 
-from autopath.metadynamics import BoundaryCorrectedMetadynamics, MetadynamicsAnalysis
+from autopath.metadynamics import BoundaryCorrectedMetadynamics
 from autopath.metadynamics.BoundaryCorrection import (
     boundary_factor, inside_fraction, smooth_floor)
 from autopath.metadynamics.CV import CVSpec, funnel_z_cv
@@ -99,8 +99,8 @@ def test_bias_files_carry_the_corrected_bias(tmp_path):
     meta, ctx = _toy(True, bias_dir=tmp_path)
     _fill_uniformly(meta, ctx)
     meta._syncWithDisk()
-    biases = list(MetadynamicsAnalysis.load_bias_files(str(tmp_path)).values())
-    _, fes = MetadynamicsAnalysis.compute_fes(biases, 300, 15)
+    (f,) = tmp_path.glob("bias_*.npy")
+    fes = -(15.0 / 14.0) * np.load(f)
     assert np.allclose(fes, meta.getFreeEnergy().value_in_unit(u.kilojoule_per_mole))
 
 

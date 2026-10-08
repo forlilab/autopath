@@ -172,9 +172,9 @@ def test_combined_with_tt_off_is_exactly_well_tempered():
     assert hills[0][-1, -1] < 0.9                         # well tempering did act
 
 
-def test_combined_free_energy_rct_and_report_scale_are_well_tempered(tmp_path):
+def test_combined_free_energy_rct_and_report_scale_are_well_tempered():
     from autopath.metadynamics import BoundaryCorrectedMetadynamics
-    from autopath.metadynamics.report import fes_scale
+    from autopath.metadynamics.Hills import fes_scale
     s1, bv1 = _toy("0")
     s2, bv2 = _toy("0")
     wt = BoundaryCorrectedMetadynamics(s1, [bv1], T * u.kelvin, 5, 1.0, 10)
@@ -186,8 +186,7 @@ def test_combined_free_energy_rct_and_report_scale_are_well_tempered(tmp_path):
     assert np.allclose(both.getFreeEnergy().value_in_unit(u.kilojoule_per_mole),
                        wt.getFreeEnergy().value_in_unit(u.kilojoule_per_mole))
     assert both.rct() == pytest.approx(wt.rct())
-    np.savez(tmp_path / "HILLS_w.npz", tempering="wt+tt", height_kj=np.ones(1))
-    assert fes_scale(str(tmp_path), 5) == pytest.approx(1.25)
+    assert fes_scale({"tempering": "wt+tt", "bias_factor": 5}) == pytest.approx(1.25)
 
 
 def test_combined_converges_to_the_well_tempered_estimate():

@@ -184,43 +184,6 @@ def test_plot_bias_returns_quietly_when_no_bias_arrays(tmp_path, monkeypatch):
     assert not (out / "sys_quicklook_BIAS.png").exists()
 
 
-def test_load_bias_files_finds_isolated_walker_subdirs(tmp_path):
-    """load_bias_files finds each isolated walker's bias inside bias_<run_id>/."""
-    import numpy as np
-    from autopath.metadynamics.Analysis import MetadynamicsAnalysis
-
-    out = tmp_path / "metadynamics_funnel"
-    out.mkdir()
-    (out / "bias_milestone_1_frame_0").mkdir()
-    np.save(out / "bias_milestone_1_frame_0" / "bias_874600475_101.npy",
-            np.zeros(125))
-    (out / "bias_milestone_2_frame_145").mkdir()
-    np.save(out / "bias_milestone_2_frame_145" / "bias_525115211_17.npy",
-            np.ones(125))
-
-    biases = MetadynamicsAnalysis.load_bias_files(str(out))
-    assert len(biases) == 2, f"expected both walkers, got {list(biases)}"
-    assert all(b.shape == (125,) for b in biases.values())
-
-
-def test_load_bias_files_still_reads_flat_shared_bias_layout(tmp_path):
-    """Shared-bias mode must keep working: highest index wins per walker."""
-    import numpy as np
-    from autopath.metadynamics.Analysis import MetadynamicsAnalysis
-
-    out = tmp_path / "metadynamics"
-    out.mkdir()
-    np.save(out / "bias_7_1.npy", np.zeros(125))
-    np.save(out / "bias_7_9.npy", np.ones(125))
-    np.save(out / "bias_8_3.npy", np.full(125, 2.0))
-
-    biases = MetadynamicsAnalysis.load_bias_files(str(out))
-    assert sorted(biases) == [7, 8]
-    assert biases[7][0] == 1.0, "should keep the highest save index for walker 7"
-
-
-# --- metadynamics context rebuild + state-xml restart ----------------------
-
 def test_metad_rebuilds_context_instead_of_reinitialising():
     """Forces added after Context creation require rebuild_simulation, not reinitialize,
     which restores globals by name and can override the new force's defaults."""
@@ -607,60 +570,6 @@ def test_openmm_writes_self_bias_and_sums_to_get_the_total():
     assert "self._totalBias += bias.bias" in total
 
 
-def test_isolated_walkers_are_averaged_not_summed():
-    """Each isolated walker holds a complete bias, so they are averaged, not summed."""
-    import numpy as np
-    from autopath.metadynamics.Analysis import MetadynamicsAnalysis
-
-    one = np.linspace(0.0, 10.0, 25)
-    arrays = [one, one, one]
-    _, fes_mean = MetadynamicsAnalysis.compute_fes(
-        arrays, temperature=300.0, bias_factor=15.0, combine="mean")
-    _, fes_one = MetadynamicsAnalysis.compute_fes(
-        [one], temperature=300.0, bias_factor=15.0, combine="mean")
-    np.testing.assert_allclose(fes_mean, fes_one)
-
-    _, fes_sum = MetadynamicsAnalysis.compute_fes(
-        arrays, temperature=300.0, bias_factor=15.0, combine="sum")
-    np.testing.assert_allclose(fes_sum, 3.0 * fes_one)
-
-
-def test_shared_walkers_are_summed():
-    import numpy as np
-    from autopath.metadynamics.Analysis import MetadynamicsAnalysis
-
-    a, b = np.full(25, 1.0), np.full(25, 2.0)
-    _, fes = MetadynamicsAnalysis.compute_fes(
-        [a, b], temperature=300.0, bias_factor=15.0, combine="sum")
-    _, fes_total = MetadynamicsAnalysis.compute_fes(
-        [a + b], temperature=300.0, bias_factor=15.0, combine="sum")
-    np.testing.assert_allclose(fes, fes_total)
-
-
-def test_compute_fes_rejects_an_unknown_combination_rule():
-    import numpy as np, pytest as _pytest
-    from autopath.metadynamics.Analysis import MetadynamicsAnalysis
-    with _pytest.raises(ValueError):
-        MetadynamicsAnalysis.compute_fes(
-            [np.zeros(5)], temperature=300.0, bias_factor=15.0, combine="median")
-
-
-def test_bias_layout_detects_both_arrangements(tmp_path):
-    import numpy as np
-    from autopath.metadynamics.Analysis import MetadynamicsAnalysis
-
-    shared = tmp_path / "shared"; shared.mkdir()
-    np.save(shared / "bias_7_1.npy", np.zeros(25))
-    assert MetadynamicsAnalysis.bias_layout(str(shared)) == "shared"
-
-    iso = tmp_path / "iso"; iso.mkdir()
-    (iso / "bias_milestone_1_frame_0").mkdir()
-    np.save(iso / "bias_milestone_1_frame_0" / "bias_99_3.npy", np.zeros(25))
-    assert MetadynamicsAnalysis.bias_layout(str(iso)) == "isolated"
-
-
-# --- Limongelli Eq. 15: cross-section + basin integral ---------------------
-
 def _flat_funnel_params(R=5.0, z_cc=8.0, z_max=20.0):
     from openmm import unit as ommunit
     return {"R_cylinder": R * ommunit.angstrom,
@@ -760,20 +669,6 @@ def _fe_history(n_snap=20, n_grid=125, depth=-40.0, drift=0.0):
     return {"fes_kj": fes, "time_ns": np.linspace(0.25, 5.0, n_snap)}
 
 
-def test_dG_timeseries_returns_one_value_per_snapshot(tmp_path):
-    import numpy as np
-    from autopath.metadynamics.Analysis import MetadynamicsAnalysis as MA
-
-    h = _fe_history()
-    t, g, ok = MA.dG_timeseries(h, _flat_funnel_params(), temperature=298.15,
-                                cv_length_per_unit_ang=10.0)
-    assert len(t) == len(g) == len(ok) == len(h["time_ns"])
-    assert np.isfinite(g).all()
-    assert ok.all()
-    # a flat history must give a flat curve
-    assert np.ptp(g) == pytest.approx(0.0, abs=1e-9)
-
-
 def test_dG_plateau_detects_a_settled_run():
     import numpy as np
     from autopath.metadynamics.Analysis import MetadynamicsAnalysis as MA
@@ -799,14 +694,6 @@ def test_convergence_fails_when_dG_has_not_settled():
         [{"n_round_trips": 3}], flat,
         dG_plateau_result={"settled": False, "reason": "drifting", "n_points": 9})
     assert not v["converged"] and "ΔG(t)" in " ".join(v["reasons"])
-
-
-def test_metad_keeps_a_fes_history_for_the_curve():
-    """The run loop snapshots the FES, since OpenMM keeps no bias history."""
-    import inspect
-    from autopath.metadynamics.MetadynamicsMD import MetadynamicsMD
-    src = inspect.getsource(MetadynamicsMD.run)
-    assert "FEhist_" in src and "getFreeEnergy()" in src
 
 
 def test_a_flat_curve_without_both_basins_is_not_settled():
@@ -841,19 +728,6 @@ def test_correction_flags_an_empty_basin_instead_of_raising_when_not_strict():
                                  cv_length_per_unit_ang=10.0)["bound_state_sampled"]
 
 
-def test_dG_timeseries_keeps_snapshots_whose_basin_is_not_yet_filled():
-    """Snapshots without a filled basin keep a value and are flagged as unsampled."""
-    import numpy as np
-    from autopath.metadynamics.Analysis import MetadynamicsAnalysis as MA
-    h = _fe_history(n_snap=10)
-    h["fes_kj"][:4] = 0.0                       # first 4 snapshots: no basin yet
-    t, g, ok = MA.dG_timeseries(h, _flat_funnel_params(), temperature=298.15,
-                                cv_length_per_unit_ang=10.0)
-    assert len(g) == 10
-    assert np.isfinite(g).all(), "every snapshot must carry a value"
-    assert not ok[:4].any() and ok[4:].all()
-
-
 def test_dG_plateau_will_not_settle_on_unsampled_snapshots():
     """The plateau test uses only snapshots marked as sampled."""
     import numpy as np
@@ -871,40 +745,6 @@ def test_dG_plateau_will_not_settle_on_unsampled_snapshots():
 
 
 # --- shared bias: sequential walkers form one curve ------------------------
-
-def test_shared_bias_run_order_is_not_alphabetical(tmp_path):
-    """Shared-bias histories are ordered by start time, not by filename."""
-    import numpy as np
-    from autopath.metadynamics.Analysis import MetadynamicsAnalysis as MA
-    # milestone_3 ran first, milestone_1 last
-    for name, started in (("milestone_1", 300.0), ("milestone_2", 200.0),
-                          ("milestone_3", 100.0)):
-        np.savez(tmp_path / f"FEhist_{name}.npz", fes_kj=np.zeros((2, 8)),
-                 time_ns=np.array([0.5, 1.0]),
-                 started_at=np.array(started, dtype=float))
-    files = sorted(str(p) for p in tmp_path.glob("FEhist_*.npz"))
-    assert [os.path.basename(f) for f in files][0] == "FEhist_milestone_1.npz"
-    ordered = MA.shared_bias_run_order(files)
-    assert [os.path.basename(f) for f in ordered] == [
-        "FEhist_milestone_3.npz", "FEhist_milestone_2.npz", "FEhist_milestone_1.npz"]
-
-
-def test_shared_bias_run_order_falls_back_to_mtime(tmp_path):
-    """Without started_at, histories are ordered by file mtime."""
-    import numpy as np, os as _os
-    from autopath.metadynamics.Analysis import MetadynamicsAnalysis as MA
-    for name, mtime in (("milestone_1", 3000), ("milestone_2", 2000),
-                        ("milestone_3", 1000)):
-        f = tmp_path / f"FEhist_{name}.npz"
-        np.savez(f, fes_kj=np.zeros((2, 8)), time_ns=np.array([0.5, 1.0]))
-        _os.utime(f, (mtime, mtime))
-    files = sorted(str(p) for p in tmp_path.glob("FEhist_*.npz"))
-    ordered = MA.shared_bias_run_order(files)
-    assert [os.path.basename(f) for f in ordered] == [
-        "FEhist_milestone_3.npz", "FEhist_milestone_2.npz", "FEhist_milestone_1.npz"]
-
-
-# --- walker seed order -----------------------------------------------------
 
 def test_walker_seed_order_reverses_only_for_unbound_first():
     """Milestones are ordered bound -> unbound and reversed only for unbound_first."""

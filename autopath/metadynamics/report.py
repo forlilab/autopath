@@ -3,18 +3,17 @@
 Run modes:
 
 * single walker    its own bias and FES history;
-* shared bias      summed self-biases form one surface; history laid end to end
-                   (sequential) or on aggregate simulation time (concurrent);
+* shared bias      walkers sharing one bias directory form one surface; history on
+                   summed walker time at wall-clock cuts (concurrent or sequential);
 * isolated biases  each walker is an independent estimate, reported alone and as
                    mean ± sd (biases are never averaged).
 
-Every ΔG comes from correct_fe_for_funnel, so figures and log agree.
+Surfaces and histories are rebuilt from the HILLS v2 files (Hills.py); every ΔG
+comes from correct_fe_for_funnel, so figures and log agree.
 """
 import os
-import re
 import logging
 from dataclasses import dataclass, field
-from glob import glob
 from typing import Optional
 
 import numpy as np
@@ -23,12 +22,12 @@ import matplotlib.pyplot as plt
 
 from autopath.metadynamics.Analysis import MetadynamicsAnalysis, bound_site_bins, correct_fe_for_funnel
 from autopath.metadynamics.Funnel import load_funnel_params, funnel_basins
+from autopath.metadynamics.Hills import fes_history, load_hills
 
 logger = logging.getLogger("autopath")
 
 KJ_TO_KCAL = 1.0 / 4.184
-COLVAR_DT_NS = 0.01          # COLVAR row interval when FEhist lacks record_dt_ns
-_BIAS_RE = re.compile(r"bias_(\d+)_(\d+)\.npy")
+N_SNAPSHOTS = 40
 
 
 # ---------------------------------------------------------------------------
@@ -49,34 +48,22 @@ class RunMode:
         return f"{n} walkers, shared bias ({self.schedule})"
 
 
-def _hist_files(out_dir: str, run_id: str) -> list:
-    """FEhist file of one walker, as a list (empty if it never finished)."""
-    path = os.path.join(out_dir, f"FEhist_{run_id}.npz")
-    return [path] if os.path.exists(path) else []
+def _window(w) -> tuple:
+    """(start, end) wall-clock seconds of one walker: its start to its last hill."""
+    start = float(w["started_at"])
+    return start, float(w["wall_s"][-1]) if len(w["wall_s"]) else start
 
 
-def _wall_window(hist_path: str) -> tuple:
-    """(start, end) wall-clock seconds of the walker that wrote ``hist_path``."""
-    end = os.path.getmtime(hist_path)
-    data = np.load(hist_path)
-    start = float(data["started_at"]) if "started_at" in data.files else np.nan
-    if not np.isfinite(start) or start <= 0 or start > end:
-        start = end
-    return start, end
-
-
-def detect_mode(out_dir: str) -> RunMode:
-    run_ids = sorted(os.path.basename(f)[len("COLVAR_"):-len(".npy")]
-                     for f in glob(os.path.join(out_dir, "COLVAR_*.npy")))
+def detect_mode(walkers) -> RunMode:
+    """Walkers sharing one bias directory = shared bias, else isolated."""
+    run_ids = sorted(w["run_id"] for w in walkers)
     if len(run_ids) <= 1:
         return RunMode("single", None, run_ids)
-    if MetadynamicsAnalysis.bias_layout(out_dir) == "isolated":
+    if len({w["bias_dir"] for w in walkers}) > 1:
         return RunMode("isolated", None, run_ids)
-    windows = sorted(_wall_window(h[0]) for h in
-                     (_hist_files(out_dir, r) for r in run_ids) if h)
+    windows = sorted(_window(w) for w in walkers)
     concurrent = any(nxt[0] < cur[1] for cur, nxt in zip(windows, windows[1:]))
-    return RunMode("shared", "concurrent" if concurrent or len(windows) < 2 else "sequential",
-                   run_ids)
+    return RunMode("shared", "concurrent" if concurrent else "sequential", run_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -97,27 +84,6 @@ class Estimate:
     @property
     def dG(self) -> Optional[float]:
         return None if self.corr is None else float(self.corr["dG_bind_std_kj_mol"])
-
-
-def _latest_bias(directory: str) -> list:
-    latest = {}
-    for f in os.listdir(directory):
-        m = _BIAS_RE.match(f)
-        if m:
-            wid, idx = int(m.group(1)), int(m.group(2))
-            if wid not in latest or idx > latest[wid][0]:
-                latest[wid] = (idx, os.path.join(directory, f))
-    return [np.load(p) for _, p in latest.values()]
-
-
-def fes_scale(out_dir, bias_factor) -> float:
-    """-F/V: 1 for transition-tempered runs (HILLS tempering="tt"), else γ/(γ-1)."""
-    for f in glob(os.path.join(out_dir, "HILLS_*.npz")):
-        with np.load(f) as d:
-            if "tempering" in d.files and str(d["tempering"]) == "tt":
-                return 1.0
-    gamma = float(bias_factor)
-    return gamma / (gamma - 1.0)
 
 
 def _well_depth(fes_kj, grid=(0.0, 1.0), origin=None, n_tail=10):
@@ -190,92 +156,17 @@ def _history(snapshots, fp, temperature, grid, cv_len, reference_range=None, ori
     return dG, ok
 
 
-def _end_to_end(hist_lists):
-    t_all, fes_all, offset = [], [], 0.0
-    for files in hist_lists:
-        for h in files:
-            d = np.load(h)
-            t = np.asarray(d["time_ns"], float)
-            t_all.append(t + offset)
-            fes_all.append(np.asarray(d["fes_kj"], float))
-            offset = float(t_all[-1][-1]) if t.size else offset
-    if not t_all:
-        return np.zeros(0), np.zeros((0, 0))
-    return np.concatenate(t_all), np.concatenate(fes_all)
-
-
-def _aggregate_concurrent(hist_lists):
-    """Merge concurrent walkers' snapshots on aggregate simulation time.
-
-    A snapshot's aggregate time is the summed progress of all walkers at its
-    wall-clock time (progress assumed linear in wall time).
-    """
-    walkers = []
-    for files in hist_lists:
-        if not files:
-            continue
-        d = np.load(files[-1])
-        t = np.asarray(d["time_ns"], float)
-        if not t.size:
-            continue
-        start, end = _wall_window(files[-1])
-        walkers.append((t, np.asarray(d["fes_kj"], float), start, end))
-    if not walkers:
-        return np.zeros(0), np.zeros((0, 0))
-
-    def progress(w, t, start, end):
-        span = max(end - start, 1e-9)
-        return float(t[-1]) * float(np.clip((w - start) / span, 0.0, 1.0))
-
-    pts = []
-    for t, fes, start, end in walkers:
-        span = max(end - start, 1e-9)
-        for ti, fe in zip(t, fes):
-            w = start + span * ti / max(float(t[-1]), 1e-12)
-            agg = sum(progress(w, tj, sj, ej) for tj, _, sj, ej in walkers)
-            pts.append((agg, fe))
-    pts.sort(key=lambda p: p[0])
-    return np.array([p[0] for p in pts]), np.array([p[1] for p in pts])
-
-
-def build_estimates(out_dir, mode, fp, temperature, bias_factor, grid, cv_len,
-                    reference_range=None, origin=None) -> list:
-    scale = fes_scale(out_dir, bias_factor)
+def build_estimates(walkers, fp, temperature, grid, cv_len, reference_range=None,
+                    origin=None, n_snapshots=N_SNAPSHOTS) -> list:
+    """One estimate per bias: shared/single = one surface, isolated = one per walker."""
     estimates = []
-    if mode.layout == "isolated":
-        for sub in sorted(glob(os.path.join(out_dir, "bias_*"))):
-            if not os.path.isdir(sub):
-                continue
-            rid = os.path.basename(sub)[len("bias_"):]
-            biases = _latest_bias(sub)
-            if not biases:
-                continue
-            fes = -scale * np.sum(biases, axis=0)
-            corr, err = _correct(fes, fp, temperature, grid, cv_len, reference_range, origin)
-            hists = _hist_files(out_dir, rid)
-            t, snaps = _end_to_end([hists])
-            dG, ok = _history(snaps, fp, temperature, grid, cv_len, reference_range, origin)
-            estimates.append(Estimate(rid, fes, corr, err, t, dG, ok, snaps, complete=bool(hists)))
-        return estimates
-
-    biases = _latest_bias(out_dir)
-    for sub in glob(os.path.join(out_dir, "bias_*")):         # single walker in a subdir
-        if os.path.isdir(sub):
-            biases += _latest_bias(sub)
-    if not biases:
-        return estimates
-    fes = -scale * np.sum(biases, axis=0)
-    corr, err = _correct(fes, fp, temperature, grid, cv_len, reference_range, origin)
-    hist_lists = [_hist_files(out_dir, r) for r in mode.run_ids]
-    if mode.layout == "shared" and mode.schedule == "concurrent":
-        t, snaps = _aggregate_concurrent(hist_lists)
-    else:
-        order = sorted((h for h in hist_lists if h), key=lambda h: _wall_window(h[0])[0])
-        t, snaps = _end_to_end(order)
-    dG, ok = _history(snaps, fp, temperature, grid, cv_len, reference_range, origin)
-    label = mode.run_ids[0] if mode.layout == "single" and mode.run_ids else "shared bias"
-    estimates.append(Estimate(label, fes, corr, err, t, dG, ok, snaps,
-                              complete=all(bool(h) for h in hist_lists)))
+    for h in fes_history(walkers, n=n_snapshots):
+        fes = h["fes"][-1]
+        corr, err = _correct(fes, fp, temperature, grid, cv_len, reference_range, origin)
+        dG, ok = _history(h["fes"], fp, temperature, grid, cv_len, reference_range, origin)
+        label = h["run_ids"][0] if len(h["run_ids"]) == 1 else "shared bias"
+        done = all(bool(w.get("finished", False)) for w in walkers if w["run_id"] in h["run_ids"])
+        estimates.append(Estimate(label, fes, corr, err, h["t_ns"], dG, ok, h["fes"], complete=done))
     return estimates
 
 
@@ -291,10 +182,11 @@ class Trace:
     stats: dict
 
 
-def walker_traces(out_dir, run_ids, basins, grid, cv_is_funnel_z=False) -> list:
+def walker_traces(out_dir, walkers, basins, grid, cv_is_funnel_z=False) -> list:
     ma = MetadynamicsAnalysis.__new__(MetadynamicsAnalysis)
     traces = []
-    for r in run_ids:
+    for w in sorted(walkers, key=lambda w: w["run_id"]):
+        r = w["run_id"]
         cpath = os.path.join(out_dir, f"COLVAR_{r}.npy")
         if not os.path.exists(cpath):
             continue
@@ -303,12 +195,7 @@ def walker_traces(out_dir, run_ids, basins, grid, cv_is_funnel_z=False) -> list:
         stats = ma.walker_transitions(cpath, basins, grid_min=grid[0], grid_max=grid[1],
                                       cv_is_funnel_z=cv_is_funnel_z)
         z = cv * 10.0 if stats["coordinate"] == "funnel_z" else None
-        hpath = os.path.join(out_dir, f"FEhist_{r}.npz")
-        dt = COLVAR_DT_NS
-        if os.path.exists(hpath):
-            h = np.load(hpath)
-            dt = float(h["record_dt_ns"]) if "record_dt_ns" in h.files else dt
-        t_ns = np.arange(len(cv)) * dt
+        t_ns = np.arange(len(cv)) * float(w["record_dt_ns"])
         traces.append(Trace(r, t_ns, cv, z, stats))
     return traces
 
@@ -428,50 +315,37 @@ def _rolling_median(x, n):
     return np.r_[np.full(n - 1, np.nan), np.median(w, axis=1)]
 
 
-def _hill_traces(out_dir, mode, window=100) -> list:
-    """(run_id, t_ns, rolling-median hill height kJ/mol) per walker, from HILLS_<run_id>.npz.
+def _progress(walker, wall):
+    """Walker time (ns) reached at each wall-clock time (0 before its first hill)."""
+    if not len(walker["wall_s"]):
+        return np.zeros(len(wall))
+    i = np.searchsorted(walker["wall_s"], wall, side="right") - 1
+    return np.where(i >= 0, np.asarray(walker["time_ns"])[np.clip(i, 0, None)], 0.0)
 
-    Time axis as in the ΔG(t) panel: walker time, end to end for sequential
-    shared walkers, aggregate progress for concurrent ones.
+
+def _hill_traces(walkers, mode, window=100) -> list:
+    """(run_id, t, rolling-median hill height kJ/mol) per walker.
+
+    t as in the ΔG(t) panel: walker time, or for a shared bias the summed
+    walker time at each hill's wall-clock time.
     """
-    hills = {}
-    for r in mode.run_ids:
-        p = os.path.join(out_dir, f"HILLS_{r}.npz")
-        if os.path.exists(p):
-            d = np.load(p)
-            if d["time_ns"].size:
-                hills[r] = (np.asarray(d["time_ns"], float), np.asarray(d["height_kj"], float))
-    if not hills:
-        return []
-    windows = {r: _wall_window(_hist_files(out_dir, r)[0]) for r in hills if _hist_files(out_dir, r)}
     out = []
-    if mode.layout == "shared" and mode.schedule == "concurrent" and len(windows) == len(hills):
-        def progress(w, r):
-            s, e = windows[r]
-            return hills[r][0][-1] * np.clip((w - s) / max(e - s, 1e-9), 0.0, 1.0)
-        for r, (t, h) in hills.items():
-            s, e = windows[r]
-            w = s + (e - s) * t / max(t[-1], 1e-12)
-            out.append((r, sum(progress(w, q) for q in hills), _rolling_median(h, window)))
-    elif mode.layout == "shared":
-        order = sorted(hills, key=lambda r: windows.get(r, (np.inf,))[0])
-        offset = 0.0
-        for r in order:
-            t, h = hills[r]
-            out.append((r, t + offset, _rolling_median(h, window)))
-            offset += t[-1]
-    else:
-        out = [(r, t, _rolling_median(h, window)) for r, (t, h) in hills.items()]
+    for w in sorted(walkers, key=lambda w: w["run_id"]):
+        if not len(w["height_kj"]):
+            continue
+        t = np.asarray(w["time_ns"], float)
+        if mode.layout == "shared":
+            t = sum(_progress(q, w["wall_s"]) for q in walkers)
+        out.append((w["run_id"], t, _rolling_median(w["height_kj"], window)))
     return out
 
 
 @_styled
-def plot_convergence(estimates, mode, grid, bias_factor, plateau_results, out_path,
-                     corrected=True, out_dir=None):
+def plot_convergence(estimates, mode, grid, plateau_results, out_path,
+                     corrected=True, walkers=None):
     fig, (a1, a2, a3) = plt.subplots(3, 1, figsize=(9, 10))
     colors = plt.cm.tab10(np.linspace(0, 1, max(len(estimates), 1)))
-    xlab = ("aggregate simulation time (ns)" if mode.layout == "shared" and mode.schedule == "concurrent"
-            else "accumulated simulation time (ns)" if mode.layout == "shared"
+    xlab = ("aggregate simulation time (ns)" if mode.layout == "shared"
             else "walker simulation time (ns)")
     for k, e in enumerate(estimates):
         if not e.t_ns.size:
@@ -506,7 +380,7 @@ def plot_convergence(estimates, mode, grid, bias_factor, plateau_results, out_pa
         fig.colorbar(sm, ax=a2, label=xlab)
         a2.set_title(f"FES snapshots ({main.label}), unbound = 0", fontsize=9)
     a2.set_ylabel("FES (kJ/mol)")
-    traces = _hill_traces(out_dir, mode) if out_dir else []
+    traces = _hill_traces(walkers, mode) if walkers else []
     hc = plt.cm.tab10(np.linspace(0, 1, max(len(traces), 1)))
     same = {e.label: colors[k] for k, e in enumerate(estimates)}    # same walker, same colour
     for k, (r, t, h) in enumerate(traces):
@@ -528,7 +402,7 @@ def plot_convergence(estimates, mode, grid, bias_factor, plateau_results, out_pa
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
-def report(out_dir, temperature, bias_factor, grid_min=0.0, grid_max=1.0,
+def report(out_dir, temperature, grid_min=0.0, grid_max=1.0,
            cv_name="CV", cv_length_per_unit_ang=None, out_prefix=None,
            funnel_params=None, cv_is_funnel_z=False, hill_width=None) -> dict:
     grid = (float(grid_min), float(grid_max))
@@ -543,7 +417,10 @@ def report(out_dir, temperature, bias_factor, grid_min=0.0, grid_max=1.0,
     if fp is None:
         logger.info("No funnel: reporting the uncorrected FES and its well depth.")
 
-    mode = detect_mode(out_dir)
+    walkers = load_hills(out_dir)
+    if not walkers:
+        logger.warning("No HILLS v2 files in %s: nothing to report.", out_dir)
+    mode = detect_mode(walkers)
     logger.info("Metadynamics report: %s", mode.describe())
     # Unbound zero from the funnel geometry, 3 hill widths clear of the wall.
     ref_range = None
@@ -561,10 +438,9 @@ def report(out_dir, temperature, bias_factor, grid_min=0.0, grid_max=1.0,
         else:
             logger.info("Unbound reference: CV %.3f-%.3f (cylinder from z_cc to z_max - 3 sigma).",
                         *ref_range)
-    traces = walker_traces(out_dir, mode.run_ids, basins, grid, cv_is_funnel_z)
-    estimates = build_estimates(out_dir, mode, fp, temperature, bias_factor, grid,
-                                cv_length_per_unit_ang, reference_range=ref_range,
-                                origin=origin)
+    traces = walker_traces(out_dir, walkers, basins, grid, cv_is_funnel_z)
+    estimates = build_estimates(walkers, fp, temperature, grid, cv_length_per_unit_ang,
+                                reference_range=ref_range, origin=origin)
 
     ma = MetadynamicsAnalysis.__new__(MetadynamicsAnalysis)
     walker_stats = {t.run_id: t.stats for t in traces}
@@ -607,9 +483,9 @@ def report(out_dir, temperature, bias_factor, grid_min=0.0, grid_max=1.0,
                         f"{out_prefix}_FES.png", corrected=fp is not None, origin=origin),
         "colvar": plot_colvar(traces, mode, basins, grid, cv_name, f"{out_prefix}_COLVAR.png",
                               z_max_ang=z_max),
-        "convergence": plot_convergence(estimates, mode, grid, float(bias_factor),
-                                        plateau_results, f"{out_prefix}_convergence.png",
-                                        corrected=fp is not None, out_dir=out_dir),
+        "convergence": plot_convergence(estimates, mode, grid, plateau_results,
+                                        f"{out_prefix}_convergence.png",
+                                        corrected=fp is not None, walkers=walkers),
     }
     for e in estimates:
         logger.info("  %-28s ΔG°_b = %s kJ/mol%s", e.label,

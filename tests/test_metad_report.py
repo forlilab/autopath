@@ -6,10 +6,14 @@ from openmm import unit
 
 from autopath.metadynamics import report as R
 from autopath.metadynamics.Analysis import correct_fe_for_funnel
+from autopath.metadynamics.Hills import load_hills
 
 GAMMA = 15.0
 S = np.linspace(0.0, 1.0, 125)
 F = -50.0 * np.exp(-((S - 0.05) / 0.04) ** 2)           # bound well, flat unbound plateau
+SIG = 0.04 / np.sqrt(2.0)                                # one hill at s = 0.05 is exactly this well
+BIAS_DEPTH = 50.0 * (GAMMA - 1.0) / GAMMA                # total hill height giving F
+T_NS = 5.0
 
 
 def _fp():
@@ -19,70 +23,60 @@ def _fp():
             "axial_distances": np.r_[rng.uniform(1, 3, 200), rng.uniform(3, 20, 800)]}
 
 
-def _bias(fes):
-    return -((GAMMA - 1.0) / GAMMA) * fes
-
-
-def _walker(d, run_id, frac=1.0, z=None, start=None, end=None, hist=True, n_snap=10, t_ns=5.0):
-    """COLVAR and FEhist for one walker; start/end fix its wall-clock window."""
+def _walker(d, run_id, bias_dir, walls, total, heights=None, finished=True, z=None):
+    """COLVAR plus a HILLS v2 file: hills at s = 0.05 summing to ``total`` kJ/mol."""
     z = np.r_[np.full(50, 2.0), np.full(50, 24.0), np.full(50, 2.0)] if z is None else z
     np.save(d / f"COLVAR_{run_id}.npy", (z / 26.0)[:, None])
-    if hist:
-        snaps = np.array([F * frac * (k + 1) / n_snap for k in range(n_snap)])
-        p = d / f"FEhist_{run_id}.npz"
-        np.savez(p, fes_kj=snaps, time_ns=np.linspace(t_ns / n_snap, t_ns, n_snap),
-                 started_at=np.array(start if start is not None else 1000.0))
-        if end is not None:
-            os.utime(p, (end, end))
+    n = len(walls)
+    h = np.full(n, total / n) if heights is None else np.asarray(heights, float)
+    np.savez(d / f"HILLS_{run_id}.npz", hills_version=2, run_id=run_id, finished=finished,
+             bias_dir=str(bias_dir), started_at=float(walls[0]),
+             time_ns=np.linspace(T_NS / n, T_NS, n), wall_s=np.asarray(walls, float),
+             cv=np.full((n, 1), 0.05), height_kj=h,
+             grid_min=np.array([0.0]), grid_max=np.array([1.0]), grid_points=np.array([125]),
+             sigma=np.array([SIG]), periodic=np.array([False]),
+             bounds_lo=np.array([np.nan]), bounds_hi=np.array([np.nan]),
+             bias_factor=GAMMA, temperature=300.0, tempering="wt", cv_names=np.array(["s"]),
+             cv_length_per_unit_ang=np.array([20.0]), origin=np.array([np.nan]),
+             record_dt_ns=T_NS / len(z), dcd_interval_ns=0.05)
 
 
-def _shared(tmp_path, concurrent=True):
-    d = tmp_path / "shared"
+def _shared(tmp_path, concurrent=True, name="shared"):
+    d = tmp_path / name
     d.mkdir()
     for k, rid in enumerate(("w1", "w2", "w3")):
-        np.save(d / f"bias_{100 + k}_9.npy", _bias(F) / 3.0)          # partial self-biases
-        if concurrent:
-            _walker(d, rid, frac=1.0, start=1000.0, end=1600.0)
-        else:
-            _walker(d, rid, frac=1.0, start=1000.0 + 700 * k, end=1600.0 + 700 * k)
+        walls = 1000.0 + 60.0 * np.arange(10) + (k if concurrent else 700.0 * k)
+        _walker(d, rid, d, walls, BIAS_DEPTH / 3.0)
     return d
 
 
 def _isolated(tmp_path):
     d = tmp_path / "isolated"
     d.mkdir()
-    for k, (rid, depth, done) in enumerate((("m1", 1.0, True), ("m2", 1.2, True), ("m3", 0.9, False))):
-        sub = d / f"bias_{rid}"
-        sub.mkdir()
-        np.save(sub / f"bias_{200 + k}_9.npy", _bias(F * depth))
-        _walker(d, rid, frac=depth, hist=done)
+    for rid, depth, done in (("m1", 1.0, True), ("m2", 1.2, True), ("m3", 0.9, False)):
+        _walker(d, rid, d / f"bias_{rid}", 1000.0 + 60.0 * np.arange(10), BIAS_DEPTH * depth,
+                finished=done)
     return d
 
 
 def test_mode_detection(tmp_path):
     single = tmp_path / "single"
     single.mkdir()
-    np.save(single / "bias_1_3.npy", _bias(F))
-    _walker(single, "only")
-    assert R.detect_mode(str(single)).layout == "single"
-    assert R.detect_mode(str(_isolated(tmp_path))).layout == "isolated"
-    conc = R.detect_mode(str(_shared(tmp_path, concurrent=True)))
+    _walker(single, "only", single, 1000.0 + np.arange(10), BIAS_DEPTH)
+    assert R.detect_mode(load_hills(single)).layout == "single"
+    assert R.detect_mode(load_hills(_isolated(tmp_path))).layout == "isolated"
+    conc = R.detect_mode(load_hills(_shared(tmp_path, concurrent=True)))
     assert (conc.layout, conc.schedule) == ("shared", "concurrent")
-    seq_dir = tmp_path / "seq"
-    seq_dir.mkdir()
-    for k, rid in enumerate(("a", "b")):
-        np.save(seq_dir / f"bias_{k}_1.npy", _bias(F) / 2)
-        _walker(seq_dir, rid, start=1000.0 + 700 * k, end=1600.0 + 700 * k)
-    seq = R.detect_mode(str(seq_dir))
+    seq = R.detect_mode(load_hills(_shared(tmp_path, concurrent=False, name="seq")))
     assert (seq.layout, seq.schedule) == ("shared", "sequential")
 
 
 def test_shared_report_uses_one_surface_and_one_correction(tmp_path):
     d = _shared(tmp_path)
-    out = R.report(str(d), 300.0, GAMMA, 0.0, 1.0, "s", cv_length_per_unit_ang=20.0,
+    out = R.report(str(d), 300.0, 0.0, 1.0, "s", cv_length_per_unit_ang=20.0,
                    out_prefix=str(tmp_path / "rep"), funnel_params=_fp())
-    expected = correct_fe_for_funnel(-(GAMMA / (GAMMA - 1.0)) * _bias(F), _fp(), temperature=300.0,
-                                     grid_min=0.0, grid_max=1.0, cv_length_per_unit_ang=20.0)
+    expected = correct_fe_for_funnel(F, _fp(), temperature=300.0, grid_min=0.0, grid_max=1.0,
+                                     cv_length_per_unit_ang=20.0)
     assert out["dG_bind_std_kj"] == pytest.approx(expected["dG_bind_std_kj_mol"])
     assert out["n_round_trips"] == 3                    # one per walker, on the CV
     for f in out["files"].values():
@@ -91,7 +85,7 @@ def test_shared_report_uses_one_surface_and_one_correction(tmp_path):
 
 def test_isolated_report_is_mean_and_sd_of_complete_walkers(tmp_path):
     d = _isolated(tmp_path)
-    out = R.report(str(d), 300.0, GAMMA, 0.0, 1.0, "s", cv_length_per_unit_ang=20.0,
+    out = R.report(str(d), 300.0, 0.0, 1.0, "s", cv_length_per_unit_ang=20.0,
                    out_prefix=str(tmp_path / "iso"), funnel_params=_fp())
     per = {lab: dg for lab, dg, done in out["estimates"]}
     complete = [dg for lab, dg, done in out["estimates"] if done]
@@ -101,49 +95,43 @@ def test_isolated_report_is_mean_and_sd_of_complete_walkers(tmp_path):
 
 
 def test_concurrent_history_is_on_aggregate_time(tmp_path):
-    d = _shared(tmp_path, concurrent=True)
-    mode = R.detect_mode(str(d))
-    est = R.build_estimates(str(d), mode, _fp(), 300.0, GAMMA, (0.0, 1.0), 20.0)[0]
-    assert est.t_ns[-1] == pytest.approx(15.0)                       # 3 walkers x 5 ns
+    walkers = load_hills(_shared(tmp_path, concurrent=True))
+    est = R.build_estimates(walkers, _fp(), 300.0, (0.0, 1.0), 20.0)[0]
+    assert est.t_ns[-1] == pytest.approx(3 * T_NS)
     assert np.all(np.diff(est.t_ns) >= 0)
-    # walkers that ran together take their first snapshots at the same moment, when
-    # the shared bias had seen 3 x 0.5 ns; laid end to end they would be 0.5, 1.0, 1.5
-    np.testing.assert_allclose(est.t_ns[:3], 1.5)
-
-
-def _hills(d, run_id, n=2500, t_ns=5.0):
-    t = np.linspace(t_ns / n, t_ns, n)
-    np.savez(d / f"HILLS_{run_id}.npz", time_ns=t, cv=np.zeros((n, 1)),
-             height_kj=1.2 * np.exp(-t / 2.0))                     # well-tempered decay
+    # at the first cut each walker has deposited one hill: 3 x 0.5 ns, not 0.5 end to end
+    assert est.t_ns[0] == pytest.approx(1.5)
+    assert np.allclose(est.snapshots[-1], F, atol=1e-9)
 
 
 def test_hill_heights_fall_on_walker_time(tmp_path):
     d = _isolated(tmp_path)
-    for rid in ("m1", "m2"):
-        _hills(d, rid)
-    traces = R._hill_traces(str(d), R.detect_mode(str(d)))
-    assert {r for r, _, _ in traces} == {"m1", "m2"}
-    for _, t, h in traces:
-        assert t[-1] == pytest.approx(5.0)
+    walkers = load_hills(d)
+    t = np.linspace(T_NS / 10, T_NS, 10)
+    for w in walkers:
+        w["height_kj"] = 1.2 * np.exp(-t / 2.0)                    # well-tempered decay
+    traces = R._hill_traces(walkers, R.detect_mode(walkers), window=3)
+    assert {r for r, _, _ in traces} == {"m1", "m2", "m3"}
+    for _, tt, h in traces:
+        assert tt[-1] == pytest.approx(T_NS)
         ok = np.isfinite(h)
-        assert h[ok][-1] < 0.1 * h[ok][0]
+        assert h[ok][-1] < 0.2 * h[ok][0]
 
 
-def test_sequential_hills_are_laid_end_to_end_in_start_order(tmp_path):
+def test_sequential_hills_are_on_summed_time_in_start_order(tmp_path):
     d = tmp_path / "seq_hills"
     d.mkdir()
     for k, rid in enumerate(("b", "a")):                       # b started first
-        np.save(d / f"bias_{k}_1.npy", _bias(F) / 2)
-        _walker(d, rid, start=1000.0 + 700 * k, end=1600.0 + 700 * k)
-        _hills(d, rid)
-    traces = R._hill_traces(str(d), R.detect_mode(str(d)))
-    assert [r for r, _, _ in traces] == ["b", "a"]
-    assert traces[1][1][0] == pytest.approx(5.0 + 5.0 / 2500)
+        _walker(d, rid, d, 1000.0 + 700.0 * k + 60.0 * np.arange(10), BIAS_DEPTH / 2.0)
+    walkers = load_hills(d)
+    traces = {r: t for r, t, _ in R._hill_traces(walkers, R.detect_mode(walkers), window=3)}
+    assert traces["b"][0] == pytest.approx(0.5)
+    assert traces["a"][0] == pytest.approx(T_NS + 0.5)
 
 
 def test_report_without_a_funnel_gives_the_uncorrected_well_depth(tmp_path):
     d = _shared(tmp_path)
-    out = R.report(str(d), 300.0, GAMMA, 0.0, 1.0, "s", out_prefix=str(tmp_path / "nf"),
+    out = R.report(str(d), 300.0, 0.0, 1.0, "s", out_prefix=str(tmp_path / "nf"),
                    funnel_params=None)
     assert out["funnel"] is False and out["dG_bind_std_kj"] is None
     (label, depth), = out["well_depth_kj"]
@@ -156,15 +144,24 @@ def test_report_without_a_funnel_gives_the_uncorrected_well_depth(tmp_path):
 
 
 def test_sequential_walkers_are_replayed_in_start_order(tmp_path):
-    """Sequential walkers are laid end to end by start time, not by name."""
+    """The history follows the wall clock (c, a, b), not the walker names."""
     d = tmp_path / "seq_order"
     d.mkdir()
-    np.save(d / "bias_0_1.npy", _bias(F))
-    # wall-clock order c, a, b; the bias grows by one unit per walker
     for k, (rid, start) in enumerate((("c", 1000.0), ("a", 2000.0), ("b", 3000.0))):
-        _walker(d, rid, frac=k + 1.0, start=start, end=start + 600.0)
-    mode = R.detect_mode(str(d))
+        _walker(d, rid, d, start + 60.0 * np.arange(10), BIAS_DEPTH * (k + 1) / 6.0)
+    walkers = load_hills(d)
+    mode = R.detect_mode(walkers)
     assert (mode.layout, mode.schedule) == ("shared", "sequential")
-    est = R.build_estimates(str(d), mode, _fp(), 300.0, GAMMA, (0.0, 1.0), 20.0)[0]
-    depth = est.snapshots[9::10].min(axis=1)              # end of each walker
-    assert np.all(np.diff(depth) < 0)                     # the well only deepens
+    est = R.build_estimates(walkers, _fp(), 300.0, (0.0, 1.0), 20.0)[0]
+    after_c = np.flatnonzero(np.isclose(est.t_ns, T_NS))[0]       # c done, a not started
+    assert est.snapshots[after_c].min() == pytest.approx(F.min() / 6.0)   # c alone, not a
+    assert est.snapshots[-1].min() == pytest.approx(F.min())
+
+
+def test_walker_without_hills_v2_is_not_reported(tmp_path):
+    d = tmp_path / "old"
+    d.mkdir()
+    np.save(d / "COLVAR_x.npy", np.zeros((10, 1)))
+    np.savez(d / "HILLS_x.npz", time_ns=np.zeros(1), cv=np.zeros((1, 1)), height_kj=np.ones(1))
+    out = R.report(str(d), 300.0, 0.0, 1.0, "s", out_prefix=str(tmp_path / "old"), funnel_params=None)
+    assert out["estimates"] == [] and out["n_walkers"] == 0

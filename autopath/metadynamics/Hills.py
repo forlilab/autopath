@@ -18,14 +18,15 @@ from .BoundaryCorrection import boundary_factor
 HILLS_VERSION = 2
 
 
-def hills_record(meta, run_id, started_at, ps_per_step, specs, tempering, **intervals) -> dict:
+def hills_record(meta, run_id, started_at, ps_per_step, specs, tempering, finished=False,
+                 **intervals) -> dict:
     """HILLS v2 arrays for ``np.savez`` from a (BoundaryCorrected|TransitionTempered)Metadynamics."""
     n = len(meta.variables)
     h = np.array(meta.hills, dtype=float).reshape(-1, n + 2)
     lo = np.array([np.nan if b is None else b[0] for b in meta.bounds], dtype=float)
     hi = np.array([np.nan if b is None else b[1] for b in meta.bounds], dtype=float)
     rec = dict(
-        hills_version=HILLS_VERSION, run_id=str(run_id),
+        hills_version=HILLS_VERSION, run_id=str(run_id), finished=bool(finished),
         bias_dir=os.path.abspath(meta.biasDir) if meta.biasDir else "",
         started_at=float(started_at),
         time_ns=h[:, 0] * ps_per_step / 1000.0, wall_s=np.array(meta.hill_wall, dtype=float),

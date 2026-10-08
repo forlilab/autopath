@@ -243,7 +243,7 @@ class MetadynamicsMD:
             The ``run_id`` string used for all output file names produced by
             this call (COLVAR, FE, checkpoint, PDB, system XML). ``REWEIGHT_<run_id>.npz``
             holds V(s_t, t) and c(t) per COLVAR row, ``HILLS_<run_id>.npz`` every hill.
-            FEhist and REWEIGHT store ``record_dt_ns`` and ``dcd_interval_ns``; see
+            HILLS and REWEIGHT store ``record_dt_ns`` and ``dcd_interval_ns``; see
             ``Analysis.dcd_frame_of_rows`` for the row -> trajectory frame map.
 
         Warns
@@ -420,7 +420,7 @@ class MetadynamicsMD:
         intervals = dict(record_dt_ns=record_steps * _ps_per_step / 1000.0,
                          dcd_interval_ns=dcd_steps * _ps_per_step / 1000.0)
 
-        def _save_reweight():
+        def _save_reweight(finished=False):
             if reweight:
                 _atomic_save(os.path.join(self.out_dir, f"REWEIGHT_{run_id}.npz"),
                          time_ns=np.arange(len(bias_list)) * intervals["record_dt_ns"],
@@ -431,13 +431,8 @@ class MetadynamicsMD:
                          tempering=tempering)
             _atomic_save(os.path.join(self.out_dir, f"HILLS_{run_id}.npz"),
                          **hills_record(meta, run_id, _started_at, _ps_per_step, resolved,
-                                        tempering, **intervals))
-        # ~40 snapshots over the run, so the curve is readable at any length
-        fe_hist, fe_hist_steps = [], []
-        # Start time orders sequential shared-bias walkers.
+                                        tempering, finished=finished, **intervals))
         _started_at = time.time()
-        _fe_hist_every = max(record_steps,
-                             (int(mMD_steps) // 40 // record_steps or 1) * record_steps)
         _store_every = max(1, round(self.store_CV / record_steps))
         for k, i in enumerate(range(0, int(mMD_steps), record_steps)):
             if self.verbose and k % _store_every == 0:
@@ -449,26 +444,9 @@ class MetadynamicsMD:
             if reweight:
                 bias_list.append(meta.bias_energy(simulation))
                 rct_list.append(meta.rct())
-
-            # FES history for convergence; OpenMM does not keep past bias states.
-            if i % _fe_hist_every == 0:
-                fe_hist.append(np.asarray(
-                    meta.getFreeEnergy().value_in_unit(
-                        openmmunit.kilojoule_per_mole), dtype=float))
-                fe_hist_steps.append(i + record_steps)
         colvar_array = np.array(colvar_list)
 
-        _save_reweight()
-        if fe_hist:
-            np.savez(
-                os.path.join(self.out_dir, f"FEhist_{run_id}.npz"),
-                fes_kj=np.array(fe_hist),
-                time_ns=np.array(fe_hist_steps, dtype=float) * _ps_per_step / 1000.0,
-                started_at=np.array(_started_at, dtype=float),
-                **intervals,
-            )
-            logger.info("Saved %d FES snapshots for the convergence curve (%s).",
-                        len(fe_hist), f"FEhist_{run_id}.npz")
+        _save_reweight(finished=True)
 
         _atomic_save(os.path.join(self.out_dir, f"COLVAR_{run_id}.npy"), colvar_array)
 

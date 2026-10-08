@@ -797,88 +797,6 @@ class MetadynamicsAnalysis:
     # ── Static helpers ─────────────────────────────────────────────────────
 
     @staticmethod
-    def load_bias_files(bias_dir: str) -> dict:
-        """Load all walker self-bias arrays from bias_dir.
-
-        Returns {walker_id (int): bias_array (kJ/mol)}, latest save-index per walker.
-        """
-        import re
-        pattern = re.compile(r'bias_(\d+)_(\d+)\.npy')
-        # Isolated mode keeps each walker's files in a bias_<run_id>/ subdirectory.
-        search_dirs = [bias_dir]
-        search_dirs += sorted(
-            d for d in glob(os.path.join(bias_dir, "bias_*")) if os.path.isdir(d))
-        latest = {}
-        for d in search_dirs:
-            if not os.path.isdir(d):
-                continue
-            for fname in sorted(os.listdir(d)):
-                m = pattern.match(fname)
-                if m:
-                    wid, idx = int(m.group(1)), int(m.group(2))
-                    if wid not in latest or idx > latest[wid][0]:
-                        latest[wid] = (idx, os.path.join(d, fname))
-        return {wid: np.load(fp) for wid, (_, fp) in latest.items()}
-
-    @staticmethod
-    def shared_bias_run_order(hist_files) -> list:
-        """Execution order of walkers that shared one bias directory.
-
-        Ordered by ``started_at`` (else file mtime): alphabetical order is not run order.
-        """
-        def _key(f):
-            try:
-                d = np.load(f)
-                if "started_at" in getattr(d, "files", []):
-                    return float(d["started_at"])
-            except Exception:
-                pass
-            return os.path.getmtime(f)
-        return sorted(hist_files, key=_key)
-
-    @staticmethod
-    def dG_timeseries(fe_hist_npz, funnel_params: dict, temperature: float = 298.15,
-                      grid_min: float = 0.0, grid_max: float = 1.0,
-                      cv_length_per_unit_ang: float = None,
-                      strict: bool = False) -> tuple:
-        """ΔG°(t) from a saved FES history (Raniolo & Limongelli, Box 2).
-
-        Each snapshot is corrected independently.
-
-        Parameters
-        ----------
-        fe_hist_npz : str or dict-like
-            ``FEhist_<run_id>.npz`` holding ``fes_kj`` (n_snapshots, n_grid) and
-            ``time_ns``.
-
-        strict : bool
-            If False (default) every snapshot gets a value and the third array flags
-            those with a resolved bound basin.
-
-        Returns
-        -------
-        (time_ns, dG_kj, bound_state_sampled) arrays.
-        """
-        data = np.load(fe_hist_npz) if isinstance(fe_hist_npz, str) else fe_hist_npz
-        fes = np.asarray(data["fes_kj"], dtype=float)
-        t = np.asarray(data["time_ns"], dtype=float)
-        out = np.full(len(fes), np.nan)
-        sampled = np.zeros(len(fes), dtype=bool)
-        for i, fe in enumerate(fes):
-            try:
-                r = correct_fe_for_funnel(
-                    fe, funnel_params, temperature=temperature,
-                    grid_min=grid_min, grid_max=grid_max,
-                    cv_length_per_unit_ang=cv_length_per_unit_ang,
-                    strict=strict,
-                )
-                out[i] = r["dG_bind_std_kj_mol"]
-                sampled[i] = r["bound_state_sampled"]
-            except Exception:
-                pass          # strict=True, or a surface with no usable integral
-        return t, out, sampled
-
-    @staticmethod
     def dG_plateau(time_ns, dG_kj, sampled=None, tail_frac: float = 0.4,
                    drift_tol_kj: float = 4.0, both_basins: bool = True) -> dict:
         """Has ΔG°(t) settled?
@@ -984,68 +902,6 @@ class MetadynamicsAnalysis:
             "reasons": reasons,
         }
 
-    @staticmethod
-    def bias_layout(bias_dir: str) -> str:
-        """'isolated' if each walker owns a bias_<run_id>/ subdirectory, else 'shared'.
-
-        """
-        import re
-        pattern = re.compile(r'bias_(\d+)_(\d+)\.npy')
-        if any(pattern.match(f) for f in os.listdir(bias_dir)):
-            return "shared"
-        if any(os.path.isdir(os.path.join(bias_dir, d))
-               for d in os.listdir(bias_dir) if d.startswith("bias_")):
-            return "isolated"
-        return "shared"
-
-    @staticmethod
-    def compute_fes(bias_arrays, temperature: float, bias_factor: float,
-                    grid_min: float = 0.0, grid_max: float = 1.0,
-                    combine: str = "sum") -> tuple:
-        """Compute the WT-MetaD FES from a collection of bias arrays.
-
-        FE(s) = -(gamma / (gamma − 1)) × V(s), V combined over the given arrays.
-
-        Parameters
-        ----------
-        bias_arrays : list/array of np.ndarray
-            Self-bias arrays in kJ/mol from load_bias_files().
-        temperature : float
-            Simulation temperature in K (unused; kept for API compatibility).
-        bias_factor : float
-            WT-MetaD bias factor γ; must be > 1.
-        grid_min, grid_max : float
-            CV grid bounds — used only to build the returned axis.
-        combine : str
-            ``'sum'`` for a shared biasDir (each file is one walker's self-bias),
-            ``'mean'`` for per-walker biasDirs (each file is a complete bias).
-
-        Returns
-        -------
-        axis : np.ndarray   — CV values at each grid point
-        fes  : np.ndarray   — Free energy in kJ/mol
-        """
-        # OpenMM saves each walker's self-bias; summing complete per-walker biases
-        # would scale the FES by the number of walkers.
-        stacked = np.stack(bias_arrays)
-        if combine == "sum":
-            V = np.sum(stacked, axis=0)
-        elif combine == "mean":
-            V = np.mean(stacked, axis=0)
-        else:
-            raise ValueError(
-                f"combine must be 'sum' (shared biasDir) or 'mean' (per-walker "
-                f"biasDir); got {combine!r}")
-        gamma = float(bias_factor)
-        if abs(gamma - 1.0) < 1e-9:
-            raise ValueError(
-                f"bias_factor (γ) must be > 1 for well-tempered metadynamics; got {gamma}. "
-                f"γ = 1 corresponds to unbiased MD where the FES estimator is undefined."
-            )
-        fes = -(gamma / (gamma - 1.0)) * V
-        axis = np.linspace(grid_min, grid_max, fes.shape[0])
-        return axis, fes
-
     def walker_transitions(self, colvar_path, basins, bound_threshold=0.1,
                            unbound_threshold=0.9, grid_min=None, grid_max=None,
                            cv_is_funnel_z=False) -> dict:
@@ -1148,31 +1004,6 @@ class MetadynamicsAnalysis:
 
     # ── Instance methods ───────────────────────────────────────────────────
 
-    def select_converged_biases(self, min_coverage: float = 0.6) -> list:
-        """Return bias arrays from walkers that covered ≥ min_coverage of the CV grid.
-
-        Falls back to all walkers if none pass.
-
-        Returns
-        -------
-        list of (walker_id, bias_array) tuples that passed the threshold.
-        """
-        biases = self.load_bias_files(self.out_dir)
-        selected = []
-        for wid, barr in sorted(biases.items()):
-            cov = self.bias_coverage(barr)
-            if cov >= min_coverage:
-                selected.append((wid, barr))
-            else:
-                logger.warning(
-                    f"Walker id={wid}: bias coverage {100*cov:.1f}% < "
-                    f"{100*min_coverage:.0f}% — likely stuck, excluded from converged set."
-                )
-        if not selected:
-            logger.warning("No walkers passed the coverage threshold — returning all biases.")
-            selected = list(sorted(biases.items()))
-        return selected
-
     def diagnose(
         self,
         colvar_files: list = None,
@@ -1191,11 +1022,12 @@ class MetadynamicsAnalysis:
     ) -> dict:
         """End-of-run analysis: see :func:`autopath.metadynamics.report.report`.
 
-        Walkers are discovered from ``out_dir``; ``colvar_files`` and the
+        Walkers are discovered from the HILLS v2 files in ``out_dir``;
+        ``colvar_files``, ``bias_factor`` (HILLS carries the tempering) and the
         threshold/coverage arguments are ignored.
         """
         from autopath.metadynamics.report import report
-        return report(self.out_dir, temperature, bias_factor, grid_min=grid_min,
+        return report(self.out_dir, temperature, grid_min=grid_min,
                       grid_max=grid_max, cv_name=cv_name,
                       cv_length_per_unit_ang=cv_length_per_unit_ang,
                       out_prefix=out_prefix, cv_is_funnel_z=cv_is_funnel_z,
