@@ -1,0 +1,123 @@
+"""Transition-tempered metadynamics (Dama et al., J. Chem. Theory Comput. 10, 3626, 2014).
+
+Hills keep their full height until the bias links a set of basin points, then
+shrink as h exp(-max(V* - V_th, 0) / ΔT), where V* is the largest bias level
+at which all basins are still connected through grid cells with V >= V*
+(the minimum bias on the maximally biased path, Eq. 1). ΔT = (γ - 1) T as in
+well-tempered metadynamics; the bias converges to -F.
+"""
+
+import numpy as np
+import openmm.unit as unit
+from scipy import ndimage
+from scipy.special import logsumexp
+
+from .BoundaryCorrection import BoundaryCorrectedMetadynamics
+
+
+def _linked(mask, basins, periodic):
+    labels, _ = ndimage.label(mask)
+    if any(labels[b] == 0 for b in basins):
+        return False
+    parent = {}
+
+    def find(a):
+        while parent.get(a, a) != a:
+            a = parent[a]
+        return a
+
+    for ax, per in enumerate(periodic):
+        if not per:
+            continue
+        lo = np.take(labels, 0, axis=ax).ravel()
+        hi = np.take(labels, -1, axis=ax).ravel()
+        for a, b in zip(lo, hi):
+            if a and b:
+                ra, rb = find(a), find(b)
+                if ra != rb:
+                    parent[ra] = rb
+    roots = {find(labels[b]) for b in basins}
+    return len(roots) == 1
+
+
+def vstar(bias, basins, periodic=None) -> float:
+    """Minimum bias on the maximally biased path linking all ``basins``.
+
+    ``bias`` is an N-D grid, ``basins`` a list of index tuples into it and
+    ``periodic`` one flag per grid axis (face-adjacent cells are neighbours).
+    """
+    bias = np.asarray(bias, dtype=float)
+    basins = [tuple(int(i) for i in np.atleast_1d(b)) for b in basins]
+    periodic = [False] * bias.ndim if periodic is None else list(periodic)
+    top = min(bias[b] for b in basins)
+    levels = np.unique(bias[bias <= top])
+    lo, hi = 0, len(levels) - 1                    # levels[0] (global min) always links
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if _linked(bias >= levels[mid], basins, periodic):
+            lo = mid
+        else:
+            hi = mid - 1
+    return float(levels[lo])
+
+
+class TransitionTemperedMetadynamics(BoundaryCorrectedMetadynamics):
+    """Boundary-corrected metadynamics with transition-tempered hill heights.
+
+    ``basins`` holds one CV point (in CV units, variable order) per basin;
+    ``threshold`` is V_th in kJ/mol. ``vstar_log`` holds V* at every hill.
+    """
+
+    def __init__(self, system, variables, temperature, biasFactor, height, frequency,
+                 saveFrequency=None, biasDir=None, bounds=None, basins=None, threshold=0.0):
+        if not basins or len(basins) < 2:
+            raise ValueError("transition tempering needs at least two basin points")
+        super().__init__(system, variables, temperature, biasFactor, height, frequency,
+                         saveFrequency=saveFrequency, biasDir=biasDir, bounds=bounds)
+        self.basins = [self._grid_index(b) for b in basins]
+        self.threshold = float(threshold)
+        self.vstar_log = []
+        self._kdt = (unit.MOLAR_GAS_CONSTANT_R * self._deltaT).value_in_unit(unit.kilojoules_per_mole)
+
+    def _grid_index(self, point):
+        point = np.atleast_1d(np.asarray(point, dtype=float))
+        if len(point) != len(self.variables):
+            raise ValueError(f"basin {list(point)} needs {len(self.variables)} coordinates")
+        idx = []
+        for x, v in zip(point, self.variables):
+            if not v.periodic and not v.minValue <= x <= v.maxValue:
+                raise ValueError(f"basin coordinate {x} outside the grid [{v.minValue}, {v.maxValue}]")
+            f = (x - v.minValue) / (v.maxValue - v.minValue)
+            idx.append(int(round((f % 1.0 if v.periodic else f) * (v.gridWidth - 1))))
+        return tuple(reversed(idx))                 # grid axes run in reverse variable order
+
+    def vstar(self) -> float:
+        return vstar(self._totalBias, self.basins, [v.periodic for v in reversed(self.variables)])
+
+    def step(self, simulation, steps):
+        stepsToGo = steps
+        while stepsToGo > 0:
+            nextSteps = stepsToGo
+            if simulation.currentStep % self.frequency == 0:
+                nextSteps = min(nextSteps, self.frequency)
+            else:
+                nextSteps = min(nextSteps, self.frequency - simulation.currentStep % self.frequency)
+            simulation.step(nextSteps)
+            if simulation.currentStep % self.frequency == 0:
+                position = self._force.getCollectiveVariableValues(simulation.context)
+                v = self.vstar()
+                self.vstar_log.append(v)
+                height = self.height * np.exp(-max(v - self.threshold, 0.0) / self._kdt)
+                self._addGaussian(position, height, simulation.context)
+            if self.saveFrequency is not None and simulation.currentStep % self.saveFrequency == 0:
+                self._syncWithDisk()
+            stepsToGo -= nextSteps
+
+    def getFreeEnergy(self):
+        return -self._totalBias * unit.kilojoules_per_mole
+
+    def rct(self) -> float:
+        """c(t) for a bias converging to -F: kT ln <exp(V/kT)> over the grid."""
+        kt = (unit.MOLAR_GAS_CONSTANT_R * self.temperature).value_in_unit(unit.kilojoules_per_mole)
+        v = self._totalBias.ravel() / kt
+        return kt * (logsumexp(v) - np.log(v.size))

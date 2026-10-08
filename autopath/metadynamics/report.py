@@ -110,6 +110,16 @@ def _latest_bias(directory: str) -> list:
     return [np.load(p) for _, p in latest.values()]
 
 
+def fes_scale(out_dir, bias_factor) -> float:
+    """-F/V: 1 for transition-tempered runs (HILLS tempering="tt"), else γ/(γ-1)."""
+    for f in glob(os.path.join(out_dir, "HILLS_*.npz")):
+        with np.load(f) as d:
+            if "tempering" in d.files and str(d["tempering"]) == "tt":
+                return 1.0
+    gamma = float(bias_factor)
+    return gamma / (gamma - 1.0)
+
+
 def _well_depth(fes_kj, grid=(0.0, 1.0), origin=None, n_tail=10):
     """FES minimum in the bound site relative to the unbound end of the grid (kJ/mol)."""
     fe = np.asarray(fes_kj, float)
@@ -230,7 +240,7 @@ def _aggregate_concurrent(hist_lists):
 
 def build_estimates(out_dir, mode, fp, temperature, bias_factor, grid, cv_len,
                     reference_range=None, origin=None) -> list:
-    gamma = float(bias_factor)
+    scale = fes_scale(out_dir, bias_factor)
     estimates = []
     if mode.layout == "isolated":
         for sub in sorted(glob(os.path.join(out_dir, "bias_*"))):
@@ -240,7 +250,7 @@ def build_estimates(out_dir, mode, fp, temperature, bias_factor, grid, cv_len,
             biases = _latest_bias(sub)
             if not biases:
                 continue
-            fes = -(gamma / (gamma - 1.0)) * np.sum(biases, axis=0)
+            fes = -scale * np.sum(biases, axis=0)
             corr, err = _correct(fes, fp, temperature, grid, cv_len, reference_range, origin)
             hists = _hist_files(out_dir, rid)
             t, snaps = _end_to_end([hists])
@@ -254,7 +264,7 @@ def build_estimates(out_dir, mode, fp, temperature, bias_factor, grid, cv_len,
             biases += _latest_bias(sub)
     if not biases:
         return estimates
-    fes = -(gamma / (gamma - 1.0)) * np.sum(biases, axis=0)
+    fes = -scale * np.sum(biases, axis=0)
     corr, err = _correct(fes, fp, temperature, grid, cv_len, reference_range, origin)
     hist_lists = [_hist_files(out_dir, r) for r in mode.run_ids]
     if mode.layout == "shared" and mode.schedule == "concurrent":
@@ -506,7 +516,7 @@ def plot_convergence(estimates, mode, grid, bias_factor, plateau_results, out_pa
     a3.set_yscale("log")
     a3.set_xlabel(xlab)
     a3.set_ylabel("hill height (kJ/mol)")
-    a3.set_title("Well-tempered hill height, median of 100 hills (falls as the bias converges)",
+    a3.set_title("Hill height, median of 100 hills (falls as the bias converges)",
                  fontsize=9)
     fig.suptitle(f"Convergence — {mode.describe()}", fontsize=10)
     fig.tight_layout()

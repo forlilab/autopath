@@ -76,6 +76,11 @@ def main():
     ap.add_argument("--dcd-interval", type=float, default=10.0, help="trajectory interval (ps)")
     ap.add_argument("--bias-factor", type=float, default=15.0, help="well-tempered bias factor")
     ap.add_argument("--hill-height", type=float, default=1.2, help="initial hill height (kJ/mol)")
+    ap.add_argument("--tt-basins", nargs="+", default=None,
+                    help="transition-tempered basins in CV units, one per point; "
+                         "comma-separate the coordinates of 2D CVs (e.g. 0.4 2.8 or 0.4,1.0 2.8,1.0)")
+    ap.add_argument("--tt-threshold", type=float, default=0.0,
+                    help="TT threshold V_th (kJ/mol)")
     args = ap.parse_args()
 
     base = args.base
@@ -209,7 +214,10 @@ def main():
               funnel_params=params, bias_dir=bias_dir,
               boundary_correction=args.boundary_correction,
               reweight=args.reweight, rct_ustride=args.rct_ustride,
-              dcd_interval=args.dcd_interval)
+              dcd_interval=args.dcd_interval,
+              tt_basins=([[float(x) for x in b.split(",")] for b in args.tt_basins]
+                         if args.tt_basins else None),
+              tt_threshold=args.tt_threshold)
     log.info("finished: %.1f ns, seed=%s", args.ns, args.seed_from)
 
 

@@ -97,3 +97,19 @@ def test_failed_quick_look_plot_does_not_lose_the_finished_run(tmp_path, monkeyp
     for f in ("WTMetaD_system_w.xml", "WTMetaD_w.pdb"):
         assert os.path.exists(tmp_path / f)
     assert any(p.name.startswith("WTMetaD_checkpoint_w") for p in tmp_path.iterdir())
+
+
+def test_tt_run_logs_vstar_and_report_reads_minus_v(tmp_path):
+    from autopath.metadynamics.report import fes_scale
+    top, s, pdb = _toy(tmp_path)
+    md = MetadynamicsMD(topology=top, ligand_atoms=[0], pocket_atoms=[0],
+                        platform="Reference", out_dir=str(tmp_path))
+    md.run(pdb_file=pdb, system=s, run_id="w", cv_specs=[_spec()], mMD_time=0.02,
+           bias_factor=5, hill_height=1.0, biasFrequency=2, bias_dir=str(tmp_path / "b"),
+           tt_basins=[[0.7], [1.4]])
+    h = np.load(tmp_path / "HILLS_w.npz")
+    assert str(h["tempering"]) == "tt" and len(h["vstar_kj"]) == len(h["height_kj"]) == 10
+    assert str(np.load(tmp_path / "REWEIGHT_w.npz")["tempering"]) == "tt"
+    assert fes_scale(str(tmp_path), 5) == 1.0
+    os.remove(tmp_path / "HILLS_w.npz")
+    assert fes_scale(str(tmp_path), 5) == pytest.approx(1.25)

@@ -13,6 +13,7 @@ import cvpack
 
 from autopath.metadynamics.CV import CVSpec
 from autopath.metadynamics.BoundaryCorrection import BoundaryCorrectedMetadynamics
+from autopath.metadynamics.TransitionTempered import TransitionTemperedMetadynamics
 from autopath.metadynamics.Analysis import (
     correct_fe_for_funnel,
     plot_bias,
@@ -168,6 +169,8 @@ class MetadynamicsMD:
         reweight: bool = True,
         rct_ustride: int = 5,
         dcd_interval: float = 10.0,
+        tt_basins: list = None,
+        tt_threshold: float = 0.0,
     ) -> str:
         """Run a single WT-MetaD trajectory and return the run identifier.
 
@@ -221,6 +224,12 @@ class MetadynamicsMD:
             pace). COLVAR and REWEIGHT rows use this interval.
         dcd_interval : float, optional
             Trajectory (and state CSV) interval in ps (default 10).
+        tt_basins : list, optional
+            Basin points (CV units, one coordinate per CV) for transition-tempered
+            metadynamics (Dama 2014); ``None`` (default) runs well-tempered.
+            ``bias_factor`` then sets ΔT = (γ - 1) T after the basins connect.
+        tt_threshold : float, optional
+            V_th in kJ/mol: tempering starts once V* exceeds it (default 0).
 
         Returns
         -------
@@ -355,7 +364,14 @@ class MetadynamicsMD:
                       for s in resolved]
         else:
             bounds = [None] * len(resolved)
-        meta = BoundaryCorrectedMetadynamics(*meta_args, bounds=bounds, **meta_kwargs)
+        if tt_basins is not None:
+            meta = TransitionTemperedMetadynamics(*meta_args, bounds=bounds, basins=tt_basins,
+                                                  threshold=tt_threshold, **meta_kwargs)
+            logger.info("Transition-tempered hills: basins %s, V_th %.2f kJ/mol",
+                        tt_basins, tt_threshold)
+        else:
+            meta = BoundaryCorrectedMetadynamics(*meta_args, bounds=bounds, **meta_kwargs)
+        tempering = "tt" if tt_basins is not None else "wt"
         if boundary_correction:
             logger.info("Boundary-corrected hills on %s (max factor %.2f)",
                         ", ".join(f"[{lo:.3f}, {hi:.3f}]" for lo, hi in bounds),
@@ -402,10 +418,13 @@ class MetadynamicsMD:
                          bias_kj=np.array(bias_list), rct_kj=np.array(rct_list),
                          **intervals,
                          temperature=self.temperature.value_in_unit(openmmunit.kelvin),
-                         bias_factor=float(bias_factor), rct_ustride=int(rct_ustride))
+                         bias_factor=float(bias_factor), rct_ustride=int(rct_ustride),
+                         tempering=tempering)
             h = np.array(meta.hills, dtype=float).reshape(-1, len(resolved) + 2)
+            extra = dict(vstar_kj=np.array(meta.vstar_log)) if tempering == "tt" else {}
             _atomic_save(os.path.join(self.out_dir, f"HILLS_{run_id}.npz"),
-                     time_ns=h[:, 0] * _ps_per_step / 1000.0, cv=h[:, 1:-1], height_kj=h[:, -1])
+                     time_ns=h[:, 0] * _ps_per_step / 1000.0, cv=h[:, 1:-1], height_kj=h[:, -1],
+                     tempering=tempering, **extra)
         # ~40 snapshots over the run, so the curve is readable at any length
         fe_hist, fe_hist_steps = [], []
         # Start time orders sequential shared-bias walkers.
