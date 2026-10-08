@@ -20,6 +20,7 @@ SEEDS=(milestone_1_frame_0 milestone_2_frame_115 milestone_3_frame_189 milestone
 [ "${4:-path}" = s1 ] && SEEDS=(equil milestone_1_frame_0 equil milestone_1_frame_0 equil)
 SEED=${SEEDS[$((SLURM_ARRAY_TASK_ID-1))]}
 RID="${SEED}_w0"; [ "${4:-path}" = s1 ] && RID="s1_${SLURM_ARRAY_TASK_ID}_${SEED}"
+RID="${RID}${RIDSUF}"      # RIDSUF: new names for resubmitted walkers
 NS=${1:-40}; OUT=${2:-3ptb/metadynamics_tt_shared}; TH=${3:-0}
 # env overrides: HILL (kJ/mol), CV, HW (nm), DGRID, BASINS, BF (bias factor), TTBF (adds TT on WT), WT (code dir)
 HILL=${HILL:-2.0}; CV=${CV:-dist}; HW=${HW:-0.01}; DGRID=${DGRID:-"0.2 3.6 1701"}; BASINS=${BASINS:-"0.4 2.5"}; BF=${BF:-5}
