@@ -25,6 +25,16 @@ NS=${1:-40}; OUT=${2:-3ptb/metadynamics_tt_shared}; TH=${3:-0}
 # env overrides: HILL (kJ/mol), CV, HW (nm), DGRID, BASINS, BF (bias factor), TTBF (adds TT on WT), WT (code dir)
 HILL=${HILL:-2.0}; CV=${CV:-dist}; HW=${HW:-0.01}; DGRID=${DGRID:-"0.2 3.6 1701"}; BASINS=${BASINS:-"0.4 2.5"}; BF=${BF:-5}
 TTARG=""; [ -n "$TTBF" ] && TTARG="--tt-bias-factor $TTBF"
+# SYNC=1: every walker waits until all array tasks have started (shared bias filled in parallel)
+if [ -n "$SYNC" ]; then
+    mkdir -p "$OUT"; touch "$OUT/.ready_${SLURM_ARRAY_TASK_ID}"
+    N=${SLURM_ARRAY_TASK_COUNT:-5}; W=0
+    until [ "$(ls "$OUT"/.ready_* 2>/dev/null | wc -l)" -ge "$N" ]; do
+        sleep 30; W=$((W + 30))
+        [ "$W" -ge "${MAXWAIT:-21600}" ] && { echo "only $(ls "$OUT"/.ready_* | wc -l)/$N walkers started in ${W}s: abort"; exit 3; }
+    done
+    echo "all $N walkers ready after ${W}s"
+fi
 python $WT/examples/04_Full-Pipeline/run_single_walker_control.py --cv "$CV" --ns "$NS" --seed-from "$SEED" \
     --hill-width "$HW" --hill-height "$HILL" --bias-factor "$BF" --dist-grid $DGRID \
     --tt-basins $BASINS --tt-threshold "$TH" $TTARG \
