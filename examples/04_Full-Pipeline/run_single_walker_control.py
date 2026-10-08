@@ -47,6 +47,9 @@ def main():
     ap.add_argument("--seed-from", default="equil",
                     help="'equil' for the equilibrated pose, or a milestone name "
                          "like milestone_2_frame_145 to seed along the path")
+    ap.add_argument("--resume-from", default=None,
+                    help="portable State XML (WTMetaD_checkpoint_<run>.xml) to continue a finished walker; "
+                         "the system still comes from --seed-from, the bias from --bias-dir")
     ap.add_argument("--bias-dir", default=None,
                     help="shared bias directory; concurrent walkers pointing at "
                          "the same one build a single surface together")
@@ -124,6 +127,9 @@ def main():
         state = f"{base}/milestones/{args.seed_from}_relax_state.xml"
         system_xml = f"{base}/milestones/{args.seed_from}_relax_system.xml"
         log.info("starting from milestone %s: %s", args.seed_from, state)
+    if args.resume_from:
+        state = args.resume_from
+        log.info("resuming from %s (system from %s)", state, system_xml)
     for _f in (state, system_xml):
         if not os.path.exists(_f):
             raise SystemExit(f"missing seed file: {_f}")

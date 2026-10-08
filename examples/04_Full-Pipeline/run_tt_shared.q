@@ -8,7 +8,8 @@
 # Seeding: path = one walker per milestone (default); s1 = all walkers in S1.
 # Env: HILL (kJ/mol), CV, HW (nm), DGRID, BASINS ("none" = no TT), BF (bias factor),
 #      TTBF (TT on top of WT), SYNC=1 (all walkers start together), ISOLATED=1 (one bias per
-#      walker), RIDSUF (run-id suffix), WT (code dir; default: the submitting repository).
+#      walker), RIDSUF (run-id suffix), EXTEND=1 (continue BASE run from its saved state in the
+#      same bias; use with RIDSUF), WT (code dir; default: the submitting repository).
 # usage (from examples/04_Full-Pipeline):
 #   sbatch -p alphafold,forli,a100 --exclude=<slow GPUs> -J tt_shr \
 #     -o 3ptb_tts_%a.out -e 3ptb_tts_%a.err run_tt_shared.q [NS] [OUT] [V_TH kJ/mol] [path|s1]
@@ -21,12 +22,15 @@ SEEDS=(milestone_1_frame_0 milestone_2_frame_115 milestone_3_frame_189 milestone
 [ "${4:-path}" = s1 ] && SEEDS=(equil milestone_1_frame_0 equil milestone_1_frame_0 equil)
 SEED=${SEEDS[$((SLURM_ARRAY_TASK_ID-1))]}
 RID="${SEED}_w0"; [ "${4:-path}" = s1 ] && RID="s1_${SLURM_ARRAY_TASK_ID}_${SEED}"
-RID="${RID}${RIDSUF}"      # RIDSUF: new names for resubmitted walkers
+BASE_RID="$RID"
+RID="${RID}${RIDSUF}"      # RIDSUF: new names for resubmitted or extended walkers
 NS=${1:-40}; OUT=${2:-3ptb/metadynamics_tt_shared}; TH=${3:-0}
 HILL=${HILL:-2.0}; CV=${CV:-dist}; HW=${HW:-0.01}; DGRID=${DGRID:-"0.2 3.6 1701"}; BASINS=${BASINS:-"0.4 2.5"}; BF=${BF:-5}
 TTARG="--tt-basins $BASINS --tt-threshold $TH"; [ -n "$TTBF" ] && TTARG="$TTARG --tt-bias-factor $TTBF"
 [ "$BASINS" = none ] && TTARG=""                 # BASINS=none: plain well tempering
-BIASDIR="$OUT"; [ -n "$ISOLATED" ] && BIASDIR="$OUT/bias_${RID}"   # ISOLATED=1: one bias per walker
+BIASDIR="$OUT"; [ -n "$ISOLATED" ] && BIASDIR="$OUT/bias_${BASE_RID}"   # ISOLATED=1: one bias per walker
+# EXTEND=1 (with RIDSUF, e.g. _x2): continue walker BASE_RID from its saved state, same bias
+RESUME=""; [ -n "$EXTEND" ] && RESUME="--resume-from $OUT/WTMetaD_checkpoint_${BASE_RID}.xml"
 # SYNC=1: every walker waits until all array tasks have started (shared bias filled in parallel)
 if [ -n "$SYNC" ]; then
     mkdir -p "$OUT"; touch "$OUT/.ready_${SLURM_ARRAY_TASK_ID}"
@@ -39,6 +43,6 @@ if [ -n "$SYNC" ]; then
 fi
 python $WT/examples/04_Full-Pipeline/run_single_walker_control.py --cv "$CV" --ns "$NS" --seed-from "$SEED" \
     --hill-width "$HW" --hill-height "$HILL" --bias-factor "$BF" --dist-grid $DGRID \
-    $TTARG \
+    $TTARG $RESUME \
     --funnel-from 3ptb/funnel_params_narrow_k100.npz --out "$OUT" --bias-dir "$BIASDIR" \
     --run-id "$RID" --rct-ustride 5 --dcd-interval 50
