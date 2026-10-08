@@ -14,6 +14,7 @@ The class also logs every hill and gives the bias at the walker and c(t)
 (Tiwary & Parrinello, J. Phys. Chem. B 119, 736, 2015) for frame reweighting.
 """
 
+import time
 from functools import reduce
 
 import numpy as np
@@ -60,7 +61,8 @@ class BoundaryCorrectedMetadynamics(Metadynamics):
     """OpenMM Metadynamics whose hills are divided by the in-domain fraction N(s).
 
     ``bounds=[None, ...]`` gives plain hills. ``hills`` holds one
-    (step, cv..., height kJ/mol) row per deposited hill.
+    (step, cv..., height kJ/mol) row per deposited hill, ``hill_wall`` its
+    time.time() at deposition.
     """
 
     def __init__(self, system, variables, temperature, biasFactor, height, frequency,
@@ -69,8 +71,10 @@ class BoundaryCorrectedMetadynamics(Metadynamics):
             bounds = [(v.minValue, v.maxValue) for v in variables]
         if len(bounds) != len(variables):
             raise ValueError("bounds needs one (lo, hi) or None per variable")
+        self.bounds = list(bounds)
         self.boundaryFactor = boundary_factor(variables, bounds)
         self.hills = []
+        self.hill_wall = []
         super().__init__(system, variables, temperature, biasFactor, height, frequency,
                          saveFrequency=saveFrequency, biasDir=biasDir)
 
@@ -92,6 +96,7 @@ class BoundaryCorrectedMetadynamics(Metadynamics):
 
         h = height.value_in_unit(unit.kilojoules_per_mole)
         self.hills.append((context.getStepCount(), *[float(p) for p in position], h))
+        self.hill_wall.append(time.time())
         hill = h * gaussian * self.boundaryFactor
         self._selfBias += hill
         self._totalBias += hill

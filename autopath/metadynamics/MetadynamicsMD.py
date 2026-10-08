@@ -14,6 +14,7 @@ import cvpack
 from autopath.metadynamics.CV import CVSpec
 from autopath.metadynamics.BoundaryCorrection import BoundaryCorrectedMetadynamics
 from autopath.metadynamics.TransitionTempered import TransitionTemperedMetadynamics
+from autopath.metadynamics.Hills import hills_record
 from autopath.metadynamics.Analysis import (
     correct_fe_for_funnel,
     plot_bias,
@@ -428,11 +429,9 @@ class MetadynamicsMD:
                          temperature=self.temperature.value_in_unit(openmmunit.kelvin),
                          bias_factor=float(bias_factor), rct_ustride=int(rct_ustride),
                          tempering=tempering)
-            h = np.array(meta.hills, dtype=float).reshape(-1, len(resolved) + 2)
-            extra = dict(vstar_kj=np.array(meta.vstar_log)) if tt_basins is not None else {}
             _atomic_save(os.path.join(self.out_dir, f"HILLS_{run_id}.npz"),
-                     time_ns=h[:, 0] * _ps_per_step / 1000.0, cv=h[:, 1:-1], height_kj=h[:, -1],
-                     tempering=tempering, **extra)
+                         **hills_record(meta, run_id, _started_at, _ps_per_step, resolved,
+                                        tempering, **intervals))
         # ~40 snapshots over the run, so the curve is readable at any length
         fe_hist, fe_hist_steps = [], []
         # Start time orders sequential shared-bias walkers.

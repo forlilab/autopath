@@ -97,7 +97,9 @@ class TransitionTemperedMetadynamics(BoundaryCorrectedMetadynamics):
             raise ValueError("transition tempering needs at least two basin points")
         super().__init__(system, variables, temperature, biasFactor, height, frequency,
                          saveFrequency=saveFrequency, biasDir=biasDir, bounds=bounds)
+        self.basin_points = [list(np.atleast_1d(np.asarray(b, dtype=float))) for b in basins]
         self.basins = [self._grid_index(b) for b in basins]
+        self.ttBiasFactor = ttBiasFactor
         self.threshold = float(threshold)
         self.vstar_log = []
         self.wellTempered = ttBiasFactor is not None

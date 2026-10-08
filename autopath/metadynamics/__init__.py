@@ -7,6 +7,7 @@ funnel metadynamics simulations:
 - MetadynamicsMD          : run OpenMM WT-MetaD simulations
 - BoundaryCorrectedMetadynamics : WT-MetaD with McGovern–de Pablo edge-corrected hills
 - TransitionTemperedMetadynamics : transition-tempered MetaD (Dama 2014) on the same hills
+- load_hills / bias_from_hills / fes_history : rebuild the bias and FES(t) from HILLS v2
 - MetadynamicsAnalysis    : post-run diagnostics and convergence analysis
 - correct_fe_for_funnel   : Limongelli 2013 standard-state correction
 - write_metad_preseed     : pre-seed metadynamics bias from sMD PMF
@@ -18,6 +19,7 @@ funnel metadynamics simulations:
 from .MetadynamicsMD import MetadynamicsMD
 from .BoundaryCorrection import BoundaryCorrectedMetadynamics
 from .TransitionTempered import TransitionTemperedMetadynamics, vstar
+from .Hills import load_hills, bias_from_hills, fes_history, hills_record
 
 # --- Analysis ---
 from .Analysis import (
@@ -67,6 +69,10 @@ __all__ = [
     "BoundaryCorrectedMetadynamics",
     "TransitionTemperedMetadynamics",
     "vstar",
+    "load_hills",
+    "bias_from_hills",
+    "fes_history",
+    "hills_record",
     "MetadynamicsAnalysis",
     "correct_fe_for_funnel",
     "rct_weights",
