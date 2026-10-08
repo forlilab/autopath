@@ -5,6 +5,10 @@ shrink as h exp(-max(V* - V_th, 0) / ΔT), where V* is the largest bias level
 at which all basins are still connected through grid cells with V >= V*
 (the minimum bias on the maximally biased path, Eq. 1). ΔT = (γ - 1) T as in
 well-tempered metadynamics; the bias converges to -F.
+
+With ``ttBiasFactor`` the local well-tempered factor exp(-V(s)/((γ - 1) kT)) is
+kept and TT multiplies on top with its own factor (PLUMED BIASFACTOR + TTBIASFACTOR);
+the bias then converges to the well-tempered -(γ - 1)/γ F.
 """
 
 import numpy as np
@@ -66,10 +70,13 @@ class TransitionTemperedMetadynamics(BoundaryCorrectedMetadynamics):
 
     ``basins`` holds one CV point (in CV units, variable order) per basin;
     ``threshold`` is V_th in kJ/mol. ``vstar_log`` holds V* at every hill.
+    ``ttBiasFactor`` keeps well tempering with ``biasFactor`` and tempers by V*
+    with ``ttBiasFactor``; None (default) is pure TT with ``biasFactor``.
     """
 
     def __init__(self, system, variables, temperature, biasFactor, height, frequency,
-                 saveFrequency=None, biasDir=None, bounds=None, basins=None, threshold=0.0):
+                 saveFrequency=None, biasDir=None, bounds=None, basins=None, threshold=0.0,
+                 ttBiasFactor=None):
         if not basins or len(basins) < 2:
             raise ValueError("transition tempering needs at least two basin points")
         super().__init__(system, variables, temperature, biasFactor, height, frequency,
@@ -77,7 +84,12 @@ class TransitionTemperedMetadynamics(BoundaryCorrectedMetadynamics):
         self.basins = [self._grid_index(b) for b in basins]
         self.threshold = float(threshold)
         self.vstar_log = []
-        self._kdt = (unit.MOLAR_GAS_CONSTANT_R * self._deltaT).value_in_unit(unit.kilojoules_per_mole)
+        self.wellTempered = ttBiasFactor is not None
+        if self.wellTempered and ttBiasFactor <= 1.0:
+            raise ValueError("ttBiasFactor must be > 1")
+        kt = (unit.MOLAR_GAS_CONSTANT_R * self.temperature).value_in_unit(unit.kilojoules_per_mole)
+        self._kdt_wt = kt * (biasFactor - 1.0)
+        self._kdt = kt * ((ttBiasFactor if self.wellTempered else biasFactor) - 1.0)
 
     def _grid_index(self, point):
         point = np.atleast_1d(np.asarray(point, dtype=float))
@@ -108,16 +120,24 @@ class TransitionTemperedMetadynamics(BoundaryCorrectedMetadynamics):
                 v = self.vstar()
                 self.vstar_log.append(v)
                 height = self.height * np.exp(-max(v - self.threshold, 0.0) / self._kdt)
+                if self.wellTempered:
+                    e = simulation.context.getState(
+                        getEnergy=True, groups={self._force.getForceGroup()}).getPotentialEnergy()
+                    height = height * np.exp(-e.value_in_unit(unit.kilojoules_per_mole) / self._kdt_wt)
                 self._addGaussian(position, height, simulation.context)
             if self.saveFrequency is not None and simulation.currentStep % self.saveFrequency == 0:
                 self._syncWithDisk()
             stepsToGo -= nextSteps
 
     def getFreeEnergy(self):
+        if self.wellTempered:
+            return super().getFreeEnergy()
         return -self._totalBias * unit.kilojoules_per_mole
 
     def rct(self) -> float:
         """c(t) for a bias converging to -F: kT ln <exp(V/kT)> over the grid."""
+        if self.wellTempered:
+            return super().rct()
         kt = (unit.MOLAR_GAS_CONSTANT_R * self.temperature).value_in_unit(unit.kilojoules_per_mole)
         v = self._totalBias.ravel() / kt
         return kt * (logsumexp(v) - np.log(v.size))

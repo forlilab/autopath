@@ -155,3 +155,53 @@ def test_bias_converges_to_minus_f_and_reweights():
     xc, fx = reweighted_fes(xs[n0:], rct_weights(bias[n0:], rct[n0:], T),
                             np.linspace(0.12, 0.98, 44), T)
     assert rms(fx, A * np.cos(2 * np.pi * xc / 0.45)) < 1.5
+
+
+def test_combined_with_tt_off_is_exactly_well_tempered():
+    from autopath.metadynamics import BoundaryCorrectedMetadynamics
+    hills = []
+    for cls, kw in ((BoundaryCorrectedMetadynamics, {}),
+                    (TransitionTemperedMetadynamics,
+                     dict(basins=[[0.225], [0.675]], threshold=1e9, ttBiasFactor=3))):
+        s, bv = _toy(WELLS)
+        meta = cls(s, [bv], T * u.kelvin, 5, 1.0, 50, bounds=[(0.1, 1.0)], **kw)
+        meta.step(_sim(s), 50 * 120)
+        hills.append(np.array(meta.hills))
+    assert hills[0].shape == hills[1].shape == (120, 3)
+    assert np.allclose(hills[0], hills[1], rtol=1e-7, atol=0)    # later: chaotic round-off growth
+    assert hills[0][-1, -1] < 0.9                         # well tempering did act
+
+
+def test_combined_free_energy_rct_and_report_scale_are_well_tempered(tmp_path):
+    from autopath.metadynamics import BoundaryCorrectedMetadynamics
+    from autopath.metadynamics.report import fes_scale
+    s1, bv1 = _toy("0")
+    s2, bv2 = _toy("0")
+    wt = BoundaryCorrectedMetadynamics(s1, [bv1], T * u.kelvin, 5, 1.0, 10)
+    both = TransitionTemperedMetadynamics(s2, [bv2], T * u.kelvin, 5, 1.0, 10,
+                                          basins=[[0.2], [0.8]], ttBiasFactor=3)
+    v = np.random.default_rng(0).random(bv1.gridWidth) * 30
+    wt._totalBias[:] = v
+    both._totalBias[:] = v
+    assert np.allclose(both.getFreeEnergy().value_in_unit(u.kilojoule_per_mole),
+                       wt.getFreeEnergy().value_in_unit(u.kilojoule_per_mole))
+    assert both.rct() == pytest.approx(wt.rct())
+    np.savez(tmp_path / "HILLS_w.npz", tempering="wt+tt", height_kj=np.ones(1))
+    assert fes_scale(str(tmp_path), 5) == pytest.approx(1.25)
+
+
+def test_combined_converges_to_the_well_tempered_estimate():
+    s, bv = _toy(WELLS)
+    gamma = 5
+    meta = TransitionTemperedMetadynamics(s, [bv], T * u.kelvin, gamma, 1.0 * u.kilojoule_per_mole,
+                                          250, bounds=[(0.1, 1.0)], basins=[[0.225], [0.675]],
+                                          ttBiasFactor=3)
+    sim = _sim(s)
+    for _ in range(1200):
+        meta.step(sim, 2500)
+    grid = np.linspace(0.0, 1.0, 201)
+    inner = (grid > 0.15) & (grid < 0.95)
+    fe = meta.getFreeEnergy().value_in_unit(u.kilojoule_per_mole)[inner]
+    ref = A * np.cos(2 * np.pi * grid[inner] / 0.45)
+    assert np.sqrt(np.mean(((fe - ref) - (fe - ref).mean()) ** 2)) < 1.5
+    assert max(meta.vstar_log) > 0 and meta.hills[-1][-1] < 0.2

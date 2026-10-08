@@ -14,17 +14,18 @@
 nvidia-smi --query-gpu=name --format=csv,noheader | head -1
 source ~/.bashrc
 micromamba activate autopath
-WT=/gpfs/home/mllanos/forlilab/autopath/.claude/worktrees/ttmetad
+WT=${WT:-/gpfs/home/mllanos/forlilab/autopath/.claude/worktrees/ttmetad}
 export PYTHONPATH=$WT
 SEEDS=(milestone_1_frame_0 milestone_2_frame_115 milestone_3_frame_189 milestone_4_frame_250 milestone_5_frame_1116)
 [ "${4:-path}" = s1 ] && SEEDS=(equil milestone_1_frame_0 equil milestone_1_frame_0 equil)
 SEED=${SEEDS[$((SLURM_ARRAY_TASK_ID-1))]}
 RID="${SEED}_w0"; [ "${4:-path}" = s1 ] && RID="s1_${SLURM_ARRAY_TASK_ID}_${SEED}"
 NS=${1:-40}; OUT=${2:-3ptb/metadynamics_tt_shared}; TH=${3:-0}
-# env overrides: HILL (kJ/mol), CV, HW (nm), DGRID, BASINS
-HILL=${HILL:-2.0}; CV=${CV:-dist}; HW=${HW:-0.01}; DGRID=${DGRID:-"0.2 3.6 1701"}; BASINS=${BASINS:-"0.4 2.5"}
+# env overrides: HILL (kJ/mol), CV, HW (nm), DGRID, BASINS, BF (bias factor), TTBF (adds TT on WT), WT (code dir)
+HILL=${HILL:-2.0}; CV=${CV:-dist}; HW=${HW:-0.01}; DGRID=${DGRID:-"0.2 3.6 1701"}; BASINS=${BASINS:-"0.4 2.5"}; BF=${BF:-5}
+TTARG=""; [ -n "$TTBF" ] && TTARG="--tt-bias-factor $TTBF"
 python $WT/examples/04_Full-Pipeline/run_single_walker_control.py --cv "$CV" --ns "$NS" --seed-from "$SEED" \
-    --hill-width "$HW" --hill-height "$HILL" --bias-factor 5 --dist-grid $DGRID \
-    --tt-basins $BASINS --tt-threshold "$TH" \
+    --hill-width "$HW" --hill-height "$HILL" --bias-factor "$BF" --dist-grid $DGRID \
+    --tt-basins $BASINS --tt-threshold "$TH" $TTARG \
     --funnel-from 3ptb/funnel_params_narrow_k100.npz --out "$OUT" --bias-dir "$OUT" \
     --run-id "$RID" --rct-ustride 5 --dcd-interval 50

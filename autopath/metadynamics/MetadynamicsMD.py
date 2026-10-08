@@ -171,6 +171,7 @@ class MetadynamicsMD:
         dcd_interval: float = 10.0,
         tt_basins: list = None,
         tt_threshold: float = 0.0,
+        tt_bias_factor: float = None,
     ) -> str:
         """Run a single WT-MetaD trajectory and return the run identifier.
 
@@ -230,6 +231,10 @@ class MetadynamicsMD:
             ``bias_factor`` then sets ΔT = (γ - 1) T after the basins connect.
         tt_threshold : float, optional
             V_th in kJ/mol: tempering starts once V* exceeds it (default 0).
+        tt_bias_factor : float, optional
+            With ``tt_basins``: keep well tempering with ``bias_factor`` and temper
+            by V* with this factor (PLUMED BIASFACTOR + TTBIASFACTOR). None (default)
+            is pure TT with ``bias_factor``.
 
         Returns
         -------
@@ -366,12 +371,15 @@ class MetadynamicsMD:
             bounds = [None] * len(resolved)
         if tt_basins is not None:
             meta = TransitionTemperedMetadynamics(*meta_args, bounds=bounds, basins=tt_basins,
-                                                  threshold=tt_threshold, **meta_kwargs)
-            logger.info("Transition-tempered hills: basins %s, V_th %.2f kJ/mol",
-                        tt_basins, tt_threshold)
+                                                  threshold=tt_threshold,
+                                                  ttBiasFactor=tt_bias_factor, **meta_kwargs)
+            logger.info("Transition-tempered hills: basins %s, V_th %.2f kJ/mol%s",
+                        tt_basins, tt_threshold,
+                        "" if tt_bias_factor is None else
+                        f", well-tempered γ {bias_factor:g} x TT γ {tt_bias_factor:g}")
         else:
             meta = BoundaryCorrectedMetadynamics(*meta_args, bounds=bounds, **meta_kwargs)
-        tempering = "tt" if tt_basins is not None else "wt"
+        tempering = "wt" if tt_basins is None else "tt" if tt_bias_factor is None else "wt+tt"
         if boundary_correction:
             logger.info("Boundary-corrected hills on %s (max factor %.2f)",
                         ", ".join(f"[{lo:.3f}, {hi:.3f}]" for lo, hi in bounds),
@@ -421,7 +429,7 @@ class MetadynamicsMD:
                          bias_factor=float(bias_factor), rct_ustride=int(rct_ustride),
                          tempering=tempering)
             h = np.array(meta.hills, dtype=float).reshape(-1, len(resolved) + 2)
-            extra = dict(vstar_kj=np.array(meta.vstar_log)) if tempering == "tt" else {}
+            extra = dict(vstar_kj=np.array(meta.vstar_log)) if tt_basins is not None else {}
             _atomic_save(os.path.join(self.out_dir, f"HILLS_{run_id}.npz"),
                      time_ns=h[:, 0] * _ps_per_step / 1000.0, cv=h[:, 1:-1], height_kj=h[:, -1],
                      tempering=tempering, **extra)

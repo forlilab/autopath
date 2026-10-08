@@ -89,6 +89,8 @@ def main():
                          "comma-separate the coordinates of 2D CVs (e.g. 0.4 2.8 or 0.4,1.0 2.8,1.0)")
     ap.add_argument("--tt-threshold", type=float, default=0.0,
                     help="TT threshold V_th (kJ/mol)")
+    ap.add_argument("--tt-bias-factor", type=float, default=None,
+                    help="keep well tempering with --bias-factor and add TT with this factor")
     args = ap.parse_args()
 
     base = args.base
@@ -237,7 +239,7 @@ def main():
               dcd_interval=args.dcd_interval,
               tt_basins=([[float(x) for x in b.split(",")] for b in args.tt_basins]
                          if args.tt_basins else None),
-              tt_threshold=args.tt_threshold)
+              tt_threshold=args.tt_threshold, tt_bias_factor=args.tt_bias_factor)
     log.info("finished: %.1f ns, seed=%s", args.ns, args.seed_from)
 
 
