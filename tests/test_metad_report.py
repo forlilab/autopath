@@ -165,3 +165,13 @@ def test_walker_without_hills_v2_is_not_reported(tmp_path):
     np.savez(d / "HILLS_x.npz", time_ns=np.zeros(1), cv=np.zeros((1, 1)), height_kj=np.ones(1))
     out = R.report(str(d), 300.0, 0.0, 1.0, "s", out_prefix=str(tmp_path / "old"), funnel_params=None)
     assert out["estimates"] == [] and out["n_walkers"] == 0
+
+
+def test_funnel_without_a_cv_length_tracks_the_well_depth(tmp_path):
+    d = _shared(tmp_path)
+    out = R.report(str(d), 300.0, 0.0, 1.0, "s", out_prefix=str(tmp_path / "nolen"),
+                   funnel_params=_fp())                         # funnel, but no cv_length_per_unit_ang
+    assert out["dG_bind_std_kj"] is None
+    (label, depth), = out["well_depth_kj"]
+    assert depth == pytest.approx(-50.0, abs=1.0)
+    assert os.path.exists(out["files"]["convergence"])

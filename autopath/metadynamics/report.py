@@ -438,8 +438,12 @@ def report(out_dir, temperature, grid_min=0.0, grid_max=1.0,
         else:
             logger.info("Unbound reference: CV %.3f-%.3f (cylinder from z_cc to z_max - 3 sigma).",
                         *ref_range)
+    # Eq. 15 needs a length along the funnel axis; without one track the raw well depth.
+    fp_corr = fp if cv_length_per_unit_ang else None
+    if fp is not None and fp_corr is None:
+        logger.info("CV has no length scale: no standard-state correction, reporting the well depth.")
     traces = walker_traces(out_dir, walkers, basins, grid, cv_is_funnel_z)
-    estimates = build_estimates(walkers, fp, temperature, grid, cv_length_per_unit_ang,
+    estimates = build_estimates(walkers, fp_corr, temperature, grid, cv_length_per_unit_ang,
                                 reference_range=ref_range, origin=origin)
 
     ma = MetadynamicsAnalysis.__new__(MetadynamicsAnalysis)
@@ -480,12 +484,12 @@ def report(out_dir, temperature, grid_min=0.0, grid_max=1.0,
 
     files = {
         "fes": plot_fes(estimates, mode, grid, cv_name, cv_length_per_unit_ang,
-                        f"{out_prefix}_FES.png", corrected=fp is not None, origin=origin),
+                        f"{out_prefix}_FES.png", corrected=fp_corr is not None, origin=origin),
         "colvar": plot_colvar(traces, mode, basins, grid, cv_name, f"{out_prefix}_COLVAR.png",
                               z_max_ang=z_max),
         "convergence": plot_convergence(estimates, mode, grid, plateau_results,
                                         f"{out_prefix}_convergence.png",
-                                        corrected=fp is not None, walkers=walkers),
+                                        corrected=fp_corr is not None, walkers=walkers),
     }
     for e in estimates:
         logger.info("  %-28s ΔG°_b = %s kJ/mol%s", e.label,
