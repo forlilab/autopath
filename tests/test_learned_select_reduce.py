@@ -148,3 +148,44 @@ def test_lda_reference_shape_and_sign():
     W = lda_reference(X, y, 2)
     s = X @ W[:, 0]
     assert W.shape == (3, 2) and s[y == "bound"].mean() < s[y == "bulk"].mean()
+
+
+import os
+
+TRAJ = "examples/04_Full-Pipeline/3ptb/sMD/trajectories"
+PDB3 = "examples/04_Full-Pipeline/3ptb/system.pdb"
+
+
+@pytest.mark.skipif(not os.path.isdir(TRAJ), reason="3ptb sMD data not on disk")
+def test_learn_cv_3ptb_rediscovers_pocket_hydration(tmp_path):
+    import MDAnalysis as mda
+    from autopath.metadynamics.learned.pipeline import learn_cv
+    u = mda.Universe(PDB3)
+    lig = list(u.select_atoms("resname UNK").indices)
+    pocket = list(u.select_atoms("protein and around 6 resname UNK").residues.atoms.indices)
+    path = learn_cv(PDB3, "examples/data/3ptb.sdf", lig, pocket, TRAJ, str(tmp_path),
+                    stride=4, n_perm=200)
+    d = np.load(path, allow_pickle=False)
+    kept_names = [str(n) for n in d["names"][d["kept"]]]
+    assert "F3_com" in kept_names
+    assert any(n.startswith("F5") or (n.startswith("F4") and n.endswith("_172")) for n in kept_names), kept_names
+    assert d["weights"].shape[0] == len(d["kept"])
+    assert float(d["monotonic_rho"]) > 0.8 and np.isfinite(float(d["f3_acc"]))
+    assert os.path.exists(tmp_path / "report.png")
+
+
+@pytest.mark.skipif(not os.path.isdir(TRAJ), reason="3ptb sMD data not on disk")
+def test_learned_cv_spec_builds_and_evaluates(tmp_path):
+    import MDAnalysis as mda
+    import openmm as mm
+    from autopath.metadynamics.learned.pipeline import learn_cv
+    from autopath.metadynamics.learned.forces import learned_cv_spec
+    u = mda.Universe(PDB3)
+    lig = list(u.select_atoms("resname UNK").indices)
+    pocket = list(u.select_atoms("protein and around 6 resname UNK").residues.atoms.indices)
+    path = learn_cv(PDB3, "examples/data/3ptb.sdf", lig, pocket, TRAJ, str(tmp_path), stride=8, n_perm=50)
+    system = mm.XmlSerializer.deserialize(open("examples/04_Full-Pipeline/3ptb/system.xml").read())
+    specs = learned_cv_spec(path, system, n_components=1)
+    assert len(specs) == 1 and specs[0].name == "learned1"
+    cv = specs[0].resolve(None, system.getNumParticles(), None).cv
+    assert cv is not None and specs[0].grid_min < specs[0].grid_max

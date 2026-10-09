@@ -1,6 +1,7 @@
 # autopath/metadynamics/learned/forces.py
 """OpenMM/cvpack builders for learned-CV features; same formulas as features.evaluate."""
 import cvpack
+import numpy as np
 import openmm as mm
 from openmm.app.internal.unitcell import reducePeriodicBoxVectors
 from openmm import unit
@@ -69,3 +70,23 @@ def combined_cv(features, weights, mu, sd, system, name="learned"):
         params[f"w{k}"], params[f"mu{k}"], params[f"sd{k}"] = float(weights[k]), float(mu[k]), float(sd[k])
     inner = [feature_cv(f, system, n) for f, n in zip(features, names)]
     return cvpack.MetaCollectiveVariable(expr, inner, unit.dimensionless, name=name, **params)
+
+
+def learned_cv_spec(npz_path, system, n_components=1):
+    from ..CV import CVSpec
+    from .features import features_from_dict
+    d = np.load(npz_path, allow_pickle=False)
+    feats = features_from_dict(d)
+    kept = [feats[int(i)] for i in d["kept"]]
+    specs = []
+    for k in range(n_components):
+        w, mu, sd = d["weights"][:, k], d["mu"], d["sd"]
+        lo, hi, hw = float(d["grid_min"][k]), float(d["grid_max"][k]), float(d["hill_width"][k])
+
+        def factory(pos, n_atoms, top, w=w, name=f"learned{k + 1}"):
+            return combined_cv(kept, w, mu, sd, system, name=name)
+
+        specs.append(CVSpec(cv=None, grid_min=lo, grid_max=hi, hill_width=hw,
+                            grid_points=int(round((hi - lo) / (hw / 5))) + 1,
+                            name=f"learned{k + 1}", bounds=(-np.inf, np.inf), _factory=factory))
+    return specs
