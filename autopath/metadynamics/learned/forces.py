@@ -63,6 +63,8 @@ def feature_cv(f, system, name):
 
 
 def combined_cv(features, weights, mu, sd, system, name="learned"):
+    if len(features) > 32:
+        raise ValueError(f"{len(features)} features exceed OpenMM CustomCVForce's limit of 32 collective variables")
     names = [f"f{k}" for k in range(len(features))]
     expr = " + ".join(f"w{k}*({n} - mu{k})/sd{k}" for k, n in enumerate(names))
     params = {}

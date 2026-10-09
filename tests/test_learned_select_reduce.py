@@ -130,6 +130,42 @@ def test_hidden_variable_speed_without_usable_bins_abstains():
     assert p < 0.05 and rho > 0
 
 
+def _r_proxy_pulls(n_pull=45, speeds=(0.01, 0.02, 0.04), seed=0):
+    """Pulls with per-pull r jitter; W rises steeply with r; x is a noisy copy of r only."""
+    rng = np.random.default_rng(seed)
+    rows = []
+    for v in speeds:
+        for p in range(n_pull):
+            r = np.linspace(0.8, 2.0, 49) + rng.uniform(0, 0.05)
+            W = 100.0 * r + rng.normal(scale=0.5, size=len(r))
+            x = r + rng.normal(scale=0.005, size=len(r))
+            rows.append(pd.DataFrame({"r": r, "W": W, "x": x, "pull": f"{v}_{p}", "speed": v}))
+    return pd.concat(rows, ignore_index=True)
+
+
+def test_hidden_variable_ignores_a_feature_that_only_tracks_r():
+    df = _r_proxy_pulls()
+    p, _ = hidden_variable_p(df.x.values, df.W.values, df.r.values, df.pull.values,
+                             df.speed.values, n_perm=200, rng=np.random.default_rng(9))
+    assert p >= 0.05
+
+
+def test_select_caps_kept_features_and_keeps_f3():
+    from autopath.metadynamics.learned.select import MAX_KEPT, select
+    rng = np.random.default_rng(10)
+    n, k = 400, 40
+    labels = np.array(["bound"] * 150 + ["vestibule"] * 150 + ["bulk"] * 100, dtype=object)
+    shift = (labels == "bound").astype(float)
+    V = shift[:, None] * rng.uniform(1, 3, k) + rng.normal(size=(n, k))
+    fams = ["F3"] + ["F7"] * (k - 1)
+    frames = pd.DataFrame({"W": rng.normal(size=n), "r": np.linspace(0.8, 2.0, n),
+                           "pull": np.arange(n) % 10, "speed": 0.01})
+    out = select(V, [f"f{i}" for i in range(k)], fams, frames, labels, n_perm=10,
+                 rng=np.random.default_rng(0))
+    assert (out["fisher"][1:] >= 0.5).sum() > MAX_KEPT
+    assert len(out["kept"]) <= MAX_KEPT == 30 and 0 in out["kept"]
+
+
 from autopath.metadynamics.learned.reduce import HLDA, lda_reference
 
 

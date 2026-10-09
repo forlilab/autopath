@@ -9,6 +9,7 @@ from scipy.spatial.distance import squareform
 from scipy.stats import rankdata
 
 BIN_NM, MIN_PULLS, RHO_PRUNE, FISHER_FLOOR, P_MAX, BULK_NM = 0.05, 20, 0.8, 0.5, 0.05, 0.3
+MAX_KEPT = 30
 
 
 def find_pulls(traj_dir, direction="forward"):
@@ -52,23 +53,29 @@ def fisher(x, y):
     return float((a.mean() - b.mean()) ** 2 / (a.var() + b.var() + 1e-12))
 
 
-def _std_ranks(v):
+def _resid_ranks(v, rr):
+    """Ranks of v with the OLS fit on centred ranks of r removed, scaled to unit sd (0 if degenerate)."""
     rv = rankdata(v)
-    return (rv - rv.mean()) / rv.std()
+    rv = rv - rv.mean()
+    if rr @ rr > 0:
+        rv = rv - (rv @ rr) / (rr @ rr) * rr
+    sd = rv.std()
+    return rv / sd if sd > 1e-9 * len(rv) else np.zeros_like(rv)
 
 
 def _usable_bins(x, W, r, pull):
-    """{bin: (per-pull mean x, per-pull mean W)} for bins with enough pulls and non-constant means."""
-    df = pd.DataFrame({"x": x, "W": W, "bin": np.round(r / BIN_NM).astype(int), "pull": pull})
+    """{bin: (x, W, r) per-pull means} for bins with enough pulls and non-constant x, W means."""
+    df = pd.DataFrame({"x": x, "W": W, "r": r, "bin": np.round(r / BIN_NM).astype(int), "pull": pull})
     out = {}
-    for b, g in df.groupby(["bin", "pull"])[["x", "W"]].mean().groupby(level=0):
+    for b, g in df.groupby(["bin", "pull"])[["x", "W", "r"]].mean().groupby(level=0):
         if len(g) >= MIN_PULLS and np.ptp(g.x.values) > 0 and np.ptp(g.W.values) > 0:
-            out[b] = (g.x.values, g.W.values)
+            out[b] = (g.x.values, g.W.values, g.r.values)
     return out
 
 
 def hidden_variable_p(x, W, r, pull, speed, n_perm=1000, rng=None):
-    """Family-wise permutation p of max_bin |rho_bar|, rho_bar = tanh(mean_g arctanh rho_g)."""
+    """Family-wise permutation p of max_bin |rho_bar|, rho_bar = tanh(mean_g arctanh rho_g),
+    rho_g the Spearman correlation of per-pull means of x and W partialling out r."""
     rng = rng or np.random.default_rng(0)
     speeds = np.unique(speed)
     if len(speeds) > 1:
@@ -87,7 +94,9 @@ def hidden_variable_p(x, W, r, pull, speed, n_perm=1000, rng=None):
     z = np.zeros((n_perm + 1, len(bins)))
     for t in tabs:
         for k, b in enumerate(bins):
-            rx, rw = (_std_ranks(v) for v in t[b])
+            xb, wb, rb = t[b]
+            rr = rankdata(rb) - (len(rb) + 1) / 2
+            rx, rw = _resid_ranks(xb, rr), _resid_ranks(wb, rr)
             n = len(rx)
             perm = rng.permuted(np.tile(np.arange(n), (n_perm, 1)), axis=1)
             rho = np.r_[rw @ rx, rw[perm] @ rx] / n
@@ -111,5 +120,6 @@ def select(V, names, families, frames, labels, n_perm=1000, rng=None):
     score = fis + (p < P_MAX) * 1e3
     kept = [int(idx[i]) for i in prune(V[:, idx], [names[i] for i in idx], score[idx])]
     f3 = [k for k, f in enumerate(families) if f == "F3"]
-    kept = sorted(set(kept) | set(f3))
+    rest = sorted((k for k in kept if k not in f3), key=lambda k: (p[k], -fis[k]))
+    kept = sorted(set(f3) | set(rest[:max(MAX_KEPT - len(f3), 0)]))
     return {"kept": kept, "fisher": fis, "p_hidden": p, "rho_hidden": rho}

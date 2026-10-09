@@ -92,3 +92,9 @@ def test_parity_on_3ptb_frames():
             got = _value(feature_cv(f, system, name=f.name), system, X)
             tol = dict(rel=2e-3, abs=2e-3) if f.family in ("F4", "F5", "F6") else dict(rel=1e-5, abs=1e-6)
             assert got == pytest.approx(wv, **tol), (f.name, k)
+
+
+def test_combined_cv_rejects_more_than_32_features():
+    feats = [Feature(f"p{i}", "pair", "F1", pairs=[(0, 1)], r0=0.35) for i in range(33)]
+    with pytest.raises(ValueError, match="32"):
+        combined_cv(feats, np.ones(33), np.zeros(33), np.ones(33), _toy_system(5))
