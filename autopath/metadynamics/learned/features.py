@@ -8,6 +8,8 @@ import numpy as np
 KINDS = ("pair", "contacts", "centroid_distance", "centroid_count", "cos")
 CONTACT_CUTOFF_FACTOR = 4.0
 CONTACT_SWITCH_FACTOR = 3.5
+COUNT_CUTOFF_FACTOR = 3.0
+COUNT_SWITCH_FACTOR = 2.5
 
 
 @dataclass
@@ -42,8 +44,8 @@ def features_from_dict(d) -> list:
     return [Feature(**json.loads(str(s))) for s in d["features_json"]]
 
 
-def _switch(r, r0):
-    rs, rc = CONTACT_SWITCH_FACTOR * r0, CONTACT_CUTOFF_FACTOR * r0
+def _switch(r, r0, switch=CONTACT_SWITCH_FACTOR, cutoff=CONTACT_CUTOFF_FACTOR):
+    rs, rc = switch * r0, cutoff * r0
     x = np.clip((r - rs) / (rc - rs), 0.0, 1.0)
     return np.where(r >= rc, 0.0, 1 - 10 * x ** 3 + 15 * x ** 4 - 6 * x ** 5)
 
@@ -63,7 +65,8 @@ def _one(f, X):
     if f.kind == "centroid_count":
         c = X[:, f.groups[0]].mean(1)
         r = np.linalg.norm(X[:, f.group_b] - c[:, None, :], axis=-1)
-        return np.sum(1 / (1 + (r / f.r0) ** 8), axis=1)
+        s = _switch(r, f.r0, COUNT_SWITCH_FACTOR, COUNT_CUTOFF_FACTOR)
+        return np.sum(s / (1 + (r / f.r0) ** 8), axis=1)
     if f.kind == "cos":
         c1, c2, c3, c4 = (X[:, g].mean(1) for g in f.groups)
         a, b = c2 - c1, c4 - c3

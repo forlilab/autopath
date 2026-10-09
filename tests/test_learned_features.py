@@ -40,6 +40,13 @@ def test_centroid_count():
     assert evaluate([f], X)[0, 0] == pytest.approx(0.5 + 1 / (1 + 2 ** 8))
 
 
+def test_centroid_count_switching_region_and_cutoff():
+    # R=0.5: switch starts at 1.25, ends at 1.5; r=1.375 is x=0.5 (S=0.5), r=2.0 is beyond 3R
+    X = _frame([0, 0, 0], [1.375, 0, 0], [2.0, 0, 0])
+    f = Feature("w", "centroid_count", "F5", groups=[[0]], group_b=[1, 2], r0=0.5)
+    assert evaluate([f], X)[0, 0] == pytest.approx(0.5 / (1 + 2.75 ** 8))
+
+
 def test_cos_perpendicular_and_parallel():
     X = _frame([0, 0, 0], [1, 0, 0], [0, 0, 0], [0, 1, 0], [0, 0, 0], [2, 0, 0])
     perp = Feature("o", "cos", "F8", groups=[[0], [1], [2], [3]])

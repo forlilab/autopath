@@ -1,11 +1,11 @@
 # autopath/metadynamics/learned/forces.py
 """OpenMM/cvpack builders for learned-CV features; same formulas as features.evaluate."""
 import cvpack
-import numpy as np
 import openmm as mm
 from openmm import unit
 
-from .features import CONTACT_CUTOFF_FACTOR, CONTACT_SWITCH_FACTOR
+from .features import (CONTACT_CUTOFF_FACTOR, CONTACT_SWITCH_FACTOR, COUNT_CUTOFF_FACTOR,
+                       COUNT_SWITCH_FACTOR)
 
 
 def _nonbonded(system):
@@ -43,7 +43,14 @@ def feature_cv(f, system, name):
     if f.kind == "centroid_count":
         groups = [f.groups[0]] + [[i] for i in f.group_b]
         bonds = [[0, k] for k in range(1, len(groups))]
-        return _wrap(_centroid(f"1/(1+(distance(g1,g2)/{f.r0})^8)", groups, 2, bonds), name)
+        box = system.getDefaultPeriodicBoxVectors()
+        half = min(sum(c.value_in_unit(unit.nanometer) ** 2 for c in v) ** 0.5 for v in box) / 2
+        if COUNT_CUTOFF_FACTOR * f.r0 >= half:
+            raise ValueError(f"{name}: count cutoff {COUNT_CUTOFF_FACTOR * f.r0:.3g} nm >= half box {half:.3g} nm")
+        rs, rc = COUNT_SWITCH_FACTOR * f.r0, COUNT_CUTOFF_FACTOR * f.r0
+        expr = (f"1/(1+(d/{f.r0})^8)*(1-10*x^3+15*x^4-6*x^5); "
+                f"x=min(1,max(0,(d-{rs})/({rc}-{rs}))); d=distance(g1,g2)")
+        return _wrap(_centroid(expr, groups, 2, bonds), name)
     if f.kind == "cos":
         # a·b from centroid distances; a = c2-c1, b = c4-c3
         expr = ("(distance(g2,g3)^2 + distance(g1,g4)^2 - distance(g2,g4)^2 - distance(g1,g3)^2)"
