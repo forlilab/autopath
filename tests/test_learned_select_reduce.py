@@ -96,3 +96,48 @@ def test_hidden_variable_sign_disagreement_across_speeds_is_null():
     df.loc[df.speed == 0.02, "x"] *= -1.0
     assert hidden_variable_p(df.x.values, df.W.values, df.r.values, df.pull.values,
                              df.speed.values, n_perm=200, rng=np.random.default_rng(5)) == (1.0, 0.0)
+
+
+from autopath.metadynamics.learned.reduce import HLDA, lda_reference
+
+
+def _three_class(seed=0):
+    rng = np.random.default_rng(seed)
+    means = {"bound": [0, 0, 0], "vestibule": [2, 0, 0], "bulk": [4, 3, 0]}
+    X, y = [], []
+    for k, m in means.items():
+        X.append(rng.normal(size=(300, 3)) * [0.5, 0.5, 2.0] + m)
+        y += [k] * 300
+    return np.vstack(X), np.array(y)
+
+
+def test_hlda_two_class_matches_closed_form():
+    rng = np.random.default_rng(0)
+    A = rng.normal(size=(400, 2)) * [1, 0.3]
+    B = rng.normal(size=(400, 2)) * [1, 0.3] + [0.5, 1.0]
+    X, y = np.vstack([A, B]), np.array(["bound"] * 400 + ["bulk"] * 400)
+    w = HLDA(n_components=1).fit(X, y, ["bound", "bulk"])[:, 0]
+    ref = (np.linalg.inv(np.cov(A.T)) + np.linalg.inv(np.cov(B.T))) @ (B.mean(0) - A.mean(0))
+    assert abs(w @ (ref / np.linalg.norm(ref))) == pytest.approx(1.0, abs=1e-6)
+
+
+def test_hlda_ignores_the_noise_axis_and_signs_bound_low():
+    X, y = _three_class()
+    W = HLDA(n_components=2).fit(X, y, ["bound", "vestibule", "bulk"])
+    assert np.all(np.abs(W[2]) < 0.1)                 # 3rd feature carries no class information
+    s = X @ W[:, 0]
+    assert s[y == "bound"].mean() < s[y == "bulk"].mean()
+
+
+def test_hlda_survives_a_feature_constant_in_one_class():
+    X, y = _three_class()
+    X[y == "vestibule", 1] = 0.0                      # singular class covariance
+    W = HLDA(n_components=2).fit(X, y, ["bound", "vestibule", "bulk"])
+    assert np.all(np.isfinite(W))
+
+
+def test_lda_reference_shape_and_sign():
+    X, y = _three_class()
+    W = lda_reference(X, y, 2)
+    s = X @ W[:, 0]
+    assert W.shape == (3, 2) and s[y == "bound"].mean() < s[y == "bulk"].mean()
