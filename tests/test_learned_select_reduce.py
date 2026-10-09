@@ -221,3 +221,12 @@ def test_learned_cv_spec_builds_and_evaluates(tmp_path):
     assert len(specs) == 1 and specs[0].name == "learned1"
     cv = specs[0].resolve(None, system.getNumParticles(), None).cv
     assert cv is not None and specs[0].grid_min < specs[0].grid_max
+
+
+def test_standardise_guards_zero_variance_columns():
+    from autopath.metadynamics.learned.pipeline import _standardise
+    V = np.c_[np.arange(5.0), np.zeros(5), np.ones(5)]
+    mu, sd = _standardise(V, np.array([0, 1]), ["F1", "F3", "F5"])
+    assert sd.tolist() == [np.arange(5.0).std(), 1.0]
+    with pytest.raises(ValueError, match="zero variance"):
+        _standardise(V, np.array([0, 2]), ["F1", "F3", "F5"])

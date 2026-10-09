@@ -2,6 +2,7 @@
 """learn_cv: sMD pulls -> features -> relevance -> HLDA -> learned_cv.npz (+ report.png)."""
 import logging
 import os
+import warnings
 
 import MDAnalysis as mda
 import numpy as np
@@ -22,15 +23,20 @@ def _speed(dat):
     return float(os.path.basename(dat).split("_v")[-1].split("_")[0])
 
 
+def _load(u, dcd):
+    u.load_new(dcd)
+    return u
+
+
 def _read(u, idx):
     """Coordinates (nm, float32) of the given frame indices."""
     return np.stack([u.atoms.positions.astype(np.float32) / 10.0 for _ in u.trajectory[list(idx)]])
 
 
-def _frames_table(topology_pdb, pulls, stride):
+def _frames_table(u, pulls, stride):
     tabs = []
     for dat, dcd in pulls:
-        n = len(mda.Universe(topology_pdb, dcd).trajectory)
+        n = len(_load(u, dcd).trajectory)
         fr = pull_frames(dat, n).iloc[::stride].reset_index(drop=True)
         fr["pull"], fr["speed"] = os.path.basename(dat), _speed(dat)
         fr["frame"] = np.arange(n)[::stride][:len(fr)]
@@ -38,24 +44,44 @@ def _frames_table(topology_pdb, pulls, stride):
     return tabs
 
 
-def _subsample_coords(topology_pdb, pulls, tabs, mask):
+def _subsample_coords(u, pulls, tabs, mask):
     """Coordinates of the rows selected by mask (concatenated-table order)."""
     out, off = [], 0
     for (_, dcd), fr in zip(pulls, tabs):
         rows = np.where(mask[off:off + len(fr)])[0]
         off += len(fr)
         if len(rows):
-            out.append(_read(mda.Universe(topology_pdb, dcd), fr.frame.values[rows]))
+            out.append(_read(_load(u, dcd), fr.frame.values[rows]))
     return np.concatenate(out)
+
+
+def _standardise(V, kept, fams):
+    """Column mean/sd of the kept features; zero sd is an error except for forced F3 columns."""
+    mu, sd = V[:, kept].mean(0), V[:, kept].std(0)
+    for j in np.flatnonzero(sd == 0):
+        if fams[kept[j]] != "F3":
+            raise ValueError(f"kept feature {kept[j]} ({fams[kept[j]]}) has zero variance")
+        logger.warning("forced F3 feature %d has zero variance; using sd=1", kept[j])
+        sd[j] = 1.0
+    return mu, sd
 
 
 def learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_dir,
              direction="forward", stride=2, n_perm=1000, reducer=None) -> str:
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="DCDReader currently makes independent timesteps")
+        return _learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_dir,
+                         direction, stride, n_perm, reducer)
+
+
+def _learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_dir,
+              direction, stride, n_perm, reducer):
     os.makedirs(out_dir, exist_ok=True)
     pulls = find_pulls(traj_dir, direction)
     if not pulls:
         raise FileNotFoundError(f"no sMD pulls with aligned DCDs in {traj_dir}")
-    tabs = _frames_table(topology_pdb, pulls, stride)
+    u = mda.Universe(topology_pdb)
+    tabs = _frames_table(u, pulls, stride)
     frames = pd.concat(tabs, ignore_index=True)
     first_r = np.array([f.r.iloc[0] for f in tabs])
     labels = labels_from_r(frames.r.values, first_r, float(frames.r.max()))
@@ -69,11 +95,11 @@ def learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_dir
         m[np.where(labels == lab)[0][::SUBSAMPLE]] = True
         masks[lab] = m
     feats = define_features(topology_pdb, ligand_sdf, ligand_idx, pocket_idx,
-                            bound_X=_subsample_coords(topology_pdb, pulls, tabs, masks["bound"]),
-                            exit_X=_subsample_coords(topology_pdb, pulls, tabs, masks["vestibule"]))
+                            bound_X=_subsample_coords(u, pulls, tabs, masks["bound"]),
+                            exit_X=_subsample_coords(u, pulls, tabs, masks["vestibule"]))
     rows = []
     for (_, dcd), fr in zip(pulls, tabs):
-        X = _read(mda.Universe(topology_pdb, dcd), fr.frame.values)
+        X = _read(_load(u, dcd), fr.frame.values)
         rows.append(np.asarray(evaluate(feats, X)))
         del X
     V = np.concatenate(rows)
@@ -84,7 +110,7 @@ def learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_dir
              labels=labels.astype(str), **features_to_dict(feats))
     sel = select(V, list(names), fams, frames, labels, n_perm=n_perm, rng=np.random.default_rng(0))
     kept = np.array(sel["kept"])
-    mu, sd = V[:, kept].mean(0), V[:, kept].std(0)
+    mu, sd = _standardise(V, kept, fams)
     Z = (V[:, kept] - mu) / sd
     reducer = reducer or HLDA(n_components=2)
     Wt = reducer.fit(Z, labels, ORDER)
