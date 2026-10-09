@@ -61,12 +61,12 @@ def test_hidden_variable_finds_planted_feature():
 
 def test_hidden_variable_noise_rate_is_nominal():
     hits = 0
-    for s in range(20):
+    for s in range(40):
         df = _pulls(planted=False, seed=100 + s)
         p, _ = hidden_variable_p(df.x.values, df.W.values, df.r.values, df.pull.values,
                                  df.speed.values, n_perm=100, rng=np.random.default_rng(s))
         hits += p < 0.05
-    assert hits <= 4                              # nominal 5% of 20 = 1; generous bound
+    assert hits <= 6                              # nominal 5% of 40 = 2
 
 
 def test_hidden_variable_single_speed_uses_split_halves():
@@ -94,8 +94,40 @@ def test_hidden_variable_constant_feature_is_null():
 def test_hidden_variable_sign_disagreement_across_speeds_is_null():
     df = _pulls(planted=True)
     df.loc[df.speed == 0.02, "x"] *= -1.0
-    assert hidden_variable_p(df.x.values, df.W.values, df.r.values, df.pull.values,
-                             df.speed.values, n_perm=200, rng=np.random.default_rng(5)) == (1.0, 0.0)
+    p, _ = hidden_variable_p(df.x.values, df.W.values, df.r.values, df.pull.values,
+                             df.speed.values, n_perm=200, rng=np.random.default_rng(5))
+    assert p >= 0.05
+
+
+def _one_bin_pulls(n_pull=45, speeds=(0.01, 0.02, 0.04), c=0.15, seed=0):
+    """x tracks W only in the r bin around 1.5 nm (per-speed rho ~0.4); noise elsewhere."""
+    rng = np.random.default_rng(seed)
+    rows = []
+    r = np.linspace(0.8, 2.0, 49)                 # 0.025 nm spacing, ~2 frames per bin
+    hot = np.round(r / 0.05) == 30
+    for v in speeds:
+        for p in range(n_pull):
+            h = rng.normal()
+            W = np.cumsum(np.ones(len(r))) + rng.normal(scale=0.5, size=len(r)) + c * h * hot
+            x = np.where(hot, h, 0.0) + rng.normal(scale=0.3, size=len(r))
+            rows.append(pd.DataFrame({"r": r, "W": W, "x": x, "pull": f"{v}_{p}", "speed": v}))
+    return pd.concat(rows, ignore_index=True)
+
+
+def test_hidden_variable_pools_a_moderate_effect_across_speeds():
+    df = _one_bin_pulls()
+    p, rho = hidden_variable_p(df.x.values, df.W.values, df.r.values, df.pull.values,
+                               df.speed.values, n_perm=500, rng=np.random.default_rng(6))
+    assert p < 0.05 and rho > 0
+
+
+def test_hidden_variable_speed_without_usable_bins_abstains():
+    df = _pulls(planted=True)
+    few = _pulls(planted=True, speeds=(0.04,), n_pull=10, seed=7)
+    df = pd.concat([df, few], ignore_index=True)
+    p, rho = hidden_variable_p(df.x.values, df.W.values, df.r.values, df.pull.values,
+                               df.speed.values, n_perm=200, rng=np.random.default_rng(8))
+    assert p < 0.05 and rho > 0
 
 
 from autopath.metadynamics.learned.reduce import HLDA, lda_reference

@@ -52,33 +52,23 @@ def fisher(x, y):
     return float((a.mean() - b.mean()) ** 2 / (a.var() + b.var() + 1e-12))
 
 
-def _spearman_cols(x, W):
-    rx, rw = rankdata(x), rankdata(W, axis=0)
-    rx = (rx - rx.mean()) / rx.std()
-    rw = (rw - rw.mean(0)) / rw.std(0)
-    return rx @ rw / len(rx)
+def _std_ranks(v):
+    rv = rankdata(v)
+    return (rv - rv.mean()) / rv.std()
 
 
-def _one_group(x, W, r, pull, n_perm, rng):
-    """max |Spearman| over r bins of per-pull means, and its family-wise permutation p."""
+def _usable_bins(x, W, r, pull):
+    """{bin: (per-pull mean x, per-pull mean W)} for bins with enough pulls and non-constant means."""
     df = pd.DataFrame({"x": x, "W": W, "bin": np.round(r / BIN_NM).astype(int), "pull": pull})
-    obs, null = [], []
-    for _, g in df.groupby("bin"):
-        g = g.groupby("pull")[["x", "W"]].mean()
-        if len(g) < MIN_PULLS or np.ptp(g.x.values) == 0 or np.ptp(g.W.values) == 0:
-            continue
-        perms = np.stack([rng.permutation(g.W.values) for _ in range(n_perm)], axis=1)
-        rho = np.nan_to_num(_spearman_cols(g.x.values, np.c_[g.W.values, perms]))
-        obs.append(rho[0])
-        null.append(np.abs(rho[1:]))
-    if not obs:
-        return 1.0, 0.0
-    obs, null = np.array(obs), np.max(np.array(null), axis=0)
-    k = np.argmax(np.abs(obs))
-    return float((1 + np.sum(null >= abs(obs[k]))) / (1 + n_perm)), float(obs[k])
+    out = {}
+    for b, g in df.groupby(["bin", "pull"])[["x", "W"]].mean().groupby(level=0):
+        if len(g) >= MIN_PULLS and np.ptp(g.x.values) > 0 and np.ptp(g.W.values) > 0:
+            out[b] = (g.x.values, g.W.values)
+    return out
 
 
 def hidden_variable_p(x, W, r, pull, speed, n_perm=1000, rng=None):
+    """Family-wise permutation p of max_bin |rho_bar|, rho_bar = tanh(mean_g arctanh rho_g)."""
     rng = rng or np.random.default_rng(0)
     speeds = np.unique(speed)
     if len(speeds) > 1:
@@ -88,11 +78,24 @@ def hidden_variable_p(x, W, r, pull, speed, n_perm=1000, rng=None):
         half = set(rng.permutation(pulls)[: len(pulls) // 2])
         m = np.array([p in half for p in pull])
         groups = [m, ~m]
-    res = [_one_group(x[g], W[g], r[g], pull[g], n_perm, rng) for g in groups]
-    signs = {np.sign(rho) for _, rho in res}
-    if len(signs) > 1:
+    tabs = [t for t in (_usable_bins(x[g], W[g], r[g], pull[g]) for g in groups) if t]
+    if not tabs:
         return 1.0, 0.0
-    return max(p for p, _ in res), float(np.mean([rho for _, rho in res]))
+    bins = sorted(set.intersection(*(set(t) for t in tabs)))
+    if not bins:
+        return 1.0, 0.0
+    z = np.zeros((n_perm + 1, len(bins)))
+    for t in tabs:
+        for k, b in enumerate(bins):
+            rx, rw = (_std_ranks(v) for v in t[b])
+            n = len(rx)
+            perm = rng.permuted(np.tile(np.arange(n), (n_perm, 1)), axis=1)
+            rho = np.r_[rw @ rx, rw[perm] @ rx] / n
+            z[:, k] += np.arctanh(np.clip(rho, -0.999, 0.999))
+    rbar = np.tanh(z / len(tabs))
+    k = int(np.argmax(np.abs(rbar[0])))
+    null = np.abs(rbar[1:]).max(1)
+    return float((1 + np.sum(null >= abs(rbar[0, k]))) / (1 + n_perm)), float(rbar[0, k])
 
 
 def select(V, names, families, frames, labels, n_perm=1000, rng=None):
