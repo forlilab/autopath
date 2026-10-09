@@ -52,6 +52,12 @@ def test_each_kind_matches_numpy(f):
     assert got == pytest.approx(want, rel=1e-5, abs=1e-6)
 
 
+def test_centroid_count_rejects_cutoff_beyond_minimum_image():
+    f = Feature("w", "centroid_count", "F5", groups=[[0, 1]], group_b=[2, 3, 4], r0=1.1)
+    with pytest.raises(ValueError, match="half"):
+        feature_cv(f, _toy_system(5, box=5.0), name="w")
+
+
 def test_combined_cv_is_the_standardised_weighted_sum():
     rng = np.random.default_rng(1)
     X = rng.uniform(1.5, 2.6, size=(5, 3))

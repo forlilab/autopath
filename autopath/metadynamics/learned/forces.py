@@ -2,6 +2,7 @@
 """OpenMM/cvpack builders for learned-CV features; same formulas as features.evaluate."""
 import cvpack
 import openmm as mm
+from openmm.app.internal.unitcell import reducePeriodicBoxVectors
 from openmm import unit
 
 from .features import (CONTACT_CUTOFF_FACTOR, CONTACT_SWITCH_FACTOR, COUNT_CUTOFF_FACTOR,
@@ -44,7 +45,8 @@ def feature_cv(f, system, name):
         groups = [f.groups[0]] + [[i] for i in f.group_b]
         bonds = [[0, k] for k in range(1, len(groups))]
         box = system.getDefaultPeriodicBoxVectors()
-        half = min(sum(c.value_in_unit(unit.nanometer) ** 2 for c in v) ** 0.5 for v in box) / 2
+        a, b, c = reducePeriodicBoxVectors(box)
+        half = min(a.x, b.y, c.z).value_in_unit(unit.nanometer) / 2
         if COUNT_CUTOFF_FACTOR * f.r0 >= half:
             raise ValueError(f"{name}: count cutoff {COUNT_CUTOFF_FACTOR * f.r0:.3g} nm >= half box {half:.3g} nm")
         rs, rc = COUNT_SWITCH_FACTOR * f.r0, COUNT_CUTOFF_FACTOR * f.r0

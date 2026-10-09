@@ -8,8 +8,8 @@ import numpy as np
 KINDS = ("pair", "contacts", "centroid_distance", "centroid_count", "cos")
 CONTACT_CUTOFF_FACTOR = 4.0
 CONTACT_SWITCH_FACTOR = 3.5
-COUNT_CUTOFF_FACTOR = 3.0
-COUNT_SWITCH_FACTOR = 2.5
+COUNT_CUTOFF_FACTOR = 2.5
+COUNT_SWITCH_FACTOR = 2.0
 
 
 @dataclass
