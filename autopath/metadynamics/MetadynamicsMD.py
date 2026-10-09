@@ -46,6 +46,19 @@ def _atomic_save(path, array=None, **arrays):
         np.save(tmp, array)
     os.replace(tmp, path)
 
+MONITOR_GROUP = 31
+
+
+def add_monitor(system, cv, name):
+    """Unbiased CV: zero energy, value via getCollectiveVariableValues (like PLUMED PRINT)."""
+    f = CustomCVForce("0*m")
+    f.addCollectiveVariable("m", cv)
+    f.setForceGroup(MONITOR_GROUP)
+    f.setName(f"monitor_{name}")
+    system.addForce(f)
+    return f
+
+
 try:
     from openmmtools.integrators import LangevinSplittingGirsanov
     from reweightingreporter import ReweightingReporter
@@ -169,6 +182,7 @@ class MetadynamicsMD:
         boundary_correction: bool = True,
         reweight: bool = True,
         rct_ustride: int = 5,
+        monitor_cvs: dict = None,
         dcd_interval: float = 10.0,
         tt_basins: list = None,
         tt_threshold: float = 0.0,
@@ -221,6 +235,9 @@ class MetadynamicsMD:
         reweight : bool, optional
             Record the bias at the walker and c(t) per frame in
             ``REWEIGHT_<run_id>.npz`` (Tiwary & Parrinello 2015; default True).
+        monitor_cvs : dict, optional
+            ``{name: cvpack CV or CVSpec}`` logged unbiased as ``monitor_<name>``
+            arrays in REWEIGHT (zero-energy force in group 31).
         rct_ustride : int, optional
             Hills between per-frame records (default 5, i.e. 10 ps at a 2 ps
             pace). COLVAR and REWEIGHT rows use this interval.
@@ -346,6 +363,17 @@ class MetadynamicsMD:
 
         resolved = [spec.resolve(input_positions, self.n_atoms, self.topology) for spec in cv_specs]
 
+        monitors = {}
+        for mname, mcv in (monitor_cvs or {}).items():
+            if hasattr(mcv, "resolve"):
+                mcv = mcv.resolve(input_positions, self.n_atoms, self.topology).cv
+            monitors[mname] = add_monitor(system, mcv, mname)
+        monitor_vals = {m: [] for m in monitors}
+
+        def _record_monitors():
+            for m, f in monitors.items():
+                monitor_vals[m].append(float(f.getCollectiveVariableValues(simulation.context)[0]))
+
         bias_variables = [
             BiasVariable(
                 s.cv,
@@ -415,6 +443,8 @@ class MetadynamicsMD:
         # Bias at the walker and c(t) per COLVAR row, for reweighting.
         bias_list = [meta.bias_energy(simulation)] if reweight else None
         rct_list = [meta.rct()] if reweight else None
+        if reweight:
+            _record_monitors()
         _ps_per_step = self.timestep.value_in_unit(openmmunit.picoseconds)
 
         intervals = dict(record_dt_ns=record_steps * _ps_per_step / 1000.0,
@@ -425,6 +455,7 @@ class MetadynamicsMD:
                 _atomic_save(os.path.join(self.out_dir, f"REWEIGHT_{run_id}.npz"),
                          time_ns=np.arange(len(bias_list)) * intervals["record_dt_ns"],
                          bias_kj=np.array(bias_list), rct_kj=np.array(rct_list),
+                         **{f"monitor_{m}": np.array(v) for m, v in monitor_vals.items()},
                          **intervals,
                          temperature=self.temperature.value_in_unit(openmmunit.kelvin),
                          bias_factor=float(bias_factor), rct_ustride=int(rct_ustride),
@@ -444,6 +475,7 @@ class MetadynamicsMD:
             if reweight:
                 bias_list.append(meta.bias_energy(simulation))
                 rct_list.append(meta.rct())
+                _record_monitors()
         colvar_array = np.array(colvar_list)
 
         _save_reweight(finished=True)
