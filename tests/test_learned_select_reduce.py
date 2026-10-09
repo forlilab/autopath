@@ -116,7 +116,7 @@ def test_hlda_two_class_matches_closed_form():
     A = rng.normal(size=(400, 2)) * [1, 0.3]
     B = rng.normal(size=(400, 2)) * [1, 0.3] + [0.5, 1.0]
     X, y = np.vstack([A, B]), np.array(["bound"] * 400 + ["bulk"] * 400)
-    w = HLDA(n_components=1).fit(X, y, ["bound", "bulk"])[:, 0]
+    w = HLDA(n_components=1, ridge=1e-9).fit(X, y, ["bound", "bulk"])[:, 0]
     ref = (np.linalg.inv(np.cov(A.T)) + np.linalg.inv(np.cov(B.T))) @ (B.mean(0) - A.mean(0))
     assert abs(w @ (ref / np.linalg.norm(ref))) == pytest.approx(1.0, abs=1e-6)
 
@@ -131,9 +131,16 @@ def test_hlda_ignores_the_noise_axis_and_signs_bound_low():
 
 def test_hlda_survives_a_feature_constant_in_one_class():
     X, y = _three_class()
-    X[y == "vestibule", 1] = 0.0                      # singular class covariance
+    rng = np.random.default_rng(1)
+    z = rng.normal(size=len(y))
+    z[y == "bulk"] = 0.3 + 1e-3 * rng.normal(size=(y == "bulk").sum())
+    X = np.c_[X, z]
+    X = (X - X.mean(0)) / X.std(0)                    # pooled standardisation
     W = HLDA(n_components=2).fit(X, y, ["bound", "vestibule", "bulk"])
     assert np.all(np.isfinite(W))
+    assert abs(W[3, 0]) < 0.5                         # near-constant bulk feature must not hijack CV1
+    s = X @ W[:, 0]
+    assert s[y == "bulk"].mean() - s[y == "bound"].mean() > s.std()
 
 
 def test_lda_reference_shape_and_sign():

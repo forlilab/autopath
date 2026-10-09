@@ -19,7 +19,9 @@ def _orient(W, X, labels, order):
 
 
 class HLDA:
-    def __init__(self, n_components=2, ridge=1e-6):
+    """ridge is in units of the pooled-standardised feature variance."""
+
+    def __init__(self, n_components=2, ridge=0.1):
         self.n_components, self.ridge = n_components, ridge
 
     def fit(self, X, labels, order):
