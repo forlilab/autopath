@@ -74,3 +74,25 @@ def test_hidden_variable_single_speed_uses_split_halves():
     p, rho = hidden_variable_p(df.x.values, df.W.values, df.r.values, df.pull.values,
                                df.speed.values, n_perm=200, rng=np.random.default_rng(2))
     assert p < 0.05 and rho > 0
+
+
+def test_hidden_variable_skips_bins_where_feature_is_constant():
+    df = _pulls(planted=True)
+    df.loc[df.r > 1.6, "x"] = 0.0
+    p, rho = hidden_variable_p(df.x.values, df.W.values, df.r.values, df.pull.values,
+                               df.speed.values, n_perm=200, rng=np.random.default_rng(3))
+    assert p < 0.05 and rho > 0
+
+
+def test_hidden_variable_constant_feature_is_null():
+    df = _pulls(planted=True)
+    df["x"] = 0.0
+    assert hidden_variable_p(df.x.values, df.W.values, df.r.values, df.pull.values,
+                             df.speed.values, n_perm=50, rng=np.random.default_rng(4)) == (1.0, 0.0)
+
+
+def test_hidden_variable_sign_disagreement_across_speeds_is_null():
+    df = _pulls(planted=True)
+    df.loc[df.speed == 0.02, "x"] *= -1.0
+    assert hidden_variable_p(df.x.values, df.W.values, df.r.values, df.pull.values,
+                             df.speed.values, n_perm=200, rng=np.random.default_rng(5)) == (1.0, 0.0)

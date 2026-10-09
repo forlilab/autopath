@@ -65,10 +65,10 @@ def _one_group(x, W, r, pull, n_perm, rng):
     obs, null = [], []
     for _, g in df.groupby("bin"):
         g = g.groupby("pull")[["x", "W"]].mean()
-        if len(g) < MIN_PULLS:
+        if len(g) < MIN_PULLS or np.ptp(g.x.values) == 0 or np.ptp(g.W.values) == 0:
             continue
         perms = np.stack([rng.permutation(g.W.values) for _ in range(n_perm)], axis=1)
-        rho = _spearman_cols(g.x.values, np.c_[g.W.values, perms])
+        rho = np.nan_to_num(_spearman_cols(g.x.values, np.c_[g.W.values, perms]))
         obs.append(rho[0])
         null.append(np.abs(rho[1:]))
     if not obs:
