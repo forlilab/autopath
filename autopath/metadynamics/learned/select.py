@@ -1,0 +1,112 @@
+"""Frames from sMD pulls, state labels from r, and feature relevance tests."""
+import glob
+import os
+
+import numpy as np
+import pandas as pd
+from scipy.cluster.hierarchy import fcluster, linkage
+from scipy.spatial.distance import squareform
+from scipy.stats import rankdata
+
+BIN_NM, MIN_PULLS, RHO_PRUNE, FISHER_FLOOR, P_MAX, BULK_NM = 0.05, 20, 0.8, 0.5, 0.05, 0.3
+
+
+def find_pulls(traj_dir, direction="forward"):
+    out = []
+    for dat in sorted(glob.glob(os.path.join(traj_dir, f"sMD_*_{direction}.dat"))):
+        dcd = dat.replace(".dat", "_aligned.dcd")
+        if os.path.exists(dcd):
+            out.append((dat, dcd))
+    return out
+
+
+def pull_frames(dat, n_frames):
+    d = pd.read_csv(dat, comment="#")
+    t = d["time"].to_numpy(float)
+    tk = t[-1] * np.arange(n_frames) / max(n_frames - 1, 1)
+    return pd.DataFrame({"t_ps": tk,
+                         "r": np.interp(tk, t, d["r_after"].to_numpy(float)),
+                         "W": np.interp(tk, t, np.cumsum(d["dW_protocol"].to_numpy(float)))})
+
+
+def labels_from_r(r, first_r, r_max):
+    lab = np.full(len(r), "vestibule", dtype=object)
+    lab[r <= np.percentile(first_r, 95)] = "bound"
+    lab[r >= r_max - BULK_NM] = "bulk"
+    return lab
+
+
+def prune(V, names, score, rho=RHO_PRUNE):
+    sd = V.std(0)
+    ok = np.flatnonzero(sd > 1e-3 * (V.max(0) - V.min(0) + 1e-12))
+    if len(ok) < 2:
+        return list(ok)
+    C = np.abs(np.corrcoef(V[:, ok].T))
+    np.fill_diagonal(C, 1.0)
+    cl = fcluster(linkage(squareform(1 - C, checks=False), "average"), 1 - rho, "distance")
+    return [int(ok[np.flatnonzero(cl == c)[np.argmax(score[ok][cl == c])]]) for c in np.unique(cl)]
+
+
+def fisher(x, y):
+    a, b = x[y], x[~y]
+    return float((a.mean() - b.mean()) ** 2 / (a.var() + b.var() + 1e-12))
+
+
+def _spearman_cols(x, W):
+    rx, rw = rankdata(x), rankdata(W, axis=0)
+    rx = (rx - rx.mean()) / rx.std()
+    rw = (rw - rw.mean(0)) / rw.std(0)
+    return rx @ rw / len(rx)
+
+
+def _one_group(x, W, r, pull, n_perm, rng):
+    """max |Spearman| over r bins of per-pull means, and its family-wise permutation p."""
+    df = pd.DataFrame({"x": x, "W": W, "bin": np.round(r / BIN_NM).astype(int), "pull": pull})
+    obs, null = [], []
+    for _, g in df.groupby("bin"):
+        g = g.groupby("pull")[["x", "W"]].mean()
+        if len(g) < MIN_PULLS:
+            continue
+        perms = np.stack([rng.permutation(g.W.values) for _ in range(n_perm)], axis=1)
+        rho = _spearman_cols(g.x.values, np.c_[g.W.values, perms])
+        obs.append(rho[0])
+        null.append(np.abs(rho[1:]))
+    if not obs:
+        return 1.0, 0.0
+    obs, null = np.array(obs), np.max(np.array(null), axis=0)
+    k = np.argmax(np.abs(obs))
+    return float((1 + np.sum(null >= abs(obs[k]))) / (1 + n_perm)), float(obs[k])
+
+
+def hidden_variable_p(x, W, r, pull, speed, n_perm=1000, rng=None):
+    rng = rng or np.random.default_rng(0)
+    speeds = np.unique(speed)
+    if len(speeds) > 1:
+        groups = [speed == s for s in speeds]
+    else:
+        pulls = np.unique(pull)
+        half = set(rng.permutation(pulls)[: len(pulls) // 2])
+        m = np.array([p in half for p in pull])
+        groups = [m, ~m]
+    res = [_one_group(x[g], W[g], r[g], pull[g], n_perm, rng) for g in groups]
+    signs = {np.sign(rho) for _, rho in res}
+    if len(signs) > 1:
+        return 1.0, 0.0
+    return max(p for p, _ in res), float(np.mean([rho for _, rho in res]))
+
+
+def select(V, names, families, frames, labels, n_perm=1000, rng=None):
+    y_bv = labels != "bulk"
+    fis = np.array([fisher(V[y_bv, k], labels[y_bv] == "bound") for k in range(V.shape[1])])
+    p, rho = np.ones(len(names)), np.zeros(len(names))
+    for k, fam in enumerate(families):
+        if fam != "F3":
+            p[k], rho[k] = hidden_variable_p(V[:, k], frames.W.values, frames.r.values,
+                                             frames.pull.values, frames.speed.values, n_perm, rng)
+    relevant = (fis >= FISHER_FLOOR) | (p < P_MAX) | (np.array(families) == "F3")
+    idx = np.flatnonzero(relevant)
+    score = fis + (p < P_MAX) * 1e3
+    kept = [int(idx[i]) for i in prune(V[:, idx], [names[i] for i in idx], score[idx])]
+    f3 = [k for k, f in enumerate(families) if f == "F3"]
+    kept = sorted(set(kept) | set(f3))
+    return {"kept": kept, "fisher": fis, "p_hidden": p, "rho_hidden": rho}
