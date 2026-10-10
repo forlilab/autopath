@@ -38,8 +38,7 @@ class HLDA:
         return _orient(V[:, np.argsort(lam)[::-1][:k]].copy(), X, labels, order)
 
 
-def lda_reference(X, labels, n_components=2):
+def lda_reference(X, labels, n_components, order):
     from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-    lda = LinearDiscriminantAnalysis(n_components=n_components).fit(X, labels)
-    order = ["bound", "vestibule", "bulk"]
+    lda = LinearDiscriminantAnalysis(n_components=min(n_components, len(order) - 1)).fit(X, labels)
     return _orient(lda.scalings_[:, :n_components].copy(), X, labels, order)

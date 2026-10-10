@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from autopath.metadynamics.learned.select import (fisher, hidden_variable_p, labels_from_r,
+from autopath.metadynamics.learned.select import (select, fisher, hidden_variable_p, labels_from_r,
                                                    prune, pull_frames)
 
 
@@ -36,6 +36,32 @@ def test_fisher_separated_vs_overlapping():
     assert fisher(np.r_[np.zeros(100), np.ones(100) * 5], y) > 1e3
     rng = np.random.default_rng(0)
     assert fisher(rng.normal(size=200), y) < 0.1
+
+
+def test_fisher_multi_reduces_to_two_class_fisher():
+    from autopath.metadynamics.learned.select import fisher_multi
+    rng = np.random.default_rng(3)
+    x = np.r_[rng.normal(0, 1, 80), rng.normal(1.5, 2, 120)]
+    lab = np.array(["a"] * 80 + ["b"] * 120)
+    assert fisher_multi(x, lab, ["a", "b"]) == pytest.approx(fisher(x, lab == "a"), rel=1e-9)
+    assert fisher_multi(x, lab, ["b", "a"]) == pytest.approx(fisher_multi(x, lab, ["a", "b"]))
+
+
+def test_fisher_multi_three_classes_unweighted():
+    from autopath.metadynamics.learned.select import fisher_multi
+    x = np.r_[np.zeros(10) + [0, 1] * 5, 3 + np.zeros(500) + [0, 1] * 250, 6 + np.zeros(10) + [0, 1] * 5]
+    lab = np.array(["a"] * 10 + ["b"] * 500 + ["c"] * 10)
+    assert fisher_multi(x, lab, ["a", "b", "c"]) == pytest.approx(np.var([0.5, 3.5, 6.5], ddof=1) / 0.25)
+
+
+def test_select_multi_class_order_uses_all_classes():
+    rng = np.random.default_rng(0)
+    lab = np.array(["m1"] * 100 + ["m2"] * 100 + ["m3"] * 100)
+    V = np.c_[np.r_[rng.normal(0, 1, 100), rng.normal(0, 1, 100), rng.normal(6, 1, 100)],
+              rng.normal(size=300)]
+    fr = pd.DataFrame({"r": 0.0, "W": 0.0, "pull": "p", "speed": 1.0}, index=range(300))
+    out = select(V, ["a", "b"], ["F1", "F1"], fr, lab, hidden=False, order=["m1", "m2", "m3"])
+    assert out["kept"] == [0] and out["fisher"][0] > 0.5 > out["fisher"][1]
 
 
 def _pulls(n_pull=60, n_frame=40, planted=True, speeds=(0.01, 0.02), seed=0):
@@ -231,7 +257,7 @@ def test_hlda_survives_a_feature_constant_in_one_class():
 
 def test_lda_reference_shape_and_sign():
     X, y = _three_class()
-    W = lda_reference(X, y, 2)
+    W = lda_reference(X, y, 2, ["bound", "vestibule", "bulk"])
     s = X @ W[:, 0]
     assert W.shape == (3, 2) and s[y == "bound"].mean() < s[y == "bulk"].mean()
 
@@ -240,6 +266,10 @@ import os
 
 TRAJ = "examples/04_Full-Pipeline/3ptb/sMD/trajectories"
 PDB3 = "examples/04_Full-Pipeline/3ptb/system.pdb"
+MILESTONES = "examples/04_Full-Pipeline/3ptb/milestones"
+MS_POCKET_RESIDS = [180, 181, 182, 183, 226, 227, 228, 229, 230, 204, 205, 206, 207, 208, 209, 210, 211,
+                    212, 213, 214, 215, 196, 197, 198, 199, 200, 201, 133, 134, 135, 136, 137, 138, 139,
+                    140, 156, 157, 158, 159, 160, 161, 162]    # run_AutoPath.py pocket (CA)
 
 
 def _3ptb_args():
@@ -250,11 +280,18 @@ def _3ptb_args():
     return (PDB3, "examples/data/3ptb.sdf", lig, pocket, TRAJ)
 
 
+def _3ptb_ms_kwargs():
+    import MDAnalysis as mda
+    res = " ".join(map(str, MS_POCKET_RESIDS))
+    ca = list(mda.Universe(PDB3).select_atoms(f"resid {res} and name CA").indices)
+    return dict(classes="milestones", milestones=MILESTONES, milestone_pocket_idx=ca)
+
+
 @pytest.fixture(scope="module")
 def learned_3ptb(tmp_path_factory):
     from autopath.metadynamics.learned.pipeline import learn_cv
     out = str(tmp_path_factory.mktemp("learned3ptb"))
-    path = learn_cv(*_3ptb_args(), out, stride=4, n_perm=50, hidden=False)
+    path = learn_cv(*_3ptb_args(), out, stride=4, n_perm=50, hidden=False, **_3ptb_ms_kwargs())
     return path, out
 
 
@@ -300,7 +337,7 @@ def test_learn_cv_second_call_reuses_feature_cache(learned_3ptb, tmp_path, caplo
     os.makedirs(work)
     shutil.copy(os.path.join(out, "features.npz"), work)
     with caplog.at_level(logging.INFO, logger="autopath.metadynamics.learned"):
-        path2 = learn_cv(*_3ptb_args(), work, stride=4, n_perm=50, hidden=False)
+        path2 = learn_cv(*_3ptb_args(), work, stride=4, n_perm=50, hidden=False, **_3ptb_ms_kwargs())
     assert "reusing feature cache" in caplog.text
     a, b = np.load(path, allow_pickle=False), np.load(path2, allow_pickle=False)
     assert list(a["kept"]) == list(b["kept"])
@@ -345,6 +382,98 @@ def test_cache_key_and_validity(tmp_path):
     assert not _cache_valid(npz, _cache_key(*args, code_hash="a"))
     np.savez(npz, V=np.zeros(1))                                        # legacy npz without key
     assert not _cache_valid(npz, key)
+
+
+def _write_topology(path, n=6):
+    import MDAnalysis as mda
+    u = mda.Universe.empty(n, n_residues=n, atom_resindex=np.arange(n), trajectory=True)
+    u.add_TopologyAttr("name", ["C1", "H1", "C2", "CA", "CA", "CA"][:n])
+    u.add_TopologyAttr("resname", ["LIG"] * 3 + ["ALA"] * (n - 3))
+    u.add_TopologyAttr("resid", np.arange(1, n + 1))
+    u.atoms.positions = np.zeros((n, 3))
+    u.atoms.write(path)
+
+
+def _fake_states(monkeypatch, tmp_path, shifts):
+    """Milestone 'states': ligand heavy atoms (0, 2) at x = shift nm from three pocket CAs at origin."""
+    from autopath.metadynamics.learned import classes
+    pos, paths = {}, []
+    for k, sh in enumerate(shifts):
+        p = str(tmp_path / f"milestone_{k + 1}_frame_{k}.xml")
+        open(p, "w").write("x")
+        P = np.zeros((6, 3))
+        P[0, 0], P[2, 0], P[2, 1] = sh, sh, 0.1
+        P[3:, 1] = [0.0, 0.5, 1.0]
+        pos[p] = P
+        paths.append(p)
+    monkeypatch.setattr(classes, "read_positions", lambda p: pos[p])
+    monkeypatch.setattr(classes, "_state_dims", lambda p: None)
+    return paths, pos
+
+
+def test_milestone_labels_nearest_and_bound_to_unbound_order(monkeypatch, tmp_path):
+    from autopath import clustering
+    from autopath.metadynamics.learned.classes import milestone_labels
+    top = str(tmp_path / "t.pdb")
+    _write_topology(top)
+    paths, pos = _fake_states(monkeypatch, tmp_path, [3.0, 2.0, 1.0])     # listed unbound -> bound
+    monkeypatch.setattr(clustering, "read_positions", lambda p: pos[p])
+    rng = np.random.default_rng(0)
+    want = [1, 2, 3, 3, 2, 1]                                              # class k = path 4-k
+    frames = [pos[paths[3 - w]] + rng.normal(scale=0.01, size=(6, 3)) for w in want]
+    lab, order, ordered = milestone_labels(paths, top, [0, 1, 2], [3, 4, 5], coords=np.stack(frames))
+    assert order == ["m1", "m2", "m3"]
+    assert ordered == paths[::-1]
+    assert list(lab) == [f"m{w}" for w in want]
+
+
+def test_learn_cv_class_count_error_names_class_and_counts(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from autopath.metadynamics.learned import pipeline
+    pull = _fake_pull(tmp_path)
+    (tmp_path / "t.pdb").write_text("pdb")
+    (tmp_path / "l.sdf").write_text("sdf")
+    ms = []
+    for k in (1, 2, 3):
+        m = tmp_path / f"milestone_{k}_frame_{k}.xml"
+        m.write_text(str(k))
+        ms.append(str(m))
+    n = 40
+    lab = np.array(["m1"] * 20 + ["m2"] * 19 + ["m3"], dtype=object)
+    frames = pd.DataFrame({"r": np.linspace(0.8, 2, n), "W": 0.0, "pull": "p", "speed": 0.01})
+    feats = [SimpleNamespace(name="f", family="F1")]
+    monkeypatch.setattr(pipeline, "find_pulls", lambda *a: [pull])
+    monkeypatch.setattr(pipeline, "_extract", lambda *a, **k: (feats, np.zeros((n, 1)), frames, lab, np.zeros((n, 2))))
+    monkeypatch.setattr(pipeline, "features_to_dict", lambda f: {})
+    with pytest.raises(ValueError, match=r"class 'm3' has 1 frame.*'m1': 20"):
+        pipeline.learn_cv(str(tmp_path / "t.pdb"), str(tmp_path / "l.sdf"), [0], [1], str(tmp_path),
+                          str(tmp_path / "out"), classes="milestones", milestones=ms)
+
+
+def test_learn_cv_milestones_requires_milestones_and_valid_classes(tmp_path):
+    from autopath.metadynamics.learned.pipeline import learn_cv
+    with pytest.raises(ValueError, match="needs milestones"):
+        learn_cv("t", "l", [0], [1], "d", str(tmp_path), classes="milestones")
+    with pytest.raises(ValueError, match="classes must be"):
+        learn_cv("t", "l", [0], [1], "d", str(tmp_path), classes="x")
+
+
+def test_cache_key_covers_classes_and_milestone_files(tmp_path):
+    from autopath.metadynamics.learned.pipeline import _cache_key
+    pull = _fake_pull(tmp_path)
+    (tmp_path / "t.pdb").write_text("pdb")
+    (tmp_path / "l.sdf").write_text("sdf")
+    m = tmp_path / "milestone_1_frame_0.xml"
+    m.write_text("a")
+    args = ([pull], 4, "forward", str(tmp_path / "t.pdb"), str(tmp_path / "l.sdf"), [1], [2])
+    k_r = _cache_key(*args, code_hash="a")
+    k_m = _cache_key(*args, code_hash="a", classes="milestones", milestones=[str(m)])
+    assert k_r != k_m
+    m.write_text("b")
+    assert k_m != _cache_key(*args, code_hash="a", classes="milestones", milestones=[str(m)])
+    assert _cache_key(*args, code_hash="a", classes="milestones", milestones=[str(m)],
+                      milestone_pocket_idx=[3]) != _cache_key(*args, code_hash="a", classes="milestones",
+                                                              milestones=[str(m)], milestone_pocket_idx=[4])
 
 
 def test_standardise_guards_zero_variance_columns():

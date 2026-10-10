@@ -53,6 +53,12 @@ def fisher(x, y):
     return float((a.mean() - b.mean()) ** 2 / (a.var() + b.var() + 1e-12))
 
 
+def fisher_multi(x, labels, order):
+    """var(class means, ddof=1) / mean(class variances), classes unweighted; = fisher() for 2 classes."""
+    g = [x[labels == c] for c in order]
+    return float(np.var([a.mean() for a in g], ddof=1) / (np.mean([a.var() for a in g]) + 1e-12))
+
+
 def _resid_ranks(v, rr):
     """Ranks of v with the OLS fit on centred ranks of r removed, scaled to unit sd (0 if degenerate)."""
     rv = rankdata(v)
@@ -107,11 +113,15 @@ def hidden_variable_p(x, W, r, pull, speed, n_perm=1000, rng=None):
     return float((1 + np.sum(null >= abs(rbar[0, k]))) / (1 + n_perm)), float(rbar[0, k])
 
 
-def select(V, names, families, frames, labels, n_perm=1000, rng=None, hidden=True):
+def select(V, names, families, frames, labels, n_perm=1000, rng=None, hidden=True, order=None):
     """Keep Fisher-relevant (or F3) features, prune redundancy, cap at MAX_KEPT by Fisher.
-    The hidden-variable p/rho are report-only (NaN when skipped): positions at fixed r are distorted by spring lag."""
-    y_bv = labels != "bulk"
-    fis = np.array([fisher(V[y_bv, k], labels[y_bv] == "bound") for k in range(V.shape[1])])
+    The hidden-variable p/rho are report-only (NaN when skipped): positions at fixed r are distorted by spring lag.
+    order=None: bound vs vestibule (r classes); else multi-class Fisher over the ordered classes."""
+    if order is None:
+        y_bv = labels != "bulk"
+        fis = np.array([fisher(V[y_bv, k], labels[y_bv] == "bound") for k in range(V.shape[1])])
+    else:
+        fis = np.array([fisher_multi(V[:, k], labels, order) for k in range(V.shape[1])])
     p, rho = np.full(len(names), np.nan), np.full(len(names), np.nan)
     if hidden:
         p[:], rho[:] = 1.0, 0.0
