@@ -11,6 +11,7 @@ Run modes:
 Surfaces and histories are rebuilt from the HILLS v2 files (Hills.py); every ΔG
 comes from correct_fe_for_funnel, so figures and log agree.
 """
+import glob
 import os
 import logging
 from dataclasses import dataclass, field
@@ -19,10 +20,11 @@ from typing import Optional
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
+from scipy.interpolate import RegularGridInterpolator
 
 from autopath.metadynamics.Analysis import MetadynamicsAnalysis, bound_site_bins, correct_fe_for_funnel
 from autopath.metadynamics.Funnel import load_funnel_params, funnel_basins
-from autopath.metadynamics.Hills import fes_history, load_hills
+from autopath.metadynamics.Hills import bias_from_hills, fes_history, load_hills
 
 logger = logging.getLogger("autopath")
 
@@ -402,6 +404,58 @@ def plot_convergence(estimates, mode, grid, plateau_results, out_path,
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+def _final_bias_at_frames(out_dir, run_id, s):
+    """V_final (kJ/mol) of the bias this walker deposited into, at its biased-CV values s (n, ncv)."""
+    ws = load_hills(out_dir)
+    me = next(w for w in ws if w["run_id"] == run_id)
+    group = [w for w in ws if w["bias_dir"] == me["bias_dir"]] if me["bias_dir"] else [me]
+    V = bias_from_hills(group)
+    axes = [np.linspace(a, b, int(n)) for a, b, n in zip(me["grid_min"], me["grid_max"], me["grid_points"])]
+    f = RegularGridInterpolator(tuple(reversed(axes)), V, bounds_error=False, fill_value=None)
+    return f(np.asarray(s)[:, ::-1])
+
+
+def z_reweighted_dG(out_dir, fp, temperature, burn=0.2, bins=0.01):
+    """ΔG°_b from W(z) of the monitored funnel z, reweighted by eq 12 (final bias) and by c(t).
+
+    The bound site is z-based (z <= 0.2 z_max), so surface-parked frames at small z count as bound.
+    Returns {"reason": ...} without numbers when it cannot run.
+    """
+    if fp is None:
+        return {"reason": "no funnel: z reweighting needs the funnel cylinder"}
+    kT = 0.0083144626 * temperature
+    zs, l12, lct = [], [], []
+    for f in sorted(glob.glob(os.path.join(out_dir, "REWEIGHT_*.npz"))):
+        rw = np.load(f)
+        if "monitor_funnel_z" not in rw.files:
+            continue
+        rid = os.path.basename(f)[len("REWEIGHT_"):-4]
+        n = len(rw["monitor_funnel_z"])
+        keep = np.arange(n) >= burn * n
+        s = np.load(os.path.join(out_dir, f"COLVAR_{rid}.npy"))[:n]
+        s = s.reshape(n, -1)
+        zs.append(rw["monitor_funnel_z"][keep])
+        l12.append(_final_bias_at_frames(out_dir, rid, s[keep]) / kT)
+        lct.append((rw["bias_kj"][:n] - rw["rct_kj"][:n])[keep] / kT)
+    if not zs:
+        return {"reason": "no REWEIGHT with monitor_funnel_z in this run"}
+    z = np.concatenate(zs)
+    lo, hi = float(np.floor(z.min() / bins) * bins), float(np.ceil(z.max() / bins) * bins)
+    edges = np.arange(lo, hi + bins, bins)
+    out = {"n_frames": int(len(z)), "reason": ""}
+    for key, lw in (("eq12_kj", np.concatenate(l12)), ("ct_kj", np.concatenate(lct))):
+        w = np.exp(lw - lw.max())
+        h, _ = np.histogram(z, edges, weights=w)
+        with np.errstate(divide="ignore"):
+            fes = -kT * np.log(h / h.sum())
+        fes[~np.isfinite(fes)] = np.nan
+        res = correct_fe_for_funnel(fes, fp, temperature=temperature, grid_min=edges[0],
+                                    grid_max=edges[-2], cv_length_per_unit_ang=10.0,
+                                    cv_origin=0.0, verbose=False)
+        out[key] = float(res["dG_bind_std_kj_mol"])
+    return out
+
+
 def report(out_dir, temperature, grid_min=0.0, grid_max=1.0,
            cv_name="CV", cv_length_per_unit_ang=None, out_prefix=None,
            funnel_params=None, cv_is_funnel_z=False, hill_width=None) -> dict:
@@ -500,7 +554,15 @@ def report(out_dir, temperature, grid_min=0.0, grid_max=1.0,
                     dG_main, f" ± {dG_sd:.1f}" if dG_sd is not None else "",
                     dG_main * KJ_TO_KCAL, pKd, verdict)
 
+    zr = z_reweighted_dG(out_dir, fp, temperature)
+    if zr.get("reason"):
+        logger.info("z reweighting skipped: %s", zr["reason"])
+    else:
+        logger.info("ΔG°_b reweighted onto funnel z: eq12 %.1f, c(t) %.1f kJ/mol (%d frames)",
+                    zr["eq12_kj"], zr["ct_kj"], zr["n_frames"])
+
     return {
+        "z_reweighted": zr,
         "mode": mode,
         "estimates": [(e.label, e.dG, e.complete) for e in estimates],
         "dG_bind_std_kj": dG_main,
