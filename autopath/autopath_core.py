@@ -64,17 +64,42 @@ def funnel_z_monitor(funnel_force, funnel_params, mMD_cv):
         funnel_params["unbinding_axis"], grid_min=-10.0, grid_max=10.0)}
 
 
-def build_learned_cv(system, sys_name, ligand_file, ligand_idx, pocket_idx, traj_dir, out_dir,
-                     direction, n_components, milestones_dir):
-    """Learn the CV (HLDA classes = this path's milestones, clustered on pocket_idx) and wrap it.
+def learned_cv_atom_sets(topology_pdb, ligand_selection, positions=None):
+    """(ligand_idx, pocket_idx) for the learned-CV features, in topology_pdb numbering: every ligand atom,
+    and every atom of the protein residues within 6 A of the ligand heavy atoms (positions in A)."""
+    u = mda.Universe(topology_pdb)
+    if positions is not None:
+        u.atoms.positions = np.asarray(positions, dtype=np.float32)
+    lig = u.select_atoms(ligand_selection)
+    if lig.n_atoms == 0:
+        raise ValueError(f"ligand selection {ligand_selection!r} matches no atom in {topology_pdb}")
+    pocket = u.select_atoms(f"protein and around 6 (({ligand_selection}) and not name H*)").residues.atoms
+    if pocket.n_atoms == 0:
+        raise ValueError(f"no protein residue within 6 A of {ligand_selection!r}")
+    return [int(i) for i in lig.indices], [int(i) for i in pocket.indices]
 
-    Any failure propagates.
+
+def learned_cv_out_dir(smd_outdir: str, group_key: str | None) -> str:
+    """Per-group learned-CV directory."""
+    base = f"{smd_outdir}/learned_cv"
+    return base if group_key is None else f"{base}/{group_key}"
+
+
+def as_cv_list(cv) -> list:
+    """CV spec(s) as a list (the learned CV returns one spec per component)."""
+    return list(cv) if isinstance(cv, (list, tuple)) else [cv]
+
+
+def build_learned_cv(system, sys_name, ligand_file, ligand_idx, pocket_idx, milestone_pocket_idx, traj_dir,
+                     out_dir, direction, n_components, milestones_dir):
+    """Learn the CV (features on ligand_idx/pocket_idx; HLDA classes = this path's milestones, clustered on
+    milestone_pocket_idx) and wrap it. Any failure propagates.
     """
     from autopath.metadynamics import learned
     npz = learned.learn_cv(f"{sys_name}/system.pdb", ligand_file, ligand_idx, pocket_idx,
                            traj_dir, out_dir, direction=direction, hidden=False,
                            classes="milestones", milestones=milestones_dir,
-                           milestone_pocket_idx=pocket_idx)
+                           milestone_pocket_idx=milestone_pocket_idx)
     return learned.learned_cv_spec(npz, system, n_components)
 
 
@@ -394,7 +419,9 @@ class AutoPath:
             raise ValueError("mMD_preseed_bias builds its bias on the path-CV grid; "
                              f"it cannot seed mMD_cv={mMD_cv!r}")
         self.mMD_cv = mMD_cv
-        self.mMD_learned_components = mMD_learned_components
+        if isinstance(mMD_learned_components, bool) or mMD_learned_components not in (1, 2):
+            raise ValueError(f"mMD_learned_components must be 1 or 2, got {mMD_learned_components!r}")
+        self.mMD_learned_components = int(mMD_learned_components)
         self.mMD_outdir_suffix = mMD_outdir_suffix
         self.mMD_preseed_bias = mMD_preseed_bias
         self.mMD_preseed_speed = mMD_preseed_speed
@@ -604,6 +631,13 @@ class AutoPath:
                                                         out_dir=sys_name,
                                                         ref_mol=lig_mol)
             logger.info(f"Ligand anchor atom indices are: {', '.join(map(str, ligand_atoms_indices))}")
+            if self.mMD_cv == "learned":
+                # last equilibration frame = sMD start; system.pdb numbering
+                learned_ligand_idx, learned_pocket_idx = learned_cv_atom_sets(
+                    solvated_system_pdb, ligand_selection,
+                    positions=u_eq.trajectory.coordinate_array[-1])
+                logger.info("Learned-CV atoms: %d ligand, %d pocket", len(learned_ligand_idx),
+                            len(learned_pocket_idx))
             # write out the protein/ligand/pocket PDBs and PyMOL session.
             if self.pocket_selection is not None:
                 pocket_view_selection = self.pocket_selection
@@ -1519,9 +1553,10 @@ class AutoPath:
                     if funnel_force is None:
                         raise RuntimeError("mMD_cv='learned' needs the funnel, which was not generated")
                     metad_cv = build_learned_cv(
-                        base_system, sys_name, ligand_file, ligand_atoms_indices,
-                        pocket_atom_indices, sMD_traj_outdir, f"{self.sMD_outdir}/learned_cv",
+                        base_system, sys_name, ligand_file, learned_ligand_idx, learned_pocket_idx,
+                        pocket_atom_indices, sMD_traj_outdir, learned_cv_out_dir(self.sMD_outdir, group_key),
                         self.sMD_pulling_dir, self.mMD_learned_components, group_milestones_dir)
+                metad_cvs = as_cv_list(metad_cv)
 
                 # most-bound milestone, resolved before the walker order is applied
                 first_milestone_name = os.path.basename(path_milestones[0]).split('.')[0]
@@ -1565,8 +1600,6 @@ class AutoPath:
                             os.makedirs(walker_bias_dir, exist_ok=True)
                             shutil.copy2(preseed_src, os.path.join(walker_bias_dir, "bias_0_0.npy"))
 
-                    metad_cvs = metad_cv if isinstance(metad_cv, list) else [metad_cv]
-                    metad_cv = metad_cvs[0]
                     logger.info(f"Running WTMetaD for milestone {milestone_name}")
                     try:
                         WTMetaD.run(

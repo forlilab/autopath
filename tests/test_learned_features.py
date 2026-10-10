@@ -119,3 +119,17 @@ def test_define_features_3ptb_families_and_asp189_contact():
     assert len({f.name for f in feats}) == len(feats)
     v = evaluate(feats, X)
     assert np.all(np.isfinite(v))
+
+
+@needs_3ptb
+def test_orchestrator_atom_sets_carry_the_gate_features():
+    from autopath.autopath_core import learned_cv_atom_sets
+    eq = mda.Universe("examples/04_Full-Pipeline/3ptb/equilibration/3ptb_equilibrated.pdb")
+    lig, pocket = learned_cv_atom_sets(PDB, "resname UNK", positions=eq.atoms.positions)
+    u = mda.Universe(PDB)
+    assert lig == list(u.select_atoms("resname UNK").indices)
+    assert ligand_polar_atoms(SDF, lig, PDB)
+    X = eq.atoms.positions[None] / 10.0
+    feats = define_features(PDB, SDF, lig, pocket, bound_X=X, exit_X=X)
+    assert any(f.family == "F1" and u.atoms[f.pairs[0][1]].resid == 172 for f in feats)
+    assert any(f.family == "F4" for f in feats)

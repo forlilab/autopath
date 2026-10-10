@@ -129,7 +129,7 @@ def test_learned_cv_failure_propagates(monkeypatch):
         raise RuntimeError("no pulls")
     monkeypatch.setattr(learned, "learn_cv", boom)
     with pytest.raises(RuntimeError, match="no pulls"):
-        build_learned_cv(None, "s", "l.sdf", [0], [1], "t", "o", "forward", 1, "m")
+        build_learned_cv(None, "s", "l.sdf", [0], [1], [2], "t", "o", "forward", 1, "m")
 
 
 def test_learned_cv_is_built_without_hidden_layer(monkeypatch):
@@ -138,10 +138,42 @@ def test_learned_cv_is_built_without_hidden_layer(monkeypatch):
     seen = {}
     monkeypatch.setattr(learned, "learn_cv", lambda *a, **k: seen.update(k) or "x.npz")
     monkeypatch.setattr(learned, "learned_cv_spec", lambda npz, system, n: [npz, n])
-    assert build_learned_cv(None, "s", "l.sdf", [0], [1], "t", "o", "forward", 2, "m/p1") == ["x.npz", 2]
+    seen_a = []
+    monkeypatch.setattr(learned, "learn_cv", lambda *a, **k: seen_a.extend(a) or seen.update(k) or "x.npz")
+    assert build_learned_cv(None, "s", "l.sdf", [0], [1], [2], "t", "o", "forward", 2, "m/p1") == ["x.npz", 2]
     assert seen["hidden"] is False and seen["direction"] == "forward"
     assert seen["classes"] == "milestones" and seen["milestones"] == "m/p1"
-    assert seen["milestone_pocket_idx"] == [1]
+    assert seen_a[2:4] == [[0], [1]] and seen["milestone_pocket_idx"] == [2]
+
+
+@pytest.mark.parametrize("n", [0, 3, True, "2"])
+def test_learned_components_validated(n):
+    from autopath.autopath_core import AutoPath
+    with pytest.raises(ValueError, match="mMD_learned_components"):
+        AutoPath(pdb_path="examples/data/3ptb.pdb", do_fix_pdb=False, mMD_cv="learned",
+                 mMD_use_funnel_potential=True, mMD_learned_components=n)
+
+
+@pytest.mark.parametrize("n", [1, 2])
+def test_learned_components_accepted(n):
+    from autopath.autopath_core import AutoPath
+    assert AutoPath(pdb_path="examples/data/3ptb.pdb", do_fix_pdb=False, mMD_cv="learned",
+                    mMD_use_funnel_potential=True, mMD_learned_components=n).mMD_learned_components == n
+
+
+def test_cv_list_keeps_every_component_for_every_walker():
+    from autopath.autopath_core import as_cv_list
+    one, two = object(), object()
+    cvs = as_cv_list([one, two])
+    for _ in range(3):                                  # one list, reused by each walker
+        assert as_cv_list(cvs) == [one, two]
+    assert as_cv_list(one) == [one]
+
+
+def test_learned_cv_out_dir_per_group():
+    from autopath.autopath_core import learned_cv_out_dir
+    assert learned_cv_out_dir("s/sMD", None) == "s/sMD/learned_cv"
+    assert learned_cv_out_dir("s/sMD", "p7") == "s/sMD/learned_cv/p7"
 
 
 def test_milestones_dir_for_group_both_layouts(tmp_path):
