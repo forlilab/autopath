@@ -84,8 +84,8 @@ def _sha(path) -> str:
 
 def _code_hash() -> str:
     """Hash of the feature definition/evaluation sources."""
-    from . import classes, define, features
-    return hashlib.sha256("".join(_sha(m.__file__) for m in (features, define, classes)).encode()).hexdigest()
+    from . import classes, define, features, select
+    return hashlib.sha256("".join(_sha(m.__file__) for m in (features, define, classes, select)).encode()).hexdigest()
 
 
 def _cache_key(pulls, stride, direction, topology_pdb, ligand_sdf, ligand_idx, pocket_idx,

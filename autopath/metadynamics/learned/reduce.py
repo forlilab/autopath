@@ -19,7 +19,10 @@ def _orient(W, X, labels, order):
 
 
 class HLDA:
-    """ridge is in units of the pooled-standardised feature variance."""
+    """ridge is in units of the pooled-standardised feature variance.
+
+    S_b is centred on the UNWEIGHTED mean of class means, not the overall data mean of Capelli et al. 2019
+    SI eq. 3: sMD frame counts per class reflect the pulling protocol, not physics (identical for 2 classes)."""
 
     def __init__(self, n_components=2, ridge=0.1):
         self.n_components, self.ridge = n_components, ridge

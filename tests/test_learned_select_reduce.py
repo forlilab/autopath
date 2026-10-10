@@ -474,17 +474,33 @@ def test_find_milestones_rejects_bad_inputs(tmp_path):
         find_milestones([str(tmp_path / "foo.xml"), str(tmp_path / "milestone_2_frame_9.xml")])
     (tmp_path / "1").mkdir()
     (tmp_path / "1" / "milestone_1_frame_0.xml").write_text("x")
-    with pytest.raises(ValueError, match="per-path subdirectories"):
-        find_milestones(str(tmp_path))
     with pytest.raises(ValueError, match="several directories"):
         find_milestones([str(tmp_path / "1" / "milestone_1_frame_0.xml"), str(tmp_path / "milestone_2_frame_9.xml")])
 
 
-def test_code_hash_covers_classes_module(monkeypatch):
-    from autopath.metadynamics.learned import classes, pipeline
+def test_find_milestones_flat_files_win_over_stale_subdirs(tmp_path, caplog):
+    import logging
+    from autopath.metadynamics.learned.classes import find_milestones
+    (tmp_path / "1").mkdir()
+    (tmp_path / "1" / "milestone_1_frame_0.xml").write_text("x")
+    with pytest.raises(ValueError, match="per-path subdirectories"):
+        find_milestones(str(tmp_path))
+    (tmp_path / "milestone_2_frame_9.xml").write_text("x")
+    (tmp_path / "milestone_0_frame_1.xml").write_text("x")
+    with caplog.at_level(logging.INFO, logger="autopath.metadynamics.learned"):
+        got = find_milestones(str(tmp_path))
+    assert got == [str(tmp_path / "milestone_0_frame_1.xml"), str(tmp_path / "milestone_2_frame_9.xml")]
+    assert "ignoring per-path subdirectories" in caplog.text
+
+
+@pytest.mark.parametrize("mod", ["classes", "select"])
+def test_code_hash_covers_module(monkeypatch, mod):
+    import importlib
+    from autopath.metadynamics.learned import pipeline
+    f = importlib.import_module(f"autopath.metadynamics.learned.{mod}").__file__
     h = pipeline._code_hash()
     orig = pipeline._sha
-    monkeypatch.setattr(pipeline, "_sha", lambda p: "changed" if p == classes.__file__ else orig(p))
+    monkeypatch.setattr(pipeline, "_sha", lambda p: "changed" if p == f else orig(p))
     assert pipeline._code_hash() != h
 
 

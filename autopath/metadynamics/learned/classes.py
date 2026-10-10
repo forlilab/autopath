@@ -1,5 +1,6 @@
 """Class labels for the HLDA/Fisher steps: r thresholds, or nearest AutoPath milestone."""
 import glob
+import logging
 import os
 import re
 
@@ -14,16 +15,19 @@ from autopath.utils import compute_distance_features
 from .select import labels_from_r  # noqa: F401  (r-threshold classes)
 
 R_ORDER = ["bound", "vestibule", "bulk"]
+logger = logging.getLogger("autopath.metadynamics.learned")
 
 
 def find_milestones(milestones):
     """XML paths from a list or ONE path's directory (milestone_*_frame_*.xml, no *_relax*), by number."""
     if isinstance(milestones, (str, os.PathLike)):
         d = str(milestones)
-        subs = [x for x in glob.glob(os.path.join(d, "*", "milestone_*_frame_*.xml"))]
-        if subs:
-            raise ValueError(f"{d} has per-path subdirectories; pass one path's milestone directory")
         paths = [p for p in glob.glob(os.path.join(d, "milestone_*_frame_*.xml")) if "_relax" not in os.path.basename(p)]
+        subs = glob.glob(os.path.join(d, "*", "milestone_*_frame_*.xml"))
+        if subs and not paths:
+            raise ValueError(f"{d} has per-path subdirectories; pass one path's milestone directory")
+        if subs:
+            logger.info("%s: using its flat milestones, ignoring per-path subdirectories", d)
     else:
         paths = [str(p) for p in milestones]
     nums = []

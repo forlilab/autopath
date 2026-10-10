@@ -1,9 +1,13 @@
 """MoSAIC-style feature modules (Leiden CPM) on an r-controlled similarity; resolution by pull-grouped CV."""
+import threading
+
 import numpy as np
 import pandas as pd
 
 BIN_NM, MIN_FRAMES = 0.05, 50
 RES_GRID = (0.3, 0.4, 0.5, 0.6, 0.7, 0.8)
+# leidenalg seeds a process-global igraph RNG, then optimises in a separate call
+_LEIDEN_LOCK = threading.Lock()
 
 
 def binned_similarity(V, r, bin_nm=BIN_NM, min_frames=MIN_FRAMES, idx=None):
@@ -49,8 +53,9 @@ def fit_modules(S, resolution, seed=0):
     mat[np.diag_indices_from(mat)] = np.nan
     mat[np.isnan(mat)] = 0
     graph = ig.Graph.Weighted_Adjacency(list(mat.astype(np.float64)), loops=False)
-    part = la.find_partition(graph, la.CPMVertexPartition, n_iterations=-1, resolution_parameter=float(resolution),
-                             weights=graph.es["weight"], seed=int(seed))
+    with _LEIDEN_LOCK:
+        part = la.find_partition(graph, la.CPMVertexPartition, n_iterations=-1,
+                                 resolution_parameter=float(resolution), weights=graph.es["weight"], seed=int(seed))
     return np.asarray(part.membership, int)
 
 
