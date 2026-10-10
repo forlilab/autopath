@@ -6,6 +6,7 @@ import re
 
 import MDAnalysis as mda
 import numpy as np
+import pandas as pd
 from MDAnalysis.coordinates.memory import MemoryReader
 from MDAnalysis.lib.mdamath import angle, norm
 
@@ -112,3 +113,77 @@ def milestone_labels(milestones, topology, ligand_idx, pocket_idx, coords=None, 
     near = nearest_milestone(features, milestone_features(u, paths, lig, pocket_idx))
     order = [f"m{k + 1}" for k in range(len(paths))]
     return np.array(order, dtype=object)[near], order, paths
+
+
+RUPTURE_ORDER = ["B", "TS", "U"]
+SMOOTH_PS = 2.0
+RISE_FRAC, SLIP_FRAC, FREE_FRAC = 0.2, 0.5, 0.1
+BASE_B_FRAC, BASE_U_FRAC, LATE_PEAK_FRAC = 0.02, 0.10, 0.10
+
+
+def smoothed_force(t, f, window_ps=SMOOTH_PS):
+    """Centred rolling mean of f over ``window_ps`` (rows from the median time step).
+
+    Parameters
+    ----------
+    t, f : (n,) arrays, time (ps) and force
+    window_ps : float
+
+    Returns
+    -------
+    (n,) array; edge rows average the partial window.
+    """
+    dt = float(np.median(np.diff(t)))
+    w = max(1, int(round(window_ps / dt)))
+    return pd.Series(np.asarray(f, float)).rolling(w, center=True, min_periods=1).mean().to_numpy()
+
+
+def rupture_labels(dat, n_frames, window_ps=SMOOTH_PS):
+    """B / TS / U class per frame from one pull's smoothed force.
+
+    Parameters
+    ----------
+    dat : str or DataFrame
+        sMD ``.dat`` path (``#`` comment lines) or a frame with ``time`` and ``force`` columns.
+    n_frames : int
+        Frames to label, spread evenly over the pull time like ``pull_frames``.
+    window_ps : float
+        Smoothing window.
+
+    Returns
+    -------
+    labels : (n_frames,) object array of "B", "TS", "U" or "" (unlabelled or excluded pull)
+    info : dict
+        t_rise, t_peak, t_slip, t_free, f_peak, dF, base_b, base_u, and reason ("" if labelled).
+    """
+    d = dat if isinstance(dat, pd.DataFrame) else pd.read_csv(dat, comment="#")
+    t, fs = d["time"].to_numpy(float), smoothed_force(d["time"].to_numpy(float), d["force"].to_numpy(float),
+                                                      window_ps)
+    n = len(fs)
+    tk = t[-1] * np.arange(n_frames) / max(n_frames - 1, 1)
+    lab = np.full(n_frames, "", dtype=object)
+    nb = max(1, int(np.ceil(BASE_B_FRAC * n)))
+    base_b = float(np.median(fs[:nb]))
+    base_u = float(np.median(fs[-max(1, int(np.ceil(BASE_U_FRAC * n))):]))
+    ip = nb + int(np.argmax(fs[nb:]))  # search past the baseline window: skips start-of-pull transients
+    dF = float(fs[ip] - base_u)
+    info = dict(t_rise=np.nan, t_peak=float(t[ip]), t_slip=np.nan, t_free=np.nan, f_peak=float(fs[ip]),
+                dF=dF, base_b=base_b, base_u=base_u, reason="")
+    if t[ip] >= t[0] + (1 - LATE_PEAK_FRAC) * (t[-1] - t[0]):
+        return lab, dict(info, reason="peak in the last 10% of the pull")
+    rise = nb + np.flatnonzero(fs[nb:] > base_b + RISE_FRAC * (fs[ip] - base_b))
+    if not len(rise):
+        return lab, dict(info, reason="no force rise")
+    slip = ip + 1 + np.flatnonzero(fs[ip + 1:] < base_u + SLIP_FRAC * dF)
+    if not len(slip):
+        return lab, dict(info, reason="no slip after the peak")
+    i_slip = int(slip[0])
+    above = np.flatnonzero(fs > base_u + FREE_FRAC * dF)
+    i_free = max(i_slip + 1, int(above[-1]) + 1 if len(above) else 0)
+    if i_free >= n:
+        return lab, dict(info, reason="force never settles to the unbound baseline")
+    t_rise, t_slip, t_free = float(t[rise[0]]), float(t[i_slip]), float(t[i_free])
+    lab[tk < t_rise] = "B"
+    lab[(tk >= t[ip]) & (tk <= t_slip)] = "TS"
+    lab[tk > t_free] = "U"
+    return lab, dict(info, t_rise=t_rise, t_slip=t_slip, t_free=t_free)
