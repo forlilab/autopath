@@ -63,11 +63,14 @@ def main():
     ap.add_argument("--hill-width", dest="hill_width", type=float, default=None,
                     help="hill width in CV units (overrides the matched-width default)")
     ap.add_argument("--cv", choices=["path", "funnel_z", "funnel_z_unclamped", "dist", "funnel_z_dist",
-                                       "dist_torsion"],
+                                       "dist_torsion", "learned"],
                     default="path",
                     help="path: progress along the milestones, extended to the funnel "
                          "cap; funnel_z: the funnel axis coordinate, from below the lower wall to z_max; "
                          "dist: two-atom distance (Limongelli 2013); funnel_z_dist: both, 2D")
+    ap.add_argument("--learned-cv-file", default=None,
+                    help="--cv learned: learned_cv.npz from autopath.metadynamics.learned.learn_cv")
+    ap.add_argument("--learned-components", type=int, default=1)
     ap.add_argument("--dist-atoms", nargs=2, default=["resid 172 and name CG", "resname UNK and name C7x"],
                     help="MDAnalysis selections (system.pdb) of the two atoms; default Asp189 CG, benzamidine C7")
     ap.add_argument("--dist-grid", nargs=3, type=float, default=[0.2, 3.6, 171],
@@ -167,7 +170,7 @@ def main():
             f"{args.expect_cv_length}. The selections or milestones differ, so the "
             "two ΔG(t) curves would not be comparable.")
 
-    if args.cv in ("dist", "dist_torsion"):
+    if args.cv in ("dist", "dist_torsion", "learned"):
         cv = None
     elif args.cv == "path":
         cv = path
@@ -197,6 +200,10 @@ def main():
             log.info("funnel z NOT clamped (experiment arm)")
         log.info("CV: funnel z on [%.2f, %.2f] Å, hills %.3f nm", z_lo, z_max, width_nm)
     cvs = [] if cv is None else [cv]
+    if args.cv == "learned":
+        from autopath.metadynamics.learned import learned_cv_spec
+        cvs.extend(learned_cv_spec(args.learned_cv_file, load_system(system_xml), args.learned_components))
+        log.info("CV: learned (%s), %d component(s)", args.learned_cv_file, args.learned_components)
     if args.cv in ("dist", "funnel_z_dist", "dist_torsion"):
         u_sys = mda.Universe(f"{base}/system.pdb")
         a1, a2 = (u_sys.select_atoms(s) for s in args.dist_atoms)
@@ -240,6 +247,10 @@ def main():
               mMD_time=args.ns, bias_factor=args.bias_factor, hill_height=args.hill_height,
               biasFrequency=2, funnel_force=funnel_force,
               funnel_params=params, bias_dir=bias_dir,
+              monitor_cvs=({"funnel_z": funnel_z_cv(
+                  params["host_index"], params["guest_index"], params["unbinding_axis"],
+                  grid_min=-10.0, grid_max=10.0)}
+                  if funnel_force is not None and args.cv not in ("funnel_z", "funnel_z_unclamped") else None),
               boundary_correction=args.boundary_correction,
               reweight=args.reweight, rct_ustride=args.rct_ustride,
               dcd_interval=args.dcd_interval,

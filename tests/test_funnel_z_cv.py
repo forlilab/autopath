@@ -101,3 +101,11 @@ def test_z_is_clamped_to_the_grid():
         moved[GUEST] += shift * n
         ctx.setPositions(moved)
         assert cv.getValue(ctx).value_in_unit(unit.nanometers) == pytest.approx(expected, abs=1e-6)
+
+
+def test_learned_cv_option_accepted_and_needs_funnel():
+    from autopath.autopath_core import AutoPath
+    assert AutoPath(pdb_path="examples/data/3ptb.pdb", do_fix_pdb=False,
+                    mMD_cv="learned", mMD_use_funnel_potential=True).mMD_cv == "learned"
+    with pytest.raises(ValueError, match="learned"):
+        AutoPath(pdb_path="examples/data/3ptb.pdb", do_fix_pdb=False, mMD_cv="learned")

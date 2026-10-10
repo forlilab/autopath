@@ -262,6 +262,7 @@ class AutoPath:
         mMD_seed_order: str = "unbound_first",
         mMD_bulk_cutoff_ang: float = 10.0,
         mMD_cv: str = "path",
+        mMD_learned_components: int = 1,
         mMD_outdir_suffix: str = "",
         mMD_preseed_bias: bool = False,
         mMD_preseed_speed: float = None,
@@ -354,15 +355,18 @@ class AutoPath:
                              f"'bound_first', got {mMD_seed_order!r}")
         self.mMD_seed_order = mMD_seed_order
         self.mMD_bulk_cutoff_ang = mMD_bulk_cutoff_ang
-        if mMD_cv not in ("path", "funnel_z"):
-            raise ValueError(f"mMD_cv must be 'path' or 'funnel_z', got {mMD_cv!r}")
+        if mMD_cv not in ("path", "funnel_z", "learned"):
+            raise ValueError(f"mMD_cv must be 'path', 'funnel_z' or 'learned', got {mMD_cv!r}")
+        if mMD_cv == "learned" and not mMD_use_funnel_potential:
+            raise ValueError("mMD_cv='learned' needs the funnel: funnel z is monitored for reweighting")
         if mMD_cv == "funnel_z" and not mMD_use_funnel_potential:
             raise ValueError("mMD_cv='funnel_z' is the funnel axis coordinate; "
                              "it needs mMD_use_funnel_potential=True")
-        if mMD_cv == "funnel_z" and mMD_preseed_bias:
+        if mMD_cv in ("funnel_z", "learned") and mMD_preseed_bias:
             raise ValueError("mMD_preseed_bias builds its bias on the path-CV grid; "
-                             "it cannot seed mMD_cv='funnel_z'")
+                             f"it cannot seed mMD_cv={mMD_cv!r}")
         self.mMD_cv = mMD_cv
+        self.mMD_learned_components = mMD_learned_components
         self.mMD_outdir_suffix = mMD_outdir_suffix
         self.mMD_preseed_bias = mMD_preseed_bias
         self.mMD_preseed_speed = mMD_preseed_speed
@@ -1426,6 +1430,17 @@ class AutoPath:
                                             "(z_cc=%.1f A), so s=1 is not bulk however long "
                                             "the cylinder is.", _z_path_far, _zcc)
                                 metad_cv = path_cv
+                            elif self.mMD_cv == "learned":
+                                from autopath.metadynamics.learned import learn_cv, learned_cv_spec
+                                _lcv_dir = f"{self.sMD_outdir}/learned_cv"
+                                _lcv = f"{_lcv_dir}/learned_cv.npz"
+                                _dcds = glob(f"{sMD_traj_outdir}/*_aligned.dcd")
+                                if not os.path.exists(_lcv) or (
+                                        _dcds and os.path.getmtime(_lcv) < max(map(os.path.getmtime, _dcds))):
+                                    learn_cv(f"{sys_name}/system.pdb", ligand_file, ligand_atoms_indices,
+                                             pocket_atom_indices, sMD_traj_outdir, _lcv_dir,
+                                             direction=self.sMD_pulling_dir)
+                                metad_cv = learned_cv_spec(_lcv, base_system, self.mMD_learned_components)
                             else:
                                 # Bias the funnel axis coordinate itself: it keeps changing up to the
                                 # cap and is the length Eq. 15 integrates over, so no path extension.
@@ -1524,19 +1539,25 @@ class AutoPath:
                             os.makedirs(walker_bias_dir, exist_ok=True)
                             shutil.copy2(preseed_src, os.path.join(walker_bias_dir, "bias_0_0.npy"))
 
+                    metad_cvs = metad_cv if isinstance(metad_cv, list) else [metad_cv]
+                    metad_cv = metad_cvs[0]
                     logger.info(f"Running WTMetaD for milestone {milestone_name}")
                     try:
                         WTMetaD.run(
                             state_xml_file=state_to_use,
                             system=milestone_system,
                             run_id=milestone_name,
-                            cv_specs=[metad_cv],
+                            cv_specs=metad_cvs,
                             mMD_time=self.mMD_time,
                             bias_factor=self.mMD_bias_factor,
                             hill_height=self.mMD_hill_height,
                             biasFrequency=self.mMD_bias_frequency,
                             funnel_force=funnel_force,
                             funnel_params=funnel_params if funnel_force is not None else None,
+                            monitor_cvs=({"funnel_z": funnel_z_cv(
+                                funnel_params["host_index"], funnel_params["guest_index"],
+                                funnel_params["unbinding_axis"], grid_min=-10.0, grid_max=10.0)}
+                                if funnel_params is not None and self.mMD_cv != "funnel_z" else None),
                             bias_dir=walker_bias_dir,
                             boundary_correction=self.mMD_boundary_correction,
                             reweight=self.mMD_reweight,
