@@ -15,12 +15,87 @@ The class also logs every hill and gives the bias at the walker and c(t)
 """
 
 import time
+from dataclasses import dataclass
 from functools import reduce
+from typing import Any
 
 import numpy as np
+import openmm as mm
 import openmm.unit as unit
 from openmm.app.metadynamics import Metadynamics
 from scipy.special import erf, logsumexp
+
+MAX_CVS = 32                                        # OpenMM CustomCVForce limit
+
+
+@dataclass(eq=False)
+class LinearComposite:
+    """Bias variable s = sum_k w_k (f_k - mu_k) / sd_k over feature forces f_k.
+
+    Passed as a BiasVariable's force: the bias force takes the f_k directly as its
+    collective variables (one level, no inner MetaCollectiveVariable). Composites
+    with the same ``key`` share their features, which are then added once.
+    """
+    forces: list
+    weights: Any
+    mu: Any
+    sd: Any
+    key: Any = None
+
+    def __post_init__(self):
+        self.weights, self.mu, self.sd = (np.asarray(a, dtype=float).ravel()
+                                          for a in (self.weights, self.mu, self.sd))
+        n = len(self.forces)
+        if not (len(self.weights) == len(self.mu) == len(self.sd) == n):
+            raise ValueError("LinearComposite needs one weight, mu and sd per feature force")
+
+    def value(self, f) -> float:
+        f = np.asarray(f, dtype=float)
+        return float(np.sum(self.weights * (f - self.mu) / self.sd))
+
+    def expression(self, names) -> str:
+        return " + ".join(f"({float(w)!r})*({n} - ({float(m)!r}))/({float(s)!r})"
+                          for n, w, m, s in zip(names, self.weights, self.mu, self.sd))
+
+
+def _copy_force(f):
+    return mm.XmlSerializer.deserialize(mm.XmlSerializer.serialize(f))
+
+
+def composite_bias_force(variables):
+    """CustomCVForce table(s...) whose LinearComposite variables are expanded over their features.
+
+    Returns (force, cv_map): cv_map[i] is ("cv", j) for a plain variable (CV index j) or
+    ("lc", composite, [j...]) for a composite (indices of its features).
+    """
+    cvs, args, defs, cv_map, groups = [], [], [], [], {}
+    for i, v in enumerate(variables):
+        c = v.force
+        if isinstance(c, LinearComposite):
+            if v.periodic:
+                raise ValueError("a LinearComposite bias variable cannot be periodic")
+            key = id(c) if c.key is None else c.key
+            if key not in groups:
+                g = len(groups)
+                idx = list(range(len(cvs), len(cvs) + len(c.forces)))
+                cvs += [(f"lf{g}_{k}", _copy_force(f)) for k, f in enumerate(c.forces)]
+                groups[key] = idx
+            idx = groups[key]
+            if len(idx) != len(c.forces):
+                raise ValueError("composites sharing a key must have the same number of features")
+            defs.append(f"s{i} = {c.expression([cvs[j][0] for j in idx])}")
+            args.append(f"s{i}")
+            cv_map.append(("lc", c, idx))
+        else:
+            cv_map.append(("cv", len(cvs)))
+            cvs.append((f"cv{i}", v.force))
+            args.append(f"cv{i}")
+    if len(cvs) > MAX_CVS:
+        raise ValueError(f"{len(cvs)} collective variables exceed OpenMM CustomCVForce's limit of {MAX_CVS}")
+    force = mm.CustomCVForce("; ".join([f"table({', '.join(args)})"] + defs))
+    for name, f in cvs:
+        force.addCollectiveVariable(name, f)
+    return force, cv_map
 
 
 def inside_fraction(grid, lo, hi, sigma) -> np.ndarray:
@@ -75,8 +150,92 @@ class BoundaryCorrectedMetadynamics(Metadynamics):
         self.boundaryFactor = boundary_factor(variables, bounds)
         self.hills = []
         self.hill_wall = []
-        super().__init__(system, variables, temperature, biasFactor, height, frequency,
-                         saveFrequency=saveFrequency, biasDir=biasDir)
+        self._cv_map = None
+        if any(isinstance(v.force, LinearComposite) for v in variables):
+            self._init_composite(system, variables, temperature, biasFactor, height, frequency,
+                                 saveFrequency, biasDir)
+        else:
+            super().__init__(system, variables, temperature, biasFactor, height, frequency,
+                             saveFrequency=saveFrequency, biasDir=biasDir)
+
+    def _init_composite(self, system, variables, temperature, biasFactor, height, frequency,
+                        saveFrequency, biasDir):
+        # Metadynamics.__init__ with the bias force from composite_bias_force
+        if not unit.is_quantity(temperature):
+            temperature = temperature * unit.kelvin
+        if not unit.is_quantity(height):
+            height = height * unit.kilojoules_per_mole
+        if biasFactor <= 1.0:
+            raise ValueError('biasFactor must be > 1')
+        if (saveFrequency is None) != (biasDir is None):
+            raise ValueError('Must specify both saveFrequency and biasDir')
+        if saveFrequency is not None and (saveFrequency < frequency or saveFrequency % frequency != 0):
+            raise ValueError('saveFrequency must be a multiple of frequency')
+        if len(variables) not in (1, 2, 3):
+            raise ValueError('Metadynamics requires 1, 2, or 3 collective variables')
+        if any(v.periodic for v in variables):
+            raise ValueError('composite bias variables cannot be mixed with periodic ones')
+        self.variables = variables
+        self.temperature = temperature
+        self.biasFactor = biasFactor
+        self.height = height
+        self.frequency = frequency
+        self.biasDir = biasDir
+        self.saveFrequency = saveFrequency
+        self._id = np.random.randint(0x7FFFFFFF)
+        self._saveIndex = 0
+        self._selfBias = np.zeros(tuple(v.gridWidth for v in reversed(variables)))
+        self._totalBias = np.zeros(tuple(v.gridWidth for v in reversed(variables)))
+        self._loadedBiases = {}
+        self._syncWithDisk()
+        self._deltaT = temperature * (biasFactor - 1)
+        self._force, self._cv_map = composite_bias_force(variables)
+        self._widths = [v.gridWidth for v in variables]
+        self._limits = sum(([v.minValue, v.maxValue] for v in variables), [])
+        if len(variables) == 1:
+            self._table = mm.Continuous1DFunction(self._totalBias.flatten(), *self._limits, False)
+        elif len(variables) == 2:
+            self._table = mm.Continuous2DFunction(*self._widths, self._totalBias.flatten(), *self._limits, False)
+        else:
+            self._table = mm.Continuous3DFunction(*self._widths, self._totalBias.flatten(), *self._limits, False)
+        self._force.addTabulatedFunction('table', self._table)
+        freeGroups = set(range(32)) - set(force.getForceGroup() for force in system.getForces())
+        if len(freeGroups) == 0:
+            raise RuntimeError('Cannot assign a force group to the metadynamics force. '
+                               'The maximum number (32) of the force groups is already used.')
+        self._force.setForceGroup(max(freeGroups))
+        system.addForce(self._force)
+
+    def _cv_values(self, context):
+        """CV values at the walker; composites evaluated from their feature values."""
+        vals = self._force.getCollectiveVariableValues(context)
+        if self._cv_map is None:
+            return vals
+        return [vals[m[1]] if m[0] == "cv" else m[1].value([vals[j] for j in m[2]])
+                for m in self._cv_map]
+
+    def getCollectiveVariables(self, simulation):
+        return self._cv_values(simulation.context)
+
+    def step(self, simulation, steps):
+        # Metadynamics.step with the CV values from _cv_values
+        stepsToGo = steps
+        forceGroup = self._force.getForceGroup()
+        while stepsToGo > 0:
+            nextSteps = stepsToGo
+            if simulation.currentStep % self.frequency == 0:
+                nextSteps = min(nextSteps, self.frequency)
+            else:
+                nextSteps = min(nextSteps, self.frequency - simulation.currentStep % self.frequency)
+            simulation.step(nextSteps)
+            if simulation.currentStep % self.frequency == 0:
+                position = self._cv_values(simulation.context)
+                energy = simulation.context.getState(energy=True, groups={forceGroup}).getPotentialEnergy()
+                height = self.height * np.exp(-energy / (unit.MOLAR_GAS_CONSTANT_R * self._deltaT))
+                self._addGaussian(position, height, simulation.context)
+            if self.saveFrequency is not None and simulation.currentStep % self.saveFrequency == 0:
+                self._syncWithDisk()
+            stepsToGo -= nextSteps
 
     def _addGaussian(self, position, height, context):
         axisGaussians = []

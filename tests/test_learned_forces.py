@@ -111,7 +111,7 @@ def test_two_components_share_one_context(tmp_path):
     npz = str(tmp_path / "cv.npz")
     np.savez(npz, kept=np.arange(5), weights=W, mu=mu, sd=sd, grid_min=[-5.0, -5.0], grid_max=[5.0, 5.0],
              hill_width=[0.1, 0.1], **features_to_dict(TOY))
-    cvs = [s.resolve(None, 5, None).cv for s in learned_cv_spec(npz, system, n_components=2)]
+    cvs = [s.resolve(None, 5, None).cv for s in learned_cv_spec(npz, system, n_components=2, nested=True)]
     for k, cv in enumerate(cvs):
         cv.setForceGroup(k + 1)
         system.addForce(cv)

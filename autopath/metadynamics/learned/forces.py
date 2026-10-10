@@ -76,19 +76,36 @@ def combined_cv(features, weights, mu, sd, system, name="learned"):
     return cvpack.MetaCollectiveVariable(expr, inner, unit.dimensionless, name=name, **params)
 
 
-def learned_cv_spec(npz_path, system, n_components=1):
+def composite_cv(features, weights, mu, sd, system, key=None):
+    """Flat learned CV: the feature forces plus their standardised weights, for the bias force."""
+    from ..BoundaryCorrection import LinearComposite
+    if len(features) > 32:
+        raise ValueError(f"{len(features)} features exceed OpenMM CustomCVForce's limit of 32 collective variables")
+    forces = [feature_cv(f, system, f"f{k}") for k, f in enumerate(features)]
+    return LinearComposite(forces, weights, mu, sd, key=key)
+
+
+def learned_cv_spec(npz_path, system, n_components=1, nested=False):
+    """One CVSpec per HLDA component. Flat LinearComposite by default (components share
+    their features); ``nested=True`` gives the old MetaCollectiveVariable (parity tests only).
+    """
     from ..CV import CVSpec
     from .features import features_from_dict
     d = np.load(npz_path, allow_pickle=False)
     feats = features_from_dict(d)
     kept = [feats[int(i)] for i in d["kept"]]
+    key = object()                                  # shared by this call's components
     specs = []
     for k in range(n_components):
         w, mu, sd = d["weights"][:, k], d["mu"], d["sd"]
         lo, hi, hw = float(d["grid_min"][k]), float(d["grid_max"][k]), float(d["hill_width"][k])
 
-        def factory(pos, n_atoms, top, w=w, name=f"learned{k + 1}"):
-            return combined_cv(kept, w, mu, sd, system, name=name)
+        if nested:
+            def factory(pos, n_atoms, top, w=w, name=f"learned{k + 1}"):
+                return combined_cv(kept, w, mu, sd, system, name=name)
+        else:
+            def factory(pos, n_atoms, top, w=w):
+                return composite_cv(kept, w, mu, sd, system, key=key)
 
         specs.append(CVSpec(cv=None, grid_min=lo, grid_max=hi, hill_width=hw,
                             grid_points=int(round((hi - lo) / (hw / 5))) + 1,

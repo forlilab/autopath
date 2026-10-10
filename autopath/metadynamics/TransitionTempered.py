@@ -135,7 +135,7 @@ class TransitionTemperedMetadynamics(BoundaryCorrectedMetadynamics):
                 nextSteps = min(nextSteps, self.frequency - simulation.currentStep % self.frequency)
             simulation.step(nextSteps)
             if simulation.currentStep % self.frequency == 0:
-                position = self._force.getCollectiveVariableValues(simulation.context)
+                position = self._cv_values(simulation.context)
                 v = self.vstar()
                 self.vstar_log.append(v)
                 height = self.height * np.exp(-max(v - self.threshold, 0.0) / self._kdt)

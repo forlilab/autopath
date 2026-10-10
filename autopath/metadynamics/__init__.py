@@ -17,7 +17,7 @@ funnel metadynamics simulations:
 
 # --- Simulation ---
 from .MetadynamicsMD import MetadynamicsMD
-from .BoundaryCorrection import BoundaryCorrectedMetadynamics
+from .BoundaryCorrection import BoundaryCorrectedMetadynamics, LinearComposite
 from .TransitionTempered import TransitionTemperedMetadynamics, vstar
 from .Hills import load_hills, bias_from_hills, fes_history, hills_record
 
