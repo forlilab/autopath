@@ -201,6 +201,8 @@ def main():
         log.info("CV: funnel z on [%.2f, %.2f] Å, hills %.3f nm", z_lo, z_max, width_nm)
     cvs = [] if cv is None else [cv]
     if args.cv == "learned":
+        if not args.learned_cv_file:
+            raise SystemExit("--cv learned needs --learned-cv-file")
         from autopath.metadynamics.learned import learned_cv_spec
         cvs.extend(learned_cv_spec(args.learned_cv_file, load_system(system_xml), args.learned_components))
         log.info("CV: learned (%s), %d component(s)", args.learned_cv_file, args.learned_components)
@@ -250,7 +252,7 @@ def main():
               monitor_cvs=({"funnel_z": funnel_z_cv(
                   params["host_index"], params["guest_index"], params["unbinding_axis"],
                   grid_min=-10.0, grid_max=10.0)}
-                  if funnel_force is not None and args.cv not in ("funnel_z", "funnel_z_unclamped") else None),
+                  if funnel_force is not None and args.cv not in ("funnel_z", "funnel_z_unclamped", "funnel_z_dist") else None),
               boundary_correction=args.boundary_correction,
               reweight=args.reweight, rct_ustride=args.rct_ustride,
               dcd_interval=args.dcd_interval,

@@ -109,3 +109,34 @@ def test_learned_cv_option_accepted_and_needs_funnel():
                     mMD_cv="learned", mMD_use_funnel_potential=True).mMD_cv == "learned"
     with pytest.raises(ValueError, match="learned"):
         AutoPath(pdb_path="examples/data/3ptb.pdb", do_fix_pdb=False, mMD_cv="learned")
+
+
+def test_funnel_z_monitor_guard():
+    from autopath.autopath_core import funnel_z_monitor
+    fp = {"host_index": [0, 1], "guest_index": [2], "unbinding_axis": [0.0, 0.0, 1.0]}
+    assert funnel_z_monitor(None, fp, "path") is None
+    assert funnel_z_monitor(object(), fp, "funnel_z") is None
+    assert funnel_z_monitor(object(), None, "path") is None
+    for cv in ("path", "learned"):
+        assert list(funnel_z_monitor(object(), fp, cv)) == ["funnel_z"]
+
+
+def test_learned_cv_failure_propagates(monkeypatch):
+    from autopath.autopath_core import build_learned_cv
+    import autopath.metadynamics.learned as learned
+
+    def boom(*a, **k):
+        raise RuntimeError("no pulls")
+    monkeypatch.setattr(learned, "learn_cv", boom)
+    with pytest.raises(RuntimeError, match="no pulls"):
+        build_learned_cv(None, "s", "l.sdf", [0], [1], "t", "o", "forward", 1)
+
+
+def test_learned_cv_is_built_without_hidden_layer(monkeypatch):
+    from autopath.autopath_core import build_learned_cv
+    import autopath.metadynamics.learned as learned
+    seen = {}
+    monkeypatch.setattr(learned, "learn_cv", lambda *a, **k: seen.update(k) or "x.npz")
+    monkeypatch.setattr(learned, "learned_cv_spec", lambda npz, system, n: [npz, n])
+    assert build_learned_cv(None, "s", "l.sdf", [0], [1], "t", "o", "forward", 2) == ["x.npz", 2]
+    assert seen["hidden"] is False and seen["direction"] == "forward"

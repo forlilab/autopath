@@ -55,6 +55,24 @@ import logging
 logger = logging.getLogger('autopath.core')
 
 
+def funnel_z_monitor(funnel_force, funnel_params, mMD_cv):
+    """Unbiased funnel-z monitor for runs that bias something else (None otherwise)."""
+    if funnel_force is None or funnel_params is None or mMD_cv == "funnel_z":
+        return None
+    return {"funnel_z": funnel_z_cv(
+        funnel_params["host_index"], funnel_params["guest_index"],
+        funnel_params["unbinding_axis"], grid_min=-10.0, grid_max=10.0)}
+
+
+def build_learned_cv(system, sys_name, ligand_file, ligand_idx, pocket_idx, traj_dir, out_dir,
+                     direction, n_components):
+    """Learn the CV from the sMD pulls and wrap it; any failure propagates."""
+    from autopath.metadynamics import learned
+    npz = learned.learn_cv(f"{sys_name}/system.pdb", ligand_file, ligand_idx, pocket_idx,
+                           traj_dir, out_dir, direction=direction, hidden=False)
+    return learned.learned_cv_spec(npz, system, n_components)
+
+
 def group_milestones_by_path(milestones: list[str],
                              milestones_outdir: str,
                              ) -> list[tuple[str | None, list[str]]]:
@@ -1431,16 +1449,7 @@ class AutoPath:
                                             "the cylinder is.", _z_path_far, _zcc)
                                 metad_cv = path_cv
                             elif self.mMD_cv == "learned":
-                                from autopath.metadynamics.learned import learn_cv, learned_cv_spec
-                                _lcv_dir = f"{self.sMD_outdir}/learned_cv"
-                                _lcv = f"{_lcv_dir}/learned_cv.npz"
-                                _dcds = glob(f"{sMD_traj_outdir}/*_aligned.dcd")
-                                if not os.path.exists(_lcv) or (
-                                        _dcds and os.path.getmtime(_lcv) < max(map(os.path.getmtime, _dcds))):
-                                    learn_cv(f"{sys_name}/system.pdb", ligand_file, ligand_atoms_indices,
-                                             pocket_atom_indices, sMD_traj_outdir, _lcv_dir,
-                                             direction=self.sMD_pulling_dir)
-                                metad_cv = learned_cv_spec(_lcv, base_system, self.mMD_learned_components)
+                                pass  # built after this try: a failure must not drop the funnel
                             else:
                                 # Bias the funnel axis coordinate itself: it keeps changing up to the
                                 # cap and is the length Eq. 15 integrates over, so no path extension.
@@ -1496,6 +1505,14 @@ class AutoPath:
                         logger.error(f"Error generating funnel potential: {e}")
                         logger.warning("Continuing without funnel potential")
                         funnel_force = None
+
+                if self.mMD_cv == "learned":
+                    if funnel_force is None:
+                        raise RuntimeError("mMD_cv='learned' needs the funnel, which was not generated")
+                    metad_cv = build_learned_cv(
+                        base_system, sys_name, ligand_file, ligand_atoms_indices,
+                        pocket_atom_indices, sMD_traj_outdir, f"{self.sMD_outdir}/learned_cv",
+                        self.sMD_pulling_dir, self.mMD_learned_components)
 
                 # most-bound milestone, resolved before the walker order is applied
                 first_milestone_name = os.path.basename(path_milestones[0]).split('.')[0]
@@ -1554,10 +1571,7 @@ class AutoPath:
                             biasFrequency=self.mMD_bias_frequency,
                             funnel_force=funnel_force,
                             funnel_params=funnel_params if funnel_force is not None else None,
-                            monitor_cvs=({"funnel_z": funnel_z_cv(
-                                funnel_params["host_index"], funnel_params["guest_index"],
-                                funnel_params["unbinding_axis"], grid_min=-10.0, grid_max=10.0)}
-                                if funnel_params is not None and self.mMD_cv != "funnel_z" else None),
+                            monitor_cvs=funnel_z_monitor(funnel_force, funnel_params, self.mMD_cv),
                             bias_dir=walker_bias_dir,
                             boundary_correction=self.mMD_boundary_correction,
                             reweight=self.mMD_reweight,
@@ -1571,7 +1585,12 @@ class AutoPath:
                 # Post-run diagnosis: FES, walker stats, and ΔG°_b from the coverage-filtered FES.
                 try:
                     colvar_files_diag = sorted(glob(f"{group_out_dir}/COLVAR_*.npy"))
-                    if colvar_files_diag:
+                    if colvar_files_diag and self.mMD_cv == "learned":
+                        # CV-space well depth assumes bound at the grid's low end; the learned axis has no such sign
+                        from autopath.metadynamics.report import z_reweighted_dG
+                        zr = z_reweighted_dG(group_out_dir, funnel_params, float(self.temperature))
+                        logger.info("z-reweighted dG: %s", zr)
+                    elif colvar_files_diag:
                         ma = MetadynamicsAnalysis(out_dir=group_out_dir)
                         diag = ma.diagnose(
                             colvar_files=colvar_files_diag,
