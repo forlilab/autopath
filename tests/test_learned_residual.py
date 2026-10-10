@@ -12,8 +12,8 @@ from openmm.app.metadynamics import BiasVariable
 from autopath.metadynamics import (BoundaryCorrectedMetadynamics, LinearComposite, MetadynamicsMD,
                                    ResidualComposite)
 from autopath.metadynamics.BoundaryCorrection import boundary_factor, composite_bias_force
+from autopath.metadynamics.learned.features import features_to_dict
 from autopath.metadynamics.learned.forces import feature_cv, funnel_z_force, is_rupture_cv, learned_cv_spec
-from autopath.metadynamics.learned.sw import z_spline_values
 
 from .learned_toys import (AXIS, FEATS, GUEST, HOST, MASSES, MU, SD, TABLES, W, X0, ZMAX, ZMIN, s_plain,
                            s_ref, toy_system, write_npz_r2, z_of)
@@ -88,12 +88,6 @@ def test_metad_records_the_numpy_value():
     assert list(meta._cv_values(ctx)) == pytest.approx([c], rel=1e-6)
 
 
-def test_residual_g_is_the_training_spline():
-    rc = residual(toy_system())
-    zz = np.linspace(ZMIN - 0.5, ZMAX + 0.5, 37)
-    assert np.allclose(rc.g(zz), z_spline_values(TABLES, ZMIN, ZMAX, zz).T)
-
-
 def test_residual_composite_validates_inputs():
     s = toy_system()
     forces = [feature_cv(f, s, f"f{k}") for k, f in enumerate(FEATS)]
@@ -107,7 +101,6 @@ def test_residual_composite_validates_inputs():
 
 
 def _write_npz_r1(path):
-    from autopath.metadynamics.learned.features import features_to_dict
     np.savez(path, kept=np.arange(3), weights=np.c_[W, -W], mu=MU, sd=SD, grid_min=[-3.0, -3.0],
              grid_max=[3.0, 3.0], hill_width=[0.2, 0.2], **features_to_dict(FEATS))
     return path

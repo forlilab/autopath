@@ -82,10 +82,9 @@ def _check_finite_z(z):
 
 
 def _corr(s, z, m):
-    r = float(np.corrcoef(s[m], z[m])[0, 1])
-    if not np.isfinite(r):
+    if np.std(s[m]) == 0 or np.std(z[m]) == 0:
         raise ValueError("s_w or z is constant over the labelled frames")
-    return r
+    return float(np.corrcoef(s[m], z[m])[0, 1])
 
 
 def _fit(X, labels, order, reducer):
