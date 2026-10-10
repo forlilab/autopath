@@ -8,7 +8,7 @@ from scipy.cluster.hierarchy import fcluster, linkage
 from scipy.spatial.distance import squareform
 from scipy.stats import rankdata
 
-BIN_NM, MIN_PULLS, RHO_PRUNE, FISHER_FLOOR, P_MAX, BULK_NM = 0.05, 20, 0.8, 0.5, 0.05, 0.3
+BIN_NM, MIN_PULLS, RHO_PRUNE, FISHER_FLOOR, BULK_NM = 0.05, 20, 0.8, 0.5, 0.3
 MAX_KEPT = 30
 
 
@@ -107,19 +107,21 @@ def hidden_variable_p(x, W, r, pull, speed, n_perm=1000, rng=None):
     return float((1 + np.sum(null >= abs(rbar[0, k]))) / (1 + n_perm)), float(rbar[0, k])
 
 
-def select(V, names, families, frames, labels, n_perm=1000, rng=None):
+def select(V, names, families, frames, labels, n_perm=1000, rng=None, hidden=True):
+    """Keep Fisher-relevant (or F3) features, prune redundancy, cap at MAX_KEPT by Fisher.
+    The hidden-variable p/rho are report-only: positions at fixed r are distorted by spring lag."""
     y_bv = labels != "bulk"
     fis = np.array([fisher(V[y_bv, k], labels[y_bv] == "bound") for k in range(V.shape[1])])
     p, rho = np.ones(len(names)), np.zeros(len(names))
-    for k, fam in enumerate(families):
-        if fam != "F3":
-            p[k], rho[k] = hidden_variable_p(V[:, k], frames.W.values, frames.r.values,
-                                             frames.pull.values, frames.speed.values, n_perm, rng)
-    relevant = (fis >= FISHER_FLOOR) | (p < P_MAX) | (np.array(families) == "F3")
+    if hidden:
+        for k, fam in enumerate(families):
+            if fam != "F3":
+                p[k], rho[k] = hidden_variable_p(V[:, k], frames.W.values, frames.r.values,
+                                                 frames.pull.values, frames.speed.values, n_perm, rng)
+    relevant = (fis >= FISHER_FLOOR) | (np.array(families) == "F3")
     idx = np.flatnonzero(relevant)
-    score = fis + (p < P_MAX) * 1e3
-    kept = [int(idx[i]) for i in prune(V[:, idx], [names[i] for i in idx], score[idx])]
+    kept = [int(idx[i]) for i in prune(V[:, idx], [names[i] for i in idx], fis[idx])]
     f3 = [k for k, f in enumerate(families) if f == "F3"]
-    rest = sorted((k for k in kept if k not in f3), key=lambda k: (p[k], -fis[k]))
+    rest = sorted((k for k in kept if k not in f3), key=lambda k: -fis[k])
     kept = sorted(set(f3) | set(rest[:max(MAX_KEPT - len(f3), 0)]))
     return {"kept": kept, "fisher": fis, "p_hidden": p, "rho_hidden": rho}

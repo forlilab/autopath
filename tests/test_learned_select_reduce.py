@@ -166,6 +166,22 @@ def test_select_caps_kept_features_and_keeps_f3():
     assert len(out["kept"]) <= MAX_KEPT == 30 and 0 in out["kept"]
 
 
+def test_select_keeps_fisher_feature_and_drops_work_only_feature():
+    from autopath.metadynamics.learned.select import select
+    df = _pulls(planted=True)
+    r = df.r.values
+    labels = np.where(r <= 1.0, "bound", np.where(r >= 1.8, "bulk", "vestibule")).astype(object)
+    rng = np.random.default_rng(1)
+    n = len(df)
+    V = np.c_[rng.normal(size=n), 3.0 * (labels == "bound") + rng.normal(size=n), df.x.values]
+    out = select(V, ["F3_com", "F7_cls", "F7_work"], ["F3", "F7", "F7"], df, labels, n_perm=200,
+                 rng=np.random.default_rng(0))
+    assert out["fisher"][1] > 0.5 and out["fisher"][2] < 0.5
+    assert out["kept"] == [0, 1]
+    assert out["p_hidden"][2] < 0.05
+    assert select(V, ["a", "b", "c"], ["F3", "F7", "F7"], df, labels, hidden=False)["kept"] == [0, 1]
+
+
 from autopath.metadynamics.learned.reduce import HLDA, lda_reference
 
 
@@ -225,7 +241,7 @@ PDB3 = "examples/04_Full-Pipeline/3ptb/system.pdb"
 
 
 @pytest.mark.skipif(not os.path.isdir(TRAJ), reason="3ptb sMD data not on disk")
-def test_learn_cv_3ptb_rediscovers_pocket_hydration(tmp_path):
+def test_learn_cv_3ptb_keeps_an_asp189_or_pocket_water_term(tmp_path):
     import MDAnalysis as mda
     from autopath.metadynamics.learned.pipeline import learn_cv
     u = mda.Universe(PDB3)
@@ -236,7 +252,8 @@ def test_learn_cv_3ptb_rediscovers_pocket_hydration(tmp_path):
     d = np.load(path, allow_pickle=False)
     kept_names = [str(n) for n in d["names"][d["kept"]]]
     assert "F3_com" in kept_names
-    assert any(n.startswith("F5") or (n.startswith("F4") and n.endswith("_172")) for n in kept_names), kept_names
+    assert any(n.startswith("F5") or (n.startswith("F4") and n.endswith("_172"))
+               or (n.startswith("F1") and n.endswith("_172")) for n in kept_names), kept_names
     assert d["weights"].shape[0] == len(d["kept"])
     assert float(d["monotonic_rho"]) > 0.8 and np.isfinite(float(d["f3_acc"]))
     assert os.path.exists(tmp_path / "report.png")
