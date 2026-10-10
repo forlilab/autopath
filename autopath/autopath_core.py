@@ -65,12 +65,22 @@ def funnel_z_monitor(funnel_force, funnel_params, mMD_cv):
 
 
 def build_learned_cv(system, sys_name, ligand_file, ligand_idx, pocket_idx, traj_dir, out_dir,
-                     direction, n_components):
-    """Learn the CV from the sMD pulls and wrap it; any failure propagates."""
+                     direction, n_components, milestones_dir):
+    """Learn the CV (HLDA classes = this path's milestones, clustered on pocket_idx) and wrap it.
+
+    Any failure propagates.
+    """
     from autopath.metadynamics import learned
     npz = learned.learn_cv(f"{sys_name}/system.pdb", ligand_file, ligand_idx, pocket_idx,
-                           traj_dir, out_dir, direction=direction, hidden=False)
+                           traj_dir, out_dir, direction=direction, hidden=False,
+                           classes="milestones", milestones=milestones_dir,
+                           milestone_pocket_idx=pocket_idx)
     return learned.learned_cv_spec(npz, system, n_components)
+
+
+def milestones_dir_for_group(milestones_outdir: str, group_key: str | None) -> str:
+    """Directory holding a group's milestones: flat root (all_medoids) or <root>/<path_id> (per_path)."""
+    return milestones_outdir if group_key is None else os.path.join(milestones_outdir, group_key)
 
 
 def group_milestones_by_path(milestones: list[str],
@@ -1193,8 +1203,7 @@ class AutoPath:
                 group_out_dir = (mMD_out_dir if group_key is None
                                  else os.path.join(mMD_out_dir, group_key))
                 # relax outputs stay beside the milestones they relax
-                group_milestones_dir = (milestones_outdir if group_key is None
-                                        else os.path.join(milestones_outdir, group_key))
+                group_milestones_dir = milestones_dir_for_group(milestones_outdir, group_key)
                 os.makedirs(group_out_dir, exist_ok=True)
                 logger.info(
                     f"Metadynamics for {group_name}: {len(group_milestones)} milestone(s) "
@@ -1512,7 +1521,7 @@ class AutoPath:
                     metad_cv = build_learned_cv(
                         base_system, sys_name, ligand_file, ligand_atoms_indices,
                         pocket_atom_indices, sMD_traj_outdir, f"{self.sMD_outdir}/learned_cv",
-                        self.sMD_pulling_dir, self.mMD_learned_components)
+                        self.sMD_pulling_dir, self.mMD_learned_components, group_milestones_dir)
 
                 # most-bound milestone, resolved before the walker order is applied
                 first_milestone_name = os.path.basename(path_milestones[0]).split('.')[0]

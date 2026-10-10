@@ -129,7 +129,7 @@ def test_learned_cv_failure_propagates(monkeypatch):
         raise RuntimeError("no pulls")
     monkeypatch.setattr(learned, "learn_cv", boom)
     with pytest.raises(RuntimeError, match="no pulls"):
-        build_learned_cv(None, "s", "l.sdf", [0], [1], "t", "o", "forward", 1)
+        build_learned_cv(None, "s", "l.sdf", [0], [1], "t", "o", "forward", 1, "m")
 
 
 def test_learned_cv_is_built_without_hidden_layer(monkeypatch):
@@ -138,5 +138,21 @@ def test_learned_cv_is_built_without_hidden_layer(monkeypatch):
     seen = {}
     monkeypatch.setattr(learned, "learn_cv", lambda *a, **k: seen.update(k) or "x.npz")
     monkeypatch.setattr(learned, "learned_cv_spec", lambda npz, system, n: [npz, n])
-    assert build_learned_cv(None, "s", "l.sdf", [0], [1], "t", "o", "forward", 2) == ["x.npz", 2]
+    assert build_learned_cv(None, "s", "l.sdf", [0], [1], "t", "o", "forward", 2, "m/p1") == ["x.npz", 2]
     assert seen["hidden"] is False and seen["direction"] == "forward"
+    assert seen["classes"] == "milestones" and seen["milestones"] == "m/p1"
+    assert seen["milestone_pocket_idx"] == [1]
+
+
+def test_milestones_dir_for_group_both_layouts(tmp_path):
+    from autopath.autopath_core import milestones_dir_for_group, group_milestones_by_path
+    root = tmp_path / "ms"
+    (root / "p7").mkdir(parents=True)
+    flat = root / "milestone_0_frame_3.xml"
+    nested = root / "p7" / "milestone_0_frame_5.xml"
+    flat.write_text("")
+    nested.write_text("")
+    for fl, (key, _) in zip([None, "p7"], group_milestones_by_path([str(flat), str(nested)], str(root))):
+        assert key == fl
+    assert milestones_dir_for_group(str(root), None) == str(root)
+    assert milestones_dir_for_group(str(root), "p7") == str(root / "p7")
