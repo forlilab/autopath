@@ -10,6 +10,7 @@ from scipy.stats import rankdata
 
 BIN_NM, MIN_PULLS, RHO_PRUNE, FISHER_FLOOR, BULK_NM = 0.05, 20, 0.8, 0.5, 0.3
 MAX_KEPT = 30
+MOSAIC_RES = 0.5
 
 
 def find_pulls(traj_dir, direction="forward"):
@@ -113,15 +114,35 @@ def hidden_variable_p(x, W, r, pull, speed, n_perm=1000, rng=None):
     return float((1 + np.sum(null >= abs(rbar[0, k]))) / (1 + n_perm)), float(rbar[0, k])
 
 
-def select(V, names, families, frames, labels, n_perm=1000, rng=None, hidden=True, order=None):
-    """Keep Fisher-relevant (or F3) features, prune redundancy, cap at MAX_KEPT by Fisher.
-    The hidden-variable p/rho are report-only (NaN when skipped): positions at fixed r are distorted by spring lag.
+def relevance(V, families, labels, order=None):
+    """(Fisher per feature, relevant mask = Fisher >= FISHER_FLOOR or F3).
     order=None: bound vs vestibule (r classes); else multi-class Fisher over the ordered classes."""
     if order is None:
         y_bv = labels != "bulk"
         fis = np.array([fisher(V[y_bv, k], labels[y_bv] == "bound") for k in range(V.shape[1])])
     else:
         fis = np.array([fisher_multi(V[:, k], labels, order) for k in range(V.shape[1])])
+    return fis, (fis >= FISHER_FLOOR) | (np.array(families) == "F3")
+
+
+def mosaic_prune(V, r, score, resolution=MOSAIC_RES, seed=0):
+    """(one representative per MoSAIC module = highest score, module labels) on the r-binned similarity."""
+    from .modules import binned_similarity, fit_modules
+    if V.shape[1] < 2:
+        return list(range(V.shape[1])), np.zeros(V.shape[1], int)
+    lab = fit_modules(binned_similarity(V, r), resolution, seed)
+    return [int(np.flatnonzero(lab == c)[np.argmax(score[lab == c])]) for c in np.unique(lab)], lab
+
+
+def select(V, names, families, frames, labels, n_perm=1000, rng=None, hidden=True, order=None,
+           redundancy="mosaic", resolution=MOSAIC_RES):
+    """Keep Fisher-relevant (or F3) features, one per redundancy group, cap at MAX_KEPT by Fisher.
+    redundancy="mosaic": MoSAIC modules on the r-binned |corr| (frames.r); "corr": |rho|>RHO_PRUNE linkage.
+    The hidden-variable p/rho are report-only (NaN when skipped): positions at fixed r are distorted by spring lag.
+    order=None: bound vs vestibule (r classes); else multi-class Fisher over the ordered classes."""
+    if redundancy not in ("mosaic", "corr"):
+        raise ValueError(f"redundancy must be 'mosaic' or 'corr', not {redundancy!r}")
+    fis, relevant = relevance(V, families, labels, order)
     p, rho = np.full(len(names), np.nan), np.full(len(names), np.nan)
     if hidden:
         p[:], rho[:] = 1.0, 0.0
@@ -129,10 +150,14 @@ def select(V, names, families, frames, labels, n_perm=1000, rng=None, hidden=Tru
             if fam != "F3":
                 p[k], rho[k] = hidden_variable_p(V[:, k], frames.W.values, frames.r.values,
                                                  frames.pull.values, frames.speed.values, n_perm, rng)
-    relevant = (fis >= FISHER_FLOOR) | (np.array(families) == "F3")
     idx = np.flatnonzero(relevant)
-    kept = [int(idx[i]) for i in prune(V[:, idx], [names[i] for i in idx], fis[idx])]
+    modules = np.full(len(names), -1)
+    if redundancy == "mosaic":
+        reps, modules[idx] = mosaic_prune(V[:, idx], frames.r.values, fis[idx], resolution)
+    else:
+        reps = prune(V[:, idx], [names[i] for i in idx], fis[idx])
+    kept = [int(idx[i]) for i in reps]
     f3 = [k for k, f in enumerate(families) if f == "F3"]
     rest = sorted((k for k in kept if k not in f3), key=lambda k: -fis[k])
     kept = sorted(set(f3) | set(rest[:max(MAX_KEPT - len(f3), 0)]))
-    return {"kept": kept, "fisher": fis, "p_hidden": p, "rho_hidden": rho}
+    return {"kept": kept, "fisher": fis, "p_hidden": p, "rho_hidden": rho, "modules": modules}

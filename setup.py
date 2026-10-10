@@ -35,7 +35,7 @@ setup(
     scripts=['autopath/cli/run_AutoPath.py'
             ],
     zip_safe=False,
-    install_requires=[''],
+    install_requires=['leidenalg', 'igraph'],
     python_requires='>=3.5',
     license="LGPL-2.1",
     keywords=["drug design", "molecular dynamics", "free energy", "medicinal chemistry"],

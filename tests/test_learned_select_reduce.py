@@ -184,10 +184,13 @@ def test_select_caps_kept_features_and_keeps_f3():
     shift = (labels == "bound").astype(float)
     V = shift[:, None] * rng.uniform(1, 3, k) + rng.normal(size=(n, k))
     fams = ["F3"] + ["F7"] * (k - 1)
-    frames = pd.DataFrame({"W": rng.normal(size=n), "r": np.linspace(0.8, 2.0, n),
+    frames = pd.DataFrame({"W": rng.normal(size=n), "r": np.linspace(0.8, 0.95, n),
                            "pull": np.arange(n) % 10, "speed": 0.01})
     out = select(V, [f"f{i}" for i in range(k)], fams, frames, labels, n_perm=10,
                  rng=np.random.default_rng(0))
+    assert len(out["kept"]) <= MAX_KEPT == 30 and 0 in out["kept"]
+    out = select(V, [f"f{i}" for i in range(k)], fams, frames, labels, n_perm=10,
+                 rng=np.random.default_rng(0), redundancy="corr")
     assert (out["fisher"][1:] >= 0.5).sum() > MAX_KEPT
     assert len(out["kept"]) <= MAX_KEPT == 30 and 0 in out["kept"]
 

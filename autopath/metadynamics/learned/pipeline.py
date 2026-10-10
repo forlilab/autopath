@@ -15,7 +15,8 @@ from .classes import R_ORDER, distance_features, find_milestones, heavy_ligand_i
 from .define import define_features
 from .features import evaluate, features_from_dict, features_to_dict
 from .reduce import HLDA, lda_reference
-from .select import find_pulls, labels_from_r, pull_frames, select
+from .modules import choose_resolution
+from .select import find_pulls, labels_from_r, pull_frames, relevance, select
 
 logger = logging.getLogger("autopath.metadynamics.learned")
 ORDER = R_ORDER
@@ -115,10 +116,14 @@ def _cache_valid(npz_path, key) -> bool:
 
 def learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_dir,
              direction="forward", stride=2, n_perm=1000, reducer=None, hidden=True,
-             use_cache=True, classes="r", milestones=None, milestone_pocket_idx=None) -> str:
+             use_cache=True, classes="r", milestones=None, milestone_pocket_idx=None,
+             mosaic_resolution="cv") -> str:
     """classes="r": bound/vestibule/bulk cut from r; "milestones": nearest AutoPath milestone
     (milestones = XML list or directory; milestone_pocket_idx = atoms the milestone clustering used,
-    required for milestones: the pocket atoms the milestones were clustered on)."""
+    required for milestones: the pocket atoms the milestones were clustered on).
+    mosaic_resolution: "cv" picks the MoSAIC resolution by pull-grouped CV on the relevant features; a float fixes it."""
+    if not (mosaic_resolution == "cv" or isinstance(mosaic_resolution, (int, float))):
+        raise ValueError(f"mosaic_resolution must be 'cv' or a float, not {mosaic_resolution!r}")
     if classes not in ("r", "milestones"):
         raise ValueError(f"classes must be 'r' or 'milestones', not {classes!r}")
     if classes == "milestones":
@@ -132,7 +137,7 @@ def learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_dir
         warnings.filterwarnings("ignore", message="DCDReader currently makes independent timesteps")
         return _learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_dir,
                          direction, stride, n_perm, reducer, hidden, use_cache,
-                         classes, milestones, milestone_pocket_idx)
+                         classes, milestones, milestone_pocket_idx, mosaic_resolution)
 
 
 def _extract(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, pulls, stride, classes="r",
@@ -188,7 +193,7 @@ def _check_classes(labels, order):
 
 def _learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_dir,
               direction, stride, n_perm, reducer, hidden, use_cache, classes="r", milestones=None,
-              milestone_pocket_idx=None):
+              milestone_pocket_idx=None, mosaic_resolution="cv"):
     os.makedirs(out_dir, exist_ok=True)
     pulls = find_pulls(traj_dir, direction)
     if not pulls:
@@ -214,8 +219,10 @@ def _learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_di
     order = _class_order(classes, len(milestones or ()))
     counts = _check_classes(labels, order)
     fams = [f.family for f in feats]
+    sel_order = None if classes == "r" else order
+    res, cv_tab = _mosaic_resolution(V, fams, frames, labels, sel_order, mosaic_resolution)
     sel = select(V, list(names), fams, frames, labels, n_perm=n_perm, rng=np.random.default_rng(0),
-                 hidden=hidden, order=None if classes == "r" else order)
+                 hidden=hidden, order=sel_order, resolution=res)
     kept = np.array(sel["kept"])
     mu, sd = _standardise(V, kept, fams)
     Z = (V[:, kept] - mu) / sd
@@ -236,8 +243,11 @@ def _learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_di
              p_hidden=sel["p_hidden"], rho_hidden=sel["rho_hidden"], names=names,
              grid_min=np.floor(cv.min(0) - 1), grid_max=np.ceil(cv.max(0) + 1),
              hill_width=0.5 * cv[bound].std(0), cv_acc=acc, f3_acc=acc_f3, monotonic_rho=mono,
-             n_pulls=len(pulls), n_frames=len(frames), **features_to_dict(feats))
-    _report(os.path.join(out_dir, "report.png"), frames, labels, cv, names[kept], Wt, Wl, order)
+             n_pulls=len(pulls), n_frames=len(frames), mosaic_resolution=res, modules=sel["modules"],
+             mosaic_cv_resolution=cv_tab.resolution.values, mosaic_cv_mean=cv_tab["mean"].values,
+             mosaic_cv_sd=cv_tab["sd"].values, mosaic_cv_n_modules=cv_tab.n_modules.values,
+             **features_to_dict(feats))
+    _report(os.path.join(out_dir, "report.png"), frames, labels, cv, names[kept], Wt, Wl, order, cv_tab, res)
     for c in order:
         r = frames.r.values[labels == c]
         logger.info("learned CV class %s: %d frames, r %.2f-%.2f nm", c, counts[c],
@@ -245,6 +255,18 @@ def _learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_di
     logger.info("learned CV: %d candidates -> %d kept (%s); held-out accuracy %.3f (F3 alone %.3f); "
                 "CV1 vs r monotonic rho %.2f", len(feats), len(kept), ", ".join(names[kept]), acc, acc_f3, mono)
     return out
+
+
+def _mosaic_resolution(V, fams, frames, labels, order, mosaic_resolution):
+    """(resolution, CV table); the table is empty when the resolution is fixed."""
+    if mosaic_resolution != "cv":
+        return float(mosaic_resolution), pd.DataFrame(columns=["resolution", "mean", "sd", "n_modules"], dtype=float)
+    _, relevant = relevance(V, fams, labels, order)
+    idx = np.flatnonzero(relevant)
+    res, tab = choose_resolution(V[:, idx], frames.r.values, frames.pull.values, frames.speed.values)
+    logger.info("learned CV: MoSAIC resolution %.2f by pull-grouped CV on %d relevant features\n%s",
+                res, len(idx), tab.to_string(index=False, float_format="%.3f"))
+    return res, tab
 
 
 def _grouped_accuracy(Z, labels, pulls, classes):
@@ -257,12 +279,12 @@ def _grouped_accuracy(Z, labels, pulls, classes):
                                  cv=GroupKFold(5)).mean())
 
 
-def _report(path, frames, labels, cv, kept_names, Wt, Wl, order):
+def _report(path, frames, labels, cv, kept_names, Wt, Wl, order, cv_tab=None, res=None):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     with plt.style.context("default"):
-        fig, ax = plt.subplots(1, 4, figsize=(21, 4.8), constrained_layout=True)
+        fig, ax = plt.subplots(1, 5, figsize=(26, 4.8), constrained_layout=True)
         rb = np.round(frames.r.values / 0.05) * 0.05
         prof = pd.DataFrame({"rb": rb, "cv": cv[:, 0]}).groupby("rb").cv.agg(["mean", "std"])
         ax[0].fill_between(prof.index, prof["mean"] - prof["std"], prof["mean"] + prof["std"], alpha=0.3)
@@ -285,5 +307,13 @@ def _report(path, frames, labels, cv, kept_names, Wt, Wl, order):
         ax[3].set_xticks(range(len(order)), [f"{c}\n n={int((labels == c).sum())}" for c in order], fontsize=8)
         ax[3].set_ylabel("r (nm)")
         ax[3].set_title("class vs r", fontsize=9, loc="left")
+        if cv_tab is not None and len(cv_tab):
+            ax[4].errorbar(cv_tab.resolution, cv_tab["mean"], cv_tab["sd"], marker="o", capsize=3)
+            ax[4].axvline(res, c="k", ls=":")
+            ax[4].set_xlabel("MoSAIC resolution")
+            ax[4].set_ylabel("held-out silhouette (pull-grouped CV)")
+        else:
+            ax[4].text(0.5, 0.5, f"MoSAIC resolution {res} (fixed)", ha="center", transform=ax[4].transAxes)
+            ax[4].set_axis_off()
         fig.savefig(path, dpi=130)
         plt.close(fig)
