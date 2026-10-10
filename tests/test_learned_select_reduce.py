@@ -5,6 +5,8 @@ import pytest
 from autopath.metadynamics.learned.select import (select, fisher, hidden_variable_p, labels_from_r,
                                                    prune, pull_frames)
 
+from .learned_toys import pull_files
+
 
 def test_pull_frames_uses_own_frame_count(tmp_path):
     p = tmp_path / "sMD_replica-1_v0.01_forward.dat"
@@ -346,16 +348,9 @@ def test_learn_cv_second_call_reuses_feature_cache(learned_3ptb, tmp_path, caplo
     assert list(a["kept"]) == list(b["kept"])
 
 
-def _fake_pull(d, name="sMD_replica-1_v0.01_forward"):
-    dat, dcd = str(d / f"{name}.dat"), str(d / f"{name}_aligned.dcd")
-    for f in (dat, dcd):
-        open(f, "w").close()
-    return dat, dcd
-
-
 def test_cache_key_and_validity(tmp_path):
     from autopath.metadynamics.learned.pipeline import _cache_key, _cache_valid
-    pull = _fake_pull(tmp_path)
+    pull = pull_files(tmp_path)
     os.utime(pull[0], (1000, 1000))
     os.utime(pull[1], (1000, 1000))
     (tmp_path / "t.pdb").write_text("pdb")
@@ -433,7 +428,7 @@ def test_milestone_labels_nearest_and_bound_to_unbound_order(monkeypatch, tmp_pa
 def test_learn_cv_class_count_error_names_class_and_counts(monkeypatch, tmp_path):
     from types import SimpleNamespace
     from autopath.metadynamics.learned import pipeline
-    pull = _fake_pull(tmp_path)
+    pull = pull_files(tmp_path)
     (tmp_path / "t.pdb").write_text("pdb")
     (tmp_path / "l.sdf").write_text("sdf")
     ms = []
@@ -446,7 +441,8 @@ def test_learn_cv_class_count_error_names_class_and_counts(monkeypatch, tmp_path
     frames = pd.DataFrame({"r": np.linspace(0.8, 2, n), "W": 0.0, "pull": "p", "speed": 0.01})
     feats = [SimpleNamespace(name="f", family="F1")]
     monkeypatch.setattr(pipeline, "find_pulls", lambda *a: [pull])
-    monkeypatch.setattr(pipeline, "_extract", lambda *a, **k: (feats, np.zeros((n, 1)), frames, lab, np.zeros((n, 2))))
+    monkeypatch.setattr(pipeline, "_extract", lambda *a, **k: (feats, np.zeros((n, 1)), frames, lab,
+                                                    np.zeros((n, 2)), None, []))
     monkeypatch.setattr(pipeline, "features_to_dict", lambda f: {})
     with pytest.raises(ValueError, match=r"class 'm3' has 1 frame.*'m1': 20"):
         pipeline.learn_cv(str(tmp_path / "t.pdb"), str(tmp_path / "l.sdf"), [0], [1], str(tmp_path),
@@ -506,7 +502,7 @@ def test_code_hash_covers_module(monkeypatch, mod):
 
 def test_cache_key_covers_classes_and_milestone_files(tmp_path):
     from autopath.metadynamics.learned.pipeline import _cache_key
-    pull = _fake_pull(tmp_path)
+    pull = pull_files(tmp_path)
     (tmp_path / "t.pdb").write_text("pdb")
     (tmp_path / "l.sdf").write_text("sdf")
     m = tmp_path / "milestone_1_frame_0.xml"

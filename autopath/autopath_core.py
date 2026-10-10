@@ -79,9 +79,12 @@ def learned_cv_atom_sets(topology_pdb, ligand_selection, positions=None):
     return [int(i) for i in lig.indices], [int(i) for i in pocket.indices]
 
 
+LEARNED_CV_DIRNAME = "learned_cv"
+
+
 def learned_cv_out_dir(smd_outdir: str, group_key: str | None) -> str:
     """Per-group learned-CV directory."""
-    base = f"{smd_outdir}/learned_cv"
+    base = f"{smd_outdir}/{LEARNED_CV_DIRNAME}"
     return base if group_key is None else f"{base}/{group_key}"
 
 
