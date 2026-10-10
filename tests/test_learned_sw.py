@@ -115,3 +115,47 @@ def test_too_few_distinct_z_values_is_an_error():
     z = np.repeat([0.0, 1.0], 100)
     with pytest.raises(ValueError, match="distinct"):
         fit_z_splines(np.c_[z], z)
+
+
+def test_fit_sw_keeps_the_plain_fit_after_a_refit():
+    X, z, lab = _z_data()
+    out = fit_sw(X, z, lab, ORDER, reducer=_Eye())
+    assert out["residualised"]
+    m = lab != ""
+    k = out["plain_component"]
+    s = X @ out["plain_w"]
+    assert s[lab == "B"].mean() < s[lab == "TS"].mean()
+    assert out["plain_w"].shape == (2,) and out["plain_fisher_ts"].shape == (2,)
+    assert out["corr_plain"] == pytest.approx(np.corrcoef(s[m], z[m])[0, 1])
+    assert out["plain_fisher_ts"][k] == pytest.approx(choose_component(X @ np.eye(2), lab, ORDER)[1][k])
+    assert not np.allclose(out["fisher_ts"], out["plain_fisher_ts"])
+
+
+def test_constant_sw_over_labelled_frames_is_an_error():
+    X, z, lab = _z_data()
+    X = X.copy()
+    X[:] = 1.0
+    with pytest.raises(ValueError, match="constant"):
+        fit_sw(X, z, lab, ORDER, reducer=_Eye())
+
+
+def test_non_finite_z_is_an_error():
+    X, z, lab = _z_data()
+    z = z.copy()
+    z[5] = np.nan
+    with pytest.raises(ValueError, match="non-finite"):
+        fit_z_splines(X, z)
+    with pytest.raises(ValueError, match="non-finite"):
+        fit_sw(X, z, lab, ORDER, reducer=_Eye())
+
+
+def test_unlabelled_frames_enter_the_pooled_z_spline():
+    X, z, lab = _z_data()
+    ref = fit_sw(X, z, lab, ORDER, reducer=_Eye())
+    X2 = X.copy()
+    un = lab == ""
+    assert un.any() and ref["residualised"]
+    X2[un, 1] += 5.0 * np.sin(6 * z[un])                   # z-dependence only in unlabelled frames
+    out = fit_sw(X2, z, lab, ORDER, reducer=_Eye())
+    assert out["residualised"]
+    assert not np.allclose(out["tables"][1], ref["tables"][1], atol=0.1)

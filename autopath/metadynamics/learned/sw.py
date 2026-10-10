@@ -52,6 +52,7 @@ def fit_z_splines(Y, z, n_knots=N_KNOTS, n_table=N_TABLE):
     """
     from scipy.interpolate import BSpline
     Y, z = np.asarray(Y, float), np.asarray(z, float)
+    _check_finite_z(z)
     lo, hi = float(z.min()), float(z.max())
     inner = np.quantile(z, np.linspace(0.0, 1.0, n_knots + 2)[1:-1])
     if not (inner[0] > lo and inner[-1] < hi and np.all(np.diff(inner) > 0)):
@@ -75,8 +76,16 @@ def z_spline_values(tables, z_min, z_max, z):
     return CubicSpline(x, tables, axis=1, bc_type="natural")(np.clip(z, z_min, z_max)).T
 
 
+def _check_finite_z(z):
+    if not np.all(np.isfinite(z)):
+        raise ValueError("z has non-finite values")
+
+
 def _corr(s, z, m):
-    return float(np.corrcoef(s[m], z[m])[0, 1])
+    r = float(np.corrcoef(s[m], z[m])[0, 1])
+    if not np.isfinite(r):
+        raise ValueError("s_w or z is constant over the labelled frames")
+    return r
 
 
 def _fit(X, labels, order, reducer):
@@ -101,14 +110,16 @@ def fit_sw(Z, z, labels, order, reducer=None, corr_max=SW_CORR_MAX):
     Returns
     -------
     dict
-        weights, component, w, fisher_ts, X of the fit used; plain_weights, plain_component, corr_plain
-        of the fit on Z; corr_resid (NaN unless refitted); residualised; z_min, z_max, tables
+        weights, component, w, fisher_ts, X of the fit used; plain_weights, plain_component, plain_w,
+        plain_fisher_ts, corr_plain of the fit on Z; corr_resid (NaN unless refitted); residualised; z_min, z_max, tables
         (NaN / empty unless residualised).
     """
     reducer = reducer or HLDA(n_components=2)
+    _check_finite_z(np.asarray(z, float))
     m = np.isin(labels, order)
     W, k, ratios, w = _fit(Z, labels, order, reducer)
     out = dict(weights=W, component=k, w=w, fisher_ts=ratios, X=Z, plain_weights=W, plain_component=k,
+               plain_w=w, plain_fisher_ts=ratios,
                corr_plain=_corr(Z @ w, z, m), corr_resid=np.nan, residualised=False,
                z_min=np.nan, z_max=np.nan, tables=np.zeros((0, 0)))
     if not abs(out["corr_plain"]) > corr_max:
