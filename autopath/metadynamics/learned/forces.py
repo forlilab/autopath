@@ -66,10 +66,12 @@ def combined_cv(features, weights, mu, sd, system, name="learned"):
     if len(features) > 32:
         raise ValueError(f"{len(features)} features exceed OpenMM CustomCVForce's limit of 32 collective variables")
     names = [f"f{k}" for k in range(len(features))]
-    expr = " + ".join(f"w{k}*({n} - mu{k})/sd{k}" for k, n in enumerate(names))
+    # global parameters: prefixed so several components can share one Context
+    p = f"{name}_"
+    expr = " + ".join(f"{p}w{k}*({n} - {p}mu{k})/{p}sd{k}" for k, n in enumerate(names))
     params = {}
     for k in range(len(features)):
-        params[f"w{k}"], params[f"mu{k}"], params[f"sd{k}"] = float(weights[k]), float(mu[k]), float(sd[k])
+        params[f"{p}w{k}"], params[f"{p}mu{k}"], params[f"{p}sd{k}"] = float(weights[k]), float(mu[k]), float(sd[k])
     inner = [feature_cv(f, system, n) for f, n in zip(features, names)]
     return cvpack.MetaCollectiveVariable(expr, inner, unit.dimensionless, name=name, **params)
 

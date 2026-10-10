@@ -99,3 +99,25 @@ def test_combined_cv_rejects_more_than_32_features():
     feats = [Feature(f"p{i}", "pair", "F1", pairs=[(0, 1)], r0=0.35) for i in range(33)]
     with pytest.raises(ValueError, match="32"):
         combined_cv(feats, np.ones(33), np.zeros(33), np.ones(33), _toy_system(5))
+
+
+def test_two_components_share_one_context(tmp_path):
+    from autopath.metadynamics.learned.features import features_to_dict
+    from autopath.metadynamics.learned.forces import learned_cv_spec
+    rng = np.random.default_rng(2)
+    X = rng.uniform(1.5, 2.6, size=(5, 3))
+    system = _toy_system(5)
+    W, mu, sd = rng.normal(size=(5, 2)), rng.normal(size=5), rng.uniform(0.5, 2, size=5)
+    npz = str(tmp_path / "cv.npz")
+    np.savez(npz, kept=np.arange(5), weights=W, mu=mu, sd=sd, grid_min=[-5.0, -5.0], grid_max=[5.0, 5.0],
+             hill_width=[0.1, 0.1], **features_to_dict(TOY))
+    cvs = [s.resolve(None, 5, None).cv for s in learned_cv_spec(npz, system, n_components=2)]
+    for k, cv in enumerate(cvs):
+        cv.setForceGroup(k + 1)
+        system.addForce(cv)
+    ctx = mm.Context(system, mm.VerletIntegrator(0.001), mm.Platform.getPlatformByName("CPU"))
+    ctx.setPositions(X)
+    v = evaluate(TOY, X[None])[0]
+    for k in range(2):                    # a CV force's energy is its value
+        got = ctx.getState(getEnergy=True, groups={k + 1}).getPotentialEnergy()._value
+        assert got == pytest.approx(float(np.sum(W[:, k] * (v - mu) / sd)), rel=1e-5)
