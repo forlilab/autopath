@@ -85,15 +85,68 @@ def composite_cv(features, weights, mu, sd, system, key=None):
     return LinearComposite(forces, weights, mu, sd, key=key)
 
 
+def funnel_z_force(host, guest, axis, name="funnel_z_lc"):
+    """Unclamped funnel z (nm): n . (COM_guest - COM_host), mass-weighted, literal axis.
+
+    Parameters
+    ----------
+    host, guest : atom index lists
+    axis : (3,) array, normalised here
+    """
+    n = np.asarray(axis, dtype=float)
+    n = n / np.linalg.norm(n)
+    expr = " + ".join(f"({float(c)!r})*({x}2-{x}1)" for c, x in zip(n, "xyz"))
+    return cvpack.CentroidFunction(expr, unit.nanometer, [[int(i) for i in host], [int(i) for i in guest]],
+                                   pbc=False, weighByMass=True, name=name)
+
+
+def is_rupture_cv(npz_path) -> bool:
+    """True for a learned_cv.npz from a rupture-class learn (one biased component, s_w)."""
+    with np.load(npz_path, allow_pickle=False) as d:
+        return "component" in d.files
+
+
+def _sw_spec(d, system, kept):
+    """[CVSpec] of s_w from a rupture-class npz (residual composite when residualised)."""
+    from ..BoundaryCorrection import LinearComposite, ResidualComposite
+    from ..CV import CVSpec
+    w, mu, sd = (np.array(d[k], dtype=float) for k in ("sw_weights", "mu", "sd"))
+    lo, hi, hw = (float(d[k]) for k in ("sw_grid_min", "sw_grid_max", "sw_hill_width"))
+    edges = (float(d["sw_lo"]), float(d["sw_hi"]))       # training range: boundary-corrected edges
+    resid = bool(d["residualised"])
+    if resid:
+        host, guest = [int(i) for i in d["funnel_host"]], [int(i) for i in d["funnel_guest"]]
+        axis = np.array(d["funnel_axis"], dtype=float)
+        z_min, z_max, tables = float(d["z_min"]), float(d["z_max"]), np.array(d["z_tables"], dtype=float)
+
+    def factory(pos, n_atoms, top):
+        forces = [feature_cv(f, system, f"f{k}") for k, f in enumerate(kept)]
+        if not resid:
+            return LinearComposite(forces, w, mu, sd)
+        return ResidualComposite(forces, w, mu, sd, z_force=funnel_z_force(host, guest, axis),
+                                 z_min=z_min, z_max=z_max, tables=tables)
+
+    return [CVSpec(cv=None, grid_min=lo, grid_max=hi, hill_width=hw,
+                   grid_points=int(round((hi - lo) / (hw / 5))) + 1,
+                   name="learned_sw", bounds=edges, _factory=factory)]
+
+
 def learned_cv_spec(npz_path, system, n_components=1, nested=False):
     """One CVSpec per HLDA component. Flat LinearComposite by default (components share
     their features); ``nested=True`` gives the old MetaCollectiveVariable (parity tests only).
+    A rupture-class npz (key "component") gives the single s_w spec "learned_sw",
+    boundary-corrected on (sw_lo, sw_hi).
     """
     from ..CV import CVSpec
     from .features import features_from_dict
     d = np.load(npz_path, allow_pickle=False)
     feats = features_from_dict(d)
     kept = [feats[int(i)] for i in d["kept"]]
+    if "component" in d.files:
+        if n_components != 1 or nested:
+            raise ValueError("a rupture-class learned CV has one biased component (s_w); "
+                             f"n_components={n_components}, nested={nested} is not supported")
+        return _sw_spec(d, system, kept)
     key = object()                                  # shared by this call's components
     specs = []
     for k in range(n_components):

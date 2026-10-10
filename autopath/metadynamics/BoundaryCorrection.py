@@ -25,6 +25,8 @@ import openmm.unit as unit
 from openmm.app.metadynamics import Metadynamics
 from scipy.special import erf, logsumexp
 
+from .learned.sw import z_spline_values
+
 MAX_CVS = 32                                        # OpenMM CustomCVForce limit
 
 
@@ -62,28 +64,78 @@ def _copy_force(f):
     return mm.XmlSerializer.deserialize(mm.XmlSerializer.serialize(f))
 
 
+@dataclass(eq=False)
+class ResidualComposite(LinearComposite):
+    """s = sum_k w_k [(f_k - mu_k) / sd_k - g_k(z)] over feature forces f_k and a z force.
+
+    g_k is the natural cubic spline through ``tables[k]`` on linspace(z_min, z_max), with z
+    clamped to that range. ``key`` is ignored: features are never shared.
+    """
+    z_force: Any = None
+    z_min: float = 0.0
+    z_max: float = 1.0
+    tables: Any = None
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.z_force is None:
+            raise ValueError("ResidualComposite needs z_force, the z collective variable")
+        self.z_min, self.z_max = float(self.z_min), float(self.z_max)
+        if not self.z_max > self.z_min:
+            raise ValueError(f"z_max ({self.z_max}) must exceed z_min ({self.z_min})")
+        self.tables = np.atleast_2d(np.asarray(self.tables, dtype=float))
+        if self.tables.shape[0] != len(self.forces) or self.tables.shape[1] < 4:
+            raise ValueError("ResidualComposite needs one table row (>= 4 points) per feature force")
+
+    def g(self, z):
+        """Spline values: (n_feat,) for scalar z, (n_feat, len(z)) otherwise."""
+        return z_spline_values(self.tables, self.z_min, self.z_max, z).T
+
+    def value(self, f) -> float:
+        """s from the feature values followed by z."""
+        f = np.asarray(f, dtype=float)
+        n = len(self.forces)
+        return float(np.sum(self.weights * ((f[:n] - self.mu) / self.sd - self.g(f[n]))))
+
+    def expression(self, names, tables) -> str:
+        """names: feature CV names then the z CV name; tables: one tabulated-function name per feature."""
+        *feats, zn = names
+        zc = f"min(max({zn}, {self.z_min!r}), {self.z_max!r})"
+        return " + ".join(f"({float(w)!r})*(({n} - ({float(m)!r}))/({float(s)!r}) - {t}({zc}))"
+                          for n, t, w, m, s in zip(feats, tables, self.weights, self.mu, self.sd))
+
+
 def composite_bias_force(variables):
     """CustomCVForce table(s...) whose LinearComposite variables are expanded over their features.
 
     Returns (force, cv_map): cv_map[i] is ("cv", j) for a plain variable (CV index j) or
-    ("lc", composite, [j...]) for a composite (indices of its features).
+    ("lc", composite, [j...]) for a composite (indices of its feature CVs, then of its
+    z CV for a ResidualComposite).
     """
-    cvs, args, defs, cv_map, groups = [], [], [], [], {}
+    cvs, args, defs, cv_map, groups, tabs = [], [], [], [], {}, []
     for i, v in enumerate(variables):
         c = v.force
         if isinstance(c, LinearComposite):
             if v.periodic:
                 raise ValueError("a LinearComposite bias variable cannot be periodic")
-            key = id(c) if c.key is None else c.key
-            if key not in groups:
-                g = len(groups)
-                idx = list(range(len(cvs), len(cvs) + len(c.forces)))
-                cvs += [(f"lf{g}_{k}", _copy_force(f)) for k, f in enumerate(c.forces)]
-                groups[key] = idx
-            idx = groups[key]
-            if len(idx) != len(c.forces):
-                raise ValueError("composites sharing a key must have the same number of features")
-            defs.append(f"s{i} = {c.expression([cvs[j][0] for j in idx])}")
+            if isinstance(c, ResidualComposite):
+                idx = list(range(len(cvs), len(cvs) + len(c.forces) + 1))
+                cvs += [(f"rf{i}_{k}", _copy_force(f)) for k, f in enumerate(c.forces)]
+                cvs.append((f"rz{i}", _copy_force(c.z_force)))
+                tn = [f"rt{i}_{k}" for k in range(len(c.forces))]
+                tabs += [(n, mm.Continuous1DFunction([float(x) for x in row], c.z_min, c.z_max, False))
+                         for n, row in zip(tn, c.tables)]
+                expr = c.expression([cvs[j][0] for j in idx], tn)
+            else:
+                key = id(c) if c.key is None else c.key
+                if key not in groups:
+                    groups[key] = list(range(len(cvs), len(cvs) + len(c.forces)))
+                    cvs += [(f"lf{len(groups) - 1}_{k}", _copy_force(f)) for k, f in enumerate(c.forces)]
+                idx = groups[key]
+                if len(idx) != len(c.forces):
+                    raise ValueError("composites sharing a key must have the same number of features")
+                expr = c.expression([cvs[j][0] for j in idx])
+            defs.append(f"s{i} = {expr}")
             args.append(f"s{i}")
             cv_map.append(("lc", c, idx))
         else:
@@ -95,6 +147,8 @@ def composite_bias_force(variables):
     force = mm.CustomCVForce("; ".join([f"table({', '.join(args)})"] + defs))
     for name, f in cvs:
         force.addCollectiveVariable(name, f)
+    for name, f in tabs:
+        force.addTabulatedFunction(name, f)
     return force, cv_map
 
 

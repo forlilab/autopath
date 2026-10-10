@@ -14,6 +14,8 @@ from autopath.metadynamics import (BoundaryCorrectedMetadynamics, CVSpec, Linear
 from autopath.metadynamics.learned.features import Feature, evaluate, features_to_dict
 from autopath.metadynamics.learned.forces import combined_cv, composite_cv, learned_cv_spec
 
+from .learned_toys import toy_system
+
 T = 300.0
 TOY = [Feature("p", "pair", "F1", pairs=[(0, 1)], r0=0.35),
        Feature("c", "contacts", "F2", group_a=[0, 1], group_b=[2, 3, 4], r0=0.3),
@@ -28,23 +30,7 @@ SD = RNG.uniform(0.5, 2, size=5)
 
 
 def _system(box=5.0):
-    s = mm.System()
-    for _ in range(5):
-        s.addParticle(12.0)
-    s.setDefaultPeriodicBoxVectors(mm.Vec3(box, 0, 0), mm.Vec3(0, box, 0), mm.Vec3(0, 0, box))
-    nb = mm.NonbondedForce()
-    nb.setNonbondedMethod(mm.NonbondedForce.CutoffPeriodic)
-    nb.setCutoffDistance(1.2)
-    for _ in range(5):
-        nb.addParticle(0.0, 0.3, 0.0)
-    s.addForce(nb)
-    tether = mm.CustomExternalForce("50*((x-x0)^2+(y-y0)^2+(z-z0)^2)")
-    for p in ("x0", "y0", "z0"):
-        tether.addPerParticleParameter(p)
-    for i, x in enumerate(X0):
-        tether.addParticle(i, list(x))
-    s.addForce(tether)
-    return s
+    return toy_system(X0, box, [12.0] * 5)
 
 
 def _s(X, k):
