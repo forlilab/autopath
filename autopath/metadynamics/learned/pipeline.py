@@ -1,5 +1,6 @@
 # autopath/metadynamics/learned/pipeline.py
 """learn_cv: sMD pulls -> features -> relevance -> HLDA -> learned_cv.npz (+ report.png)."""
+import hashlib
 import json
 import logging
 import os
@@ -67,28 +68,38 @@ def _standardise(V, kept, fams):
     return mu, sd
 
 
-def _cache_key(pulls, stride, direction, topology_pdb, ligand_sdf, ligand_idx, pocket_idx) -> str:
-    """JSON of everything the extracted features depend on (inputs and their mtimes)."""
+def _sha(path) -> str:
+    with open(path, "rb") as fh:
+        return hashlib.sha256(fh.read()).hexdigest()
+
+
+def _code_hash() -> str:
+    """Hash of the feature definition/evaluation sources."""
+    from . import define, features
+    return hashlib.sha256("".join(_sha(m.__file__) for m in (features, define)).encode()).hexdigest()
+
+
+def _cache_key(pulls, stride, direction, topology_pdb, ligand_sdf, ligand_idx, pocket_idx,
+               code_hash=None) -> str:
+    """JSON of everything the extracted features depend on (inputs, contents, feature code)."""
     return json.dumps({
         "pulls": sorted((d, c, os.path.getmtime(d), os.path.getmtime(c)) for d, c in pulls),
         "stride": int(stride), "direction": direction,
-        "topology_pdb": os.path.abspath(topology_pdb), "ligand_sdf": os.path.abspath(ligand_sdf),
+        "topology_pdb": os.path.abspath(topology_pdb), "topology_sha": _sha(topology_pdb),
+        "ligand_sdf": os.path.abspath(ligand_sdf), "ligand_sha": _sha(ligand_sdf),
+        "code": code_hash or _code_hash(),
         "ligand_idx": sorted(int(i) for i in ligand_idx),
         "pocket_idx": sorted(int(i) for i in pocket_idx)})
 
 
 def _cache_valid(npz_path, key) -> bool:
-    """npz exists, stores this key, and is newer than every pull file in the key."""
     if not os.path.exists(npz_path):
         return False
     try:
         with np.load(npz_path, allow_pickle=False) as d:
-            if "cache_key" not in d.files or str(d["cache_key"]) != key:
-                return False
+            return "cache_key" in d.files and str(d["cache_key"]) == key
     except Exception:
         return False
-    newest = max(max(p[2], p[3]) for p in json.loads(key)["pulls"])
-    return os.path.getmtime(npz_path) > newest
 
 
 def learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_dir,

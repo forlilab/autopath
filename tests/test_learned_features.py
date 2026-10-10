@@ -79,7 +79,7 @@ _skip3 = pytest.mark.skipif(not os.path.exists(PDB), reason="3ptb system not on 
 
 
 def needs_3ptb(f):
-    return pytest.mark.slow(_skip3(f))
+    return pytest.mark.learned_slow(_skip3(f))
 
 
 @needs_3ptb

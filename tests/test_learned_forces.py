@@ -73,7 +73,7 @@ XML = "examples/04_Full-Pipeline/3ptb/system.xml"
 DCD = "examples/04_Full-Pipeline/3ptb/sMD/trajectories/sMD_replica-164131_v0.01_forward_aligned.dcd"
 
 
-@pytest.mark.slow
+@pytest.mark.learned_slow
 @pytest.mark.skipif(not all(os.path.exists(p) for p in (PDB, XML, DCD)), reason="3ptb data not on disk")
 def test_parity_on_3ptb_frames():
     import MDAnalysis as mda

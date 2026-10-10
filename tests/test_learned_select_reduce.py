@@ -261,7 +261,7 @@ def learned_3ptb(tmp_path_factory):
 needs_traj = pytest.mark.skipif(not os.path.isdir(TRAJ), reason="3ptb sMD data not on disk")
 
 
-@pytest.mark.slow
+@pytest.mark.learned_slow
 @needs_traj
 def test_learn_cv_3ptb_keeps_an_asp189_or_pocket_water_term(learned_3ptb):
     path, out = learned_3ptb
@@ -276,7 +276,7 @@ def test_learn_cv_3ptb_keeps_an_asp189_or_pocket_water_term(learned_3ptb):
     assert os.path.exists(os.path.join(out, "report.png"))
 
 
-@pytest.mark.slow
+@pytest.mark.learned_slow
 @needs_traj
 def test_learned_cv_spec_builds_and_evaluates(learned_3ptb):
     import openmm as mm
@@ -289,7 +289,7 @@ def test_learned_cv_spec_builds_and_evaluates(learned_3ptb):
     assert cv is not None and specs[0].grid_min < specs[0].grid_max
 
 
-@pytest.mark.slow
+@pytest.mark.learned_slow
 @needs_traj
 def test_learn_cv_second_call_reuses_feature_cache(learned_3ptb, tmp_path, caplog):
     import logging
@@ -318,19 +318,31 @@ def test_cache_key_and_validity(tmp_path):
     pull = _fake_pull(tmp_path)
     os.utime(pull[0], (1000, 1000))
     os.utime(pull[1], (1000, 1000))
+    (tmp_path / "t.pdb").write_text("pdb")
+    (tmp_path / "l.sdf").write_text("sdf")
     args = ([pull], 4, "forward", str(tmp_path / "t.pdb"), str(tmp_path / "l.sdf"), [3, 1], [5, 2])
-    key = _cache_key(*args)
-    assert key == _cache_key(*args[:5], [1, 3], [2, 5])                # index order irrelevant
-    for alt in (_cache_key(args[0], 2, *args[2:]), _cache_key(*args[:5], [1], [2, 5]),
-                _cache_key(*args[:2], "reverse", *args[3:])):
+    key = _cache_key(*args, code_hash="a")
+    assert key == _cache_key(*args[:5], [1, 3], [2, 5], code_hash="a")  # index order irrelevant
+    assert key != _cache_key(*args, code_hash="b")                      # feature code changed
+    assert _cache_key(*args) == _cache_key(*args)                       # default hash is stable
+    (tmp_path / "l.sdf").write_text("other")
+    assert key != _cache_key(*args, code_hash="a")                      # sdf content changed
+    (tmp_path / "l.sdf").write_text("sdf")
+    (tmp_path / "t.pdb").write_text("other")
+    assert key != _cache_key(*args, code_hash="a")                      # pdb content changed
+    (tmp_path / "t.pdb").write_text("pdb")
+    assert key == _cache_key(*args, code_hash="a")
+    for alt in (_cache_key(args[0], 2, *args[2:], code_hash="a"),
+                _cache_key(*args[:5], [1], [2, 5], code_hash="a"),
+                _cache_key(*args[:2], "reverse", *args[3:], code_hash="a")):
         assert alt != key
     npz = str(tmp_path / "features.npz")
     assert not _cache_valid(npz, key)                                   # missing
     np.savez(npz, V=np.zeros(1), cache_key=np.array(key))
     assert _cache_valid(npz, key)
     assert not _cache_valid(npz, key + " ")                             # key mismatch
-    os.utime(pull[1], (os.path.getmtime(npz) + 10,) * 2)                # DCD newer than npz
-    assert not _cache_valid(npz, _cache_key(*args))
+    os.utime(pull[1], (os.path.getmtime(npz) + 10,) * 2)                # DCD touched -> key differs
+    assert not _cache_valid(npz, _cache_key(*args, code_hash="a"))
     np.savez(npz, V=np.zeros(1))                                        # legacy npz without key
     assert not _cache_valid(npz, key)
 
