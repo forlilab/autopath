@@ -11,8 +11,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
-from .classes import (R_ORDER, distance_features, find_milestones, heavy_ligand_idx,
-                      milestone_features, nearest_milestone, order_paths)
+from .classes import R_ORDER, distance_features, find_milestones, heavy_ligand_idx, milestone_labels
 from .define import define_features
 from .features import evaluate, features_from_dict, features_to_dict
 from .reduce import HLDA, lda_reference
@@ -84,8 +83,8 @@ def _sha(path) -> str:
 
 def _code_hash() -> str:
     """Hash of the feature definition/evaluation sources."""
-    from . import define, features
-    return hashlib.sha256("".join(_sha(m.__file__) for m in (features, define)).encode()).hexdigest()
+    from . import classes, define, features
+    return hashlib.sha256("".join(_sha(m.__file__) for m in (features, define, classes)).encode()).hexdigest()
 
 
 def _cache_key(pulls, stride, direction, topology_pdb, ligand_sdf, ligand_idx, pocket_idx,
@@ -119,7 +118,7 @@ def learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_dir
              use_cache=True, classes="r", milestones=None, milestone_pocket_idx=None) -> str:
     """classes="r": bound/vestibule/bulk cut from r; "milestones": nearest AutoPath milestone
     (milestones = XML list or directory; milestone_pocket_idx = atoms the milestone clustering used,
-    default pocket_idx)."""
+    required for milestones: the pocket atoms the milestones were clustered on)."""
     if classes not in ("r", "milestones"):
         raise ValueError(f"classes must be 'r' or 'milestones', not {classes!r}")
     if classes == "milestones":
@@ -127,8 +126,8 @@ def learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_dir
             raise ValueError("classes='milestones' needs milestones (XML list or directory)")
         milestones = find_milestones(milestones)
         if milestone_pocket_idx is None:
-            logger.warning("milestone_pocket_idx not given: using pocket_idx for the milestone distances")
-            milestone_pocket_idx = pocket_idx
+            raise ValueError("classes='milestones' needs milestone_pocket_idx: "
+                             "the pocket atoms the milestones were clustered on")
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message="DCDReader currently makes independent timesteps")
         return _learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_dir,
@@ -170,13 +169,11 @@ def _extract(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, pulls, stride, cl
     D = None
     if ms:
         D = np.concatenate(drows)
-        paths = order_paths(milestones, lig, milestone_pocket_idx)
-        near = nearest_milestone(D, milestone_features(u, paths, lig, milestone_pocket_idx))
-        labels = np.array([f"m{k + 1}" for k in range(len(paths))], dtype=object)[near]
+        labels, _, _ = milestone_labels(milestones, u, ligand_idx, milestone_pocket_idx, features=D)
     return feats, np.concatenate(rows), frames, labels, D
 
 
-def _class_order(labels, classes, n_ms):
+def _class_order(classes, n_ms):
     return ORDER if classes == "r" else [f"m{k + 1}" for k in range(n_ms)]
 
 
@@ -214,7 +211,7 @@ def _learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_di
                  labels=labels.astype(str), cache_key=np.array(key),
                  D=np.zeros((0, 0)) if D is None else D, **features_to_dict(feats))
         logger.info("learned CV: extracted features (%s) -> %s", "cache stale" if use_cache else "cache off", npz)
-    order = _class_order(labels, classes, len(milestones or ()))
+    order = _class_order(classes, len(milestones or ()))
     counts = _check_classes(labels, order)
     fams = [f.family for f in feats]
     sel = select(V, list(names), fams, frames, labels, n_perm=n_perm, rng=np.random.default_rng(0),

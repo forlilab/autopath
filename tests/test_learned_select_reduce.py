@@ -447,15 +447,42 @@ def test_learn_cv_class_count_error_names_class_and_counts(monkeypatch, tmp_path
     monkeypatch.setattr(pipeline, "features_to_dict", lambda f: {})
     with pytest.raises(ValueError, match=r"class 'm3' has 1 frame.*'m1': 20"):
         pipeline.learn_cv(str(tmp_path / "t.pdb"), str(tmp_path / "l.sdf"), [0], [1], str(tmp_path),
-                          str(tmp_path / "out"), classes="milestones", milestones=ms)
+                          str(tmp_path / "out"), classes="milestones", milestones=ms, milestone_pocket_idx=[1])
 
 
 def test_learn_cv_milestones_requires_milestones_and_valid_classes(tmp_path):
     from autopath.metadynamics.learned.pipeline import learn_cv
     with pytest.raises(ValueError, match="needs milestones"):
         learn_cv("t", "l", [0], [1], "d", str(tmp_path), classes="milestones")
+    with pytest.raises(ValueError, match="needs milestone_pocket_idx"):
+        learn_cv("t", "l", [0], [1], "d", str(tmp_path), classes="milestones", milestones=[])
     with pytest.raises(ValueError, match="classes must be"):
         learn_cv("t", "l", [0], [1], "d", str(tmp_path), classes="x")
+
+
+def test_find_milestones_rejects_bad_inputs(tmp_path):
+    from autopath.metadynamics.learned.classes import find_milestones, milestone_labels
+    (tmp_path / "milestone_2_frame_9.xml").write_text("x")
+    (tmp_path / "milestone_10_frame_9.xml").write_text("x")
+    assert [os.path.basename(p)[:12] for p in find_milestones(str(tmp_path))] == ["milestone_2_", "milestone_10"]
+    with pytest.raises(ValueError, match="at least 2 milestones"):
+        milestone_labels([str(tmp_path / "milestone_2_frame_9.xml")], "t", [0], [1], features=np.zeros((2, 1)))
+    with pytest.raises(ValueError, match="not a milestone file name"):
+        find_milestones([str(tmp_path / "foo.xml"), str(tmp_path / "milestone_2_frame_9.xml")])
+    (tmp_path / "1").mkdir()
+    (tmp_path / "1" / "milestone_1_frame_0.xml").write_text("x")
+    with pytest.raises(ValueError, match="per-path subdirectories"):
+        find_milestones(str(tmp_path))
+    with pytest.raises(ValueError, match="several directories"):
+        find_milestones([str(tmp_path / "1" / "milestone_1_frame_0.xml"), str(tmp_path / "milestone_2_frame_9.xml")])
+
+
+def test_code_hash_covers_classes_module(monkeypatch):
+    from autopath.metadynamics.learned import classes, pipeline
+    h = pipeline._code_hash()
+    orig = pipeline._sha
+    monkeypatch.setattr(pipeline, "_sha", lambda p: "changed" if p == classes.__file__ else orig(p))
+    assert pipeline._code_hash() != h
 
 
 def test_cache_key_covers_classes_and_milestone_files(tmp_path):

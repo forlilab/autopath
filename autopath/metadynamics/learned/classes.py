@@ -17,15 +17,26 @@ R_ORDER = ["bound", "vestibule", "bulk"]
 
 
 def find_milestones(milestones):
-    """XML paths from a list or a directory (milestone_*_frame_*.xml, no *_relax*), by milestone number."""
+    """XML paths from a list or ONE path's directory (milestone_*_frame_*.xml, no *_relax*), by number."""
     if isinstance(milestones, (str, os.PathLike)):
-        paths = [p for p in glob.glob(os.path.join(str(milestones), "milestone_*_frame_*.xml"))
-                 if "_relax" not in os.path.basename(p)]
+        d = str(milestones)
+        subs = [x for x in glob.glob(os.path.join(d, "*", "milestone_*_frame_*.xml"))]
+        if subs:
+            raise ValueError(f"{d} has per-path subdirectories; pass one path's milestone directory")
+        paths = [p for p in glob.glob(os.path.join(d, "milestone_*_frame_*.xml")) if "_relax" not in os.path.basename(p)]
     else:
         paths = [str(p) for p in milestones]
-    paths.sort(key=lambda p: int(re.search(r"milestone_(\d+)_", os.path.basename(p)).group(1))
-               if re.search(r"milestone_(\d+)_", os.path.basename(p)) else 0)
-    return paths
+    nums = []
+    for p in paths:
+        m = re.match(r"milestone_(\d+)_frame_", os.path.basename(p))
+        if not m:
+            raise ValueError(f"not a milestone file name (milestone_<k>_frame_<j>.xml): {p}")
+        nums.append(int(m.group(1)))
+    if len(set(os.path.dirname(os.path.abspath(p)) for p in paths)) > 1:
+        raise ValueError("milestones span several directories; pass one path's milestones only")
+    if len(set(nums)) != len(nums):
+        raise ValueError("duplicate milestone numbers: milestones from several paths are mixed")
+    return [p for _, p in sorted(zip(nums, paths))]
 
 
 def heavy_ligand_idx(topology, ligand_idx):
