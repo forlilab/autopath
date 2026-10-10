@@ -489,10 +489,16 @@ def correct_fe_for_funnel(
         ref_mask = (cv >= reference_range[0]) & (cv <= reference_range[1])
         if ref_mask.sum() < 3:
             raise ValueError(f"reference_range {reference_range} covers fewer than 3 grid points")
-        plateau_val = float(fe[ref_mask].mean())
+        ref_vals = fe[ref_mask][np.isfinite(fe[ref_mask])]
+        if not len(ref_vals):
+            raise ValueError("unbound reference window has no finite FES values")
+        plateau_val = float(ref_vals.mean())
         _plateau_range = (float(cv[ref_mask][0]), float(cv[ref_mask][-1]))
     else:
-        plateau_val = float(fe[-n_tail:].mean())
+        tail = fe[-n_tail:][np.isfinite(fe[-n_tail:])]
+        if not len(tail):
+            raise ValueError("unbound reference tail has no finite FES values")
+        plateau_val = float(tail.mean())
         _plateau_range = (float(cv[-n_tail]), float(cv[-1]))
 
     fe_norm = fe - plateau_val

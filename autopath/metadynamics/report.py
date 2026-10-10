@@ -418,7 +418,9 @@ def _final_bias_at_frames(out_dir, run_id, s):
 def z_reweighted_dG(out_dir, fp, temperature, burn=0.2, bins=0.01):
     """ΔG°_b from W(z) of the monitored funnel z, reweighted by eq 12 (final bias) and by c(t).
 
-    The bound site is z-based (z <= 0.2 z_max), so surface-parked frames at small z count as bound.
+    Bound site: z <= 0.2*z_max of the funnel, z from the unbiased funnel_z monitor.
+    The histogram spans [floor(min z), funnel z_max] (nm); empty bins are +inf (zero
+    probability) and frames beyond z_max are dropped (``n_dropped``).
     Returns {"reason": ...} without numbers when it cannot run.
     """
     if fp is None:
@@ -431,26 +433,39 @@ def z_reweighted_dG(out_dir, fp, temperature, burn=0.2, bins=0.01):
             continue
         rid = os.path.basename(f)[len("REWEIGHT_"):-4]
         n = len(rw["monitor_funnel_z"])
+        if len(rw["bias_kj"]) < n or len(rw["rct_kj"]) < n:
+            raise ValueError(f"{rid}: bias_kj/rct_kj shorter than the {n} monitored rows")
         keep = np.arange(n) >= burn * n
-        s = np.load(os.path.join(out_dir, f"COLVAR_{rid}.npy"))[:n]
-        s = s.reshape(n, -1)
+        s = np.load(os.path.join(out_dir, f"COLVAR_{rid}.npy"))
+        if len(s) < n:
+            raise ValueError(f"{rid}: COLVAR has {len(s)} rows, REWEIGHT {n}")
+        s = s[:n].reshape(n, -1)
         zs.append(rw["monitor_funnel_z"][keep])
         l12.append(_final_bias_at_frames(out_dir, rid, s[keep]) / kT)
         lct.append((rw["bias_kj"][:n] - rw["rct_kj"][:n])[keep] / kT)
     if not zs:
         return {"reason": "no REWEIGHT with monitor_funnel_z in this run"}
     z = np.concatenate(zs)
-    lo, hi = float(np.floor(z.min() / bins) * bins), float(np.ceil(z.max() / bins) * bins)
-    edges = np.arange(lo, hi + bins, bins)
-    out = {"n_frames": int(len(z)), "reason": ""}
-    for key, lw in (("eq12_kj", np.concatenate(l12)), ("ct_kj", np.concatenate(lct))):
+    zmax = fp["z_max"]
+    zmax = float(zmax.value_in_unit(unit_ang())) / 10.0 if hasattr(zmax, "value_in_unit") else float(zmax)
+    inside = z <= zmax
+    n_dropped = int((~inside).sum())
+    if not inside.any():
+        return {"reason": "no monitored frames inside the funnel (z <= z_max)"}
+    z = z[inside]
+    lo = float(np.floor(z.min() / bins) * bins)
+    edges = np.arange(lo, zmax + bins, bins)
+    edges = edges[edges < zmax + 1e-12]
+    edges = np.append(edges, zmax) if edges[-1] < zmax - 1e-12 else edges
+    centers = 0.5 * (edges[1:] + edges[:-1])
+    out = {"n_frames": int(len(z)), "n_dropped": n_dropped, "reason": ""}
+    for key, lw in (("eq12_kj", np.concatenate(l12)[inside]), ("ct_kj", np.concatenate(lct)[inside])):
         w = np.exp(lw - lw.max())
         h, _ = np.histogram(z, edges, weights=w)
         with np.errstate(divide="ignore"):
-            fes = -kT * np.log(h / h.sum())
-        fes[~np.isfinite(fes)] = np.nan
-        res = correct_fe_for_funnel(fes, fp, temperature=temperature, grid_min=edges[0],
-                                    grid_max=edges[-2], cv_length_per_unit_ang=10.0,
+            fes = -kT * np.log(h / h.sum())              # empty bins -> +inf
+        res = correct_fe_for_funnel(fes, fp, temperature=temperature, grid_min=centers[0],
+                                    grid_max=centers[-1], cv_length_per_unit_ang=10.0,
                                     cv_origin=0.0, verbose=False)
         out[key] = float(res["dG_bind_std_kj_mol"])
     return out
@@ -554,7 +569,11 @@ def report(out_dir, temperature, grid_min=0.0, grid_max=1.0,
                     dG_main, f" ± {dG_sd:.1f}" if dG_sd is not None else "",
                     dG_main * KJ_TO_KCAL, pKd, verdict)
 
-    zr = z_reweighted_dG(out_dir, fp, temperature)
+    try:
+        zr = z_reweighted_dG(out_dir, fp, temperature)
+    except Exception as e:
+        zr = {"reason": f"z reweighting failed: {e}"}
+        logger.warning("%s", zr["reason"])
     if zr.get("reason"):
         logger.info("z reweighting skipped: %s", zr["reason"])
     else:

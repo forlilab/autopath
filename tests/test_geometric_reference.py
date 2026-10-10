@@ -100,3 +100,20 @@ def test_quicklook_and_well_depth_use_the_origin(tmp_path, monkeypatch):
     plot_FE_rw("out", -1.4, 2.6, 190, "z", origin=0.0)
     plot_FE_rw("out", -1.4, 2.6, 190, "z")                      # unresolved: still plots
     assert (tmp_path / "out" / "out_quicklook_FE_rw.png").exists()
+
+
+def test_finite_fes_result_is_unchanged_by_finite_masking():
+    # values recorded from the pre-masking implementation
+    r = correct_fe_for_funnel(FES, _fp(), temperature=300.0, cv_length_per_unit_ang=20.0, verbose=False)
+    assert r["dG_bind_std_kj_mol"] == -48.19572218672401
+    r = correct_fe_for_funnel(FES, _fp(), temperature=300.0, cv_length_per_unit_ang=20.0,
+                              reference_range=(0.55, 0.85), verbose=False)
+    assert r["dG_bind_std_kj_mol"] == -51.459105816204726
+
+
+def test_inf_bins_do_not_break_the_correction():
+    fes = FES.copy()
+    fes[60:70] = np.inf
+    fes[-4:] = np.inf
+    r = correct_fe_for_funnel(fes, _fp(), temperature=300.0, cv_length_per_unit_ang=20.0, verbose=False)
+    assert np.isfinite(r["dG_bind_std_kj_mol"])
