@@ -1,5 +1,6 @@
 # autopath/metadynamics/learned/pipeline.py
 """learn_cv: sMD pulls -> features -> relevance -> HLDA -> learned_cv.npz (+ report.png)."""
+import json
 import logging
 import os
 import warnings
@@ -10,7 +11,7 @@ import pandas as pd
 from scipy.stats import spearmanr
 
 from .define import define_features
-from .features import evaluate, features_to_dict
+from .features import evaluate, features_from_dict, features_to_dict
 from .reduce import HLDA, lda_reference
 from .select import find_pulls, labels_from_r, pull_frames, select
 
@@ -66,20 +67,40 @@ def _standardise(V, kept, fams):
     return mu, sd
 
 
+def _cache_key(pulls, stride, direction, topology_pdb, ligand_sdf, ligand_idx, pocket_idx) -> str:
+    """JSON of everything the extracted features depend on (inputs and their mtimes)."""
+    return json.dumps({
+        "pulls": sorted((d, c, os.path.getmtime(d), os.path.getmtime(c)) for d, c in pulls),
+        "stride": int(stride), "direction": direction,
+        "topology_pdb": os.path.abspath(topology_pdb), "ligand_sdf": os.path.abspath(ligand_sdf),
+        "ligand_idx": sorted(int(i) for i in ligand_idx),
+        "pocket_idx": sorted(int(i) for i in pocket_idx)})
+
+
+def _cache_valid(npz_path, key) -> bool:
+    """npz exists, stores this key, and is newer than every pull file in the key."""
+    if not os.path.exists(npz_path):
+        return False
+    try:
+        with np.load(npz_path, allow_pickle=False) as d:
+            if "cache_key" not in d.files or str(d["cache_key"]) != key:
+                return False
+    except Exception:
+        return False
+    newest = max(max(p[2], p[3]) for p in json.loads(key)["pulls"])
+    return os.path.getmtime(npz_path) > newest
+
+
 def learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_dir,
-             direction="forward", stride=2, n_perm=1000, reducer=None) -> str:
+             direction="forward", stride=2, n_perm=1000, reducer=None, hidden=True,
+             use_cache=True) -> str:
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message="DCDReader currently makes independent timesteps")
         return _learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_dir,
-                         direction, stride, n_perm, reducer)
+                         direction, stride, n_perm, reducer, hidden, use_cache)
 
 
-def _learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_dir,
-              direction, stride, n_perm, reducer):
-    os.makedirs(out_dir, exist_ok=True)
-    pulls = find_pulls(traj_dir, direction)
-    if not pulls:
-        raise FileNotFoundError(f"no sMD pulls with aligned DCDs in {traj_dir}")
+def _extract(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, pulls, stride):
     u = mda.Universe(topology_pdb)
     tabs = _frames_table(u, pulls, stride)
     frames = pd.concat(tabs, ignore_index=True)
@@ -102,13 +123,34 @@ def _learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_di
         X = _read(_load(u, dcd), fr.frame.values)
         rows.append(np.asarray(evaluate(feats, X)))
         del X
-    V = np.concatenate(rows)
-    names = np.array([f.name for f in feats])
+    return feats, np.concatenate(rows), frames, labels
+
+
+def _learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_dir,
+              direction, stride, n_perm, reducer, hidden, use_cache):
+    os.makedirs(out_dir, exist_ok=True)
+    pulls = find_pulls(traj_dir, direction)
+    if not pulls:
+        raise FileNotFoundError(f"no sMD pulls with aligned DCDs in {traj_dir}")
+    npz = os.path.join(out_dir, "features.npz")
+    key = _cache_key(pulls, stride, direction, topology_pdb, ligand_sdf, ligand_idx, pocket_idx)
+    if use_cache and _cache_valid(npz, key):
+        with np.load(npz, allow_pickle=False) as d:
+            V, names, labels = d["V"], d["names"], d["labels"].astype(object)
+            frames = pd.DataFrame({"r": d["r"], "W": d["W"], "pull": d["pull"], "speed": d["speed"]})
+            feats = features_from_dict(d)
+        logger.info("learned CV: reusing feature cache %s", npz)
+    else:
+        feats, V, frames, labels = _extract(topology_pdb, ligand_sdf, ligand_idx, pocket_idx,
+                                            pulls, stride)
+        names = np.array([f.name for f in feats])
+        np.savez(npz, V=V, names=names, r=frames.r.values, W=frames.W.values,
+                 pull=frames.pull.values.astype(str), speed=frames.speed.values,
+                 labels=labels.astype(str), cache_key=np.array(key), **features_to_dict(feats))
+        logger.info("learned CV: extracted features (%s) -> %s", "cache stale" if use_cache else "cache off", npz)
     fams = [f.family for f in feats]
-    np.savez(os.path.join(out_dir, "features.npz"), V=V, names=names, r=frames.r.values,
-             W=frames.W.values, pull=frames.pull.values.astype(str), speed=frames.speed.values,
-             labels=labels.astype(str), **features_to_dict(feats))
-    sel = select(V, list(names), fams, frames, labels, n_perm=n_perm, rng=np.random.default_rng(0))
+    sel = select(V, list(names), fams, frames, labels, n_perm=n_perm, rng=np.random.default_rng(0),
+                 hidden=hidden)
     kept = np.array(sel["kept"])
     mu, sd = _standardise(V, kept, fams)
     Z = (V[:, kept] - mu) / sd

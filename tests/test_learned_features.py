@@ -75,7 +75,11 @@ from autopath.metadynamics.learned.define import define_features, ligand_polar_a
 
 PDB = "examples/04_Full-Pipeline/3ptb/system.pdb"
 SDF = "examples/data/3ptb.sdf"
-needs_3ptb = pytest.mark.skipif(not os.path.exists(PDB), reason="3ptb system not on disk")
+_skip3 = pytest.mark.skipif(not os.path.exists(PDB), reason="3ptb system not on disk")
+
+
+def needs_3ptb(f):
+    return pytest.mark.slow(_skip3(f))
 
 
 @needs_3ptb

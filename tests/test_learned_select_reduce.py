@@ -179,7 +179,9 @@ def test_select_keeps_fisher_feature_and_drops_work_only_feature():
     assert out["fisher"][1] > 0.5 and out["fisher"][2] < 0.5
     assert out["kept"] == [0, 1]
     assert out["p_hidden"][2] < 0.05
-    assert select(V, ["a", "b", "c"], ["F3", "F7", "F7"], df, labels, hidden=False)["kept"] == [0, 1]
+    off = select(V, ["a", "b", "c"], ["F3", "F7", "F7"], df, labels, hidden=False)
+    assert off["kept"] == [0, 1]
+    assert np.isnan(off["p_hidden"]).all() and np.isnan(off["rho_hidden"]).all()
 
 
 from autopath.metadynamics.learned.reduce import HLDA, lda_reference
@@ -240,15 +242,29 @@ TRAJ = "examples/04_Full-Pipeline/3ptb/sMD/trajectories"
 PDB3 = "examples/04_Full-Pipeline/3ptb/system.pdb"
 
 
-@pytest.mark.skipif(not os.path.isdir(TRAJ), reason="3ptb sMD data not on disk")
-def test_learn_cv_3ptb_keeps_an_asp189_or_pocket_water_term(tmp_path):
+def _3ptb_args():
     import MDAnalysis as mda
-    from autopath.metadynamics.learned.pipeline import learn_cv
     u = mda.Universe(PDB3)
     lig = list(u.select_atoms("resname UNK").indices)
     pocket = list(u.select_atoms("protein and around 6 resname UNK").residues.atoms.indices)
-    path = learn_cv(PDB3, "examples/data/3ptb.sdf", lig, pocket, TRAJ, str(tmp_path),
-                    stride=4, n_perm=200)
+    return (PDB3, "examples/data/3ptb.sdf", lig, pocket, TRAJ)
+
+
+@pytest.fixture(scope="module")
+def learned_3ptb(tmp_path_factory):
+    from autopath.metadynamics.learned.pipeline import learn_cv
+    out = str(tmp_path_factory.mktemp("learned3ptb"))
+    path = learn_cv(*_3ptb_args(), out, stride=4, n_perm=50, hidden=False)
+    return path, out
+
+
+needs_traj = pytest.mark.skipif(not os.path.isdir(TRAJ), reason="3ptb sMD data not on disk")
+
+
+@pytest.mark.slow
+@needs_traj
+def test_learn_cv_3ptb_keeps_an_asp189_or_pocket_water_term(learned_3ptb):
+    path, out = learned_3ptb
     d = np.load(path, allow_pickle=False)
     kept_names = [str(n) for n in d["names"][d["kept"]]]
     assert "F3_com" in kept_names
@@ -256,24 +272,67 @@ def test_learn_cv_3ptb_keeps_an_asp189_or_pocket_water_term(tmp_path):
                or (n.startswith("F1") and n.endswith("_172")) for n in kept_names), kept_names
     assert d["weights"].shape[0] == len(d["kept"])
     assert float(d["monotonic_rho"]) > 0.8 and np.isfinite(float(d["f3_acc"]))
-    assert os.path.exists(tmp_path / "report.png")
+    assert np.isnan(d["p_hidden"]).all() and np.isnan(d["rho_hidden"]).all()
+    assert os.path.exists(os.path.join(out, "report.png"))
 
 
-@pytest.mark.skipif(not os.path.isdir(TRAJ), reason="3ptb sMD data not on disk")
-def test_learned_cv_spec_builds_and_evaluates(tmp_path):
-    import MDAnalysis as mda
+@pytest.mark.slow
+@needs_traj
+def test_learned_cv_spec_builds_and_evaluates(learned_3ptb):
     import openmm as mm
-    from autopath.metadynamics.learned.pipeline import learn_cv
     from autopath.metadynamics.learned.forces import learned_cv_spec
-    u = mda.Universe(PDB3)
-    lig = list(u.select_atoms("resname UNK").indices)
-    pocket = list(u.select_atoms("protein and around 6 resname UNK").residues.atoms.indices)
-    path = learn_cv(PDB3, "examples/data/3ptb.sdf", lig, pocket, TRAJ, str(tmp_path), stride=8, n_perm=50)
+    path, _ = learned_3ptb
     system = mm.XmlSerializer.deserialize(open("examples/04_Full-Pipeline/3ptb/system.xml").read())
     specs = learned_cv_spec(path, system, n_components=1)
     assert len(specs) == 1 and specs[0].name == "learned1"
     cv = specs[0].resolve(None, system.getNumParticles(), None).cv
     assert cv is not None and specs[0].grid_min < specs[0].grid_max
+
+
+@pytest.mark.slow
+@needs_traj
+def test_learn_cv_second_call_reuses_feature_cache(learned_3ptb, tmp_path, caplog):
+    import logging
+    import shutil
+    from autopath.metadynamics.learned.pipeline import learn_cv
+    path, out = learned_3ptb
+    work = str(tmp_path / "again")
+    os.makedirs(work)
+    shutil.copy(os.path.join(out, "features.npz"), work)
+    with caplog.at_level(logging.INFO, logger="autopath.metadynamics.learned"):
+        path2 = learn_cv(*_3ptb_args(), work, stride=4, n_perm=50, hidden=False)
+    assert "reusing feature cache" in caplog.text
+    a, b = np.load(path, allow_pickle=False), np.load(path2, allow_pickle=False)
+    assert list(a["kept"]) == list(b["kept"])
+
+
+def _fake_pull(d, name="sMD_replica-1_v0.01_forward"):
+    dat, dcd = str(d / f"{name}.dat"), str(d / f"{name}_aligned.dcd")
+    for f in (dat, dcd):
+        open(f, "w").close()
+    return dat, dcd
+
+
+def test_cache_key_and_validity(tmp_path):
+    from autopath.metadynamics.learned.pipeline import _cache_key, _cache_valid
+    pull = _fake_pull(tmp_path)
+    os.utime(pull[0], (1000, 1000))
+    os.utime(pull[1], (1000, 1000))
+    args = ([pull], 4, "forward", str(tmp_path / "t.pdb"), str(tmp_path / "l.sdf"), [3, 1], [5, 2])
+    key = _cache_key(*args)
+    assert key == _cache_key(*args[:5], [1, 3], [2, 5])                # index order irrelevant
+    for alt in (_cache_key(args[0], 2, *args[2:]), _cache_key(*args[:5], [1], [2, 5]),
+                _cache_key(*args[:2], "reverse", *args[3:])):
+        assert alt != key
+    npz = str(tmp_path / "features.npz")
+    assert not _cache_valid(npz, key)                                   # missing
+    np.savez(npz, V=np.zeros(1), cache_key=np.array(key))
+    assert _cache_valid(npz, key)
+    assert not _cache_valid(npz, key + " ")                             # key mismatch
+    os.utime(pull[1], (os.path.getmtime(npz) + 10,) * 2)                # DCD newer than npz
+    assert not _cache_valid(npz, _cache_key(*args))
+    np.savez(npz, V=np.zeros(1))                                        # legacy npz without key
+    assert not _cache_valid(npz, key)
 
 
 def test_standardise_guards_zero_variance_columns():

@@ -109,11 +109,12 @@ def hidden_variable_p(x, W, r, pull, speed, n_perm=1000, rng=None):
 
 def select(V, names, families, frames, labels, n_perm=1000, rng=None, hidden=True):
     """Keep Fisher-relevant (or F3) features, prune redundancy, cap at MAX_KEPT by Fisher.
-    The hidden-variable p/rho are report-only: positions at fixed r are distorted by spring lag."""
+    The hidden-variable p/rho are report-only (NaN when skipped): positions at fixed r are distorted by spring lag."""
     y_bv = labels != "bulk"
     fis = np.array([fisher(V[y_bv, k], labels[y_bv] == "bound") for k in range(V.shape[1])])
-    p, rho = np.ones(len(names)), np.zeros(len(names))
+    p, rho = np.full(len(names), np.nan), np.full(len(names), np.nan)
     if hidden:
+        p[:], rho[:] = 1.0, 0.0
         for k, fam in enumerate(families):
             if fam != "F3":
                 p[k], rho[k] = hidden_variable_p(V[:, k], frames.W.values, frames.r.values,
