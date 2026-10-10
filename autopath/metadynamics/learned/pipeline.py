@@ -122,8 +122,10 @@ def learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_dir
     (milestones = XML list or directory; milestone_pocket_idx = atoms the milestone clustering used,
     required for milestones: the pocket atoms the milestones were clustered on).
     mosaic_resolution: "cv" picks the MoSAIC resolution by pull-grouped CV on the relevant features; a float fixes it."""
-    if not (mosaic_resolution == "cv" or isinstance(mosaic_resolution, (int, float))):
-        raise ValueError(f"mosaic_resolution must be 'cv' or a float, not {mosaic_resolution!r}")
+    if not (isinstance(mosaic_resolution, str) and mosaic_resolution == "cv"
+            or isinstance(mosaic_resolution, (int, float, np.floating)) and not isinstance(mosaic_resolution, bool)
+            and 0 < mosaic_resolution <= 1):
+        raise ValueError(f"mosaic_resolution must be 'cv' or a number in (0, 1], not {mosaic_resolution!r}")
     if classes not in ("r", "milestones"):
         raise ValueError(f"classes must be 'r' or 'milestones', not {classes!r}")
     if classes == "milestones":

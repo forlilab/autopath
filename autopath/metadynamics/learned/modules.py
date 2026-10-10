@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 
 BIN_NM, MIN_FRAMES = 0.05, 50
-RES_GRID = (0.4, 0.5, 0.6, 0.7, 0.8)
+RES_GRID = (0.3, 0.4, 0.5, 0.6, 0.7, 0.8)
 
 
 def binned_similarity(V, r, bin_nm=BIN_NM, min_frames=MIN_FRAMES, idx=None):
@@ -82,16 +82,17 @@ def pull_folds(pull, speed, n_folds=5, seed=0):
     return np.array([fold_of[p] for p in pull])
 
 
-def choose_resolution(V, r, pull, speed, grid=RES_GRID, n_folds=5, seeds=(0, 1), n_jobs=-1):
+def choose_resolution(V, r, pull, speed, grid=RES_GRID, n_folds=5, seeds=(0, 1, 2), n_jobs=-1, backend="threading"):
     """Resolution maximising the held-out silhouette of training-fold modules (pull-grouped folds
     stratified by speed; r-binned similarity built separately on train and held-out pulls).
-    Returns (best, table) with table columns resolution, mean, sd (across folds), n_modules."""
+    Returns (best, table) with table columns resolution, mean, sd (across folds), n_modules.
+    Threads by default: process workers would re-import autopath (slow, noisy)."""
     from joblib import Parallel, delayed
     fold = pull_folds(pull, speed, n_folds)
     mats = [(binned_similarity(V, r, idx=np.flatnonzero(fold != f)),
              binned_similarity(V, r, idx=np.flatnonzero(fold == f))) for f in range(n_folds)]
     jobs = [(res, s, f) for res in grid for s in seeds for f in range(n_folds)]
-    out = Parallel(n_jobs=n_jobs)(delayed(_cv_fold_score)(*mats[f], res, s) for res, s, f in jobs)
+    out = Parallel(n_jobs=n_jobs, backend=backend)(delayed(_cv_fold_score)(*mats[f], res, s) for res, s, f in jobs)
     df = pd.DataFrame([(res, s, f, sc, nm) for (res, s, f), (sc, nm) in zip(jobs, out)],
                       columns=["resolution", "seed", "fold", "score", "n_modules"])
     per_fold = df.groupby(["resolution", "fold"]).agg(score=("score", "mean"), n_modules=("n_modules", "mean"))
