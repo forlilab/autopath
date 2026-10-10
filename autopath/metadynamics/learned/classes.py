@@ -139,7 +139,7 @@ def smoothed_force(t, f, window_ps=SMOOTH_PS):
 
 
 def rupture_labels(dat, n_frames, window_ps=SMOOTH_PS):
-    """B / TS / U class per frame from one pull's smoothed force.
+    """B / TS / U class per frame from one pull's force.
 
     Parameters
     ----------
@@ -157,14 +157,17 @@ def rupture_labels(dat, n_frames, window_ps=SMOOTH_PS):
         t_rise, t_peak, t_slip, t_free, f_peak, dF, base_b, base_u, and reason ("" if labelled).
     """
     d = dat if isinstance(dat, pd.DataFrame) else pd.read_csv(dat, comment="#")
-    t, fs = d["time"].to_numpy(float), smoothed_force(d["time"].to_numpy(float), d["force"].to_numpy(float),
-                                                      window_ps)
-    n = len(fs)
+    t, raw = d["time"].to_numpy(float), d["force"].to_numpy(float)
+    n = len(raw)
+    nb = max(1, int(np.ceil(BASE_B_FRAC * n)))
+    if nb >= n:
+        raise ValueError(f"too few rows ({n}) to label a rupture")
+    fs = smoothed_force(t, raw, window_ps)
     tk = t[-1] * np.arange(n_frames) / max(n_frames - 1, 1)
     lab = np.full(n_frames, "", dtype=object)
-    nb = max(1, int(np.ceil(BASE_B_FRAC * n)))
-    base_b = float(np.median(fs[:nb]))
-    base_u = float(np.median(fs[-max(1, int(np.ceil(BASE_U_FRAC * n))):]))
+    # raw medians: smoothing would spread a start spike over the baseline window
+    base_b = float(np.median(raw[:nb]))
+    base_u = float(np.median(raw[-max(1, int(np.ceil(BASE_U_FRAC * n))):]))
     ip = nb + int(np.argmax(fs[nb:]))  # search past the baseline window: skips start-of-pull transients
     dF = float(fs[ip] - base_u)
     info = dict(t_rise=np.nan, t_peak=float(t[ip]), t_slip=np.nan, t_free=np.nan, f_peak=float(fs[ip]),

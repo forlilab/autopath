@@ -1,4 +1,3 @@
-# tests/test_learned_rupture.py
 """Rupture (B/TS/U) labels, rupture-class learn_cv and its report."""
 import numpy as np
 import pandas as pd
@@ -110,3 +109,19 @@ def test_start_of_pull_spike_is_not_the_rupture():
     assert _idx(lab, "TS") == [51, 52, 53]
     assert _idx(lab, "B") == list(range(35))
     assert _idx(lab, "U") == list(range(56, 101))
+
+
+def test_wide_start_spike_with_default_window_matches_spike_free_trace():
+    lab0, info0 = rupture_labels(_trace(_single), 101)
+    lab, info = rupture_labels(_trace(lambda t: _single(t) + 500.0 * (t < 0.5)), 101)
+    assert info["reason"] == "" and info0["reason"] == ""
+    assert info["base_b"] == 0.0
+    assert lab.tolist() == lab0.tolist()
+    for k in ("t_rise", "t_peak", "t_slip", "t_free"):
+        assert info[k] == pytest.approx(info0[k])
+
+
+def test_too_short_trace_raises():
+    df = pd.DataFrame({"time": [0.0], "force": [1.0]})
+    with pytest.raises(ValueError, match="too few rows"):
+        rupture_labels(df, 5)
