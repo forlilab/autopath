@@ -122,11 +122,11 @@ def test_history_of_concurrent_walkers_cuts_at_wall_time(tmp_path):
 
 
 def test_md_run_writes_v2_that_rebuilds_the_final_free_energy(tmp_path):
-    from test_metad_frames import _spec, _toy
-    top, s, pdb = _toy(tmp_path)
+    from ._metad_toy import toy, x_spec
+    top, s, pdb = toy(tmp_path)
     md = MetadynamicsMD(topology=top, ligand_atoms=[0], pocket_atoms=[0],
                         platform="Reference", out_dir=str(tmp_path))
-    md.run(pdb_file=pdb, system=s, run_id="w", cv_specs=[_spec()], mMD_time=0.04,
+    md.run(pdb_file=pdb, system=s, run_id="w", cv_specs=[x_spec()], mMD_time=0.04,
            bias_factor=20, hill_height=1.0, biasFrequency=2, bias_dir=str(tmp_path / "b"),
            tt_basins=[[0.7], [1.4]], tt_bias_factor=5)
     (w,) = load_hills(tmp_path)

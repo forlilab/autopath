@@ -485,17 +485,22 @@ class Config(object):
             logging.error(f"Config file {config} is not valid JSON.")
             raise
 
-        # Flatten the nested dictionary structure
-        flattened_config = {}
-        for section, params in config_data.items():
-            if isinstance(params, dict):
-                for key, value in params.items():
-                    flattened_config[key] = value
-
-        # Backward compatibility with old config keys
+        expected_keys = cls.get_defaults_dict().keys()
         legacy_map = {
             "equilibration_scheme": "protocol_fname",
         }
+        legacy_keys = set(legacy_map) | {"sMD_replicas"}
+
+        # A top-level parameter name is a value even when dict-valued; other dicts are sections.
+        flattened_config = {}
+        for section, params in config_data.items():
+            if isinstance(params, dict) and section not in expected_keys and section not in legacy_keys:
+                for key, value in params.items():
+                    flattened_config[key] = value
+            else:
+                flattened_config[section] = params
+
+        # Backward compatibility with old config keys
         for old_key, new_key in legacy_map.items():
             if old_key in flattened_config and new_key not in flattened_config:
                 flattened_config[new_key] = flattened_config.pop(old_key)
@@ -521,7 +526,6 @@ class Config(object):
                     speed_map[speed] = reps
             flattened_config["sMD_pulling_speeds"] = speed_map
 
-        expected_keys = cls.get_defaults_dict().keys()
         bad_keys = [k for k in flattened_config if k not in expected_keys]
         if bad_keys:
             err_msg = "Unexpected keys in Config.from_config():" + os.linesep

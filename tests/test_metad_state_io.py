@@ -1,27 +1,42 @@
-import inspect
+import numpy as np
+import openmm as mm
+import openmm.unit as u
+import pytest
+
+from autopath.metadynamics.CV import path_rmsd_cv, rmsd_states_cv
 from autopath.metadynamics.MetadynamicsMD import MetadynamicsMD
 
-
-def test_run_accepts_state_xml_file():
-    """run() accepts a state_xml_file input."""
-    assert "state_xml_file" in inspect.signature(MetadynamicsMD.run).parameters
+from ._metad_toy import toy, x_spec
 
 
-def test_no_input_still_raises():
-    src = inspect.getsource(MetadynamicsMD.run)
-    assert "state_xml_file" in src and "raise ValueError" in src
+def _md(tmp_path, top):
+    return MetadynamicsMD(topology=top, ligand_atoms=[0], pocket_atoms=[0],
+                          platform="Reference", out_dir=str(tmp_path))
 
 
-def test_state_path_sets_box_positions_velocities_individually():
-    src = inspect.getsource(MetadynamicsMD.run)
-    assert "setPeriodicBoxVectors" in src
-    assert "setVelocities" in src
-    assert "loadState" not in src
+def test_run_starts_from_the_state_xml_not_the_pdb(tmp_path):
+    """Positions come from state_xml_file even when the PDB holds a different frame."""
+    top, s, pdb = toy(tmp_path)
+    ctx = mm.Context(s, mm.VerletIntegrator(0.001), mm.Platform.getPlatformByName("Reference"))
+    ctx.setPositions([[1.2, 1.5, 1.5]] * u.nanometer)
+    ctx.setVelocitiesToTemperature(300 * u.kelvin)
+    xml = tmp_path / "start.xml"
+    xml.write_text(mm.XmlSerializer.serialize(ctx.getState(getPositions=True, getVelocities=True)))
+    del ctx
+
+    _md(tmp_path, top).run(pdb_file=pdb, state_xml_file=str(xml), system=s, run_id="w",
+                           cv_specs=[x_spec()], mMD_time=0.004, bias_factor=10, hill_height=1.0,
+                           biasFrequency=2, bias_dir=str(tmp_path / "b"))
+    colvar = np.load(tmp_path / "COLVAR_w.npy")[:, 0]
+    assert colvar[0] == pytest.approx(1.2, abs=1e-4)
 
 
-import os
-import pytest
-from autopath.metadynamics.CV import path_rmsd_cv, rmsd_states_cv
+def test_run_without_a_starting_structure_raises(tmp_path):
+    top, s, _ = toy(tmp_path)
+    with pytest.raises(ValueError, match="must be provided"):
+        _md(tmp_path, top).run(system=s, run_id="w", cv_specs=[x_spec()], mMD_time=0.004,
+                               bias_factor=10, hill_height=1.0, biasFrequency=2,
+                               bias_dir=str(tmp_path / "b"))
 
 
 def test_path_rmsd_cv_rejects_state_xml_milestones():
