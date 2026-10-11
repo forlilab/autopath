@@ -210,6 +210,10 @@ def _molecules(topology):
     return np.array([root(i) for i in range(len(parent))])
 
 
+class FunnelFrameError(ValueError):
+    """The protein frame cannot be built for this system."""
+
+
 def select_frame_groups(positions_nm, topology, host_index, masses):
     """Frame groups (B, C): protein CA atoms beyond ``FRAME_MIN_DIST_NM`` of the host COM, split by 2-means.
 
@@ -222,34 +226,39 @@ def select_frame_groups(positions_nm, topology, host_index, masses):
         Host atoms in more than one molecule; a group under ``FRAME_MIN_ATOMS`` atoms; or an angle
         between (B − A) and (C − A) outside ``FRAME_ANGLE_LIMITS_DEG``.
     """
+    return _frame_groups_and_angle(positions_nm, topology, host_index, masses)[:2]
+
+
+def _frame_groups_and_angle(positions_nm, topology, host_index, masses):
+    """(B, C, angle in deg between B − A and C − A) for :func:`select_frame_groups`."""
     from sklearn.cluster import KMeans
     pos = np.asarray(positions_nm, dtype=float)
     m = np.asarray(masses, dtype=float)
     host = [int(i) for i in host_index]
     mol = _molecules(topology)
     if len(set(mol[host])) != 1:
-        raise ValueError("protein-frame funnel: host atoms span more than one molecule: not supported")
+        raise FunnelFrameError("protein-frame funnel: host atoms span more than one molecule: not supported")
     ca = [a.index for r in topology.residues() if {"N", "CA", "C"} <= {x.name for x in r.atoms()}
           for a in r.atoms() if a.name == "CA" and mol[a.index] == mol[host[0]]]
     hc = np.average(pos[host], axis=0, weights=m[host])
     ca = np.array([i for i in ca if np.linalg.norm(pos[i] - hc) > FRAME_MIN_DIST_NM], dtype=int)
     if len(ca) < 2 * FRAME_MIN_ATOMS:
-        raise ValueError(f"protein-frame funnel: {len(ca)} CA atoms beyond {FRAME_MIN_DIST_NM} nm of the host, "
+        raise FunnelFrameError(f"protein-frame funnel: {len(ca)} CA atoms beyond {FRAME_MIN_DIST_NM} nm of the host, "
                          f"fewer than {FRAME_MIN_ATOMS} per frame group")
     lab = KMeans(n_clusters=2, n_init=10, random_state=0).fit_predict(pos[ca])
     groups = sorted(([int(i) for i in ca[lab == k]] for k in (0, 1)), key=min)
     b, c = groups
     if min(len(b), len(c)) < FRAME_MIN_ATOMS:
-        raise ValueError(f"protein-frame funnel: frame groups of {len(b)} and {len(c)} atoms, "
+        raise FunnelFrameError(f"protein-frame funnel: frame groups of {len(b)} and {len(c)} atoms, "
                          f"fewer than {FRAME_MIN_ATOMS} in one")
     u = np.average(pos[b], axis=0, weights=m[b]) - hc
     v = np.average(pos[c], axis=0, weights=m[c]) - hc
     ang = np.degrees(np.arccos(np.clip(u @ v / np.linalg.norm(u) / np.linalg.norm(v), -1.0, 1.0)))
     lo, hi = FRAME_ANGLE_LIMITS_DEG
     if not lo <= ang <= hi:
-        raise ValueError(f"protein-frame funnel: angle {ang:.1f} deg between the frame groups seen from the "
+        raise FunnelFrameError(f"protein-frame funnel: angle {ang:.1f} deg between the frame groups seen from the "
                          f"host is outside [{lo:.0f}, {hi:.0f}] deg (ill-conditioned frame)")
-    return b, c
+    return b, c, ang
 
 
 def upgrade_funnel_params(params, reference_positions, topology, masses) -> Dict:
@@ -269,17 +278,16 @@ def upgrade_funnel_params(params, reference_positions, topology, masses) -> Dict
         ``params`` plus the frame groups and the axis coefficients (n·e1, n·e2, n·e3) at the reference.
     """
     if "axis_coeffs" in params:
-        raise ValueError("funnel params already have a protein frame")
+        raise FunnelFrameError("funnel params already have a protein frame")
     pos = np.asarray(reference_positions, dtype=float)
     m = np.asarray(masses, dtype=float)
     host = [int(i) for i in params["host_index"]]
-    b, c = select_frame_groups(pos, topology, host, m)
+    b, c, ang = _frame_groups_and_angle(pos, topology, host, m)
     cen = lambda idx: np.average(pos[idx], axis=0, weights=m[idx])
     n = np.asarray(params["unbinding_axis"], dtype=float)
     n = n / np.linalg.norm(n)
     e = frame_basis(cen(host), cen(b), cen(c))
     out = dict(params, frame_b_index=b, frame_c_index=c, axis_coeffs=e @ n)
-    ang = np.degrees(np.arccos(np.clip(e[0] @ (cen(c) - cen(host)) / np.linalg.norm(cen(c) - cen(host)), -1, 1)))
     logger.info("Protein-frame funnel: groups of %d and %d CA atoms, %.1f deg apart seen from the host; "
                 "axis coefficients %s", len(b), len(c), ang, np.round(e @ n, 4).tolist())
     return out
@@ -306,8 +314,6 @@ def _frame_definitions(h: int, g: int, o: int, b: int, c: int, coeffs, radial: b
     d += [f"pf_u{k} = {k}{b} - {k}{o}" for k in "xyz"]
     d += [f"pf_v{k} = {k}{c} - {k}{o}" for k in "xyz"]
     return ";".join(d)
-
-
 
 
 def add_funnel_restraints(

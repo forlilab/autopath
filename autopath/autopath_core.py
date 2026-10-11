@@ -44,6 +44,7 @@ from autopath.metadynamics import (
     com_distance_at_z,
     save_funnel_params,
     write_funnel_pymol,
+    FunnelFrameError,
     upgrade_funnel_params,
     funnel_frame,
     funnel_axis_at,
@@ -151,6 +152,14 @@ def group_milestones_by_path(milestones: list[str],
             key = None
         groups[key].append(m)
     return [(k, groups[k]) for k in sorted(groups, key=lambda k: (k is not None, k or ""))]
+
+
+def funnel_setup_failed(e: Exception) -> None:
+    """Re-raise an unsupported protein frame; log any other funnel setup error."""
+    if isinstance(e, FunnelFrameError):
+        raise e
+    logger.error(f"Error generating funnel potential: {e}")
+    logger.warning("Continuing without funnel potential")
 
 
 def walker_seed_order(path_milestones: list, order: str) -> list:
@@ -1577,8 +1586,7 @@ class AutoPath:
                                 logger.warning(f"Funnel visualization failed (non-fatal): {viz_e}")
 
                     except Exception as e:
-                        logger.error(f"Error generating funnel potential: {e}")
-                        logger.warning("Continuing without funnel potential")
+                        funnel_setup_failed(e)
                         funnel_force = None
 
                 if self.mMD_cv == "learned":

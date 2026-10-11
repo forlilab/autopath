@@ -361,3 +361,42 @@ def test_orchestrator_z_monitor_uses_the_protein_frame():
     pos = _rotate(POS, PROTEIN, _random_rotation(8), _com(POS, HOST))
     assert _cv_value(spec.resolve(pos, len(MASSES), None).cv, pos) == pytest.approx(_z_force(NEW, pos), abs=1e-10)
     assert abs(_z_force(NEW, pos) - _z_force(LAB, pos)) > 1e-3
+
+
+def test_orchestrator_funnel_setup_raises_on_an_unsupported_frame_and_still_swallows_other_errors():
+    from autopath.autopath_core import funnel_setup_failed
+    water = len(MASSES) - 1
+    params = _lab_params(HOST + [water], GUEST)
+    try:
+        upgrade_funnel_params(params, POS, TOP, MASSES)
+    except Exception as e:
+        with pytest.raises(ValueError, match="not supported"):
+            funnel_setup_failed(e)
+    else:
+        pytest.fail("upgrade should have raised")
+    funnel_setup_failed(RuntimeError("boom"))
+    funnel_setup_failed(ValueError("unrelated"))
+
+
+def test_frame_z_cv_clamps_to_the_grid():
+    for lo, hi in ((-0.2, 0.3), (-5.0, 0.1)):
+        spec = funnel_z_cv(HOST, GUEST, AXIS, grid_min=lo, grid_max=hi, frame=funnel_frame(NEW))
+        z = _cv_value(spec.resolve(POS, len(MASSES), None).cv, POS)
+        assert z == pytest.approx(min(max(_z_force(NEW, POS), lo), hi), abs=1e-10)
+    far = POS.copy()
+    far[GUEST] += 5.0 * AXIS
+    near = POS.copy()
+    near[GUEST] -= 5.0 * AXIS
+    spec = funnel_z_cv(HOST, GUEST, AXIS, grid_min=-0.4, grid_max=0.6, frame=funnel_frame(NEW))
+    assert _cv_value(spec.resolve(far, len(MASSES), None).cv, far) == pytest.approx(0.6, abs=1e-10)
+    assert _cv_value(spec.resolve(near, len(MASSES), None).cv, near) == pytest.approx(-0.4, abs=1e-10)
+
+
+def test_cache_key_depends_on_the_axis_coefficients_alone():
+    from autopath.metadynamics.learned.pipeline import _cache_key, _funnel_geometry
+    g = _funnel_geometry(NEW)
+    g2 = _funnel_geometry(dict(NEW, axis_coeffs=np.asarray(NEW["axis_coeffs"]) + 0.01))
+    assert g["frame"]["b"] == g2["frame"]["b"] and g["frame"]["c"] == g2["frame"]["c"]
+    args = ([], 1, "forward", __file__, __file__, [0], [1])
+    kw = dict(code_hash="a", classes="rupture", masses=MASSES)
+    assert _cache_key(*args, funnel=g, **kw) != _cache_key(*args, funnel=g2, **kw)
