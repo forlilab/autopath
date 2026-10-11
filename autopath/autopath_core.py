@@ -122,7 +122,7 @@ def build_learned_z_cv(system, sys_name, ligand_file, ligand_idx, pocket_idx, tr
     masses = [system.getParticleMass(i).value_in_unit(_u.dalton) for i in range(system.getNumParticles())]
     npz = learned.learn_cv(f"{sys_name}/system.pdb", ligand_file, ligand_idx, pocket_idx, traj_dir, out_dir,
                            direction=direction, hidden=False, classes="rupture", funnel=funnel_params,
-                           masses=masses)
+                           masses=masses, system=system)
     return learned.learned_cv_spec(npz, system, 1, n_plain_cvs=1)
 
 

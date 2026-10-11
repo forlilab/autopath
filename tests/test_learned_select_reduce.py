@@ -438,11 +438,12 @@ def test_learn_cv_class_count_error_names_class_and_counts(monkeypatch, tmp_path
         ms.append(str(m))
     n = 40
     lab = np.array(["m1"] * 20 + ["m2"] * 19 + ["m3"], dtype=object)
-    frames = pd.DataFrame({"r": np.linspace(0.8, 2, n), "W": 0.0, "pull": "p", "speed": 0.01})
+    frames = pd.DataFrame({"r": np.linspace(0.8, 2, n), "W": 0.0, "pull": "p", "speed": 0.01,
+                           "frame": np.arange(n), "dcd": "p_aligned.dcd"})
     feats = [SimpleNamespace(name="f", family="F1")]
     monkeypatch.setattr(pipeline, "find_pulls", lambda *a: [pull])
     monkeypatch.setattr(pipeline, "_extract", lambda *a, **k: (feats, np.zeros((n, 1)), frames, lab,
-                                                    np.zeros((n, 2)), None, []))
+                                                    np.zeros((n, 2)), None, [], {}))
     monkeypatch.setattr(pipeline, "features_to_dict", lambda f: {})
     with pytest.raises(ValueError, match=r"class 'm3' has 1 frame.*'m1': 20"):
         pipeline.learn_cv(str(tmp_path / "t.pdb"), str(tmp_path / "l.sdf"), [0], [1], str(tmp_path),

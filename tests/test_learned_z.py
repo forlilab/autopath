@@ -363,6 +363,7 @@ def test_build_learned_z_cv_learns_rupture_classes_with_system_masses(monkeypatc
         ["x.npz", 1, {"n_plain_cvs": 1}]
     assert seen["classes"] == "rupture" and seen["funnel"] is fp and seen["hidden"] is False
     assert seen["masses"] == pytest.approx([12.0, 1.5, 16.0]) and seen["direction"] == "forward"
+    assert seen["system"] is s
     assert seen["args"][:6] == ("sys/system.pdb", "l.sdf", [2], [0, 1], "t", "o")
 
 

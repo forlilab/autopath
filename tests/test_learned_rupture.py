@@ -141,11 +141,12 @@ def _run_learn(monkeypatch, tmp_path, data, funnel=FUNNEL, **kw):
     (tmp_path / "t.pdb").write_text("pdb")
     (tmp_path / "l.sdf").write_text("sdf")
     monkeypatch.setattr(pipeline, "find_pulls", lambda *a: pulls)
-    monkeypatch.setattr(pipeline, "_extract", lambda *a, **k: (RUPTURE_FEATS, V, frames, lab, None, z, diag))
+    frames = frames.assign(frame=frames.groupby("pull").cumcount(), dcd=frames.pull + "_aligned.dcd")
+    monkeypatch.setattr(pipeline, "_extract", lambda *a, **k: (RUPTURE_FEATS, V, frames, lab, None, z, diag, {}))
     out = str(tmp_path / "out")
     path = pipeline.learn_cv(str(tmp_path / "t.pdb"), str(tmp_path / "l.sdf"), [0, 1], [2, 3, 4],
                              str(tmp_path), out, hidden=False, classes="rupture", funnel=funnel,
-                             masses=[12.0] * 5, mosaic_resolution=0.5, **kw)
+                             masses=[12.0] * 5, mosaic_resolution=0.5, feature_set="contacts", **kw)
     return path, out
 
 
@@ -408,7 +409,7 @@ def rupture_3ptb(tmp_path_factory):
     masses = [s.getParticleMass(i).value_in_unit(unit.dalton) for i in range(s.getNumParticles())]
     out = str(tmp_path_factory.mktemp("rupture3ptb"))
     path = learn_cv(PDB3, "examples/data/3ptb.sdf", lig, pocket, TRAJ, out, stride=4, hidden=False,
-                    classes="rupture", funnel=FUNNEL3, masses=masses)
+                    classes="rupture", funnel=FUNNEL3, masses=masses, system=s)
     return path, out
 
 
@@ -422,7 +423,7 @@ def test_learn_cv_rupture_on_3ptb(rupture_3ptb):
     assert rep["n_pulls_labelled"] >= 0.8 * rep["n_pulls"], rep["excluded"]
     assert rep["B_r_median"] < rep["ts_r_median"] < rep["U_r_median"]
     d = np.load(path, allow_pickle=False)
-    assert not any(str(n).startswith(("F3", "F5")) for n in d["names"])
+    assert all(str(n).startswith(("W1", "W3")) for n in d["names"])
     assert np.isfinite(d["sw_weights"]).all() and np.isfinite(float(d["sw_lo"])) and np.isfinite(float(d["sw_hi"]))
     assert 0 <= int(d["component"]) < 2 and np.isfinite(d["basin_B"]).all() and np.isfinite(d["basin_U"]).all()
     spec = learned_cv_spec(path, mm.XmlSerializer.deserialize(open(XML3).read()), 1)[0]
