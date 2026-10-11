@@ -19,27 +19,60 @@ def _water_xyz(cog):
     return np.stack([o, o + H_OFF[0], o + H_OFF[1]], axis=1).reshape(-1, 3)
 
 
-def test_inscribed_radius():
-    from autopath.metadynamics.learned.imaging import inscribed_radius
-    a = 4.2
-    rd = np.array([[a, 0, 0], [0, a, 0], [a / 2, a / 2, a / np.sqrt(2)]])      # rhombic dodecahedron
-    np.testing.assert_allclose(inscribed_radius(np.stack([np.eye(3) * 3.6, rd])), [1.8, a / (2 * np.sqrt(2))],
-                               rtol=1e-12)
+def _frame(box, atoms, rng, n_w=3000, spill=0.0):
+    """Atoms (nm, relative to the centre) then waters whose centres fill the brick of box around the centre.
+
+    Atoms 0, 1 are the imaging centre (symmetric about 0); spill > 0 pushes one water centre that far out of
+    the brick along +x.
+    """
+    h = np.diag(box) / 2
+    cog = rng.uniform(-h, h, (n_w, 3))
+    cog[0] = [h[0] + spill, 0.0, 0.0] if spill else cog[0]
+    X = np.vstack([[[0.3, 0, 0], [-0.3, 0, 0]], np.asarray(atoms, float), _water_xyz(cog)])
+    mols = np.arange(2 + len(atoms), len(X)).reshape(-1, 3)
+    return X, mols
 
 
-def test_safe_frames_rule():
+def _rd(a):
+    return np.array([[a, 0, 0], [0, a, 0], [a / 2, a / 2, a / np.sqrt(2)]])
+
+
+def test_safe_frames_uses_the_faces_of_the_wrapped_brick():
     from autopath.metadynamics.learned.imaging import safe_frames
-    box = np.stack([np.eye(3) * 2 * (CN_DMAX + 0.8)] * 3)        # safe radius 0.8
-    X = np.zeros((3, 4, 3))
-    X[:, 0] = [[1.0, 0, 0], [-1.0, 0, 0], [0, 0, 0]]              # centre = mean of atoms 0, 1
-    X[:, 1] = [[-1.0, 0, 0], [1.0, 0, 0], [0, 0, 0]]
-    X[:, 2] = [[0.79, 0, 0], [0.0, 0.81, 0], [0, 0, 0.3]]
-    X[:, 3] = [[5.0, 5.0, 5.0]] * 3                               # not a centre atom
-    valid, margin = safe_frames(X, box, [0, 1], [2])
-    assert valid.tolist() == [True, False, True]
-    np.testing.assert_allclose(margin, [0.01, -0.01, 0.5], atol=1e-12)
+    rng = np.random.default_rng(0)
+    L = 2 * (CN_DMAX + 1.0)                                       # inscribed sphere radius CN_DMAX + 1
+    cube = np.eye(3) * L
+    atoms = [[1.5, 0.0, 0.0],                                     # inside the inscribed sphere, 0.5 from a face
+             [0.9, 0.9, 0.0],                                     # outside the safe sphere, 1.1 from every face
+             [0.0, 0.0, 0.99]]                                    # 1.01 from the z faces
+    for k, want in enumerate([False, True, True]):
+        X, mols = _frame(cube, [atoms[k]], rng)
+        valid, margin = safe_frames(X[None], cube[None], [0, 1], [2], mols)
+        assert valid[0] == want
+        face = L / 2 - np.abs(atoms[k]).max()
+        assert margin[0] == pytest.approx(face - CN_DMAX, abs=1e-6)
+    # rhombic dodecahedron: one cell is the brick a x a x a/sqrt(2), so x reaches beyond the inscribed sphere
+    a = 2 * np.sqrt(2) * (CN_DMAX + 0.5)                          # c_z / 2 = CN_DMAX + 0.5
+    box = _rd(a)
+    X, mols = _frame(box, [[a / 2 - CN_DMAX - 0.05, 0.0, 0.0], [0.0, 0.0, 0.4]], rng)
+    valid, margin = safe_frames(X[None], box[None], [0, 1], [2, 3], mols)
+    assert valid[0] and margin[0] == pytest.approx(0.05, abs=1e-6)
+
+
+def test_safe_frames_margin_shrinks_by_the_water_excess_and_unwrapped_cells_are_not_supported():
+    from autopath.metadynamics.learned.imaging import IMAGED_TOL_NM, safe_frames
+    rng = np.random.default_rng(1)
+    cube = np.eye(3) * 2 * (CN_DMAX + 1.0)
+    X, mols = _frame(cube, [[0.0, 0.0, 0.95]], rng, spill=0.1)    # a cell rotated slightly in the aligned frame
+    valid, margin = safe_frames(X[None], cube[None], [0, 1], [2], mols)
+    assert margin[0] == pytest.approx((CN_DMAX + 1.0 - 0.95) - CN_DMAX - 0.1, abs=1e-6) and not valid[0]
+    X, mols = _frame(cube, [[0.0, 0.0, 0.0]], rng, spill=IMAGED_TOL_NM + 0.1)
+    with pytest.raises(ValueError, match="not imaged into one cell.*not supported"):
+        safe_frames(X[None], cube[None], [0, 1], [2], mols)
     with pytest.raises(ValueError, match="not supported"):
-        safe_frames(X, None, [0, 1], [2])
+        safe_frames(X[None], None, [0, 1], [2], mols)
+    with pytest.raises(ValueError, match="not supported"):
+        safe_frames(X[None], cube[None], [0, 1], [2], np.zeros((0, 3), int))
 
 
 def test_open_box_gives_plain_distances():
@@ -53,7 +86,7 @@ def test_open_box_gives_plain_distances():
 
 # ---- learn_cv on a toy complex -------------------------------------------------------------------------
 
-L = 5.0                          # safe radius L/2 - CN_DMAX around the protein centroid
+L = 5.0                          # cn centre atoms must stay CN_DMAX from the faces of the cell around the protein
 N_FR, N_PULL = 80, 6
 REST = 0.9                       # waters are kept out of a sphere around the pocket (shrinks during the pull)
 POCKET = np.array([0.15, 0.3, 0.0])
@@ -229,7 +262,7 @@ def test_frames_beyond_the_safe_radius_are_excluded_and_counted(learned_water, t
     for dcd, X in toy["coords"].items():
         rows = np.flatnonzero(d["dcd"] == dcd)
         Xr = X[d["frame"][rows]]
-        far = np.linalg.norm(Xr[:, toy["lig"]] - toy["centre"], axis=-1).max(1) > L / 2 - CN_DMAX
+        far = np.abs(Xr[:, toy["lig"]] - toy["centre"]).max(axis=(1, 2)) > L / 2 - CN_DMAX
         assert valid[rows].tolist() == (~far).tolist()
         assert np.isnan(d["V"][rows[far]]).all()
         k = rows[~far]

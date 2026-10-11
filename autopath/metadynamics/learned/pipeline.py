@@ -25,7 +25,7 @@ from .reduce import HLDA, lda_reference
 from .modules import choose_resolution
 from .sw import choose_component, fit_sw
 from .select import find_pulls, labels_from_r, pull_frames, relevance, select
-from .water import define_water_features
+from .water import WATER_RES, define_water_features
 
 logger = logging.getLogger("autopath.metadynamics.learned")
 ORDER = R_ORDER
@@ -193,8 +193,8 @@ def learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_dir
     exclude_families: feature families not defined; default ("F3", "F5") for "rupture", none otherwise.
     temperature (K), analysis_dir (default: analysis_traces next to traj_dir): the v->0 barrier check of "rupture".
     feature_set: "water" (W1/W3 cn features; default for "rupture", which alone supports it) or "contacts"
-    (round-2 families; default otherwise). Water frames whose cn centre atoms lie beyond the safe radius of the
-    imaged cell are excluded from training.
+    (round-2 families; default otherwise). Water frames with a cn centre atom closer than CN_DMAX to a face of
+    the imaged cell are excluded from training.
     system: openmm.System or system.xml path; required by "water" (exclusions); masses default to its masses."""
     if not (isinstance(mosaic_resolution, str) and mosaic_resolution == "cv"
             or isinstance(mosaic_resolution, (int, float, np.floating)) and not isinstance(mosaic_resolution, bool)
@@ -247,7 +247,7 @@ def _extract(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, pulls, stride, cl
              milestones=None, milestone_pocket_idx=None, exclude_families=(), funnel=None, masses=None,
              feature_set="contacts", system=None):
     """(features, V, frames, labels, D, z, diag, extra); extra holds the water-set info, the per-row
-    ``valid`` mask (rows beyond the safe radius have NaN features) and the extraction time."""
+    ``valid`` mask (rows too near the cell faces have NaN features) and the extraction time."""
     u = mda.Universe(topology_pdb)
     tabs = _frames_table(u, pulls, stride)
     frames = pd.concat(tabs, ignore_index=True)
@@ -257,6 +257,10 @@ def _extract(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, pulls, stride, cl
         feats, info = define_water_features(topology_pdb, ligand_idx, system)
         feats = [f for f in feats if f.family not in exclude_families]
         centre_idx, centres = anchor_atoms(topology_pdb), cn_centres(feats)
+        wres = [r.atoms.indices for r in u.residues if r.resname in WATER_RES]
+        if len({len(w) for w in wres}) > 1:
+            raise ValueError("water residues with different atom counts are not supported")
+        water_mols = np.array(wres, dtype=int).reshape(len(wres), -1)
         extra["water"] = info
     else:
         first_r = np.array([f.r.iloc[0] for f in tabs])
@@ -288,10 +292,10 @@ def _extract(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, pulls, stride, cl
             drows.append(distance_features(u, X, lig, milestone_pocket_idx, dims))
         if water:
             box = None if dims is None else np.stack([triclinic_vectors(dm) for dm in dims]) / 10.0
-            ok, _ = safe_frames(X, box, centre_idx, centres)
+            ok, _ = safe_frames(X, box, centre_idx, centres, water_mols)
             V = np.full((len(X), len(feats)), np.nan)
             if ok.any():
-                # every water within CN_DMAX of a centre atom is in the cell: plain distances are exact
+                # every water within CN_DMAX of a centre atom is inside the cell: plain distances are exact
                 V[ok] = evaluate(feats, X[ok], box=open_box(X[ok]))
             rows.append(V)
             valid.append(ok)
@@ -370,7 +374,7 @@ def _learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_di
         logger.info("learned CV: extracted features (%s) -> %s", "cache stale" if use_cache else "cache off", npz)
     if feature_set == "water":
         extra["safe_radius"] = _safe_radius_summary(valid, labels, frames.pull.values)
-        logger.info("learned CV: %d/%d frames beyond the cn safe radius excluded (per class %s); "
+        logger.info("learned CV: %d/%d frames with cn centres near the cell faces excluded (per class %s); "
                     "extraction %.3f s/frame", extra["safe_radius"]["n_excluded"], len(valid),
                     extra["safe_radius"]["excluded_per_class"], extra["s_per_frame"])
         V, labels, frames = V[valid], labels[valid], frames[valid].reset_index(drop=True)
