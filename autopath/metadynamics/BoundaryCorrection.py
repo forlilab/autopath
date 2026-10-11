@@ -37,12 +37,14 @@ class LinearComposite:
     Passed as a BiasVariable's force: the bias force takes the f_k directly as its
     collective variables (one level, no inner MetaCollectiveVariable). Composites
     with the same ``key`` share their features, which are then added once.
+    ``clamp=(lo, hi)`` limits the value used by the bias to [lo, hi]; its gradient is zero outside.
     """
     forces: list
     weights: Any
     mu: Any
     sd: Any
     key: Any = None
+    clamp: Any = None
 
     def __post_init__(self):
         self.weights, self.mu, self.sd = (np.asarray(a, dtype=float).ravel()
@@ -50,14 +52,24 @@ class LinearComposite:
         n = len(self.forces)
         if not (len(self.weights) == len(self.mu) == len(self.sd) == n):
             raise ValueError("LinearComposite needs one weight, mu and sd per feature force")
+        if self.clamp is not None:
+            self.clamp = (float(self.clamp[0]), float(self.clamp[1]))
+            if not self.clamp[1] > self.clamp[0]:
+                raise ValueError(f"clamp {self.clamp} needs hi > lo")
+
+    def _clamped(self, v: float) -> float:
+        return v if self.clamp is None else min(max(v, self.clamp[0]), self.clamp[1])
+
+    def _clamped_expr(self, expr: str) -> str:
+        return expr if self.clamp is None else f"min(max({expr}, {self.clamp[0]!r}), {self.clamp[1]!r})"
 
     def value(self, f) -> float:
         f = np.asarray(f, dtype=float)
-        return float(np.sum(self.weights * (f - self.mu) / self.sd))
+        return self._clamped(float(np.sum(self.weights * (f - self.mu) / self.sd)))
 
     def expression(self, names) -> str:
-        return " + ".join(f"({float(w)!r})*({n} - ({float(m)!r}))/({float(s)!r})"
-                          for n, w, m, s in zip(names, self.weights, self.mu, self.sd))
+        return self._clamped_expr(" + ".join(f"({float(w)!r})*({n} - ({float(m)!r}))/({float(s)!r})"
+                                             for n, w, m, s in zip(names, self.weights, self.mu, self.sd)))
 
 
 def _copy_force(f):
@@ -95,14 +107,15 @@ class ResidualComposite(LinearComposite):
         """s from the feature values followed by z."""
         f = np.asarray(f, dtype=float)
         n = len(self.forces)
-        return float(np.sum(self.weights * ((f[:n] - self.mu) / self.sd - self.g(f[n]))))
+        return self._clamped(float(np.sum(self.weights * ((f[:n] - self.mu) / self.sd - self.g(f[n])))))
 
     def expression(self, names, tables) -> str:
         """names: feature CV names then the z CV name; tables: one tabulated-function name per feature."""
         *feats, zn = names
         zc = f"min(max({zn}, {self.z_min!r}), {self.z_max!r})"
-        return " + ".join(f"({float(w)!r})*(({n} - ({float(m)!r}))/({float(s)!r}) - {t}({zc}))"
-                          for n, t, w, m, s in zip(feats, tables, self.weights, self.mu, self.sd))
+        return self._clamped_expr(" + ".join(
+            f"({float(w)!r})*(({n} - ({float(m)!r}))/({float(s)!r}) - {t}({zc}))"
+            for n, t, w, m, s in zip(feats, tables, self.weights, self.mu, self.sd)))
 
 
 def composite_bias_force(variables):

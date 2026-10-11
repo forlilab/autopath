@@ -489,21 +489,30 @@ def z_reweighted_dG(out_dir, fp, temperature, burn=0.2, bins=0.01):
 SW_OOR_WARN, SW_OOR_MAX = 0.001, 0.01
 
 
+SW_CLAMP_WARN, SW_CLAMP_RTOL = 0.05, 1e-6
+
+
+def _edge_tol(lo, hi) -> float:
+    return SW_CLAMP_RTOL * max(abs(lo), abs(hi), 1.0)
+
+
 def sw_range_fraction(s, lo, hi) -> float:
-    """Fraction of s outside [lo, hi] (0 for an empty array)."""
+    """Fraction of s outside [lo, hi] (0 for an empty array); values on an edge within float32 tolerance are inside."""
     s = np.asarray(s, float)
-    return float(np.mean((s < lo) | (s > hi))) if s.size else 0.0
+    tol = _edge_tol(lo, hi)
+    return float(np.mean((s < lo - tol) | (s > hi + tol))) if s.size else 0.0
 
 
 def check_sw_range(out_dir, npz_path, strict=False) -> dict:
     """Fraction of COLVAR s_w ("learned_sw" column, all walkers) outside the training range (sw_lo, sw_hi).
 
     The boundary correction treats that range as the reachable domain. Warns above SW_OOR_WARN;
-    ``strict=True`` raises above SW_OOR_MAX.
+    ``strict=True`` raises above SW_OOR_MAX. Rows on a clamp edge are in range; their fractions are
+    reported and warned above SW_CLAMP_WARN.
 
     Returns
     -------
-    dict with fraction, n, sw_lo, sw_hi and reason ("" when computed).
+    dict with fraction, n, sw_lo, sw_hi, frac_at_lo_clamp, frac_at_hi_clamp and reason ("" when computed).
     """
     with np.load(npz_path, allow_pickle=False) as d:
         lo, hi = float(d["sw_lo"]), float(d["sw_hi"])
@@ -518,7 +527,15 @@ def check_sw_range(out_dir, npz_path, strict=False) -> dict:
         return {"reason": "no COLVAR with a learned_sw column in this run"}
     s = np.concatenate(vals)
     frac = sw_range_fraction(s, lo, hi)
-    out = {"fraction": frac, "n": int(len(s)), "sw_lo": lo, "sw_hi": hi, "reason": ""}
+    tol = _edge_tol(lo, hi)
+    at_lo, at_hi = float(np.mean(np.abs(s - lo) <= tol)), float(np.mean(np.abs(s - hi) <= tol))
+    out = {"fraction": frac, "n": int(len(s)), "sw_lo": lo, "sw_hi": hi,
+           "frac_at_lo_clamp": at_lo, "frac_at_hi_clamp": at_hi, "reason": ""}
+    logger.info("s_w at clamp: %.2f%% at sw_lo, %.2f%% at sw_hi", 100 * at_lo, 100 * at_hi)
+    for name, f in (("sw_lo", at_lo), ("sw_hi", at_hi)):
+        if f > SW_CLAMP_WARN:
+            logger.warning("%.1f%% of COLVAR rows sit at the %s clamp: the bound basin may extend past it",
+                           100 * f, name)
     msg = (f"s_w left its training range: boundary correction invalid "
            f"({100 * frac:.2f}% of {len(s)} COLVAR rows outside [{lo:.3f}, {hi:.3f}])")
     if strict and frac > SW_OOR_MAX:

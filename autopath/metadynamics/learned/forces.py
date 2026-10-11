@@ -175,13 +175,13 @@ def fused_sw_forces(features, weights, mu, sd, system):
     return forces, float(-np.sum(c * mu))
 
 
-def fused_sw_composite(features, weights, mu, sd, system, key=None):
+def fused_sw_composite(features, weights, mu, sd, system, key=None, clamp=None):
     """LinearComposite over the fused forces with the same value as ``composite_cv``."""
     from ..BoundaryCorrection import LinearComposite
     forces, const = fused_sw_forces(features, weights, mu, sd, system)
     shift = np.zeros(len(forces))
     shift[0] = -const
-    return LinearComposite(forces, np.ones(len(forces)), shift, np.ones(len(forces)), key=key)
+    return LinearComposite(forces, np.ones(len(forces)), shift, np.ones(len(forces)), key=key, clamp=clamp)
 
 
 def combined_cv(features, weights, mu, sd, system, name="learned"):
@@ -259,7 +259,7 @@ def _sw_spec(d, system, kept, n_plain_cvs=0, fused=True):
         raise ValueError(f"{n_cvs} collective variables ({n_feat} feature forces, the residual z, "
                          f"{n_plain_cvs} plain) exceed OpenMM's limit of {MAX_CVS}: not supported")
     lo, hi, hw = (float(d[k]) for k in ("sw_grid_min", "sw_grid_max", "sw_hill_width"))
-    edges = (float(d["sw_lo"]), float(d["sw_hi"]))       # training range: boundary-corrected edges
+    edges = (float(d["sw_lo"]), float(d["sw_hi"]))       # training range: clamp and boundary-corrected edges
     resid = bool(d["residualised"])
     if resid:
         host, guest = [int(i) for i in d["funnel_host"]], [int(i) for i in d["funnel_guest"]]
@@ -268,12 +268,12 @@ def _sw_spec(d, system, kept, n_plain_cvs=0, fused=True):
 
     def factory(pos, n_atoms, top):
         if fused:
-            return fused_sw_composite(kept, w, mu, sd, system)
+            return fused_sw_composite(kept, w, mu, sd, system, clamp=edges)
         forces = [feature_cv(f, system, f"f{k}") for k, f in enumerate(kept)]
         if not resid:
-            return LinearComposite(forces, w, mu, sd)
+            return LinearComposite(forces, w, mu, sd, clamp=edges)
         return ResidualComposite(forces, w, mu, sd, z_force=funnel_z_force(host, guest, axis),
-                                 z_min=z_min, z_max=z_max, tables=tables)
+                                 z_min=z_min, z_max=z_max, tables=tables, clamp=edges)
 
     return [CVSpec(cv=None, grid_min=lo, grid_max=hi, hill_width=hw,
                    grid_points=int(round((hi - lo) / (hw / 5))) + 1,
@@ -284,7 +284,7 @@ def learned_cv_spec(npz_path, system, n_components=1, nested=False, n_plain_cvs=
     """One CVSpec per HLDA component. Flat LinearComposite by default (components share
     their features); ``nested=True`` gives the old MetaCollectiveVariable (parity tests only).
     A rupture-class npz (key "component") gives the single s_w spec "learned_sw",
-    boundary-corrected on (sw_lo, sw_hi); ``n_plain_cvs`` counts the other biased variables'
+    clamped and boundary-corrected on (sw_lo, sw_hi); ``n_plain_cvs`` counts the other biased variables'
     CVs against the CustomCVForce limit. ``fused`` builds s_w from one force per feature kind
     (``fused_sw_forces``); a residualised npz needs ``fused=False``.
     """
