@@ -6,7 +6,6 @@ import numpy as np
 import openmm as mm
 import openmm.unit as u
 import pytest
-from openmm.app import Element, PDBFile, Topology
 from openmm.app.metadynamics import BiasVariable
 
 from autopath.metadynamics import (BoundaryCorrectedMetadynamics, LinearComposite, MetadynamicsMD,
@@ -16,7 +15,7 @@ from autopath.metadynamics.learned.features import features_to_dict
 from autopath.metadynamics.learned.forces import feature_cv, funnel_z_force, is_rupture_cv, learned_cv_spec
 
 from .learned_toys import (AXIS, FEATS, GUEST, HOST, MASSES, MU, SD, TABLES, W, X0, ZMAX, ZMIN, s_plain,
-                           s_ref, toy_system, write_npz_r2, z_of)
+                           s_ref, toy_pdb, toy_system, write_npz_r2, z_of)
 
 REF = mm.Platform.getPlatformByName("Reference")
 
@@ -127,14 +126,7 @@ def test_rupture_npz_rejects_two_components_and_nested(tmp_path):
 
 
 def test_md_run_applies_the_boundary_factor_to_the_learned_sw_bias(tmp_path, monkeypatch):
-    top = Topology()
-    res = top.addResidue("UNK", top.addChain())
-    for i in range(5):
-        top.addAtom(f"C{i}", Element.getBySymbol("C"), res)
-    top.setPeriodicBoxVectors(np.eye(3) * 10.0 * u.nanometer)
-    pdb = str(tmp_path / "toy.pdb")
-    with open(pdb, "w") as fh:
-        PDBFile.writeFile(top, X0 * u.nanometer, fh)
+    top, pdb = toy_pdb(tmp_path)
     made = []
 
     class Spy(BoundaryCorrectedMetadynamics):

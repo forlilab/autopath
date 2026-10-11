@@ -415,10 +415,21 @@ def _final_bias_at_frames(out_dir, run_id, s):
     return f(np.asarray(s)[:, ::-1])
 
 
-def z_reweighted_dG(out_dir, fp, temperature, burn=0.2, bins=0.01):
-    """ΔG°_b from W(z) of the monitored funnel z, reweighted by eq 12 (final bias) and by c(t).
+def _colvar_column(out_dir, rid, name):
+    """Index of CV ``name`` among the walker's COLVAR columns (HILLS cv_names), or None."""
+    f = os.path.join(out_dir, f"HILLS_{rid}.npz")
+    if not os.path.exists(f):
+        return None
+    with np.load(f) as d:
+        names = [str(n) for n in d["cv_names"]] if "cv_names" in d.files else []
+    return names.index(name) if name in names else None
 
-    Bound site: z <= 0.2*z_max of the funnel, z from the unbiased funnel_z monitor.
+
+def z_reweighted_dG(out_dir, fp, temperature, burn=0.2, bins=0.01):
+    """ΔG°_b from W(z) of the funnel z, reweighted by eq 12 (final bias) and by c(t).
+
+    Bound site: z <= 0.2*z_max of the funnel. z is the unbiased funnel_z monitor or, without
+    one, the biased funnel_z COLVAR column; its clamped frames (z >= z_max) are dropped.
     The histogram spans [floor(min z), funnel z_max] (nm); empty bins are +inf (zero
     probability) and frames beyond z_max are dropped (``n_dropped``).
     Returns {"reason": ...} without numbers when it cannot run.
@@ -426,13 +437,14 @@ def z_reweighted_dG(out_dir, fp, temperature, burn=0.2, bins=0.01):
     if fp is None:
         return {"reason": "no funnel: z reweighting needs the funnel cylinder"}
     kT = 0.0083144626 * temperature
-    zs, l12, lct = [], [], []
+    zs, l12, lct, from_colvar = [], [], [], []
     for f in sorted(glob.glob(os.path.join(out_dir, "REWEIGHT_*.npz"))):
         rw = np.load(f)
-        if "monitor_funnel_z" not in rw.files:
-            continue
         rid = os.path.basename(f)[len("REWEIGHT_"):-4]
-        n = len(rw["monitor_funnel_z"])
+        zcol = None if "monitor_funnel_z" in rw.files else _colvar_column(out_dir, rid, "funnel_z")
+        if "monitor_funnel_z" not in rw.files and zcol is None:
+            continue
+        n = len(rw["monitor_funnel_z"]) if zcol is None else len(rw["bias_kj"])
         if len(rw["bias_kj"]) < n or len(rw["rct_kj"]) < n:
             raise ValueError(f"{rid}: bias_kj/rct_kj shorter than the {n} monitored rows")
         keep = np.arange(n) >= burn * n
@@ -440,15 +452,17 @@ def z_reweighted_dG(out_dir, fp, temperature, burn=0.2, bins=0.01):
         if len(s) < n:
             raise ValueError(f"{rid}: COLVAR has {len(s)} rows, REWEIGHT {n}")
         s = s[:n].reshape(n, -1)
-        zs.append(rw["monitor_funnel_z"][keep])
+        z = rw["monitor_funnel_z"] if zcol is None else s[:, zcol]
+        zs.append(z[keep])
+        from_colvar.append(np.full(int(keep.sum()), zcol is not None))
         l12.append(_final_bias_at_frames(out_dir, rid, s[keep]) / kT)
         lct.append((rw["bias_kj"][:n] - rw["rct_kj"][:n])[keep] / kT)
     if not zs:
-        return {"reason": "no REWEIGHT with monitor_funnel_z in this run"}
+        return {"reason": "no REWEIGHT with monitor_funnel_z or a biased funnel_z COLVAR column in this run"}
     z = np.concatenate(zs)
     zmax = fp["z_max"]
     zmax = float(zmax.value_in_unit(unit_ang())) / 10.0 if hasattr(zmax, "value_in_unit") else float(zmax)
-    inside = z <= zmax
+    inside = np.where(np.concatenate(from_colvar), z < zmax, z <= zmax)
     n_dropped = int((~inside).sum())
     if not inside.any():
         return {"reason": "no monitored frames inside the funnel (z <= z_max)"}
@@ -468,6 +482,48 @@ def z_reweighted_dG(out_dir, fp, temperature, burn=0.2, bins=0.01):
                                     grid_max=centers[-1], cv_length_per_unit_ang=10.0,
                                     cv_origin=0.0, verbose=False)
         out[key] = float(res["dG_bind_std_kj_mol"])
+    return out
+
+
+SW_OOR_WARN, SW_OOR_MAX = 0.001, 0.01
+
+
+def sw_range_fraction(s, lo, hi) -> float:
+    """Fraction of s outside [lo, hi] (0 for an empty array)."""
+    s = np.asarray(s, float)
+    return float(np.mean((s < lo) | (s > hi))) if s.size else 0.0
+
+
+def check_sw_range(out_dir, npz_path, strict=False) -> dict:
+    """Fraction of COLVAR s_w ("learned_sw" column, all walkers) outside the training range (sw_lo, sw_hi).
+
+    The boundary correction treats that range as the reachable domain. Warns above SW_OOR_WARN;
+    ``strict=True`` raises above SW_OOR_MAX.
+
+    Returns
+    -------
+    dict with fraction, n, sw_lo, sw_hi and reason ("" when computed).
+    """
+    with np.load(npz_path, allow_pickle=False) as d:
+        lo, hi = float(d["sw_lo"]), float(d["sw_hi"])
+    vals = []
+    for f in sorted(glob.glob(os.path.join(out_dir, "COLVAR_*.npy"))):
+        col = _colvar_column(out_dir, os.path.basename(f)[len("COLVAR_"):-4], "learned_sw")
+        if col is None:
+            continue
+        c = np.load(f)
+        vals.append(c.reshape(len(c), -1)[:, col])
+    if not vals:
+        return {"reason": "no COLVAR with a learned_sw column in this run"}
+    s = np.concatenate(vals)
+    frac = sw_range_fraction(s, lo, hi)
+    out = {"fraction": frac, "n": int(len(s)), "sw_lo": lo, "sw_hi": hi, "reason": ""}
+    msg = (f"s_w left its training range: boundary correction invalid "
+           f"({100 * frac:.2f}% of {len(s)} COLVAR rows outside [{lo:.3f}, {hi:.3f}])")
+    if strict and frac > SW_OOR_MAX:
+        raise ValueError(msg)
+    if frac > SW_OOR_WARN:
+        logger.warning(msg)
     return out
 
 

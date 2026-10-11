@@ -106,10 +106,14 @@ def is_rupture_cv(npz_path) -> bool:
         return "component" in d.files
 
 
-def _sw_spec(d, system, kept):
+def _sw_spec(d, system, kept, n_plain_cvs=0):
     """[CVSpec] of s_w from a rupture-class npz (residual composite when residualised)."""
-    from ..BoundaryCorrection import LinearComposite, ResidualComposite
+    from ..BoundaryCorrection import MAX_CVS, LinearComposite, ResidualComposite
     from ..CV import CVSpec
+    n_cvs = len(kept) + bool(d["residualised"]) + n_plain_cvs
+    if n_cvs > MAX_CVS:
+        raise ValueError(f"{n_cvs} collective variables ({len(kept)} features, the residual z, "
+                         f"{n_plain_cvs} plain) exceed OpenMM's limit of {MAX_CVS}: not supported")
     w, mu, sd = (np.array(d[k], dtype=float) for k in ("sw_weights", "mu", "sd"))
     lo, hi, hw = (float(d[k]) for k in ("sw_grid_min", "sw_grid_max", "sw_hill_width"))
     edges = (float(d["sw_lo"]), float(d["sw_hi"]))       # training range: boundary-corrected edges
@@ -131,11 +135,12 @@ def _sw_spec(d, system, kept):
                    name="learned_sw", bounds=edges, _factory=factory)]
 
 
-def learned_cv_spec(npz_path, system, n_components=1, nested=False):
+def learned_cv_spec(npz_path, system, n_components=1, nested=False, n_plain_cvs=0):
     """One CVSpec per HLDA component. Flat LinearComposite by default (components share
     their features); ``nested=True`` gives the old MetaCollectiveVariable (parity tests only).
     A rupture-class npz (key "component") gives the single s_w spec "learned_sw",
-    boundary-corrected on (sw_lo, sw_hi).
+    boundary-corrected on (sw_lo, sw_hi); ``n_plain_cvs`` counts the other biased variables'
+    CVs against the CustomCVForce limit.
     """
     from ..CV import CVSpec
     from .features import features_from_dict
@@ -146,7 +151,7 @@ def learned_cv_spec(npz_path, system, n_components=1, nested=False):
         if n_components != 1 or nested:
             raise ValueError("a rupture-class learned CV has one biased component (s_w); "
                              f"n_components={n_components}, nested={nested} is not supported")
-        return _sw_spec(d, system, kept)
+        return _sw_spec(d, system, kept, n_plain_cvs)
     key = object()                                  # shared by this call's components
     specs = []
     for k in range(n_components):
@@ -164,3 +169,17 @@ def learned_cv_spec(npz_path, system, n_components=1, nested=False):
                             grid_points=int(round((hi - lo) / (hw / 5))) + 1,
                             name=f"learned{k + 1}", bounds=(-np.inf, np.inf), _factory=factory))
     return specs
+
+
+def tt_basins_from_classes(npz_path, specs):
+    """Transition-tempering basins [B, U] from a rupture-class npz, as (funnel z nm, s_w) points.
+
+    ``specs`` is the bias-variable order; only [funnel_z, learned_sw] is supported.
+    """
+    names = [sp.name for sp in specs]
+    if names != ["funnel_z", "learned_sw"]:
+        raise ValueError(f"class basins are (funnel z, s_w) points; bias variables {names} not supported")
+    with np.load(npz_path, allow_pickle=False) as d:
+        if "basin_B" not in d.files or "basin_U" not in d.files:
+            raise ValueError(f"{npz_path} has no class basins: not supported")
+        return [[float(x) for x in d["basin_B"]], [float(x) for x in d["basin_U"]]]

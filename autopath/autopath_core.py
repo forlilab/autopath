@@ -57,7 +57,7 @@ logger = logging.getLogger('autopath.core')
 
 def funnel_z_monitor(funnel_force, funnel_params, mMD_cv):
     """Unbiased funnel-z monitor for runs that bias something else (None otherwise)."""
-    if funnel_force is None or funnel_params is None or mMD_cv == "funnel_z":
+    if funnel_force is None or funnel_params is None or mMD_cv in ("funnel_z", "learned_z"):
         return None
     return {"funnel_z": funnel_z_cv(
         funnel_params["host_index"], funnel_params["guest_index"],
@@ -80,11 +80,12 @@ def learned_cv_atom_sets(topology_pdb, ligand_selection, positions=None):
 
 
 LEARNED_CV_DIRNAME = "learned_cv"
+LEARNED_Z_DIRNAME = "learned_cv_rupture"
 
 
-def learned_cv_out_dir(smd_outdir: str, group_key: str | None) -> str:
+def learned_cv_out_dir(smd_outdir: str, group_key: str | None, name: str = LEARNED_CV_DIRNAME) -> str:
     """Per-group learned-CV directory."""
-    base = f"{smd_outdir}/{LEARNED_CV_DIRNAME}"
+    base = f"{smd_outdir}/{name}"
     return base if group_key is None else f"{base}/{group_key}"
 
 
@@ -104,6 +105,20 @@ def build_learned_cv(system, sys_name, ligand_file, ligand_idx, pocket_idx, mile
                            classes="milestones", milestones=milestones_dir,
                            milestone_pocket_idx=milestone_pocket_idx)
     return learned.learned_cv_spec(npz, system, n_components)
+
+
+def build_learned_z_cv(system, sys_name, ligand_file, ligand_idx, pocket_idx, traj_dir, out_dir, direction,
+                       funnel_params):
+    """s_w spec for the (funnel z, s_w) bias: rupture classes from the sMD forces, z from the funnel and the
+    system masses. Any failure propagates.
+    """
+    from openmm import unit as _u
+    from autopath.metadynamics import learned
+    masses = [system.getParticleMass(i).value_in_unit(_u.dalton) for i in range(system.getNumParticles())]
+    npz = learned.learn_cv(f"{sys_name}/system.pdb", ligand_file, ligand_idx, pocket_idx, traj_dir, out_dir,
+                           direction=direction, hidden=False, classes="rupture", funnel=funnel_params,
+                           masses=masses)
+    return learned.learned_cv_spec(npz, system, 1, n_plain_cvs=1)
 
 
 def milestones_dir_for_group(milestones_outdir: str, group_key: str | None) -> str:
@@ -411,14 +426,16 @@ class AutoPath:
                              f"'bound_first', got {mMD_seed_order!r}")
         self.mMD_seed_order = mMD_seed_order
         self.mMD_bulk_cutoff_ang = mMD_bulk_cutoff_ang
-        if mMD_cv not in ("path", "funnel_z", "learned"):
-            raise ValueError(f"mMD_cv must be 'path', 'funnel_z' or 'learned', got {mMD_cv!r}")
+        if mMD_cv not in ("path", "funnel_z", "learned", "learned_z"):
+            raise ValueError(f"mMD_cv must be 'path', 'funnel_z', 'learned' or 'learned_z', got {mMD_cv!r}")
         if mMD_cv == "learned" and not mMD_use_funnel_potential:
             raise ValueError("mMD_cv='learned' needs the funnel: funnel z is monitored for reweighting")
+        if mMD_cv == "learned_z" and not mMD_use_funnel_potential:
+            raise ValueError("mMD_cv='learned_z' biases funnel z and s_w; it needs mMD_use_funnel_potential=True")
         if mMD_cv == "funnel_z" and not mMD_use_funnel_potential:
             raise ValueError("mMD_cv='funnel_z' is the funnel axis coordinate; "
                              "it needs mMD_use_funnel_potential=True")
-        if mMD_cv in ("funnel_z", "learned") and mMD_preseed_bias:
+        if mMD_cv in ("funnel_z", "learned", "learned_z") and mMD_preseed_bias:
             raise ValueError("mMD_preseed_bias builds its bias on the path-CV grid; "
                              f"it cannot seed mMD_cv={mMD_cv!r}")
         self.mMD_cv = mMD_cv
@@ -634,7 +651,7 @@ class AutoPath:
                                                         out_dir=sys_name,
                                                         ref_mol=lig_mol)
             logger.info(f"Ligand anchor atom indices are: {', '.join(map(str, ligand_atoms_indices))}")
-            if self.mMD_cv == "learned":
+            if self.mMD_cv in ("learned", "learned_z"):
                 # last equilibration frame = sMD start; system.pdb numbering
                 learned_ligand_idx, learned_pocket_idx = learned_cv_atom_sets(
                     solvated_system_pdb, ligand_selection,
@@ -1559,6 +1576,15 @@ class AutoPath:
                         base_system, sys_name, ligand_file, learned_ligand_idx, learned_pocket_idx,
                         pocket_atom_indices, sMD_traj_outdir, learned_cv_out_dir(self.sMD_outdir, group_key),
                         self.sMD_pulling_dir, self.mMD_learned_components, group_milestones_dir)
+                elif self.mMD_cv == "learned_z":
+                    if funnel_force is None:
+                        raise RuntimeError("mMD_cv='learned_z' needs the funnel, which was not generated")
+                    # metad_cv is the funnel z spec from the funnel block; s_w is the second variable
+                    metad_cv = [metad_cv, *build_learned_z_cv(
+                        base_system, sys_name, ligand_file, learned_ligand_idx, learned_pocket_idx,
+                        sMD_traj_outdir,
+                        learned_cv_out_dir(self.sMD_outdir, group_key, name=LEARNED_Z_DIRNAME),
+                        self.sMD_pulling_dir, funnel_params)]
                 metad_cvs = as_cv_list(metad_cv)
 
                 # most-bound milestone, resolved before the walker order is applied
@@ -1630,11 +1656,16 @@ class AutoPath:
                 # Post-run diagnosis: FES, walker stats, and ΔG°_b from the coverage-filtered FES.
                 try:
                     colvar_files_diag = sorted(glob(f"{group_out_dir}/COLVAR_*.npy"))
-                    if colvar_files_diag and self.mMD_cv == "learned":
+                    if colvar_files_diag and self.mMD_cv in ("learned", "learned_z"):
                         # CV-space well depth assumes bound at the grid's low end; the learned axis has no such sign
                         from autopath.metadynamics.report import z_reweighted_dG
                         zr = z_reweighted_dG(group_out_dir, funnel_params, float(self.temperature))
                         logger.info("z-reweighted dG: %s", zr)
+                        if self.mMD_cv == "learned_z":
+                            from autopath.metadynamics.report import check_sw_range
+                            _sw_npz = os.path.join(learned_cv_out_dir(self.sMD_outdir, group_key,
+                                                                      name=LEARNED_Z_DIRNAME), "learned_cv.npz")
+                            logger.info("s_w training-range check: %s", check_sw_range(group_out_dir, _sw_npz))
                     elif colvar_files_diag:
                         ma = MetadynamicsAnalysis(out_dir=group_out_dir)
                         diag = ma.diagnose(

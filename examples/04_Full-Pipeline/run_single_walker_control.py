@@ -63,11 +63,12 @@ def main():
     ap.add_argument("--hill-width", dest="hill_width", type=float, default=None,
                     help="hill width in CV units (overrides the matched-width default)")
     ap.add_argument("--cv", choices=["path", "funnel_z", "funnel_z_unclamped", "dist", "funnel_z_dist",
-                                       "dist_torsion", "learned"],
+                                       "dist_torsion", "learned", "learned_z"],
                     default="path",
                     help="path: progress along the milestones, extended to the funnel "
                          "cap; funnel_z: the funnel axis coordinate, from below the lower wall to z_max; "
-                         "dist: two-atom distance (Limongelli 2013); funnel_z_dist: both, 2D")
+                         "dist: two-atom distance (Limongelli 2013); funnel_z_dist: both, 2D"
+                         "; learned_z: funnel z plus the rupture-class s_w (--learned-cv-file), 2D")
     ap.add_argument("--learned-cv-file", default=None,
                     help="--cv learned: learned_cv.npz from autopath.metadynamics.learned.learn_cv")
     ap.add_argument("--learned-components", type=int, default=1)
@@ -97,7 +98,15 @@ def main():
                     help="TT threshold V_th (kJ/mol)")
     ap.add_argument("--tt-bias-factor", type=float, default=None,
                     help="keep well tempering with --bias-factor and add TT with this factor")
+    ap.add_argument("--tt-basins-from-classes", action="store_true",
+                    help="--cv learned_z: transition-tempering basins from the npz class medians "
+                         "(funnel z, s_w of B and U)")
     args = ap.parse_args()
+    if args.tt_basins_from_classes:
+        if args.tt_basins:
+            ap.error("--tt-basins-from-classes: --tt-basins is not allowed with it")
+        if args.cv != "learned_z" or not args.learned_cv_file:
+            ap.error("--tt-basins-from-classes needs --cv learned_z and --learned-cv-file")
 
     base = args.base
     os.makedirs(args.out, exist_ok=True)
@@ -140,7 +149,7 @@ def main():
     z_max = params["z_max"].value_in_unit(ommunit.angstrom)
     # the path CV is only needed to bias it, to match its hill width, or to check its length
     need_path = (args.cv == "path" or args.expect_cv_length is not None
-                 or (args.cv.startswith("funnel_z") and args.hill_width is None))
+                 or ((args.cv.startswith("funnel_z") or args.cv == "learned_z") and args.hill_width is None))
     path, span = None, None
     if need_path:
         # same milestones and order as the seeded run, so the path CV is identical
@@ -206,6 +215,17 @@ def main():
         from autopath.metadynamics.learned import learned_cv_spec
         cvs.extend(learned_cv_spec(args.learned_cv_file, load_system(system_xml), args.learned_components))
         log.info("CV: learned (%s), %d component(s)", args.learned_cv_file, args.learned_components)
+    if args.cv == "learned_z":
+        from autopath.metadynamics.learned.forces import is_rupture_cv, learned_cv_spec
+        if not args.learned_cv_file or not is_rupture_cv(args.learned_cv_file):
+            raise SystemExit("--cv learned_z needs --learned-cv-file from learn_cv(classes='rupture')")
+        cvs.extend(learned_cv_spec(args.learned_cv_file, load_system(system_xml), 1, n_plain_cvs=1))
+        log.info("CV: funnel z + s_w (%s), 2D", args.learned_cv_file)
+    tt_basins = [[float(x) for x in b.split(",")] for b in args.tt_basins] if args.tt_basins else None
+    if args.tt_basins_from_classes:
+        from autopath.metadynamics.learned.forces import tt_basins_from_classes
+        tt_basins = tt_basins_from_classes(args.learned_cv_file, cvs)   # (funnel z, s_w) in bias-variable order
+        log.info("TT basins from classes (z nm, s_w): %s", tt_basins)
     if args.cv in ("dist", "funnel_z_dist", "dist_torsion"):
         u_sys = mda.Universe(f"{base}/system.pdb")
         a1, a2 = (u_sys.select_atoms(s) for s in args.dist_atoms)
@@ -252,12 +272,11 @@ def main():
               monitor_cvs=({"funnel_z": funnel_z_cv(
                   params["host_index"], params["guest_index"], params["unbinding_axis"],
                   grid_min=-10.0, grid_max=10.0)}
-                  if funnel_force is not None and args.cv not in ("funnel_z", "funnel_z_unclamped", "funnel_z_dist") else None),
+                  if funnel_force is not None and args.cv not in ("funnel_z", "funnel_z_unclamped", "funnel_z_dist", "learned_z") else None),
               boundary_correction=args.boundary_correction,
               reweight=args.reweight, rct_ustride=args.rct_ustride,
               dcd_interval=args.dcd_interval,
-              tt_basins=([[float(x) for x in b.split(",")] for b in args.tt_basins]
-                         if args.tt_basins else None),
+              tt_basins=tt_basins,
               tt_threshold=args.tt_threshold, tt_bias_factor=args.tt_bias_factor)
     log.info("finished: %.1f ns, seed=%s", args.ns, args.seed_from)
 

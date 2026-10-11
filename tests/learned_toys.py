@@ -1,7 +1,9 @@
 """Shared toy system and residualised-s_w reference for the learned-CV tests."""
 import numpy as np
 import openmm as mm
+import openmm.unit as u
 import pandas as pd
+from openmm.app import Element, PDBFile, Topology
 
 from autopath.metadynamics.learned.features import Feature, evaluate, features_to_dict
 from autopath.metadynamics.learned.sw import z_spline_values
@@ -54,6 +56,19 @@ def toy_system(x0=X0, box=10.0, masses=MASSES):
     return s
 
 
+def toy_pdb(tmp_path):
+    """(topology, pdb path) of the 5-atom toy at X0."""
+    top = Topology()
+    res = top.addResidue("UNK", top.addChain())
+    for i in range(5):
+        top.addAtom(f"C{i}", Element.getBySymbol("C"), res)
+    top.setPeriodicBoxVectors(np.eye(3) * 10.0 * u.nanometer)
+    pdb = str(tmp_path / "toy.pdb")
+    with open(pdb, "w") as fh:
+        PDBFile.writeFile(top, X0 * u.nanometer, fh)
+    return top, pdb
+
+
 def s_ref(X):
     f = evaluate(FEATS, X[None])[0]
     g = z_spline_values(TABLES, ZMIN, ZMAX, z_of(X))
@@ -72,6 +87,7 @@ def write_npz_r2(path, residualised=True):
              z_tables=TABLES if residualised else np.zeros((0, 0)),
              funnel_host=np.array(HOST), funnel_guest=np.array(GUEST), funnel_axis=AXIS / np.linalg.norm(AXIS),
              sw_lo=c - 2.0, sw_hi=c + 2.0, sw_grid_min=c - 2.6, sw_grid_max=c + 2.6, sw_hill_width=0.2,
+             basin_B=[Z0 - 0.3, c - 1.0], basin_U=[Z0 + 0.3, c + 1.0],
              **features_to_dict(FEATS))
     return path
 
