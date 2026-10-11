@@ -6,8 +6,8 @@ import openmm as mm
 from openmm.app.internal.unitcell import reducePeriodicBoxVectors
 from openmm import unit
 
-from .features import (CONTACT_CUTOFF_FACTOR, CONTACT_SWITCH_FACTOR, COUNT_CUTOFF_FACTOR,
-                       COUNT_SWITCH_FACTOR)
+from .features import (CN_DELTA, CN_DMAX, CN_NM, CN_R0, CONTACT_CUTOFF_FACTOR, CONTACT_SWITCH_FACTOR,
+                       COUNT_CUTOFF_FACTOR, COUNT_SWITCH_FACTOR, _rational)
 
 
 def _nonbonded(system):
@@ -33,7 +33,87 @@ def _wrap(force, name):
     return cvpack.OpenMMForceWrapper(force, unit.dimensionless, name=name)
 
 
+def cn_expression(r0=CN_R0, dmax=CN_DMAX, n=CN_NM[0], m=CN_NM[1]):
+    """Lepton expression of ``features.cn_switch`` in ``r`` (nm), branch for branch."""
+    c = float(_rational(dmax / r0, n, m))
+    return (f"step({dmax!r}-r)*(rat-({c!r}))/(1-({c!r})); "
+            f"rat = select(far, (1-xs^{n})/(1-xs^{m}), {n / m!r}*(1+({0.5 * (n - m)!r})*(x-1))); "
+            "xs = select(far, x, 0.5); "
+            f"far = step(abs(x-1)-{CN_DELTA!r}); "
+            f"x = r/{r0!r}")
+
+
+def _cn_box_guard(system):
+    cz = system.getDefaultPeriodicBoxVectors()[2].z
+    cz = cz.value_in_unit(unit.nanometer) if unit.is_quantity(cz) else float(cz)
+    if CN_DMAX >= 0.95 * cz / 2:
+        raise ValueError(f"cn cutoff {CN_DMAX} nm not supported: >= 95 % of half the box height ({cz / 2:.3g} nm)")
+
+
+def _fused_cn(feats, coeffs, system):
+    """One CustomNonbondedForce for every cn feature: sum_k c_k * cn_k.
+
+    Atoms with the same (feature, term, side) signature form a class; each linked class pair
+    is one interaction group whose table entry sums c_k * scale over the terms linking it.
+    """
+    _cn_box_guard(system)
+    n = system.getNumParticles()
+    sides = {}                                      # atom -> set of (feature, term, side)
+    for k, f in enumerate(feats):
+        if not f.terms:
+            raise ValueError(f"cn feature {f.name!r} has no terms: not supported")
+        for t, (a, b, _) in enumerate(f.terms):
+            for side, g in ((0, a), (1, b)):
+                for i in g:
+                    sides.setdefault(int(i), set()).add((k, t, side))
+    sig = {}
+    for i in sorted(sides):
+        sig.setdefault(frozenset(sides[i]), []).append(i)
+    sigs, members = list(sig), list(sig.values())
+    cls = np.zeros(n, dtype=int)
+    for c, m in enumerate(members):
+        cls[m] = c
+    nc = len(members)
+    table = np.zeros((nc, nc))
+    links = set()
+    for c1 in range(nc):
+        for c2 in range(c1, nc):
+            for (k, t, s) in sigs[c1]:
+                if (k, t, 1 - s) in sigs[c2]:
+                    table[c1, c2] += coeffs[k] * feats[k].terms[t][2]
+                    links.add((c1, c2))
+            table[c2, c1] = table[c1, c2]
+    if not links:
+        raise ValueError("cn features link no atom pairs: not supported")
+    nb = _nonbonded(system)
+    exceptions = [tuple(nb.getExceptionParameters(e)[:2]) for e in range(nb.getNumExceptions())]
+    # numpy skips Feature.exclude; it must equal the exceptions each feature links
+    for k, f in enumerate(feats):
+        linked = {tuple(sorted((int(i), int(j)))) for i, j in exceptions
+                  if i in sides and j in sides
+                  and any(kk == k and (k, t, 1 - s) in sides[j] for kk, t, s in sides[i])}
+        if linked != {tuple(p) for p in (f.exclude or [])}:
+            raise ValueError(f"cn feature {f.name!r}: exclude differs from the system exceptions "
+                             "linked by its terms; not supported")
+    force = mm.CustomNonbondedForce(f"tcn(cls1, cls2)*cnsw; cnsw = {cn_expression()}")
+    force.addPerParticleParameter("cls")
+    force.addTabulatedFunction("tcn", mm.Discrete2DFunction(nc, nc, table.ravel(order="F").tolist()))
+    for i in range(n):
+        force.addParticle([float(cls[i])])
+    for i, j in exceptions:
+        force.addExclusion(i, j)
+    force.setNonbondedMethod(mm.CustomNonbondedForce.CutoffPeriodic)
+    force.setCutoffDistance(CN_DMAX)
+    force.setUseSwitchingFunction(False)
+    force.setUseLongRangeCorrection(False)
+    for c1, c2 in sorted(links):
+        force.addInteractionGroup(members[c1], members[c2])
+    return force
+
+
 def feature_cv(f, system, name):
+    if f.kind == "cn":
+        return _wrap(_fused_cn([f], [1.0], system), name)
     if f.kind == "pair":
         b = mm.CustomBondForce(f"1/(1+(r/{f.r0})^6)")
         for i, j in f.pairs:
@@ -128,7 +208,7 @@ def fused_sw_forces(features, weights, mu, sd, system):
 
     Parameters
     ----------
-    features : list of Feature (kinds pair, contacts, centroid_distance, cos)
+    features : list of Feature (kinds pair, contacts, centroid_distance, cos, cn)
     weights, mu, sd : (n_features,) arrays
     system : openmm.System with a NonbondedForce (contacts exclusions and PBC)
 
@@ -143,7 +223,7 @@ def fused_sw_forces(features, weights, mu, sd, system):
     c = w / sd
     by_kind = {}
     for k, f in enumerate(features):
-        if f.kind not in ("pair", "contacts", "centroid_distance", "cos"):
+        if f.kind not in ("pair", "contacts", "centroid_distance", "cos", "cn"):
             raise ValueError(f"feature {f.name!r} of kind {f.kind!r} is not supported in the fused s_w")
         by_kind.setdefault(f.kind, []).append(k)
     forces = []
@@ -159,6 +239,9 @@ def fused_sw_forces(features, weights, mu, sd, system):
     if "contacts" in by_kind:
         ks = by_kind["contacts"]
         forces.append(_wrap(_fused_contacts([features[k] for k in ks], c[ks], system), "fused_contacts"))
+    if "cn" in by_kind:
+        ks = by_kind["cn"]
+        forces.append(_wrap(_fused_cn([features[k] for k in ks], c[ks], system), "fused_cn"))
     for kind, n_groups, expr in (
             ("centroid_distance", 2, "distance(g1,g2)"),
             ("cos", 4, COS_EXPR)):
