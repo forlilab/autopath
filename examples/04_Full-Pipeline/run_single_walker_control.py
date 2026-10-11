@@ -216,9 +216,13 @@ def main():
         cvs.extend(learned_cv_spec(args.learned_cv_file, load_system(system_xml), args.learned_components))
         log.info("CV: learned (%s), %d component(s)", args.learned_cv_file, args.learned_components)
     if args.cv == "learned_z":
-        from autopath.metadynamics.learned.forces import is_rupture_cv, learned_cv_spec
+        from autopath.metadynamics.learned.forces import check_funnel_match, is_rupture_cv, learned_cv_spec
         if not args.learned_cv_file or not is_rupture_cv(args.learned_cv_file):
             raise SystemExit("--cv learned_z needs --learned-cv-file from learn_cv(classes='rupture')")
+        try:
+            check_funnel_match(args.learned_cv_file, params)
+        except ValueError as e:
+            raise SystemExit(str(e))
         cvs.extend(learned_cv_spec(args.learned_cv_file, load_system(system_xml), 1, n_plain_cvs=1))
         log.info("CV: funnel z + s_w (%s), 2D", args.learned_cv_file)
     tt_basins = [[float(x) for x in b.split(",")] for b in args.tt_basins] if args.tt_basins else None

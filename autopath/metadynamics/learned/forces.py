@@ -106,6 +106,24 @@ def is_rupture_cv(npz_path) -> bool:
         return "component" in d.files
 
 
+def check_funnel_match(npz_path, funnel):
+    """Raise ValueError unless the npz funnel host/guest/axis equal those of ``funnel``.
+
+    Parameters
+    ----------
+    npz_path : learned_cv.npz from learn_cv
+    funnel : funnel_params dict (``host_index``, ``guest_index``, ``unbinding_axis``)
+    """
+    with np.load(npz_path, allow_pickle=False) as d:
+        host, guest, axis = d["funnel_host"], d["funnel_guest"], np.asarray(d["funnel_axis"], float)
+    f_axis = np.asarray(funnel["unbinding_axis"], float)
+    same = (list(host) == [int(i) for i in funnel["host_index"]]
+            and list(guest) == [int(i) for i in funnel["guest_index"]]
+            and np.allclose(axis / np.linalg.norm(axis), f_axis / np.linalg.norm(f_axis)))
+    if not same:
+        raise ValueError("learned CV funnel differs from --funnel-from: not supported")
+
+
 def _sw_spec(d, system, kept, n_plain_cvs=0):
     """[CVSpec] of s_w from a rupture-class npz (residual composite when residualised)."""
     from ..BoundaryCorrection import MAX_CVS, LinearComposite, ResidualComposite

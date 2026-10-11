@@ -203,6 +203,17 @@ def test_cv_budget_is_checked_at_spec_build_time(tmp_path):
         learned_cv_spec(big, toy_system(), 1, n_plain_cvs=1)
 
 
+@pytest.fixture
+def reweight_stubs(monkeypatch):
+    """Stub the free-energy correction and final bias; returns the list of W(z) arrays passed in."""
+    from autopath.metadynamics import report as rep
+    seen = []
+    monkeypatch.setattr(rep, "correct_fe_for_funnel",
+                        lambda fes, fp, **kw: seen.append(np.asarray(fes)) or {"dG_bind_std_kj_mol": -1.0})
+    monkeypatch.setattr(rep, "_final_bias_at_frames", lambda out_dir, rid, s: np.zeros(len(s)))
+    return seen
+
+
 def _colvar_z_run(d, z, clamped=0, zmax=2.6):
     d.mkdir()
     rng = np.random.default_rng(1)
@@ -215,15 +226,12 @@ def _colvar_z_run(d, z, clamped=0, zmax=2.6):
     return str(d)
 
 
-def test_z_reweighted_dG_from_colvar_drops_clamped_frames(tmp_path, monkeypatch):
+def test_z_reweighted_dG_from_colvar_drops_clamped_frames(tmp_path, reweight_stubs):
     from autopath.metadynamics import report as rep
+    seen = reweight_stubs
     from tests.test_z_reweight import _fp
     rng = np.random.default_rng(0)
     z = np.r_[rng.normal(0.1, 0.02, 3000), rng.uniform(1.0, 2.0, 3000)]
-    seen = []
-    monkeypatch.setattr(rep, "correct_fe_for_funnel",
-                        lambda fes, fp, **kw: seen.append(np.asarray(fes)) or {"dG_bind_std_kj_mol": -1.0})
-    monkeypatch.setattr(rep, "_final_bias_at_frames", lambda out_dir, rid, s: np.zeros(len(s)))
     free = rep.z_reweighted_dG(_colvar_z_run(tmp_path / "free", z), fp=_fp(), temperature=300.0, burn=0.0)
     clamp = rep.z_reweighted_dG(_colvar_z_run(tmp_path / "clamp", z, clamped=500), fp=_fp(),
                                 temperature=300.0, burn=0.0)
@@ -233,11 +241,36 @@ def test_z_reweighted_dG_from_colvar_drops_clamped_frames(tmp_path, monkeypatch)
     np.testing.assert_allclose(seen[1], seen[3])
 
 
-def test_z_reweighted_dG_monitor_keeps_frames_at_z_max(tmp_path, monkeypatch):
+def test_z_reweighted_dG_drops_float32_clamped_colvar_frames(tmp_path, reweight_stubs):
     from autopath.metadynamics import report as rep
     from tests.test_z_reweight import _fp
-    monkeypatch.setattr(rep, "correct_fe_for_funnel", lambda fes, fp, **kw: {"dG_bind_std_kj_mol": -1.0})
-    monkeypatch.setattr(rep, "_final_bias_at_frames", lambda out_dir, rid, s: np.zeros(len(s)))
+    zmax = 2.6495475863484215
+    fp = _fp(z_max=zmax * 10.0)
+    z = np.r_[np.linspace(0.1, 2.0, 100), np.full(7, zmax - 1e-3)]
+    clamped = float(np.float32(zmax))
+    assert clamped != zmax
+    out = rep.z_reweighted_dG(_colvar_z_run(tmp_path / "f32", z, clamped=5, zmax=clamped), fp=fp,
+                              temperature=300.0, burn=0.0)
+    assert out["n_dropped"] == 5 and out["n_frames"] == 107
+
+
+def test_check_funnel_match(tmp_path):
+    from autopath.metadynamics.learned.forces import check_funnel_match
+    npz = str(tmp_path / "l.npz")
+    np.savez(npz, funnel_host=np.array([1, 2, 3]), funnel_guest=np.array([7, 8]),
+             funnel_axis=np.array([0.0, 0.0, 2.0]))
+    fp = {"host_index": [1, 2, 3], "guest_index": [7, 8], "unbinding_axis": np.array([0.0, 0.0, 1.0])}
+    check_funnel_match(npz, fp)
+    for bad in ({**fp, "guest_index": [7, 9]}, {**fp, "host_index": [1, 2]},
+                {**fp, "unbinding_axis": np.array([0.0, 1.0, 0.0])}):
+        with pytest.raises(ValueError, match="differs from --funnel-from.*not supported"):
+            check_funnel_match(npz, bad)
+
+
+def test_z_reweighted_dG_monitor_keeps_frames_at_z_max(tmp_path, reweight_stubs):
+    from autopath.metadynamics import report as rep
+    seen = reweight_stubs
+    from tests.test_z_reweight import _fp
     z = np.r_[np.linspace(0.1, 2.0, 100), np.full(10, 2.6)]
     np.savez(tmp_path / "REWEIGHT_w.npz", time_ns=np.arange(110.0), bias_kj=np.zeros(110), rct_kj=np.zeros(110),
              monitor_funnel_z=z, record_dt_ns=1.0)
@@ -246,15 +279,12 @@ def test_z_reweighted_dG_monitor_keeps_frames_at_z_max(tmp_path, monkeypatch):
     assert out["n_frames"] == 110 and out["n_dropped"] == 0
 
 
-def test_z_reweighted_dG_reads_a_biased_funnel_z_column_like_a_monitor(tmp_path, monkeypatch):
+def test_z_reweighted_dG_reads_a_biased_funnel_z_column_like_a_monitor(tmp_path, reweight_stubs):
     from autopath.metadynamics import report as rep
+    seen = reweight_stubs
     from tests.test_z_reweight import _fp
     rng = np.random.default_rng(0)
     z = np.r_[rng.normal(0.1, 0.02, 3000), rng.uniform(1.0, 2.0, 3000)]
-    seen = []
-    monkeypatch.setattr(rep, "correct_fe_for_funnel",
-                        lambda fes, fp, **kw: seen.append(np.asarray(fes)) or {"dG_bind_std_kj_mol": -1.0})
-    monkeypatch.setattr(rep, "_final_bias_at_frames", lambda out_dir, rid, s: np.zeros(len(s)))
     mon, col = tmp_path / "mon", tmp_path / "col"
     mon.mkdir()
     base = dict(time_ns=np.linspace(0, 10, len(z)), bias_kj=np.zeros(len(z)), rct_kj=np.zeros(len(z)),

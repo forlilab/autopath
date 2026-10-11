@@ -30,6 +30,7 @@ logger = logging.getLogger("autopath")
 
 KJ_TO_KCAL = 1.0 / 4.184
 N_SNAPSHOTS = 40
+Z_CLAMP_TOL = 1e-5   # nm; GPU platforms clamp funnel_z in float32
 
 
 # ---------------------------------------------------------------------------
@@ -462,7 +463,7 @@ def z_reweighted_dG(out_dir, fp, temperature, burn=0.2, bins=0.01):
     z = np.concatenate(zs)
     zmax = fp["z_max"]
     zmax = float(zmax.value_in_unit(unit_ang())) / 10.0 if hasattr(zmax, "value_in_unit") else float(zmax)
-    inside = np.where(np.concatenate(from_colvar), z < zmax, z <= zmax)
+    inside = np.where(np.concatenate(from_colvar), z < zmax - Z_CLAMP_TOL, z <= zmax)
     n_dropped = int((~inside).sum())
     if not inside.any():
         return {"reason": "no monitored frames inside the funnel (z <= z_max)"}
