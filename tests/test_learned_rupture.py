@@ -134,8 +134,17 @@ def test_too_short_trace_raises():
         rupture_labels(df, 5)
 
 
+def _stub_viewer(monkeypatch):
+    """Replace the PyMOL writer (mocked topology); returns the list of out_pse paths it was called with."""
+    from autopath.metadynamics.learned import pipeline
+    calls = []
+    monkeypatch.setattr(pipeline, "write_feature_pse", lambda npz, structs, out, **k: calls.append(out) or out)
+    return calls
+
+
 def _run_learn(monkeypatch, tmp_path, data, funnel=FUNNEL, **kw):
     from autopath.metadynamics.learned import pipeline
+    calls = _stub_viewer(monkeypatch)
     V, frames, lab, z, diag = data
     pulls = [pull_files(tmp_path)]
     (tmp_path / "t.pdb").write_text("pdb")
@@ -147,6 +156,7 @@ def _run_learn(monkeypatch, tmp_path, data, funnel=FUNNEL, **kw):
     path = pipeline.learn_cv(str(tmp_path / "t.pdb"), str(tmp_path / "l.sdf"), [0, 1], [2, 3, 4],
                              str(tmp_path), out, hidden=False, classes="rupture", funnel=funnel,
                              masses=[12.0] * 5, mosaic_resolution=0.5, feature_set="contacts", **kw)
+    assert calls == [os.path.join(out, "features.pse")]
     return path, out
 
 

@@ -28,9 +28,11 @@ def _coords():
     return np.array(prot + lig + wat)
 
 
-def _write_pdb(path, X, shift=None):
+def _write_pdb(path, X, shift=None, resn="UNK", cryst=None):
     X = X * 10.0 if shift is None else X * 10.0 @ shift[0].T + shift[1]
     lines, serial = [], 1
+    if cryst:
+        lines.append(f"CRYST1{cryst:9.3f}{cryst:9.3f}{cryst:9.3f}  90.00  90.00  90.00 P 1           1")
     for r in range(6):
         for k, nm in enumerate(("N", "CA", "C", "O")):
             x = X[4 * r + k]
@@ -38,7 +40,7 @@ def _write_pdb(path, X, shift=None):
             serial += 1
     for k, nm in enumerate(("C1", "C2")):
         x = X[24 + k]
-        lines.append(f"HETATM{serial:5d} {nm:<4s} UNK L{7:4d}    {x[0]:8.3f}{x[1]:8.3f}{x[2]:8.3f}  1.00  0.00           C")
+        lines.append(f"HETATM{serial:5d} {nm:<4s} {resn:<3s} L{7:4d}    {x[0]:8.3f}{x[1]:8.3f}{x[2]:8.3f}  1.00  0.00           C")
         serial += 1
     for w in range(5):
         for k, nm in enumerate(("O", "H1", "H2")):
@@ -159,3 +161,42 @@ def test_atom_count_mismatch_raises(toy):
     open(tmp / "short.pdb", "w").write("\n".join(lines[:-4]) + "\nEND\n")
     with pytest.raises(ValueError, match="atom count"):
         write_feature_pse(npz, {"bound": structs["bound"], "bad": str(tmp / "short.pdb")}, str(tmp / "x.pse"))
+
+
+def _across_boundary(tmp):
+    X = _coords()
+    X[WATERS[2]] = [4.9, 0.0, 0.0]                  # 0.1 nm from the ligand through the periodic image
+    return X
+
+
+def test_water_selection_uses_the_cryst1_minimum_image(toy):
+    npz, structs, tmp = toy
+    X = _across_boundary(tmp)
+    _write_pdb(tmp / "box.pdb", X, cryst=50.0)
+    _write_pdb(tmp / "nobox.pdb", X)
+    for name, want in (("box", 3), ("nobox", 2)):
+        pm = _open(write_feature_pse(npz, {"bound": str(tmp / f"{name}.pdb")}, str(tmp / f"{name}.pse")))
+        try:
+            assert pm.cmd.count_atoms("waters_bound") == want
+        finally:
+            pm.stop()
+
+
+def test_explicit_ligand_idx_needs_no_unk_residue(toy):
+    npz, structs, tmp = toy
+    X = _coords()
+    _write_pdb(tmp / "lig.pdb", X, resn="LIG")
+    _write_pdb(tmp / "lig2.pdb", X, resn="LIG")
+    npz2 = str(tmp / "nowater.npz")
+    d = dict(np.load(npz))
+    d["features_json"] = np.array([x for x, nm in zip(d["features_json"], d["names"]) if nm.startswith("F1")])
+    d.update(kept=np.array([0]), sw_weights=np.array([0.5]), names=np.array(["F1_p"]))
+    np.savez(npz2, **d)
+    s = {"bound": str(tmp / "lig.pdb"), "m2": str(tmp / "lig2.pdb")}
+    with pytest.raises(ValueError, match="not supported"):
+        write_feature_pse(npz2, s, str(tmp / "a.pse"))
+    pm = _open(write_feature_pse(npz2, s, str(tmp / "b.pse"), ligand_idx=LIG))
+    try:
+        assert "state_bound" in pm.cmd.get_names("objects")
+    finally:
+        pm.stop()

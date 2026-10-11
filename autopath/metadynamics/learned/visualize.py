@@ -3,6 +3,7 @@ import re
 from collections import OrderedDict
 
 import numpy as np
+from MDAnalysis.lib.distances import distance_array
 
 from .features import CN_DMAX, CN_R0, features_from_dict
 
@@ -124,7 +125,7 @@ def _funnel_cgo_obj(cmd, funnel, X, ref):
     cmd.load_cgo(cgo, "funnel")
 
 
-def write_feature_pse(learned_npz, structures, out_pse, funnel=None, waters=True, water_cut_nm=None) -> str:
+def write_feature_pse(learned_npz, structures, out_pse, funnel=None, waters=True, water_cut_nm=None, ligand_idx=None) -> str:
     """Write a PyMOL session of the kept learned-CV features.
 
     Parameters
@@ -141,7 +142,9 @@ def write_feature_pse(learned_npz, structures, out_pse, funnel=None, waters=True
     waters : bool
         Add per-structure water oxygens within ``water_cut_nm`` of any kept cn centre.
     water_cut_nm : float, optional
-        Water cutoff (nm), default CN_DMAX; no periodic imaging is applied.
+        Water cutoff (nm), default CN_DMAX; minimum image with the reference CRYST1 box when present.
+    ligand_idx : sequence of int, optional
+        Ligand atom indices; guessed (residues of the kept W1 centres, else resname UNK) when None.
 
     Returns
     -------
@@ -182,10 +185,13 @@ def write_feature_pse(learned_npz, structures, out_pse, funnel=None, waters=True
         X = cmd.get_coords(ref)
 
         # ligand: residues of the kept W1 centres, else resname UNK
-        lig_ids = sorted({i for f in kf if f.family == "W1" for i in _centres(f)})
+        if ligand_idx is not None:
+            lig_ids = sorted({int(i) for i in ligand_idx})
+        else:
+            lig_ids = sorted({i for f in kf if f.family == "W1" for i in _centres(f)})
         lig_sel = f"byres {_sel(lig_ids, ref)}" if lig_ids else f"({ref} and resname UNK)"
         if not cmd.count_atoms(lig_sel):
-            raise ValueError("no ligand found in the reference structure")
+            raise ValueError("ligand not supported: no ligand_idx, no W1 centres and no UNK residue in the reference")
         pocket = f"({ref} and name CA and polymer.protein and (({lig_sel}) around {POCKET_CA_NM * 10}))"
         if len(names) > 1:
             rank_ids = []
@@ -232,6 +238,8 @@ def write_feature_pse(learned_npz, structures, out_pse, funnel=None, waters=True
             cmd.group("shells", "shell_cgo")
             cmd.disable("shells shell_cgo")
 
+        sym = cmd.get_symmetry(ref)
+        box = np.asarray(sym[:6], float) if sym and sym[0] > 1.0 else None
         wat = []
         if waters and centres:
             for n in names:
@@ -241,7 +249,7 @@ def write_feature_pse(learned_npz, structures, out_pse, funnel=None, waters=True
                 Y = cmd.get_coords(o)
                 ids = np.asarray(ids, int)
                 if len(ids):
-                    dist = np.linalg.norm(Y[ids][:, None] - Y[centres][None], axis=-1).min(1)
+                    dist = distance_array(Y[ids], Y[centres], box=box).min(1)
                     ids = ids[dist <= cut * 10.0]
                 wo = f"waters_{_safe(n)}"
                 if len(ids):

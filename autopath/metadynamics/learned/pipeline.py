@@ -397,7 +397,7 @@ def _learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_di
     shared = dict(out_dir=out_dir, feats=feats, names=names, kept=kept, mu=mu, sd=sd, sel=sel, res=res,
                   cv_tab=cv_tab, frames=frames, labels=labels, order=order, n_pulls=len(pulls),
                   feature_set=feature_set, extra=extra, system=system, fams=fams,
-                  structures=_viewer_structures(topology_pdb, milestone_pdbs))
+                  structures=_viewer_structures(topology_pdb, milestone_pdbs), ligand_idx=ligand_idx)
     if classes == "rupture":
         analysis = analysis_dir or os.path.join(os.path.dirname(os.path.normpath(traj_dir)), ANALYSIS_DIRNAME)
         return _finish_rupture(shared, Z, z, diag, reducer, funnel, analysis, temperature)
@@ -467,7 +467,7 @@ def _write_learned(shared, cv, Wt, Wl, extra):
              **features_to_dict(sh["feats"]), **extra)
     _report(os.path.join(sh["out_dir"], REPORT_NAME), frames, labels, cv, names[kept], Wt, Wl, order,
             sh["cv_tab"], sh["res"])
-    write_feature_pse(out, sh["structures"], os.path.join(sh["out_dir"], PSE_NAME))
+    write_feature_pse(out, sh["structures"], os.path.join(sh["out_dir"], PSE_NAME), ligand_idx=sh["ligand_idx"])
     for c in order:
         r = frames.r.values[labels == c]
         logger.info("learned CV class %s: %d frames, r %.2f-%.2f nm", c, len(r),
