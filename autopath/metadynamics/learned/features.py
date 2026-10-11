@@ -9,7 +9,7 @@ from MDAnalysis.lib.distances import capped_distance
 from MDAnalysis.lib.mdamath import triclinic_box
 
 KINDS = ("pair", "contacts", "centroid_distance", "centroid_count", "cos", "cn")
-CN_R0, CN_DMAX, CN_NM, CN_DELTA = 0.35, 1.2, (6, 10), 1e-3
+CN_R0, CN_DMAX, CN_NM, CN_DELTA = 0.35, 1.0, (6, 10), 1e-3
 CONTACT_CUTOFF_FACTOR = 4.0
 CONTACT_SWITCH_FACTOR = 3.5
 COUNT_CUTOFF_FACTOR = 2.5

@@ -108,7 +108,7 @@ def test_cn_forces_match_finite_differences():
 
 
 def test_cn_expression_matches_cn_switch_piecewise():
-    r = np.array([0.1, 0.3, 0.35 * (1 - 5e-4), 0.35, 0.35 * (1 + 9e-4), 0.35 * (1 + 2e-3), 0.8, 1.1999, 1.2, 1.5])
+    r = np.array([0.1, 0.3, 0.35 * (1 - 5e-4), 0.35, 0.35 * (1 + 9e-4), 0.35 * (1 + 2e-3), 0.8, 0.9999, 1.0, 1.5])
     s = mm.System()
     s.addParticle(1.0)
     s.addParticle(1.0)
@@ -131,7 +131,7 @@ def test_cn_exclude_inconsistent_with_the_system_is_not_supported():
 
 
 def test_cn_cutoff_too_large_for_the_box_is_not_supported():
-    small = np.diag([2.4, 2.4, 2.4])
+    small = np.diag([2.1, 2.1, 2.1])
     with pytest.raises(ValueError, match="not supported"):
         fused_sw_forces(_feats(), np.ones(2), np.zeros(2), np.ones(2), _system(small))
     with pytest.raises(ValueError, match="not supported"):

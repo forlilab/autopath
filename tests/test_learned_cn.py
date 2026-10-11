@@ -17,7 +17,7 @@ def _ref_c(d=CN_DMAX, r0=CN_R0):
     return (1 - x ** 6) / (1 - x ** 10)
 
 
-@pytest.mark.parametrize("r", [0.1, 0.3, 0.34, 0.36, 0.5, 1.0, 1.19])
+@pytest.mark.parametrize("r", [0.1, 0.3, 0.34, 0.36, 0.5, 0.9, 0.99])
 def test_cn_switch_matches_the_shifted_rational(r):
     assert cn_switch(np.array([r]))[0] == pytest.approx(float(_ref(np.array([r]))[0]), rel=1e-12)
 
