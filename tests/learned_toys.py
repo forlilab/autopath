@@ -79,8 +79,10 @@ def s_plain(X):
     return float(np.sum(W * (evaluate(FEATS, X[None])[0] - MU) / SD))
 
 
-def write_npz_r2(path, residualised=True):
+def write_npz_r2(path, residualised=True, frame=None):
     c = s_ref(X0) if residualised else s_plain(X0)
+    extra = {} if frame is None else dict(funnel_frame_b=np.array(frame["b"]), funnel_frame_c=np.array(frame["c"]),
+                                         funnel_axis_coeffs=np.array(frame["coeffs"], float))
     np.savez(path, kept=np.arange(3), weights=np.c_[W, -W], mu=MU, sd=SD, component=1, sw_weights=W,
              residualised=residualised, z_min=ZMIN if residualised else np.nan,
              z_max=ZMAX if residualised else np.nan,
@@ -88,7 +90,7 @@ def write_npz_r2(path, residualised=True):
              funnel_host=np.array(HOST), funnel_guest=np.array(GUEST), funnel_axis=AXIS / np.linalg.norm(AXIS),
              sw_lo=c - 2.0, sw_hi=c + 2.0, sw_grid_min=c - 2.6, sw_grid_max=c + 2.6, sw_hill_width=0.2,
              basin_B=[Z0 - 0.3, c - 1.0], basin_U=[Z0 + 0.3, c + 1.0],
-             **features_to_dict(FEATS))
+             **extra, **features_to_dict(FEATS))
     return path
 
 

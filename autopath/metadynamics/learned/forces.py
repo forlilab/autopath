@@ -207,19 +207,33 @@ def composite_cv(features, weights, mu, sd, system, key=None):
     return LinearComposite(forces, weights, mu, sd, key=key)
 
 
-def funnel_z_force(host, guest, axis, name="funnel_z_lc"):
-    """Unclamped funnel z (nm): n . (COM_guest - COM_host), mass-weighted, literal axis.
+def funnel_z_force(host, guest, axis, name="funnel_z_lc", frame=None):
+    """Unclamped funnel z (nm): n . (COM_guest - COM_host), mass-weighted.
 
     Parameters
     ----------
     host, guest : atom index lists
-    axis : (3,) array, normalised here
+    axis : (3,) array, normalised here; the literal axis when ``frame`` is None
+    frame : protein frame from ``Funnel.funnel_frame``; n is rebuilt from it
     """
+    groups = [[int(i) for i in host], [int(i) for i in guest]]
+    if frame is not None:
+        from ..Funnel import _frame_definitions
+        expr = "r_z;" + _frame_definitions(1, 2, 1, 3, 4, frame["coeffs"], radial=False)
+        groups += [[int(i) for i in frame["b"]], [int(i) for i in frame["c"]]]
+        return cvpack.CentroidFunction(expr, unit.nanometer, groups, pbc=False, weighByMass=True, name=name)
     n = np.asarray(axis, dtype=float)
     n = n / np.linalg.norm(n)
     expr = " + ".join(f"({float(c)!r})*({x}2-{x}1)" for c, x in zip(n, "xyz"))
-    return cvpack.CentroidFunction(expr, unit.nanometer, [[int(i) for i in host], [int(i) for i in guest]],
-                                   pbc=False, weighByMass=True, name=name)
+    return cvpack.CentroidFunction(expr, unit.nanometer, groups, pbc=False, weighByMass=True, name=name)
+
+
+def _npz_frame(d):
+    """Protein frame stored in a learned_cv npz, or None."""
+    if "funnel_axis_coeffs" not in d.files:
+        return None
+    return {"b": [int(i) for i in d["funnel_frame_b"]], "c": [int(i) for i in d["funnel_frame_c"]],
+            "coeffs": np.array(d["funnel_axis_coeffs"], dtype=float)}
 
 
 def is_rupture_cv(npz_path) -> bool:
@@ -234,14 +248,20 @@ def check_funnel_match(npz_path, funnel):
     Parameters
     ----------
     npz_path : learned_cv.npz from learn_cv
-    funnel : funnel_params dict (``host_index``, ``guest_index``, ``unbinding_axis``)
+    funnel : funnel_params dict (``host_index``, ``guest_index``, ``unbinding_axis``; protein frame if any)
     """
+    from ..Funnel import funnel_frame
     with np.load(npz_path, allow_pickle=False) as d:
         host, guest, axis = d["funnel_host"], d["funnel_guest"], np.asarray(d["funnel_axis"], float)
+        frame = _npz_frame(d)
     f_axis = np.asarray(funnel["unbinding_axis"], float)
+    f_frame = funnel_frame(funnel)
     same = (list(host) == [int(i) for i in funnel["host_index"]]
             and list(guest) == [int(i) for i in funnel["guest_index"]]
-            and np.allclose(axis / np.linalg.norm(axis), f_axis / np.linalg.norm(f_axis)))
+            and np.allclose(axis / np.linalg.norm(axis), f_axis / np.linalg.norm(f_axis))
+            and (frame is None) == (f_frame is None)
+            and (frame is None or (frame["b"] == f_frame["b"] and frame["c"] == f_frame["c"]
+                                   and np.allclose(frame["coeffs"], f_frame["coeffs"]))))
     if not same:
         raise ValueError("learned CV funnel differs from --funnel-from: not supported")
 
@@ -263,7 +283,7 @@ def _sw_spec(d, system, kept, n_plain_cvs=0, fused=True):
     resid = bool(d["residualised"])
     if resid:
         host, guest = [int(i) for i in d["funnel_host"]], [int(i) for i in d["funnel_guest"]]
-        axis = np.array(d["funnel_axis"], dtype=float)
+        axis, frame = np.array(d["funnel_axis"], dtype=float), _npz_frame(d)
         z_min, z_max, tables = float(d["z_min"]), float(d["z_max"]), np.array(d["z_tables"], dtype=float)
 
     def factory(pos, n_atoms, top):
@@ -272,7 +292,7 @@ def _sw_spec(d, system, kept, n_plain_cvs=0, fused=True):
         forces = [feature_cv(f, system, f"f{k}") for k, f in enumerate(kept)]
         if not resid:
             return LinearComposite(forces, w, mu, sd, clamp=edges)
-        return ResidualComposite(forces, w, mu, sd, z_force=funnel_z_force(host, guest, axis),
+        return ResidualComposite(forces, w, mu, sd, z_force=funnel_z_force(host, guest, axis, frame=frame),
                                  z_min=z_min, z_max=z_max, tables=tables, clamp=edges)
 
     return [CVSpec(cv=None, grid_min=lo, grid_max=hi, hill_width=hw,

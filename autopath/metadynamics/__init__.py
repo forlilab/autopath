@@ -62,6 +62,9 @@ from .Funnel import (
     com_distance_at_z,
     z_max_for_bulk,
     write_funnel_pymol,
+    upgrade_funnel_params,
+    funnel_frame,
+    funnel_axis_at,
 )
 
 __all__ = [
@@ -104,4 +107,7 @@ __all__ = [
     "com_distance_at_z",
     "z_max_for_bulk",
     "write_funnel_pymol",
+    "upgrade_funnel_params",
+    "funnel_frame",
+    "funnel_axis_at",
 ]

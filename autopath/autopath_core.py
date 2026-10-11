@@ -44,6 +44,9 @@ from autopath.metadynamics import (
     com_distance_at_z,
     save_funnel_params,
     write_funnel_pymol,
+    upgrade_funnel_params,
+    funnel_frame,
+    funnel_axis_at,
 )
 from autopath.pulling import SMDData, SMDAnalysis
 from autopath.pulling.Convergence import (tail_converged, validate_autostop_options,
@@ -61,7 +64,8 @@ def funnel_z_monitor(funnel_force, funnel_params, mMD_cv):
         return None
     return {"funnel_z": funnel_z_cv(
         funnel_params["host_index"], funnel_params["guest_index"],
-        funnel_params["unbinding_axis"], grid_min=-10.0, grid_max=10.0)}
+        funnel_params["unbinding_axis"], grid_min=-10.0, grid_max=10.0,
+        frame=funnel_frame(funnel_params))}
 
 
 def learned_cv_atom_sets(topology_pdb, ligand_selection, positions=None):
@@ -1436,6 +1440,13 @@ class AutoPath:
                                 verbose=True,
                             )
 
+                            # protein frame from the first aligned sMD frame, the orientation the axis was fitted in
+                            universe.trajectory[0]
+                            _all_mass = np.array([
+                                base_system.getParticleMass(i).value_in_unit(openmmunit.dalton)
+                                for i in range(base_system.getNumParticles())])
+                            funnel_params = upgrade_funnel_params(
+                                funnel_params, universe.atoms.positions / 10.0, topology, _all_mass)
                             _zmax = float(funnel_params["z_max"].value_in_unit(
                                 openmmunit.angstrom))
                             _zcc = float(funnel_params["z_cc"].value_in_unit(
@@ -1445,7 +1456,8 @@ class AutoPath:
                                 _target_nm = com_distance_at_z(
                                     read_positions(path_milestones[-1]) * 10.0,
                                     ligand_atoms_indices, pocket_atom_indices,
-                                    funnel_params["unbinding_axis"], _zmax)
+                                    funnel_axis_at(funnel_params, read_positions(path_milestones[-1]),
+                                                   _all_mass), _zmax)
                                 _pos = read_positions(path_milestones[-1])
                                 _mass = lambda idx: np.array([
                                     base_system.getParticleMass(int(i)).value_in_unit(openmmunit.dalton)
@@ -1481,9 +1493,8 @@ class AutoPath:
                                     # Wall and CV range are independent caps; compare them in
                                     # funnel z (s=1 must lie in the cylinder, not past the wall).
                                     try:
-                                        _ax = np.asarray(funnel_params["unbinding_axis"],
-                                                         dtype=float)
-                                        _ax = _ax / np.linalg.norm(_ax)
+                                        _ax = funnel_axis_at(funnel_params, read_positions(path_milestones[0]),
+                                                             _all_mass)
                                         _p0 = read_positions(path_milestones[0]) * 10.0
                                         _z_first = float(np.dot(
                                             _p0[ligand_atoms_indices].mean(axis=0)
@@ -1525,16 +1536,17 @@ class AutoPath:
                                     hill_width=self.mMD_hill_width,
                                     grid_points=int(round(124 * (_zmax - _zlo) / _zmax)) + 1,
                                     bounds=funnel_z_bounds_nm(funnel_params),
+                                    frame=funnel_frame(funnel_params),
                                 )
                                 _pos0 = read_positions(path_milestones[0]) * 10.0
                                 _hm = [int(i) for i in funnel_params["host_index"]]
                                 _gm = [int(i) for i in funnel_params["guest_index"]]
                                 _w = lambda idx: np.array([
                                     base_system.getParticleMass(i).value_in_unit(openmmunit.dalton) for i in idx])
-                                _ax0 = np.asarray(funnel_params["unbinding_axis"], dtype=float)
+                                _ax0 = funnel_axis_at(funnel_params, _pos0 / 10.0, _all_mass)
                                 _z_bound = float(np.dot(
                                     np.average(_pos0[_gm], axis=0, weights=_w(_gm))
-                                    - np.average(_pos0[_hm], axis=0, weights=_w(_hm)), _ax0 / np.linalg.norm(_ax0)))
+                                    - np.average(_pos0[_hm], axis=0, weights=_w(_hm)), _ax0))
                                 logger.info(
                                     "Biasing the funnel axis coordinate z on [%.2f, %.2f] A (lower wall at "
                                     "%.2f A); bound milestone at z=%.2f A.", _zlo, _zmax,

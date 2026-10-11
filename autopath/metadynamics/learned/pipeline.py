@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
-from ..Funnel import funnel_z_ang, load_funnel_params
+from ..Funnel import funnel_frame, funnel_z_ang, load_funnel_params
 from .classes import (R_ORDER, RUPTURE_ORDER, distance_features, find_milestones, heavy_ligand_idx,
                       milestone_labels, rupture_labels)
 from .define import define_features
@@ -103,14 +103,20 @@ def _cache_key(pulls, stride, direction, topology_pdb, ligand_sdf, ligand_idx, p
                exclude_families=(), funnel=None, masses=None) -> str:
     """JSON of everything the extracted features depend on (inputs, contents, feature code).
 
-    funnel is the geometry from ``_funnel_geometry``; masses are hashed over its host and guest atoms.
+    funnel is the geometry from ``_funnel_geometry``; masses are hashed over its host, guest and frame atoms.
     """
     fz = None
     if funnel is not None:
         idx = list(funnel["host"]) + list(funnel["guest"])
+        fr = funnel.get("frame")
+        if fr is not None:
+            idx += list(fr["b"]) + list(fr["c"])
         fz = {"host": sorted(funnel["host"]), "guest": sorted(funnel["guest"]),
               "axis": [round(float(a), 9) for a in funnel["axis"]],
               "masses_sha": hashlib.sha256(np.asarray(masses, float)[idx].tobytes()).hexdigest()}
+        if fr is not None:
+            fz["frame"] = {"b": list(fr["b"]), "c": list(fr["c"]),
+                           "coeffs": [round(float(a), 9) for a in fr["coeffs"]]}
     return json.dumps({
         "pulls": sorted((d, c, os.path.getmtime(d), os.path.getmtime(c)) for d, c in pulls),
         "stride": int(stride), "direction": direction,
@@ -136,17 +142,19 @@ def _cache_valid(npz_path, key) -> bool:
 
 
 def _funnel_geometry(funnel):
-    """{"host", "guest", "axis" (unit)} from a funnel_params dict or its saved .npz path."""
+    """{"host", "guest", "axis" (unit), "frame" (protein frame or None)} from a funnel_params dict
+    or its saved .npz path."""
     if isinstance(funnel, (str, os.PathLike)):
         funnel = load_funnel_params(str(funnel))
     axis = np.asarray(funnel["unbinding_axis"], float)
     return {"host": [int(i) for i in funnel["host_index"]], "guest": [int(i) for i in funnel["guest_index"]],
-            "axis": axis / np.linalg.norm(axis)}
+            "axis": axis / np.linalg.norm(axis), "frame": funnel_frame(funnel)}
 
 
 def _funnel_z_nm(X, funnel, masses):
-    """Funnel z (nm) per frame of X (n, N, 3) nm; X are the aligned frames the funnel was fitted on."""
-    return np.array([funnel_z_ang(x, funnel["host"], funnel["guest"], masses, funnel["axis"]) for x in X]) / 10.0
+    """Funnel z (nm) per frame of X (n, N, 3) nm, as the run-time funnel z computes it."""
+    return np.array([funnel_z_ang(x, funnel["host"], funnel["guest"], masses, funnel["axis"],
+                                  frame=funnel["frame"]) for x in X]) / 10.0
 
 
 def learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_dir,
@@ -508,6 +516,9 @@ def _finish_rupture(shared, Z, z, diag, reducer, funnel, analysis_dir, temperatu
         z_min=fit["z_min"], z_max=fit["z_max"], z_tables=fit["tables"],
         funnel_host=np.array(funnel["host"]), funnel_guest=np.array(funnel["guest"]),
         funnel_axis=np.asarray(funnel["axis"], float),
+        **({} if funnel["frame"] is None else dict(
+            funnel_frame_b=np.array(funnel["frame"]["b"]), funnel_frame_c=np.array(funnel["frame"]["c"]),
+            funnel_axis_coeffs=np.asarray(funnel["frame"]["coeffs"], float))),
         sw_lo=sw_lo, sw_hi=sw_hi, sw_grid_min=sw_lo - 3 * hw, sw_grid_max=sw_hi + 3 * hw, sw_hill_width=hw,
         basin_B=np.array(basin[order[0]]), basin_U=np.array(basin[order[2]]), cv_acc=acc,
         n_pulls_labelled=rep["n_pulls_labelled"], class_order=np.array(order)))

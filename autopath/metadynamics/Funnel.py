@@ -128,15 +128,184 @@ def funnel_z_bounds_nm(params) -> tuple:
     return (-np.inf, float(params["z_max"].value_in_unit(openmmunit.nanometer)))
 
 
-def funnel_z_ang(positions_nm, host_idx, guest_idx, masses, axis) -> float:
-    """Guest position on the funnel axis (Å): n·(COM_guest − COM_host), mass-weighted."""
+def funnel_z_ang(positions_nm, host_idx, guest_idx, masses, axis, frame=None) -> float:
+    """Guest position on the funnel axis (Å): n·(COM_guest − COM_host), mass-weighted.
+
+    ``frame`` (from :func:`funnel_frame`) rebuilds n from the protein frame at these positions;
+    None uses the literal ``axis``.
+    """
     pos = np.asarray(positions_nm, dtype=float)
     m = np.asarray(masses, dtype=float)
-    n = np.asarray(axis, dtype=float)
-    n = n / np.linalg.norm(n)
     host = np.average(pos[host_idx], axis=0, weights=m[host_idx])
     guest = np.average(pos[guest_idx], axis=0, weights=m[guest_idx])
+    if frame is None:
+        n = np.asarray(axis, dtype=float)
+        n = n / np.linalg.norm(n)
+    else:
+        n = _frame_axis(pos, m, host_idx, frame)
     return float(np.dot(guest - host, n)) * 10.0
+
+
+# Protein frame: CA atoms farther than this from the host COM form the two frame groups.
+FRAME_MIN_DIST_NM = 1.2
+FRAME_MIN_ATOMS = 20
+FRAME_ANGLE_LIMITS_DEG = (30.0, 150.0)
+_lab_frame_logged = False
+
+
+def frame_basis(a, b, c) -> np.ndarray:
+    """Orthonormal frame (rows e1, e2, e3) from centroids a (origin), b and c.
+
+    e1 = (b − a)/|b − a|; e2 = the part of (c − a) normal to e1, normalised; e3 = e1 × e2.
+    """
+    a, b, c = (np.asarray(x, dtype=float) for x in (a, b, c))
+    e1 = (b - a) / np.linalg.norm(b - a)
+    v = c - a
+    w = v - np.dot(v, e1) * e1
+    e2 = w / np.linalg.norm(w)
+    return np.array([e1, e2, np.cross(e1, e2)])
+
+
+def _frame_axis(pos, masses, host_idx, frame) -> np.ndarray:
+    cen = lambda idx: np.average(pos[list(idx)], axis=0, weights=masses[list(idx)])
+    return np.asarray(frame["coeffs"], float) @ frame_basis(cen(host_idx), cen(frame["b"]), cen(frame["c"]))
+
+
+def funnel_frame(params):
+    """{"b", "c", "coeffs"} of a protein-frame funnel, or None for a lab-frame one.
+
+    Lab-frame params (no ``axis_coeffs``) keep the constant ``unbinding_axis``.
+    """
+    global _lab_frame_logged
+    if "axis_coeffs" not in params:
+        if not _lab_frame_logged:
+            logger.info("funnel params have no protein frame: the funnel axis is fixed in the lab frame")
+            _lab_frame_logged = True
+        return None
+    return {"b": [int(i) for i in params["frame_b_index"]], "c": [int(i) for i in params["frame_c_index"]],
+            "coeffs": np.asarray(params["axis_coeffs"], dtype=float)}
+
+
+def funnel_axis_at(params, positions_nm, masses) -> np.ndarray:
+    """Unit funnel axis at these positions (nm): rebuilt from the protein frame, or the lab axis."""
+    frame = funnel_frame(params)
+    if frame is None:
+        n = np.asarray(params["unbinding_axis"], dtype=float)
+        return n / np.linalg.norm(n)
+    return _frame_axis(np.asarray(positions_nm, float), np.asarray(masses, float),
+                       [int(i) for i in params["host_index"]], frame)
+
+
+def _molecules(topology):
+    """Atom index -> connected-component id over the topology bonds."""
+    parent = list(range(topology.getNumAtoms()))
+
+    def root(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    for a1, a2 in topology.bonds():
+        parent[root(a1.index)] = root(a2.index)
+    return np.array([root(i) for i in range(len(parent))])
+
+
+def select_frame_groups(positions_nm, topology, host_index, masses):
+    """Frame groups (B, C): protein CA atoms beyond ``FRAME_MIN_DIST_NM`` of the host COM, split by 2-means.
+
+    Candidates are the CAs (atoms named CA in residues with N and C) of the host's molecule.
+    B is the cluster holding the lowest atom index.
+
+    Raises
+    ------
+    ValueError
+        Host atoms in more than one molecule; a group under ``FRAME_MIN_ATOMS`` atoms; or an angle
+        between (B − A) and (C − A) outside ``FRAME_ANGLE_LIMITS_DEG``.
+    """
+    from sklearn.cluster import KMeans
+    pos = np.asarray(positions_nm, dtype=float)
+    m = np.asarray(masses, dtype=float)
+    host = [int(i) for i in host_index]
+    mol = _molecules(topology)
+    if len(set(mol[host])) != 1:
+        raise ValueError("protein-frame funnel: host atoms span more than one molecule: not supported")
+    ca = [a.index for r in topology.residues() if {"N", "CA", "C"} <= {x.name for x in r.atoms()}
+          for a in r.atoms() if a.name == "CA" and mol[a.index] == mol[host[0]]]
+    hc = np.average(pos[host], axis=0, weights=m[host])
+    ca = np.array([i for i in ca if np.linalg.norm(pos[i] - hc) > FRAME_MIN_DIST_NM], dtype=int)
+    if len(ca) < 2 * FRAME_MIN_ATOMS:
+        raise ValueError(f"protein-frame funnel: {len(ca)} CA atoms beyond {FRAME_MIN_DIST_NM} nm of the host, "
+                         f"fewer than {FRAME_MIN_ATOMS} per frame group")
+    lab = KMeans(n_clusters=2, n_init=10, random_state=0).fit_predict(pos[ca])
+    groups = sorted(([int(i) for i in ca[lab == k]] for k in (0, 1)), key=min)
+    b, c = groups
+    if min(len(b), len(c)) < FRAME_MIN_ATOMS:
+        raise ValueError(f"protein-frame funnel: frame groups of {len(b)} and {len(c)} atoms, "
+                         f"fewer than {FRAME_MIN_ATOMS} in one")
+    u = np.average(pos[b], axis=0, weights=m[b]) - hc
+    v = np.average(pos[c], axis=0, weights=m[c]) - hc
+    ang = np.degrees(np.arccos(np.clip(u @ v / np.linalg.norm(u) / np.linalg.norm(v), -1.0, 1.0)))
+    lo, hi = FRAME_ANGLE_LIMITS_DEG
+    if not lo <= ang <= hi:
+        raise ValueError(f"protein-frame funnel: angle {ang:.1f} deg between the frame groups seen from the "
+                         f"host is outside [{lo:.0f}, {hi:.0f}] deg (ill-conditioned frame)")
+    return b, c
+
+
+def upgrade_funnel_params(params, reference_positions, topology, masses) -> Dict:
+    """Copy of lab-frame funnel params with a protein frame (``frame_b_index``, ``frame_c_index``,
+    ``axis_coeffs``).
+
+    Parameters
+    ----------
+    params : funnel_params dict without a frame
+    reference_positions : (N, 3) nm, in the orientation ``unbinding_axis`` was computed in
+    topology : openmm.app.Topology of the system
+    masses : (N,) particle masses (Da), the system's
+
+    Returns
+    -------
+    dict
+        ``params`` plus the frame groups and the axis coefficients (n·e1, n·e2, n·e3) at the reference.
+    """
+    if "axis_coeffs" in params:
+        raise ValueError("funnel params already have a protein frame")
+    pos = np.asarray(reference_positions, dtype=float)
+    m = np.asarray(masses, dtype=float)
+    host = [int(i) for i in params["host_index"]]
+    b, c = select_frame_groups(pos, topology, host, m)
+    cen = lambda idx: np.average(pos[idx], axis=0, weights=m[idx])
+    n = np.asarray(params["unbinding_axis"], dtype=float)
+    n = n / np.linalg.norm(n)
+    e = frame_basis(cen(host), cen(b), cen(c))
+    out = dict(params, frame_b_index=b, frame_c_index=c, axis_coeffs=e @ n)
+    ang = np.degrees(np.arccos(np.clip(e[0] @ (cen(c) - cen(host)) / np.linalg.norm(cen(c) - cen(host)), -1, 1)))
+    logger.info("Protein-frame funnel: groups of %d and %d CA atoms, %.1f deg apart seen from the host; "
+                "axis coefficients %s", len(b), len(c), ang, np.round(e @ n, 4).tolist())
+    return out
+
+
+def _frame_definitions(h: int, g: int, o: int, b: int, c: int, coeffs, radial: bool = True) -> str:
+    """Expression definitions of r_z (and cx, cy, cz = n × r if ``radial``) in the protein frame.
+
+    r = centroid g − centroid h; the frame is built from centroid groups o (origin), b and c,
+    and r is expanded in it (s1, s2, s3), so n is never formed: r_z = a·s, n × r = a × s.
+    """
+    a1, a2, a3 = (f"({float(x)!r})" for x in coeffs)
+    d = [f"r_z = {a1}*pf_s1 + {a2}*pf_s2 + {a3}*pf_s3"]
+    if radial:
+        d += [f"cx = {a2}*pf_s3 - {a3}*pf_s2", f"cy = {a3}*pf_s1 - {a1}*pf_s3", f"cz = {a1}*pf_s2 - {a2}*pf_s1"]
+    d += ["pf_s1 = pf_ur*pf_iu", "pf_s2 = (pf_vr - pf_p*pf_ur)*pf_iw", "pf_s3 = pf_t*pf_iu*pf_iw",
+          "pf_iw = 1/sqrt(pf_vv - pf_p*pf_uv)", "pf_p = pf_uv/pf_uu", "pf_iu = 1/sqrt(pf_uu)",
+          "pf_t = pf_rx*(pf_uy*pf_vz - pf_uz*pf_vy) + pf_ry*(pf_uz*pf_vx - pf_ux*pf_vz)"
+          " + pf_rz*(pf_ux*pf_vy - pf_uy*pf_vx)",
+          "pf_ur = pf_ux*pf_rx + pf_uy*pf_ry + pf_uz*pf_rz", "pf_vr = pf_vx*pf_rx + pf_vy*pf_ry + pf_vz*pf_rz",
+          "pf_uu = pf_ux^2 + pf_uy^2 + pf_uz^2", "pf_vv = pf_vx^2 + pf_vy^2 + pf_vz^2",
+          "pf_uv = pf_ux*pf_vx + pf_uy*pf_vy + pf_uz*pf_vz"]
+    d += [f"pf_r{k} = {k}{g} - {k}{h}" for k in "xyz"]
+    d += [f"pf_u{k} = {k}{b} - {k}{o}" for k in "xyz"]
+    d += [f"pf_v{k} = {k}{c} - {k}{o}" for k in "xyz"]
+    return ";".join(d)
 
 
 
@@ -504,6 +673,10 @@ def save_funnel_params(params_dict: Dict, filepath: str) -> None:
         force_group=np.array(params_dict["force_group"]),
         trajectory_length=np.array(params_dict["trajectory_length"]),
         force_name=np.array(params_dict.get("force_name", "k_funnel_trajectory")),
+        **({} if "axis_coeffs" not in params_dict else dict(
+            frame_b_index=np.array(params_dict["frame_b_index"]),
+            frame_c_index=np.array(params_dict["frame_c_index"]),
+            axis_coeffs=np.array(params_dict["axis_coeffs"], dtype=float))),
     )
     logger.info(f"Funnel parameters saved to {filepath}.npz")
 
@@ -524,6 +697,10 @@ def load_funnel_params(filepath: str) -> Dict:
     # older files have no k_z; the force then falls back to k_xy
     extra = ({"k_z": float(data["k_z_kcal_per_mol_per_ang2"]) * kcal_a2}
              if "k_z_kcal_per_mol_per_ang2" in data.files else {})
+    if "axis_coeffs" in data.files:
+        extra.update(frame_b_index=[int(i) for i in data["frame_b_index"]],
+                     frame_c_index=[int(i) for i in data["frame_c_index"]],
+                     axis_coeffs=np.array(data["axis_coeffs"], dtype=float))
     return {
         **extra,
         "z_cc": float(data["z_cc_ang"]) * openmmunit.angstrom,
@@ -571,6 +748,9 @@ def create_funnel_force_from_trajectory_analysis(
     Funnel along the trajectory-derived axis, one-sided: a cone up to ``z_cc``,
     a cylinder up to a ``z_max`` wall, and a lower wall at ``z_low`` (default
     from :func:`funnel_lower_wall_ang`) so the guest cannot leave through z < 0.
+    Params with a protein frame (:func:`upgrade_funnel_params`) rebuild the axis each step
+    from the centroids of the host and the frame groups; the protein must stay whole
+    (one molecule), as the centroids are taken without periodic images.
     """
 
     host_index = params_dict["host_index"]
@@ -585,10 +765,10 @@ def create_funnel_force_from_trajectory_analysis(
     force_name = params_dict.get("force_name", "k_funnel_trajectory")
     unbinding_axis = params_dict["unbinding_axis"]  # unit vector (3,)
     z_low = funnel_lower_wall_ang(params_dict) * openmmunit.angstrom
+    frame = funnel_frame(params_dict)
 
     # r_z, r_xy are relative to the unbinding axis (nx, ny, nz).
-    funnel = CustomCentroidBondForce(
-        2,
+    expression = (
         # z_max is a harmonic wall (U_axial), not a switch: gating the cylinder off
         # beyond z_max would free the guest and make the energy discontinuous.
         "U_funnel + U_cylinder + U_axial + U_lower;"
@@ -603,11 +783,16 @@ def create_funnel_force_from_trajectory_analysis(
         # r_xy = |n x r|: sqrt(r2 - r_z^2) cancels in single precision and has an
         # infinite derivative at 0, which the zero step() turns into NaN.
         "r_xy = sqrt(cx^2 + cy^2 + cz^2 + 1e-12);"
-        "cx = ny*(z2-z1) - nz*(y2-y1);"
-        "cy = nz*(x2-x1) - nx*(z2-z1);"
-        "cz = nx*(y2-y1) - ny*(x2-x1);"
-        "r_z = nx*(x2-x1) + ny*(y2-y1) + nz*(z2-z1);",
     )
+    if frame is None:
+        funnel = CustomCentroidBondForce(2, expression + (
+            "cx = ny*(z2-z1) - nz*(y2-y1);"
+            "cy = nz*(x2-x1) - nx*(z2-z1);"
+            "cz = nx*(y2-y1) - ny*(x2-x1);"
+            "r_z = nx*(x2-x1) + ny*(y2-y1) + nz*(z2-z1);"))
+    else:
+        # groups 3-5: frame B, C and the host again, mass-weighted like funnel z
+        funnel = CustomCentroidBondForce(5, expression + _frame_definitions(1, 2, 5, 3, 4, frame["coeffs"]))
 
     funnel.setUsesPeriodicBoundaryConditions(False)
     funnel.setForceGroup(force_group)
@@ -619,14 +804,17 @@ def create_funnel_force_from_trajectory_analysis(
     funnel.addGlobalParameter("z_low", z_low)
     funnel.addGlobalParameter("alpha", alpha)
     funnel.addGlobalParameter("R_cylinder", R_cylinder)
-    funnel.addGlobalParameter("nx", float(unbinding_axis[0]))
-    funnel.addGlobalParameter("ny", float(unbinding_axis[1]))
-    funnel.addGlobalParameter("nz", float(unbinding_axis[2]))
-
     g1 = funnel.addGroup(host_index, [1.0 for i in range(len(host_index))])
     g2 = funnel.addGroup(guest_index, [1.0 for i in range(len(guest_index))])
-
-    funnel.addBond([g1, g2], [])
+    if frame is None:
+        funnel.addGlobalParameter("nx", float(unbinding_axis[0]))
+        funnel.addGlobalParameter("ny", float(unbinding_axis[1]))
+        funnel.addGlobalParameter("nz", float(unbinding_axis[2]))
+        funnel.addBond([g1, g2], [])
+    else:
+        # empty weights: mass-weighted centroids
+        groups = [funnel.addGroup([int(i) for i in idx]) for idx in (frame["b"], frame["c"], host_index)]
+        funnel.addBond([g1, g2, *groups], [])
     funnel.setName(force_name)
 
     if system is not None:

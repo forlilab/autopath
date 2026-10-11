@@ -29,7 +29,8 @@ from autopath.metadynamics.CV import CVSpec, pathCV_cv, funnel_z_cv, com_cv
 from cvpack import Torsion
 from autopath.metadynamics.Funnel import (create_funnel_force_from_trajectory_analysis,
                                           load_funnel_params, com_distance_at_z,
-                                          funnel_z_grid_min_ang, funnel_z_bounds_nm)
+                                          funnel_z_grid_min_ang, funnel_z_bounds_nm,
+                                          funnel_frame, funnel_axis_at)
 
 POCKET_RESIDUES = [180, 181, 182, 183, 226, 227, 228, 229, 230, 204, 205, 206,
                    207, 208, 209, 210, 211, 212, 213, 214, 215, 196, 197, 198,
@@ -129,7 +130,8 @@ def main():
 
     params = load_funnel_params(args.funnel_from)
     funnel_force = create_funnel_force_from_trajectory_analysis(params)
-    log.info("funnel reused from %s", args.funnel_from)
+    frame = funnel_frame(params)
+    log.info("funnel reused from %s (%s frame)", args.funnel_from, "lab" if frame is None else "protein")
 
     if args.seed_from == "equil":
         state = f"{base}/equilibration/checkpoint_equil_3ptb.xml"
@@ -162,8 +164,10 @@ def main():
         # extend the path to the funnel cap unless a target is given
         extend = args.extend_path
         if extend is None:
-            extend = com_distance_at_z(read_positions(milestones[-1]) * 10.0, lig, pocket,
-                                       params["unbinding_axis"], z_max)
+            _sys = load_system(f"{base}/system.xml")
+            _m = [_sys.getParticleMass(i).value_in_unit(ommunit.dalton) for i in range(_sys.getNumParticles())]
+            _p = read_positions(milestones[-1])
+            extend = com_distance_at_z(_p * 10.0, lig, pocket, funnel_axis_at(params, _p, _m), z_max)
         path = pathCV_cv(topology=topology, milestones=milestones,
                          pocket_atoms=pocket, ligand_atoms=lig,
                          system=load_system(f"{base}/system.xml"),
@@ -194,8 +198,14 @@ def main():
                          params["unbinding_axis"], grid_min=z_lo / 10.0, grid_max=z_max / 10.0,
                          hill_width=width_nm,
                          grid_points=int(round(124 * (z_max - z_lo) / z_max)) + 1,
-                         bounds=funnel_z_bounds_nm(params))
-        if args.cv == "funnel_z_unclamped":
+                         bounds=funnel_z_bounds_nm(params), frame=frame)
+        if args.cv == "funnel_z_unclamped" and frame is not None:
+            from autopath.metadynamics.learned.forces import funnel_z_force
+            _h, _g = params["host_index"], params["guest_index"]
+            cv._factory = lambda pos, n_atoms, top: funnel_z_force(_h, _g, params["unbinding_axis"],
+                                                                   name="centroid_function", frame=frame)
+            log.info("funnel z NOT clamped (experiment arm, protein frame)")
+        elif args.cv == "funnel_z_unclamped":
             # unclamped CV, can leave the bias grid
             import cvpack
             _n = np.asarray(params["unbinding_axis"], float)
@@ -275,7 +285,7 @@ def main():
               funnel_params=params, bias_dir=bias_dir,
               monitor_cvs=({"funnel_z": funnel_z_cv(
                   params["host_index"], params["guest_index"], params["unbinding_axis"],
-                  grid_min=-10.0, grid_max=10.0)}
+                  grid_min=-10.0, grid_max=10.0, frame=frame)}
                   if funnel_force is not None and args.cv not in ("funnel_z", "funnel_z_unclamped", "funnel_z_dist", "learned_z") else None),
               boundary_correction=args.boundary_correction,
               reweight=args.reweight, rct_ustride=args.rct_ustride,

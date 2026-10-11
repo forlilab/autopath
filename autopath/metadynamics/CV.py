@@ -123,6 +123,7 @@ def funnel_z_cv(
     hill_width: float = 0.05,
     grid_points: int = 125,
     bounds: Optional[tuple] = None,
+    frame: Optional[dict] = None,
 ) -> CVSpec:
     """Guest position along the funnel axis, r_z = n·(COM_guest - COM_host) (nm).
 
@@ -130,13 +131,24 @@ def funnel_z_cv(
     coordinate Limongelli 2013 Eq. 15 integrates over. Clamped to the grid
     because OpenMM's bias is zero outside it. z = 0 is the bound end; set
     grid_min < 0 so the bias also acts below the host COM. ``bounds`` are the
-    boundary-correction edges (nm), see ``funnel_z_bounds_nm``.
+    boundary-correction edges (nm), see ``funnel_z_bounds_nm``. ``frame`` (from
+    ``Funnel.funnel_frame``) rebuilds n from the protein frame; None uses ``axis``.
     """
     n = np.asarray(axis, dtype=float)
     n = n / np.linalg.norm(n)
     host, guest = [int(i) for i in host_atoms], [int(i) for i in guest_atoms]
 
     def factory(input_positions, n_atoms, topology):
+        if frame is not None:
+            from .Funnel import _frame_definitions
+            return cvpack.CentroidFunction(
+                "min(max(r_z, fz_lo), fz_hi);" + _frame_definitions(1, 2, 1, 3, 4, frame["coeffs"], radial=False),
+                openmmunit.nanometers,
+                [host, guest, [int(i) for i in frame["b"]], [int(i) for i in frame["c"]]],
+                weighByMass=True,
+                pbc=False,
+                fz_lo=[float(grid_min)], fz_hi=[float(grid_max)],
+            )
         # 1-element arrays: scalar cvpack parameters become global Context parameters.
         return cvpack.CentroidFunction(
             "min(max(fz_nx*(x2-x1) + fz_ny*(y2-y1) + fz_nz*(z2-z1), fz_lo), fz_hi)",

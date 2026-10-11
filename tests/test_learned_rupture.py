@@ -134,7 +134,7 @@ def test_too_short_trace_raises():
         rupture_labels(df, 5)
 
 
-def _run_learn(monkeypatch, tmp_path, data, **kw):
+def _run_learn(monkeypatch, tmp_path, data, funnel=FUNNEL, **kw):
     from autopath.metadynamics.learned import pipeline
     V, frames, lab, z, diag = data
     pulls = [pull_files(tmp_path)]
@@ -144,7 +144,7 @@ def _run_learn(monkeypatch, tmp_path, data, **kw):
     monkeypatch.setattr(pipeline, "_extract", lambda *a, **k: (RUPTURE_FEATS, V, frames, lab, None, z, diag))
     out = str(tmp_path / "out")
     path = pipeline.learn_cv(str(tmp_path / "t.pdb"), str(tmp_path / "l.sdf"), [0, 1], [2, 3, 4],
-                             str(tmp_path), out, hidden=False, classes="rupture", funnel=FUNNEL,
+                             str(tmp_path), out, hidden=False, classes="rupture", funnel=funnel,
                              masses=[12.0] * 5, mosaic_resolution=0.5, **kw)
     return path, out
 
