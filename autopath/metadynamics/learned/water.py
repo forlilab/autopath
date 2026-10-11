@@ -32,17 +32,36 @@ def _heavy(atom):
     return atom.element is not None and atom.element.symbol != "H"
 
 
+def _lig_residues(atoms, ligand_idx):
+    return {atoms[int(i)].residue.index for i in ligand_idx}
+
+
 def _is_water_o(atom):
     return atom.residue.name in WATER_RES and atom.name in WATER_O
 
 
 def apolar_pocket_atoms(topology_pdb, ligand_idx, shell_nm=0.6) -> list:
-    """Protein heavy atoms within ``shell_nm`` of a ligand heavy atom that are sulphur or carbon
-    with no N/O bonded neighbour."""
+    """Apolar protein heavy atoms in the ligand pocket shell.
+
+    Parameters
+    ----------
+    topology_pdb : str
+        PDB with coordinates (nm after loading) and bonds.
+    ligand_idx : sequence of int
+        Ligand atom indices; their residues are never protein.
+    shell_nm : float
+        Shell radius around ligand heavy atoms.
+
+    Returns
+    -------
+    list of int
+        Sorted atom indices of sulphur, or carbon with no N/O bonded neighbour.
+    """
     top, X = _load(topology_pdb)
     atoms = list(top.atoms())
+    lres = _lig_residues(atoms, ligand_idx)
     lig = [int(i) for i in ligand_idx if _heavy(atoms[int(i)])]
-    cand = [a.index for a in atoms if _is_protein(a.residue) and _heavy(a)]
+    cand = [a.index for a in atoms if a.residue.index not in lres and _is_protein(a.residue) and _heavy(a)]
     if not lig or not cand:
         return []
     d, _ = cKDTree(X[lig]).query(X[cand])
@@ -66,8 +85,24 @@ def apolar_pocket_atoms(topology_pdb, ligand_idx, shell_nm=0.6) -> list:
 
 
 def patches(positions_nm, atoms, cut_nm=0.6, min_size=3) -> list:
-    """Average-linkage clusters of ``atoms`` cut at ``cut_nm``; clusters smaller than ``min_size`` are
-    merged into the cluster with the nearest centroid. Sorted by smallest atom index."""
+    """Average-linkage patches of atoms.
+
+    Parameters
+    ----------
+    positions_nm : array (n_atoms, 3)
+        Coordinates indexed by atom id.
+    atoms : sequence of int
+        Atom ids to cluster.
+    cut_nm : float
+        Distance at which the dendrogram is cut.
+    min_size : int
+        Clusters smaller than this are merged into the cluster with the nearest centroid.
+
+    Returns
+    -------
+    list of list of int
+        Patches sorted by smallest atom id.
+    """
     atoms = sorted(int(i) for i in atoms)
     if len(atoms) < 2:
         return [atoms] if atoms else []
@@ -87,18 +122,32 @@ def patches(positions_nm, atoms, cut_nm=0.6, min_size=3) -> list:
     return sorted((sorted(atoms[k] for k in g) for g in groups), key=lambda g: g[0])
 
 
-def protein_weight(topology_pdb) -> float:
-    """rho_O of bulk water (> 1 nm from solute heavy atoms) over rho of protein heavy atoms within
-    half the protein radius of gyration of its centre."""
+def protein_weight(topology_pdb, ligand_idx=()) -> float:
+    """Ratio of bulk-water oxygen density to protein-core heavy-atom density.
+
+    Parameters
+    ----------
+    topology_pdb : str
+        PDB with a periodic box.
+    ligand_idx : sequence of int
+        Ligand atom indices; their residues are solute but not protein.
+
+    Returns
+    -------
+    float
+        rho_O (water O farther than 1 nm from every solute atom) divided by the density of
+        protein heavy atoms within 0.5 R_g of the protein centre.
+    """
     top, X = _load(topology_pdb)
     bv = top.getPeriodicBoxVectors()
     if bv is None:
         raise ValueError(f"{topology_pdb} has no box (CRYST1)")
     box = np.array([[v.x, v.y, v.z] for v in bv.value_in_unit(unit.nanometer)])
     atoms = list(top.atoms())
-    solute = [a.index for a in atoms if _heavy(a) and a.residue.name not in WATER_RES
-              and (_is_protein(a.residue) or len(list(a.residue.atoms())) > 1)]
-    prot = [a.index for a in atoms if _heavy(a) and _is_protein(a.residue)]
+    lres = _lig_residues(atoms, ligand_idx)
+    solute = [a.index for a in atoms if a.residue.name not in WATER_RES and (
+        a.residue.index in lres or _is_protein(a.residue) or len(list(a.residue.atoms())) > 1)]
+    prot = [a.index for a in atoms if _heavy(a) and a.residue.index not in lres and _is_protein(a.residue)]
     wat = [a.index for a in atoms if _is_water_o(a)]
     if not prot or not solute:
         raise ValueError(f"{topology_pdb} has no protein heavy atoms")
@@ -128,7 +177,20 @@ def protein_weight(topology_pdb) -> float:
 
 
 def linked_exceptions(feature, system) -> list:
-    """Sorted NonbondedForce exception pairs with one atom on each side of a term of ``feature``."""
+    """NonbondedForce exception pairs linked by the terms of a feature.
+
+    Parameters
+    ----------
+    feature : Feature
+        cn feature with terms.
+    system : openmm.System
+        System holding a NonbondedForce.
+
+    Returns
+    -------
+    list of list of int
+        Sorted [i, j] pairs with i and j on opposite sides of some term.
+    """
     from .forces import _nonbonded
     nb = _nonbonded(system)
     sides = {}
@@ -146,26 +208,48 @@ def linked_exceptions(feature, system) -> list:
 
 
 def define_water_features(topology_pdb, ligand_idx, system=None):
-    """W1 and W3 cn features of a complex and an info dict (w_p, patches, n_apolar)."""
+    """W1 and W3 cn features of a complex.
+
+    Parameters
+    ----------
+    topology_pdb : str
+        PDB with coordinates, bonds and a periodic box.
+    ligand_idx : sequence of int
+        Ligand atom indices.
+    system : openmm.System, optional
+        Source of the NonbondedForce exceptions for ``Feature.exclude``; required when W3 is non-empty.
+
+    Returns
+    -------
+    features : list of Feature
+        ``W1_<atom>`` per ligand heavy atom, then ``W3_p<k>`` per apolar patch.
+    info : dict
+        ``w_p``, ``patches`` (``resid:name`` members) and ``n_apolar``.
+    """
     top, X = _load(topology_pdb)
     atoms = list(top.atoms())
+    if system is not None and system.getNumParticles() != len(atoms):
+        raise ValueError(f"system has {system.getNumParticles()} particles but {topology_pdb} has "
+                         f"{len(atoms)} atoms; not supported")
+    lres = _lig_residues(atoms, ligand_idx)
     wat = [a.index for a in atoms if _is_water_o(a)]
     lig = [int(i) for i in ligand_idx if _heavy(atoms[int(i)])]
     names = [atoms[i].name for i in lig]
     feats = [Feature(f"W1_{n}" if names.count(n) == 1 else f"W1_{n}_{i}", "cn", "W1", terms=[[[i], wat, 1.0]])
              for i, n in zip(lig, names)]
     apolar = apolar_pocket_atoms(topology_pdb, ligand_idx)
+    groups = [g for g in patches(X, apolar) if len(g) >= 3]
     info = {"w_p": None, "patches": [], "n_apolar": len(apolar)}
-    if not apolar:
-        log.warning("no apolar pocket atoms within the shell of the ligand; W3 features are empty")
+    if not groups:
+        log.warning("no apolar pocket patch of >= 3 atoms near the ligand; W3 features are empty")
     else:
         if system is None:
             raise ValueError("W3 exclusions need the openmm.System; define_water_features(system=None) is "
                              "not supported when W3 is non-empty")
-        w_p = protein_weight(topology_pdb)
+        w_p = protein_weight(topology_pdb, ligand_idx)
         info["w_p"] = w_p
-        prot = [a.index for a in atoms if _heavy(a) and _is_protein(a.residue)]
-        for k, patch in enumerate(patches(X, apolar)):
+        prot = [a.index for a in atoms if _heavy(a) and a.residue.index not in lres and _is_protein(a.residue)]
+        for k, patch in enumerate(groups):
             by_res = {}
             for i in patch:
                 by_res.setdefault(atoms[i].residue.index, []).append(i)

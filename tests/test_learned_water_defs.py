@@ -27,7 +27,7 @@ def _write_pdb(path, residues, box=BOX):
     return str(path)
 
 
-def _toy(tmp_path, all_polar=False):
+def _toy(tmp_path, all_polar=False, lig_backbone=False, few_apolar=False):
     c = np.array([0.15, 0.3, 0.0])
     ser = ("SER", [("N", "N", (1.0, 1.0, 0.0)), ("CA", "C", (1.1, 1.1, 0.0)), ("C", "C", (1.2, 1.0, 0.0)),
                    ("O", "O", (1.3, 1.0, 0.0)), ("CB", "C", c + [0.05, 0.05, 0.1]),
@@ -41,16 +41,25 @@ def _toy(tmp_path, all_polar=False):
     if all_polar:
         met = ("MET", [a for a in met[1] if a[0] not in ("CB", "CG", "SD", "CE")])
         val = ("VAL", [a for a in val[1] if a[0] not in ("CB", "CG1", "CG2")])
-    lig = ("LIG", [("C1", "C", (0.0, 0.0, 0.0)), ("C2", "C", (0.15, 0.0, 0.0)), ("O1", "O", (0.3, 0.0, 0.0))])
+    if few_apolar:
+        met = ("MET", [a for a in met[1] if a[0] not in ("CG", "SD", "CE")])
+        val = ("VAL", [a for a in val[1] if a[0] != "CG1"])
+    ln = ("N", "CA", "C") if lig_backbone else ("C1", "C2", "O1")
+    lig = ("LIG", [(ln[0], "C", (0.0, 0.0, 0.0)), (ln[1], "C", (0.15, 0.0, 0.0)), (ln[2], "O", (0.3, 0.0, 0.0))])
     rng = np.random.default_rng(0)
     near = [np.array([0.15, 0.0, 0.0]) + rng.normal(0, 0.45, 3) for _ in range(17)]
     far = [np.array(p) for p in ((2.8, 2.8, 2.8), (3.2, 3.3, 3.0), (3.5, 2.9, 3.4))]
     wat = [("HOH", [("O", "O", p), ("H1", "H", p + [0.096, 0, 0]), ("H2", "H", p + [-0.03, 0.09, 0])])
            for p in near + far]
     pdb = _write_pdb(tmp_path / "toy.pdb", [ser, met, val, lig] + wat)
+    if lig_backbone:
+        first = 1 + len(ser[1]) + len(met[1]) + len(val[1])
+        conect = "".join(f"CONECT{a:5d}{b:5d}\n" for a, b in ((first, first + 1), (first + 1, first + 2)))
+        text = open(pdb).read()
+        open(pdb, "w").write(text.replace("END\n", conect + "END\n"))
     top = app.PDBFile(pdb).topology
     idx = {(a.residue.index, a.name): a.index for a in top.atoms()}
-    lig_idx = [idx[(3, "C1")], idx[(3, "C2")], idx[(3, "O1")]]
+    lig_idx = [idx[(3, n)] for n in ln]
     return pdb, lig_idx, idx
 
 
@@ -202,3 +211,66 @@ def test_features_build_fused_and_equal_openmm(tmp_path):
         assert energy(feature_cv(f, system, "f")) == pytest.approx(r, rel=1e-10)
     forces, _ = fused_sw_forces([w1, w3], np.array([1.0, -2.0]), np.zeros(2), np.ones(2), system)
     assert energy(forces[0]) == pytest.approx(ref[0] - 2.0 * ref[1], rel=1e-10)
+
+
+def test_ligand_with_backbone_names_is_not_protein(tmp_path):
+    (tmp_path / "ref").mkdir()
+    ref_pdb, ref_lig, _ = _toy(tmp_path / "ref")
+    pdb, lig, _ = _toy(tmp_path, lig_backbone=True)
+    feats, info = water.define_water_features(pdb, lig, _system(pdb))
+    assert info["w_p"] == pytest.approx(water.protein_weight(ref_pdb, ref_lig), rel=1e-12)
+    assert set(water.apolar_pocket_atoms(pdb, lig)).isdisjoint(lig)
+    for f in feats:
+        if f.family == "W3":
+            for a, b, _ in f.terms:
+                assert not set(a) & set(lig) and not set(b) & set(lig)
+
+
+def test_bulk_water_distance_uses_hydrogens(tmp_path):
+    box = 8.0
+    core = [("GLY", [("CA", "C", (1.0 + 0.1 * i, 1.0, 1.0))]) for i in range(6)]
+    core.append(("GLY", [("CA", "C", (1.0, 1.1, 1.0)), ("HA", "H", (6.5, 6.5, 6.5))]))
+    wat = [("HOH", [("O", "O", (6.5, 6.5, 6.0))]), ("HOH", [("O", "O", (4.0, 4.0, 4.0))])]
+    pdb = _write_pdb(tmp_path / "h.pdb", core + wat, box=box)
+    # O at (4,4,4) is > 1 nm from every heavy atom; the first water is 0.5 nm from an H
+    assert np.linalg.norm(np.array([4, 4, 4]) - np.array([6.5, 6.5, 6.5])) > 1.0
+    w = water.protein_weight(pdb)
+    assert w > 0
+    pdb2 = _write_pdb(tmp_path / "h2.pdb", core + wat[:1], box=box)
+    with pytest.raises(ValueError, match="bulk"):
+        water.protein_weight(pdb2)
+
+
+def test_only_small_patches_means_no_w3(tmp_path, caplog):
+    pdb, lig, _ = _toy(tmp_path, few_apolar=True)
+    assert len(water.apolar_pocket_atoms(pdb, lig)) == 2
+    with caplog.at_level(logging.WARNING):
+        feats, info = water.define_water_features(pdb, lig, None)
+    assert {f.family for f in feats} == {"W1"} and info["patches"] == [] and info["n_apolar"] == 2
+    assert "W3" in caplog.text
+
+
+def test_system_size_mismatch_raises(tmp_path):
+    pdb, lig, _ = _toy(tmp_path)
+    s = _system(pdb)
+    s.addParticle(1.0)
+    with pytest.raises(ValueError, match="not supported"):
+        water.define_water_features(pdb, lig, s)
+
+
+def test_exclude_equals_independent_exception_enumeration(tmp_path):
+    pdb, lig, _ = _toy(tmp_path)
+    s = _system(pdb)
+    feats, _ = water.define_water_features(pdb, lig, s)
+    nb = s.getForce(0)
+    exc = [tuple(nb.getExceptionParameters(e)[:2]) for e in range(nb.getNumExceptions())]
+    n_nonempty = 0
+    for f in feats:
+        want = set()
+        for a, b, _ in f.terms:
+            for i, j in exc:
+                if (i in a and j in b) or (j in a and i in b):
+                    want.add((min(i, j), max(i, j)))
+        assert {tuple(p) for p in (f.exclude or [])} == want
+        n_nonempty += bool(want)
+    assert n_nonempty >= 1
