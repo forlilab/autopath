@@ -90,3 +90,44 @@ def test_cn_terms_and_exclude_survive_the_json_round_trip():
     assert g == f
     assert g.exclude == [[0, 2], [1, 3]] or g.exclude == [[1, 3], [0, 2]]
     assert all(a < b for a, b in g.exclude)
+
+
+def _brute(X, box, a, b, scale=1.0):
+    rng = range(-2, 3)
+    sh = np.array([[i, j, k] for i in rng for j in rng for k in rng], float) @ box
+    tot = 0.0
+    for i in a:
+        for j in b:
+            if i == j:
+                continue
+            d = np.linalg.norm((X[j] - X[i])[None] + sh, axis=1).min()
+            tot += float(cn_switch(np.array([d]))[0])
+    return scale * tot
+
+
+def _octa(d=7.0):
+    return np.array([[d, 0, 0], [d / 3, 2 * np.sqrt(2) * d / 3, 0],
+                     [-d / 3, np.sqrt(2) * d / 3, np.sqrt(6) * d / 3]])
+
+
+@pytest.mark.parametrize("box", [_octa(), np.array([[6, 0, 0], [3, 5.6, 0], [-3, 2.8, 5.2]], float)])
+def test_cn_triclinic_many_atoms_matches_image_search(box):
+    rng = np.random.default_rng(3)
+    n = 400
+    X = (rng.random((n, 3)) * 1.3 - 0.15) @ box
+    a, b = list(range(0, 30)), list(range(15, 400))
+    f = Feature("w", "cn", "W3", terms=[[a, b, 0.7]])
+    v = evaluate([f], X[None], box=box[None])[0, 0]
+    assert v == pytest.approx(_brute(X, box, a, b, 0.7), rel=1e-10)
+
+
+def test_cn_rejects_a_box_too_small_for_dmax():
+    f = Feature("w", "cn", "W1", terms=[[[0], [1], 1.0]])
+    with pytest.raises(ValueError, match="not supported"):
+        evaluate([f], np.zeros((1, 2, 3)), box=np.diag([2.0] * 3)[None])
+
+
+def test_cn_box_frame_count_must_match():
+    f = Feature("w", "cn", "W1", terms=[[[0], [1], 1.0]])
+    with pytest.raises(ValueError, match="frames"):
+        evaluate([f], np.zeros((2, 2, 3)), box=np.tile(np.diag([3.0] * 3), (3, 1, 1)))

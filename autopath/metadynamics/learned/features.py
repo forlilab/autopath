@@ -1,4 +1,4 @@
-"""Feature definitions and their numpy evaluator (nm, no PBC: aligned, imaged frames)."""
+"""Feature definitions and their numpy evaluator (nm; cn uses the PBC minimum image, others none)."""
 import json
 from dataclasses import asdict, dataclass
 from typing import Optional
@@ -88,21 +88,25 @@ def _min_image_dist(dv, box):
 
 
 def _cn(f, X, box):
-    excl = {(i, j) for i, j in (f.exclude or [])} | {(j, i) for i, j in (f.exclude or [])}
+    n_at = X.shape[1]
+    ex = np.array(f.exclude or [], dtype=np.int64).reshape(-1, 2)
+    excl = np.concatenate([ex[:, 0] * n_at + ex[:, 1], ex[:, 1] * n_at + ex[:, 0]])
     out = np.zeros(len(X))
     for t in range(len(X)):
         bt = np.asarray(box[t], dtype=float)
+        if CN_DMAX >= 0.95 * bt[2, 2] / 2:
+            raise ValueError("cn: box too small for d_MAX (d_MAX < 0.95 * c_z/2 required); not supported")
         dims = triclinic_box(*(bt * 10.0))
         for a, b, w in f.terms:
             ia, ib = np.asarray(a, dtype=int), np.asarray(b, dtype=int)
-            pairs = capped_distance(X[t, ia] * 10.0, X[t, ib] * 10.0, max_cutoff=CN_DMAX * 10.0,
-                                    box=dims, return_distances=False)
+            pairs = capped_distance(X[t, ia] * 10.0, X[t, ib] * 10.0, max_cutoff=CN_DMAX * 10.0 + 1e-3,
+                                    box=dims, method="bruteforce", return_distances=False)
             if not len(pairs):
                 continue
             gi, gj = ia[pairs[:, 0]], ib[pairs[:, 1]]
             keep = gi != gj
-            if excl:
-                keep &= np.array([(i, j) not in excl for i, j in zip(gi, gj)], dtype=bool)
+            if len(excl):
+                keep &= ~np.isin(gi * n_at + gj, excl)
             gi, gj = gi[keep], gj[keep]
             d = _min_image_dist(X[t, gj] - X[t, gi], bt)
             out[t] += w * cn_switch(d).sum()
@@ -144,4 +148,6 @@ def evaluate(features, X, box=None) -> np.ndarray:
         box = np.asarray(box, dtype=float)
         if box.ndim == 2:
             box = np.broadcast_to(box, (len(X), 3, 3))
+        elif len(box) != len(X):
+            raise ValueError(f"box has {len(box)} frames but X has {len(X)}")
     return np.stack([_one(f, X, box) for f in features], axis=1)
