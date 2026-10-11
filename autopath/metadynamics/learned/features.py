@@ -5,7 +5,11 @@ from typing import Optional
 
 import numpy as np
 
-KINDS = ("pair", "contacts", "centroid_distance", "centroid_count", "cos")
+from MDAnalysis.lib.distances import capped_distance
+from MDAnalysis.lib.mdamath import triclinic_box
+
+KINDS = ("pair", "contacts", "centroid_distance", "centroid_count", "cos", "cn")
+CN_R0, CN_DMAX, CN_NM, CN_DELTA = 0.35, 1.2, (6, 10), 1e-3
 CONTACT_CUTOFF_FACTOR = 4.0
 CONTACT_SWITCH_FACTOR = 3.5
 COUNT_CUTOFF_FACTOR = 2.5
@@ -22,6 +26,8 @@ class Feature:
     group_b: Optional[list] = None
     groups: Optional[list] = None
     r0: float = 0.0
+    terms: Optional[list] = None
+    exclude: Optional[list] = None
 
     def __post_init__(self):
         # JSON round trips turn tuples into lists; normalise so equality holds
@@ -33,6 +39,10 @@ class Feature:
                 setattr(self, k, [int(i) for i in v])
         if self.groups is not None:
             self.groups = [[int(i) for i in g] for g in self.groups]
+        if self.terms is not None:
+            self.terms = [[[int(i) for i in a], [int(i) for i in b], float(w)] for a, b, w in self.terms]
+        if self.exclude is not None:
+            self.exclude = [sorted(int(i) for i in p) for p in self.exclude]
         self.r0 = float(self.r0)
 
 
@@ -50,7 +60,60 @@ def _switch(r, r0, switch=CONTACT_SWITCH_FACTOR, cutoff=CONTACT_CUTOFF_FACTOR):
     return np.where(r >= rc, 0.0, 1 - 10 * x ** 3 + 15 * x ** 4 - 6 * x ** 5)
 
 
-def _one(f, X):
+def _rational(x, n, m):
+    # (1-x^n)/(1-x^m); first-order expansion within CN_DELTA of x = 1 (0/0 there)
+    x = np.asarray(x, dtype=float)
+    near = np.abs(x - 1.0) < CN_DELTA
+    xs = np.where(near, 0.5, x)
+    out = (1 - xs ** n) / (1 - xs ** m)
+    lim = (n / m) * (1 + 0.5 * (n - m) * (x - 1.0))
+    return np.where(near, lim, out)
+
+
+def cn_switch(r, r0=CN_R0, dmax=CN_DMAX, n=CN_NM[0], m=CN_NM[1]):
+    """Shifted rational coordination switching, exactly 0 for r >= dmax (nm)."""
+    r = np.asarray(r, dtype=float)
+    c = _rational(dmax / r0, n, m)
+    return np.where(r < dmax, (_rational(r / r0, n, m) - c) / (1 - c), 0.0)
+
+
+_IMAGES = np.array([[i, j, k] for i in (-1, 0, 1) for j in (-1, 0, 1) for k in (-1, 0, 1)], dtype=float)
+
+
+def _min_image_dist(dv, box):
+    # float64 exact minimum image: reduce to the home cell, then search 27 images
+    dv = dv - np.round(dv @ np.linalg.inv(box)) @ box
+    cand = dv[:, None, :] + (_IMAGES @ box)[None]
+    return np.linalg.norm(cand, axis=-1).min(axis=1)
+
+
+def _cn(f, X, box):
+    excl = {(i, j) for i, j in (f.exclude or [])} | {(j, i) for i, j in (f.exclude or [])}
+    out = np.zeros(len(X))
+    for t in range(len(X)):
+        bt = np.asarray(box[t], dtype=float)
+        dims = triclinic_box(*(bt * 10.0))
+        for a, b, w in f.terms:
+            ia, ib = np.asarray(a, dtype=int), np.asarray(b, dtype=int)
+            pairs = capped_distance(X[t, ia] * 10.0, X[t, ib] * 10.0, max_cutoff=CN_DMAX * 10.0,
+                                    box=dims, return_distances=False)
+            if not len(pairs):
+                continue
+            gi, gj = ia[pairs[:, 0]], ib[pairs[:, 1]]
+            keep = gi != gj
+            if excl:
+                keep &= np.array([(i, j) not in excl for i, j in zip(gi, gj)], dtype=bool)
+            gi, gj = gi[keep], gj[keep]
+            d = _min_image_dist(X[t, gj] - X[t, gi], bt)
+            out[t] += w * cn_switch(d).sum()
+    return out
+
+
+def _one(f, X, box=None):
+    if f.kind == "cn":
+        if box is None:
+            raise ValueError("cn features need box vectors")
+        return _cn(f, X, box)
     if f.kind == "pair":
         i, j = np.array(f.pairs).T
         r = np.linalg.norm(X[:, j] - X[:, i], axis=-1)
@@ -74,7 +137,11 @@ def _one(f, X):
     raise ValueError(f"unknown feature kind {f.kind!r}; expected one of {KINDS}")
 
 
-def evaluate(features, X) -> np.ndarray:
-    """(n_frames, n_atoms, 3) nm -> (n_frames, n_features)."""
+def evaluate(features, X, box=None) -> np.ndarray:
+    """(n_frames, n_atoms, 3) nm -> (n_frames, n_features); box (F, 3, 3) or (3, 3) nm, needed by cn."""
     X = np.asarray(X, dtype=float)
-    return np.stack([_one(f, X) for f in features], axis=1)
+    if box is not None:
+        box = np.asarray(box, dtype=float)
+        if box.ndim == 2:
+            box = np.broadcast_to(box, (len(X), 3, 3))
+    return np.stack([_one(f, X, box) for f in features], axis=1)
