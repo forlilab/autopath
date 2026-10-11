@@ -24,6 +24,11 @@ def _centroid(expr, groups, n_bond_groups=None, bonds=None):
     return f
 
 
+# a.b from centroid coordinates (a = c2-c1, b = c4-c3): distance() between far
+# groups is minimum-image only inside half the box height; intra-group lengths are short.
+COS_EXPR = ("((x2-x1)*(x4-x3) + (y2-y1)*(y4-y3) + (z2-z1)*(z4-z3))"
+            "/(distance(g1,g2)*distance(g3,g4))")
+
 def _wrap(force, name):
     return cvpack.OpenMMForceWrapper(force, unit.dimensionless, name=name)
 
@@ -55,10 +60,7 @@ def feature_cv(f, system, name):
                 f"x=min(1,max(0,(d-{rs})/({rc}-{rs}))); d=distance(g1,g2)")
         return _wrap(_centroid(expr, groups, 2, bonds), name)
     if f.kind == "cos":
-        # a·b from centroid distances; a = c2-c1, b = c4-c3
-        expr = ("(distance(g2,g3)^2 + distance(g1,g4)^2 - distance(g2,g4)^2 - distance(g1,g3)^2)"
-                "/(2*distance(g1,g2)*distance(g3,g4))")
-        return _wrap(_centroid(expr, f.groups), name)
+        return _wrap(_centroid(COS_EXPR, f.groups), name)
     raise ValueError(f"unknown feature kind {f.kind!r}")
 
 
@@ -159,8 +161,7 @@ def fused_sw_forces(features, weights, mu, sd, system):
         forces.append(_wrap(_fused_contacts([features[k] for k in ks], c[ks], system), "fused_contacts"))
     for kind, n_groups, expr in (
             ("centroid_distance", 2, "distance(g1,g2)"),
-            ("cos", 4, "(distance(g2,g3)^2 + distance(g1,g4)^2 - distance(g2,g4)^2 - distance(g1,g3)^2)"
-                       "/(2*distance(g1,g2)*distance(g3,g4))")):
+            ("cos", 4, COS_EXPR)):
         if kind not in by_kind:
             continue
         cb = mm.CustomCentroidBondForce(n_groups, f"c*{expr}")
