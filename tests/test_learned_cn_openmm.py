@@ -83,6 +83,7 @@ def test_linked_exclusion_changes_the_value():
 
 def test_cn_with_overlapping_term_sides_equals_numpy():
     box, X = BOXES["rhombic"], _positions(4)
+    X[2] = X[1] + [0.4, 0.1, 0]                       # intra-class pair inside the cutoff
     f = Feature("ov", "cn", "W3", terms=[[[0, 1, 2], [1, 2] + WATER, 0.5]], exclude=[[0, 1]])
     ref = evaluate([f], X[None], box=box[None])[0, 0]
     e, _ = _energy(feature_cv(f, _system(box), "f"), X, box)
@@ -135,3 +136,12 @@ def test_cn_cutoff_too_large_for_the_box_is_not_supported():
         fused_sw_forces(_feats(), np.ones(2), np.zeros(2), np.ones(2), _system(small))
     with pytest.raises(ValueError, match="not supported"):
         feature_cv(_feats()[0], _system(small), "f")
+
+
+def test_repeated_index_inside_a_term_side_is_not_supported():
+    with pytest.raises(ValueError, match="not supported"):
+        Feature("dup", "cn", "W3", terms=[[[0, 0, 1], WATER, 1.0]])
+    f = Feature("dup", "cn", "W3", terms=[[[0, 1], WATER, 1.0]])
+    f.terms[0][1] = [7, 7, 8]                         # bypass construction-time validation
+    with pytest.raises(ValueError, match="not supported"):
+        feature_cv(f, _system(BOXES["cubic"]), "f")

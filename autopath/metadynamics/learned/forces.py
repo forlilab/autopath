@@ -63,6 +63,8 @@ def _fused_cn(feats, coeffs, system):
         if not f.terms:
             raise ValueError(f"cn feature {f.name!r} has no terms: not supported")
         for t, (a, b, _) in enumerate(f.terms):
+            if len(set(a)) != len(a) or len(set(b)) != len(b):
+                raise ValueError(f"cn feature {f.name!r}: repeated atom index inside a term side is not supported")
             for side, g in ((0, a), (1, b)):
                 for i in g:
                     sides.setdefault(int(i), set()).add((k, t, side))

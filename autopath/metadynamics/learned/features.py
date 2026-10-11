@@ -41,6 +41,9 @@ class Feature:
             self.groups = [[int(i) for i in g] for g in self.groups]
         if self.terms is not None:
             self.terms = [[[int(i) for i in a], [int(i) for i in b], float(w)] for a, b, w in self.terms]
+            for a, b, _ in self.terms:
+                if len(set(a)) != len(a) or len(set(b)) != len(b):
+                    raise ValueError(f"feature {self.name!r}: repeated atom index inside a term side is not supported")
         if self.exclude is not None:
             self.exclude = [sorted(int(i) for i in p) for p in self.exclude]
         self.r0 = float(self.r0)
