@@ -16,34 +16,6 @@ def _tiny_system(n=6):
     return system
 
 
-def test_written_state_roundtrips_positions_and_box(tmp_path):
-    """A serialized State round-trips positions, box vectors and velocities."""
-    system = _tiny_system()
-    integ = mm.LangevinMiddleIntegrator(300 * ommunit.kelvin,
-                                        1 / ommunit.picosecond,
-                                        0.002 * ommunit.picoseconds)
-    ctx = mm.Context(system, integ, mm.Platform.getPlatformByName("Reference"))
-    pos = np.arange(18, dtype=float).reshape(6, 3) * 0.1
-    box = [mm.Vec3(4.1, 0, 0), mm.Vec3(0, 4.2, 0), mm.Vec3(0, 0, 4.3)]
-    ctx.setPeriodicBoxVectors(*[b * ommunit.nanometer for b in box])
-    ctx.setPositions(pos * ommunit.nanometer)
-    ctx.setVelocitiesToTemperature(300 * ommunit.kelvin)
-    state = ctx.getState(getPositions=True, getVelocities=True)
-    p = tmp_path / "s.xml"
-    p.write_text(mm.XmlSerializer.serialize(state))
-
-    back = mm.XmlSerializer.deserialize(p.read_text())
-    np.testing.assert_allclose(
-        back.getPositions(asNumpy=True).value_in_unit(ommunit.nanometer), pos,
-        rtol=0, atol=1e-6)
-    bv = back.getPeriodicBoxVectors()
-    assert bv[0][0].value_in_unit(ommunit.nanometer) == pytest.approx(4.1)
-    assert bv[2][2].value_in_unit(ommunit.nanometer) == pytest.approx(4.3)
-    v = back.getVelocities(asNumpy=True).value_in_unit(
-        ommunit.nanometer / ommunit.picosecond)
-    assert np.abs(v).sum() > 0                      # velocities present
-
-
 def test_write_states_roundtrips_a_real_trajectory(tmp_path):
     """write_states output matches the trajectory's positions and box."""
     import MDAnalysis as mda

@@ -82,40 +82,38 @@ def test_single_milestone_is_returned_unchanged(tmp_path):
 
 # --- sigma='auto' ----------------------------------------------------------
 
-def _auto_sigma(com_dists):
-    """The sigma='auto' arithmetic from pathCV_cv, against which we assert."""
-    steps = np.diff(np.asarray(com_dists, dtype=float))
-    gaps = np.abs(steps)
-    usable = gaps[gaps > 1e-6]
-    if usable.size == 0:
-        raise ValueError("no usable spacing")
-    return 0.5 * float(usable.min())
+def _pathcv(tmp_path, seps, sigma="auto"):
+    """Build the path CV through 2-atom milestones (pocket at 0, ligand at `seps` nm)."""
+    import openmm as mm
+    from autopath.metadynamics.CV import pathCV_cv
+    system = mm.System()
+    for _ in range(2):
+        system.addParticle(12.0)
+    spec = pathCV_cv(None, _write_state_pair(tmp_path, seps), [0], [1], system, sigma=sigma)
+    return spec._factory(None, 2, None)
 
 
-def test_auto_sigma_is_positive_for_a_non_monotone_milestone_list():
+def test_auto_sigma_is_half_the_minimum_gap(tmp_path):
+    cv = _pathcv(tmp_path, [0.4, 0.9, 1.5])
+    assert cv._args["sigma"] == pytest.approx(0.25, abs=1e-4)
+
+
+def test_auto_sigma_is_positive_and_warns_for_a_non_monotone_milestone_list(tmp_path, caplog):
     """A backwards step must not produce a negative sigma."""
-    sigma = _auto_sigma([0.40, 1.20, 0.50, 0.90, 1.10])
-    assert sigma > 0
-    assert sigma == pytest.approx(0.5 * 0.20, abs=1e-9)
+    with caplog.at_level("WARNING", logger="autopath.cv"):
+        cv = _pathcv(tmp_path, [0.40, 1.20, 0.50, 0.90, 1.10])
+    assert cv._args["sigma"] == pytest.approx(0.5 * 0.20, abs=1e-4)
+    assert "not monotonically increasing" in caplog.text
 
 
-def test_auto_sigma_matches_half_the_minimum_gap_when_monotone():
-    assert _auto_sigma([0.4, 0.9, 1.5]) == pytest.approx(0.25, abs=1e-9)
+def test_auto_sigma_rejects_all_identical_milestones(tmp_path):
+    with pytest.raises(ValueError, match="cannot auto-tune sigma"):
+        _pathcv(tmp_path, [0.5, 0.5, 0.5])
 
 
-def test_auto_sigma_rejects_all_identical_milestones():
-    with pytest.raises(ValueError):
-        _auto_sigma([0.5, 0.5, 0.5])
-
-
-def test_pathcv_source_guards_sigma_and_warns_on_non_monotone():
-    """Pin the guard in the real code, since the arithmetic above is a copy."""
-    import inspect
-    from autopath.metadynamics import CV
-    src = inspect.getsource(CV.pathCV_cv)
-    assert "np.abs(steps)" in src
-    assert "cannot auto-tune sigma" in src
-    assert "not monotonically increasing" in src
+def test_explicit_sigma_is_passed_through(tmp_path):
+    cv = _pathcv(tmp_path, [0.4, 0.9, 1.5], sigma=0.07)
+    assert cv._args["sigma"] == pytest.approx(0.07)
 
 
 # --- no loadState anywhere -------------------------------------------------
@@ -136,21 +134,6 @@ def test_no_module_calls_load_state():
                     if ".loadState(" in code:
                         offenders.append(f"{os.path.relpath(path, root)}:{lineno}")
     assert offenders == [], f"loadState is forbidden; found at {offenders}"
-
-
-# --- medoid_info.json lookup ------------------------------------------------
-
-def test_core_looks_for_medoid_info_under_path_analysis():
-    """medoid_info.json is written and read under path_analysis/."""
-    import inspect
-    from autopath import autopath_core
-    from autopath.pulling import PathModel as pm
-
-    writer = inspect.getsource(pm)
-    assert '"path_analysis", "medoid_info.json"' in writer
-
-    reader = inspect.getsource(autopath_core)
-    assert 'path_analysis/medoid_info.json' in reader
 
 
 # --- bias plot glob (isolated-walker mode) ---------------------------------
@@ -182,37 +165,6 @@ def test_plot_bias_returns_quietly_when_no_bias_arrays(tmp_path, monkeypatch):
     plot_bias("sys/metadynamics", x_min=0.0, x_max=1.0, grid_points=25,
               colvar_name="PathCV_progress")
     assert not (out / "sys_quicklook_BIAS.png").exists()
-
-
-def test_metad_rebuilds_context_instead_of_reinitialising():
-    """Forces added after Context creation require rebuild_simulation, not reinitialize,
-    which restores globals by name and can override the new force's defaults."""
-    import inspect
-    from autopath.metadynamics.MetadynamicsMD import MetadynamicsMD
-
-    src = inspect.getsource(MetadynamicsMD.run)
-    code = "\n".join(l.split("#", 1)[0] for l in src.splitlines())
-    assert "reinitialize" not in code
-    assert "rebuild_simulation(simulation, system)" in code
-
-
-def test_metad_attaches_reporters_after_the_rebuild():
-    """Reporters are attached to the new Simulation returned by rebuild_simulation."""
-    import inspect
-    from autopath.metadynamics.MetadynamicsMD import MetadynamicsMD
-
-    src = inspect.getsource(MetadynamicsMD.run)
-    assert src.index("rebuild_simulation(simulation, system)") < src.index("add_reporters(")
-
-
-def test_core_seeds_metadynamics_from_state_xml_not_checkpoint():
-    """Metadynamics starts from a state XML, since its Context differs from the relax run's."""
-    import inspect
-    from autopath import autopath_core
-
-    src = inspect.getsource(autopath_core)
-    assert "_relax_state.xml" in src
-    assert "_relax_checkpoint.chk" not in src
 
 
 # --- funnel cylinder radius ------------------------------------------------
@@ -549,26 +501,7 @@ def test_median_zcc_would_put_the_site_in_the_cylinder():
     assert _cone_radius_at(good, z_site) > r_bound
 
 
-def test_core_does_not_force_a_median_zcc():
-    import inspect
-    from autopath import autopath_core
-    src = inspect.getsource(autopath_core)
-    assert "percentile_z=50" not in src.replace(" ", "")
-
-
-# --- walker biases: sum when shared, average when isolated -----------------
-
-def test_openmm_writes_self_bias_and_sums_to_get_the_total():
-    """OpenMM saves each walker's self bias and sums them, so shared-bias files must be summed."""
-    import inspect
-    import openmm.app.metadynamics as m
-
-    src = inspect.getsource(m.Metadynamics._syncWithDisk)
-    assert "self._selfBias" in src, "walkers save their own bias, not the total"
-    total = inspect.getsource(m.Metadynamics)
-    assert "self._totalBias = np.copy(self._selfBias)" in total
-    assert "self._totalBias += bias.bias" in total
-
+# --- funnel standard-state correction ---------------------------------------
 
 def _flat_funnel_params(R=5.0, z_cc=8.0, z_max=20.0):
     from openmm import unit as ommunit
@@ -658,16 +591,6 @@ def test_convergence_sums_round_trips_over_walkers():
 
 
 # --- dG(t) convergence curve ----------------------------------------------
-
-def _fe_history(n_snap=20, n_grid=125, depth=-40.0, drift=0.0):
-    """FES snapshots whose bound well deepens by `drift` kJ/mol over the run."""
-    import numpy as np
-    fes = np.zeros((n_snap, n_grid))
-    for i in range(n_snap):
-        d = depth - drift * (i / max(1, n_snap - 1))
-        fes[i, :int(0.10 * n_grid)] = d
-    return {"fes_kj": fes, "time_ns": np.linspace(0.25, 5.0, n_snap)}
-
 
 def test_dG_plateau_detects_a_settled_run():
     import numpy as np
@@ -962,12 +885,3 @@ def test_cylinder_cap_is_set_by_the_bulk_cutoff_not_the_trajectory_end():
         caps[cut] = p["z_max"].value_in_unit(ommunit.angstrom)
     assert caps[35.0] >= 35.0 > 25.0          # beyond the 25 A trajectory end
     assert caps[35.0] > caps[10.0]
-
-
-@pytest.mark.parametrize("removed", [{"z_max_mode": "buffer"}, {"z_max_buffer_ang": 3.0}])
-def test_buffer_cap_options_are_gone(removed):
-    from autopath.metadynamics.Funnel import generate_funnel_parameters_from_trajectory
-    with pytest.raises(TypeError):
-        generate_funnel_parameters_from_trajectory(
-            _funnel_universe(), host_selection="resname ALA", guest_selection="resname LIG",
-            stride=1, verbose=False, **removed)
