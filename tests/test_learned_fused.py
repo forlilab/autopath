@@ -61,6 +61,9 @@ def _configs():
     X[8] = [1.5, 0.62, 2.9]                                 # (1, 8): 0.72 across y, r0 = 0.2 switching
     X[9] = X[1] + [0.85, 0.0, 0.0]                          # (1, 9) beyond the r0 = 0.2 cutoff
     out.append(X)
+    Y = rng.uniform(0, BOX, size=(N, 3))
+    Y[6] = Y[1] + [0.0, 0.0, 0.25]                          # (1, 6) excluded pair, inside the r0 = 0.3 core
+    out.append(Y)
     return out
 
 
@@ -92,11 +95,13 @@ def test_fused_s_w_matches_the_per_feature_composite():
 
 
 def test_the_constructed_config_hits_switching_cutoff_and_wrap():
-    X = _configs()[-1]
+    X = _configs()[-2]
     d = X[5] - X[0]
     assert np.linalg.norm(d) > 2.5 and np.linalg.norm(d - BOX * np.round(d / BOX)) == pytest.approx(0.1)
     r06, r04 = np.linalg.norm(X[6] - X[0]), np.linalg.norm(X[4] - X[0])
     assert 3.5 * 0.3 < r06 < 4 * 0.3 < r04
+    Y = _configs()[-1]
+    assert np.linalg.norm(Y[6] - Y[1]) < 0.3
     d = X[8] - X[1]
     assert 3.5 * 0.2 < np.linalg.norm(d - BOX * np.round(d / BOX)) < 4 * 0.2 < np.linalg.norm(X[9] - X[1])
 
