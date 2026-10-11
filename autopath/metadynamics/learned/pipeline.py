@@ -256,8 +256,10 @@ def _extract(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, pulls, stride, cl
     if water:
         feats, info = define_water_features(topology_pdb, ligand_idx, system)
         feats = [f for f in feats if f.family not in exclude_families]
-        centre_idx, centres = anchor_atoms(topology_pdb), cn_centres(feats)
         wres = [r.atoms.indices for r in u.residues if r.resname in WATER_RES]
+        if not wres:
+            raise ValueError("topology has no water molecules; water features are not supported")
+        centre_idx, centres = anchor_atoms(topology_pdb), cn_centres(feats)
         if len({len(w) for w in wres}) > 1:
             raise ValueError("water residues with different atom counts are not supported")
         water_mols = np.array(wres, dtype=int).reshape(len(wres), -1)

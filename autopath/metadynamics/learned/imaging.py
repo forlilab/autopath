@@ -24,7 +24,7 @@ def safe_frames(X, box, centre_idx, centres, water_mols):
 
     The cell is the brick of half widths (a_x, b_y, c_z)/2 around the unweighted centroid of centre_idx
     (mdtraj image_molecules on a reduced box). Its face distances are reduced by how far water centres
-    stick out of it (alignment rotates the cell slightly).
+    stick out of it.
 
     Parameters
     ----------
@@ -50,6 +50,7 @@ def safe_frames(X, box, centre_idx, centres, water_mols):
     wm = np.asarray(water_mols, dtype=int)
     if wm.ndim != 2 or not len(wm):
         raise ValueError("no water molecules to verify the imaging of the cell; cn features not supported")
+    # alignment rotates the cell slightly, so water centres can stick out of the brick
     half = np.diagonal(box, axis1=1, axis2=2) / 2
     c = X[:, list(centre_idx)].mean(1)
     excess = np.maximum((np.abs(X[:, wm].mean(2) - c[:, None]) - half[:, None]).max(axis=(1, 2)), 0.0)

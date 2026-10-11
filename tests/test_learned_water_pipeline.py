@@ -75,6 +75,19 @@ def test_safe_frames_margin_shrinks_by_the_water_excess_and_unwrapped_cells_are_
         safe_frames(X[None], cube[None], [0, 1], [2], np.zeros((0, 3), int))
 
 
+def test_parallelepiped_wrapped_rhombic_dodecahedron_is_not_supported():
+    from autopath.metadynamics.learned.imaging import safe_frames
+    rng = np.random.default_rng(3)
+    box = _rd(6.7)
+    frac = rng.uniform(0, 1, (4000, 3))                           # waters wrapped by fractional floor
+    cog = frac @ box
+    centre = box.sum(0) / 2
+    X = np.vstack([[centre + [0.3, 0, 0], centre - [0.3, 0, 0]], [centre + [0.0, 0.0, 0.5]], _water_xyz(cog)])
+    mols = np.arange(3, len(X)).reshape(-1, 3)
+    with pytest.raises(ValueError, match="not imaged into one cell.*not supported"):
+        safe_frames(X[None], box[None], [0, 1], [2], mols)
+
+
 def test_open_box_gives_plain_distances():
     from autopath.metadynamics.learned.imaging import open_box
     rng = np.random.default_rng(2)
@@ -294,6 +307,17 @@ def test_water_needs_the_system(toy, tmp_path):
 def test_water_takes_masses_from_a_system_object(toy, tmp_path):
     path = _learn(toy, tmp_path / "o", system=toy["system"])
     assert str(np.load(path)["feature_set"]) == "water"
+
+
+def test_water_extraction_without_waters_is_not_supported(toy, tmp_path, monkeypatch):
+    from autopath.metadynamics.learned import pipeline
+    pdb = _write_pdb(tmp_path / "dry.pdb", _protein_and_ligand())
+    monkeypatch.setattr(pipeline, "define_water_features", lambda *a, **k: ([], {}))
+    monkeypatch.setattr(pipeline, "_frames_table", lambda *a, **k: [pd.DataFrame({"r": [0.0]})])
+    pulls = pipeline.find_pulls(toy["traj"], "forward")
+    with pytest.raises(ValueError, match="not supported"):
+        pipeline._extract(pdb, None, toy["lig"], [1, 7], pulls, 1, classes="rupture", feature_set="water",
+                          funnel=toy["funnel"], masses=None, system=toy["system"])
 
 
 def test_contacts_feature_set_keeps_the_round2_families(toy, tmp_path, monkeypatch):
