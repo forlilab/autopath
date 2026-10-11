@@ -164,7 +164,8 @@ def test_learn_cv_rupture_writes_s_w_and_report(monkeypatch, tmp_path):
     assert fisher(s[m], lab[m] == "TS") > 1.0
     hw = float(d["sw_hill_width"])
     assert hw == pytest.approx(0.5 * s[lab == "B"].std())
-    assert float(d["sw_lo"]) == pytest.approx(s[m].min()) and float(d["sw_hi"]) == pytest.approx(s[m].max())
+    sb = s[lab == "B"].std()
+    assert float(d["sw_lo"]) == pytest.approx(s[m].min() - 3 * sb) and float(d["sw_hi"]) == pytest.approx(s[m].max() + 3 * sb)
     assert float(d["sw_grid_min"]) == pytest.approx(float(d["sw_lo"]) - 3 * hw)
     assert float(d["sw_grid_max"]) == pytest.approx(float(d["sw_hi"]) + 3 * hw)
     assert list(d["funnel_host"]) == [2, 3] and np.isfinite(float(d["corr_sz"]))
@@ -365,7 +366,8 @@ def test_learn_cv_rupture_runs_the_residualised_path(monkeypatch, tmp_path):
     m = lab != ""
     hw = float(d["sw_hill_width"])
     assert hw == pytest.approx(0.5 * s[lab == "B"].std())
-    assert float(d["sw_lo"]) == pytest.approx(s[m].min()) and float(d["sw_hi"]) == pytest.approx(s[m].max())
+    sb = s[lab == "B"].std()
+    assert float(d["sw_lo"]) == pytest.approx(s[m].min() - 3 * sb) and float(d["sw_hi"]) == pytest.approx(s[m].max() + 3 * sb)
     assert d["basin_B"][1] == pytest.approx(np.median(s[lab == "B"]))
     assert json.load(open(os.path.join(out, "rupture_report.json")))["residualised"] is True
     assert learned_cv_spec(path, toy_system(), 1)[0].grid_min < float(d["sw_hi"]) + 3 * hw

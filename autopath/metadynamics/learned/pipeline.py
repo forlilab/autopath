@@ -26,6 +26,7 @@ from .select import find_pulls, labels_from_r, pull_frames, relevance, select
 logger = logging.getLogger("autopath.metadynamics.learned")
 ORDER = R_ORDER
 SUBSAMPLE = 10
+SW_BOUND_SIGMAS = 3.0
 NPZ_NAME, REPORT_NAME, RUPTURE_REPORT_NAME = "learned_cv.npz", "report.png", "rupture_report.json"
 ANALYSIS_DIRNAME = "analysis_traces"
 
@@ -482,9 +483,11 @@ def _finish_rupture(shared, Z, z, diag, reducer, funnel, analysis_dir, temperatu
     fit = fit_sw(Z, z, labels, order, reducer=reducer)
     s = fit["X"] @ fit["w"]
     m = np.isin(labels, order)
-    # training range over all labelled frames (U holds the bulk plateau): the hard edges of s_w
-    sw_lo, sw_hi = float(s[m].min()), float(s[m].max())
-    hw = float(0.5 * s[labels == order[0]].std())
+    # training B frames under-sample the bound basin, so widen the range by SW_BOUND_SIGMAS sigma_B
+    sig_b = float(s[labels == order[0]].std())
+    sw_lo = float(s[m].min()) - SW_BOUND_SIGMAS * sig_b
+    sw_hi = float(s[m].max()) + SW_BOUND_SIGMAS * sig_b
+    hw = 0.5 * sig_b
     if not np.isfinite(hw) or hw <= 1e-9 * (sw_hi - sw_lo):
         raise ValueError(f"s_w hill width is {hw} (s_w is constant or undefined over the {order[0]} frames)")
     Wl = lda_reference(fit["X"][m], labels[m], 2, order)
