@@ -1,6 +1,7 @@
 """Shared toy system and residualised-s_w reference for the learned-CV tests."""
 import numpy as np
 import openmm as mm
+import pandas as pd
 
 from autopath.metadynamics.learned.features import Feature, evaluate, features_to_dict
 from autopath.metadynamics.learned.sw import z_spline_values
@@ -89,7 +90,6 @@ def rupture_data(n_pull=10, n=400, speeds=(0.01, 0.02), seed=0):
 
     Columns: TS signal, z, U signal, 2 noise. Returns (V, frames, labels, z, diag).
     """
-    import pandas as pd
     rng = np.random.default_rng(seed)
     V, z, lab, r, pull, speed, diag = [], [], [], [], [], [], []
     for p in range(n_pull):

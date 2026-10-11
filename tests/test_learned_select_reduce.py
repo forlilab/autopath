@@ -489,7 +489,7 @@ def test_find_milestones_flat_files_win_over_stale_subdirs(tmp_path, caplog):
     assert "ignoring per-path subdirectories" in caplog.text
 
 
-@pytest.mark.parametrize("mod", ["classes", "select"])
+@pytest.mark.parametrize("mod", ["classes", "select", "pipeline"])
 def test_code_hash_covers_module(monkeypatch, mod):
     import importlib
     from autopath.metadynamics.learned import pipeline

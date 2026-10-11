@@ -134,7 +134,7 @@ def test_too_short_trace_raises():
         rupture_labels(df, 5)
 
 
-def _run_learn(monkeypatch, tmp_path, data):
+def _run_learn(monkeypatch, tmp_path, data, **kw):
     from autopath.metadynamics.learned import pipeline
     V, frames, lab, z, diag = data
     pulls = [pull_files(tmp_path)]
@@ -145,7 +145,7 @@ def _run_learn(monkeypatch, tmp_path, data):
     out = str(tmp_path / "out")
     path = pipeline.learn_cv(str(tmp_path / "t.pdb"), str(tmp_path / "l.sdf"), [0, 1], [2, 3, 4],
                              str(tmp_path), out, hidden=False, classes="rupture", funnel=FUNNEL,
-                             masses=[12.0] * 5, mosaic_resolution=0.5)
+                             masses=[12.0] * 5, mosaic_resolution=0.5, **kw)
     return path, out
 
 
@@ -281,28 +281,101 @@ def _write_pmfs(d, peaks):
     pd.concat(rows).to_csv(os.path.join(d, "mixture_pmfs.csv"), index=False)
 
 
-def test_rupture_report_v0_barrier_compares_r_ts_with_ts_frames(tmp_path):
+def test_rupture_report_v0_barrier_compares_in_the_spring_centre_coordinate(tmp_path):
     from autopath.metadynamics.learned.pipeline import rupture_report
     V, frames, lab, z, diag = rupture_data()
+    frames = frames.assign(r_target=frames.r + 0.3)                  # spring centre leads the ligand
+    ts_t = np.percentile(frames.r_target.values[lab == "TS"], [5, 25, 50, 75, 95])
     ts_r = np.percentile(frames.r.values[lab == "TS"], [5, 25, 50, 75, 95])
-    _write_pmfs(str(tmp_path), {"cumulant": float(ts_r[2]), "jarzynski": 2.2, "force": None})
+    _write_pmfs(str(tmp_path), {"cumulant": float(ts_t[2]), "jarzynski": 2.5, "force": None})
     rep = rupture_report(frames, lab, z, V, [f"f{k}" for k in range(5)], diag, analysis_dir=str(tmp_path))
     b = rep["v0_barrier"]
-    assert b["status"] == "ok"
-    assert b["ts_r_quantiles"] == pytest.approx(ts_r.tolist())
+    assert b["status"] == "ok" and b["coordinate"] == "r_target"
+    assert b["ts_quantiles"] == pytest.approx(ts_t.tolist())
+    assert b["ts_r_after_quantiles"] == pytest.approx(ts_r.tolist())
     c = b["estimators"]["cumulant"]
-    assert c["r_ts"] == pytest.approx(ts_r[2], abs=0.02)
-    assert c["within_ts_iqr"] is True and 0.4 < c["ts_r_percentile"] < 0.6
+    assert c["r_ts"] == pytest.approx(ts_t[2], abs=0.02)
+    assert c["within_ts_iqr"] is True and 0.4 < c["ts_percentile"] < 0.6   # in r_after it would be ~1
     assert b["estimators"]["jarzynski"]["within_ts_iqr"] is False
-    assert b["estimators"]["jarzynski"]["ts_r_percentile"] == 1.0
+    assert b["estimators"]["jarzynski"]["ts_percentile"] == 1.0
     assert b["estimators"]["force"]["r_ts"] is None
     json.dumps(rep)
+
+
+def test_rupture_report_v0_barrier_skips_without_r_target(tmp_path):
+    from autopath.metadynamics.learned.pipeline import rupture_report
+    V, frames, lab, z, diag = rupture_data()
+    _write_pmfs(str(tmp_path), {"cumulant": 1.5})
+    b = rupture_report(frames, lab, z, V, [f"f{k}" for k in range(5)], diag, analysis_dir=str(tmp_path))["v0_barrier"]
+    assert b["status"] == "skipped" and "r_target" in b["reason"]
+
+
+def test_learn_cv_rupture_passes_analysis_dir_and_temperature(monkeypatch, tmp_path):
+    V, frames, lab, z, diag = rupture_data()
+    frames = frames.assign(r_target=frames.r + 0.3)
+    _write_pmfs(str(tmp_path / "an"), {"cumulant": 1.5})
+    _, out = _run_learn(monkeypatch, tmp_path, (V, frames, lab, z, diag),
+                        analysis_dir=str(tmp_path / "an"), temperature=310.0)
+    b = json.load(open(os.path.join(out, "rupture_report.json")))["v0_barrier"]
+    assert b["status"] == "ok" and b["temperature_K"] == 310.0
+
+
+def test_pull_frames_carries_r_target(tmp_path):
+    from autopath.metadynamics.learned.select import pull_frames
+    t = np.arange(0.0, 10.5, 0.5)
+    p = tmp_path / "a.dat"
+    pd.DataFrame({"time": t, "r_after": t, "r_target": t + 1.0, "dW_protocol": 1.0}).to_csv(p, index=False)
+    fr = pull_frames(str(p), 5)
+    assert fr.r_target.tolist() == pytest.approx((fr.r + 1.0).tolist())
+    pd.DataFrame({"time": t, "r_after": t, "dW_protocol": 1.0}).to_csv(p, index=False)
+    assert "r_target" not in pull_frames(str(p), 5).columns
+
+
+def test_rupture_report_is_strict_json(monkeypatch, tmp_path):
+    V, frames, lab, z, diag = data = rupture_data(speeds=(0.01,))     # one speed: ts_speed_max_smd is NaN
+    _, out = _run_learn(monkeypatch, tmp_path, data)
+
+    def bad(c):
+        raise ValueError(f"non-strict constant {c}")
+    rep = json.load(open(os.path.join(out, "rupture_report.json")), parse_constant=bad)
+    assert rep["ts_speed_max_smd"] is None
+
+
+def test_learn_cv_rupture_rejects_degenerate_hill_width(monkeypatch, tmp_path):
+    V, frames, lab, z, diag = rupture_data()
+    V, z = V.copy(), z.copy()
+    V[lab == "B"], z[lab == "B"] = 0.0, 0.0                           # B constant in every feature and z
+    with pytest.raises(ValueError, match="hill width"):
+        _run_learn(monkeypatch, tmp_path, (V, frames, lab, z, diag))
+
+
+def test_learn_cv_rupture_runs_the_residualised_path(monkeypatch, tmp_path):
+    from autopath.metadynamics.learned.forces import learned_cv_spec
+    V, frames, lab, z, diag = rupture_data()
+    rng = np.random.default_rng(1)
+    V = V.copy()
+    V[:, 1] = V[:, 0] + rng.normal(0, 0.3, len(z))                    # z-like column tracks the TS signal as well
+    z = 0.5 * V[:, 0] + rng.normal(0, 0.02, len(z))
+    path, out = _run_learn(monkeypatch, tmp_path, (V, frames, lab, z, diag))
+    d = np.load(path, allow_pickle=False)
+    assert bool(d["residualised"]) and abs(float(d["corr_sz"])) > 0.9
+    X = (V[:, d["kept"]] - d["mu"]) / d["sd"]
+    X = X - z_spline_values(d["z_tables"], float(d["z_min"]), float(d["z_max"]), z)
+    s = X @ d["sw_weights"]
+    m = lab != ""
+    hw = float(d["sw_hill_width"])
+    assert hw == pytest.approx(0.5 * s[lab == "B"].std())
+    assert float(d["sw_lo"]) == pytest.approx(s[m].min()) and float(d["sw_hi"]) == pytest.approx(s[m].max())
+    assert d["basin_B"][1] == pytest.approx(np.median(s[lab == "B"]))
+    assert json.load(open(os.path.join(out, "rupture_report.json")))["residualised"] is True
+    assert learned_cv_spec(path, toy_system(), 1)[0].grid_min < float(d["sw_hi"]) + 3 * hw
 
 
 def test_rupture_report_v0_barrier_skips_with_a_reason(tmp_path):
     from autopath.metadynamics.learned.pipeline import rupture_report
     V, frames, lab, z, diag = rupture_data()
     names = [f"f{k}" for k in range(5)]
+    frames = frames.assign(r_target=frames.r)
     b = rupture_report(frames, lab, z, V, names, diag, analysis_dir=str(tmp_path / "nope"))["v0_barrier"]
     assert b["status"] == "skipped" and "mixture_pmfs.csv" in b["reason"]
     os.makedirs(tmp_path / "x")
@@ -339,7 +412,7 @@ def rupture_3ptb(tmp_path_factory):
 
 @pytest.mark.learned_slow
 @needs_3ptb
-def test_learn_cv_rupture_on_3ptb(rupture_3ptb, caplog):
+def test_learn_cv_rupture_on_3ptb(rupture_3ptb):
     import openmm as mm
     from autopath.metadynamics.learned.forces import learned_cv_spec
     path, out = rupture_3ptb
@@ -352,7 +425,8 @@ def test_learn_cv_rupture_on_3ptb(rupture_3ptb, caplog):
     assert 0 <= int(d["component"]) < 2 and np.isfinite(d["basin_B"]).all() and np.isfinite(d["basin_U"]).all()
     spec = learned_cv_spec(path, mm.XmlSerializer.deserialize(open(XML3).read()), 1)[0]
     assert spec.resolve(None, 0, None).cv is not None and spec.grid_min < spec.grid_max
-    print("SLOW_NUMBERS", json.dumps({k: rep[k] for k in (
-        "n_pulls", "n_pulls_labelled", "excluded", "class_counts", "class_frames_per_pull_median", "kept",
-        "component", "corr_sz", "corr_sz_resid", "residualised", "ts_r_median", "ts_r_iqr", "ts_z_median",
-        "B_r_median", "U_r_median", "v0_barrier", "sw_lo", "sw_hi", "sw_hill_width", "cv_acc")}))
+    keys = ("n_pulls", "n_pulls_labelled", "excluded", "class_counts", "class_frames_per_pull_median", "kept",
+            "component", "corr_sz", "corr_sz_resid", "residualised", "ts_r_median", "ts_r_iqr", "ts_z_median",
+            "B_r_median", "U_r_median", "v0_barrier", "sw_lo", "sw_hi", "sw_hill_width", "cv_acc")
+    with open(os.path.join(out, "slow_numbers.json"), "w") as fh:
+        json.dump({k: rep[k] for k in keys}, fh, indent=1)

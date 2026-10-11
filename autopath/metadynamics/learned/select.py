@@ -26,9 +26,12 @@ def pull_frames(dat, n_frames):
     d = pd.read_csv(dat, comment="#")
     t = d["time"].to_numpy(float)
     tk = t[-1] * np.arange(n_frames) / max(n_frames - 1, 1)
-    return pd.DataFrame({"t_ps": tk,
-                         "r": np.interp(tk, t, d["r_after"].to_numpy(float)),
-                         "W": np.interp(tk, t, np.cumsum(d["dW_protocol"].to_numpy(float)))})
+    out = pd.DataFrame({"t_ps": tk,
+                        "r": np.interp(tk, t, d["r_after"].to_numpy(float)),
+                        "W": np.interp(tk, t, np.cumsum(d["dW_protocol"].to_numpy(float)))})
+    if "r_target" in d:
+        out["r_target"] = np.interp(tk, t, d["r_target"].to_numpy(float))
+    return out
 
 
 def labels_from_r(r, first_r, r_max):

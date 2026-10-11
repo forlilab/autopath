@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+import sys
 import warnings
 from collections import Counter
 
@@ -92,7 +93,7 @@ def _code_hash() -> str:
     """Hash of the feature definition/evaluation sources and of funnel z."""
     from .. import Funnel
     from . import classes, define, features, select
-    mods = (features, define, classes, select, Funnel)
+    mods = (features, define, classes, select, Funnel, sys.modules[__name__])
     return hashlib.sha256("".join(_sha(m.__file__) for m in mods).encode()).hexdigest()
 
 
@@ -150,14 +151,15 @@ def _funnel_z_nm(X, funnel, masses):
 def learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_dir,
              direction="forward", stride=2, n_perm=1000, reducer=None, hidden=True,
              use_cache=True, classes="r", milestones=None, milestone_pocket_idx=None,
-             mosaic_resolution="cv", funnel=None, masses=None, exclude_families=None) -> str:
+             mosaic_resolution="cv", funnel=None, masses=None, exclude_families=None, temperature=300.0, analysis_dir=None) -> str:
     """classes="r": bound/vestibule/bulk cut from r; "milestones": nearest AutoPath milestone
     (milestones = XML list or directory; milestone_pocket_idx = atoms the milestone clustering used,
     required for milestones: the pocket atoms the milestones were clustered on);
     "rupture": B/TS/U from each pull's force trace, biased component s_w (funnel = funnel_params dict
     or .npz path, masses = system particle masses in Da; both required).
     mosaic_resolution: "cv" picks the MoSAIC resolution by pull-grouped CV on the relevant features; a float fixes it.
-    exclude_families: feature families not defined; default ("F3", "F5") for "rupture", none otherwise."""
+    exclude_families: feature families not defined; default ("F3", "F5") for "rupture", none otherwise.
+    temperature (K), analysis_dir (default: analysis_traces next to traj_dir): the v->0 barrier check of "rupture"."""
     if not (isinstance(mosaic_resolution, str) and mosaic_resolution == "cv"
             or isinstance(mosaic_resolution, (int, float, np.floating)) and not isinstance(mosaic_resolution, bool)
             and 0 < mosaic_resolution <= 1):
@@ -187,7 +189,7 @@ def learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_dir
         return _learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_dir,
                          direction, stride, n_perm, reducer, hidden, use_cache,
                          classes, milestones, milestone_pocket_idx, mosaic_resolution,
-                         exclude_families, funnel, masses)
+                         exclude_families, funnel, masses, temperature, analysis_dir)
 
 
 def _extract(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, pulls, stride, classes="r",
@@ -253,7 +255,8 @@ def _check_classes(labels, order):
 
 def _learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_dir,
               direction, stride, n_perm, reducer, hidden, use_cache, classes="r", milestones=None,
-              milestone_pocket_idx=None, mosaic_resolution="cv", exclude_families=(), funnel=None, masses=None):
+              milestone_pocket_idx=None, mosaic_resolution="cv", exclude_families=(), funnel=None, masses=None,
+              temperature=300.0, analysis_dir=None):
     os.makedirs(out_dir, exist_ok=True)
     pulls = find_pulls(traj_dir, direction)
     if not pulls:
@@ -294,8 +297,8 @@ def _learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_di
     shared = dict(out_dir=out_dir, feats=feats, names=names, kept=kept, mu=mu, sd=sd, sel=sel, res=res,
                   cv_tab=cv_tab, frames=frames, labels=labels, order=order, n_pulls=len(pulls))
     if classes == "rupture":
-        analysis = os.path.join(os.path.dirname(os.path.normpath(traj_dir)), ANALYSIS_DIRNAME)
-        return _finish_rupture(shared, Z, z, diag, reducer, funnel, analysis)
+        analysis = analysis_dir or os.path.join(os.path.dirname(os.path.normpath(traj_dir)), ANALYSIS_DIRNAME)
+        return _finish_rupture(shared, Z, z, diag, reducer, funnel, analysis, temperature)
     reducer = reducer or HLDA(n_components=2)
     Wt = reducer.fit(Z, labels, order)
     Wl = lda_reference(Z, labels, Wt.shape[1], order)
@@ -374,29 +377,36 @@ def multimodal(x, min_n=10):
     return bool(bic[1] < bic[0]), bic
 
 
-def _v0_barrier(r_ts_frames, analysis_dir, temperature):
-    """r_TS of the v->0 PMF of each estimator in analysis_dir/mixture_pmfs.csv against the TS-frame r.
+def _v0_barrier(ts_target, ts_r_after, analysis_dir, temperature):
+    """r_TS of the v->0 PMF of each estimator in analysis_dir/mixture_pmfs.csv against the TS frames.
 
-    Returns {"status": "skipped", "reason"} when the PMFs are absent or hold no v->0 profile.
+    The PMF coordinate is the spring-centre position, so the comparison uses ts_target (r_target of the
+    TS frames, None when unavailable); ts_r_after (ligand r) is reported for reference only.
+
+    Returns {"status": "skipped", "reason"} when the PMFs are absent, hold no v->0 profile, or ts_target is None.
     """
     path = None if analysis_dir is None else os.path.join(analysis_dir, "mixture_pmfs.csv")
     if path is None or not os.path.exists(path):
         return {"status": "skipped", "reason": f"no mixture_pmfs.csv in {analysis_dir or 'an analysis_traces directory'}"}
     from ...pulling.Estimators import KramersEstimator
+    if ts_target is None:
+        return {"status": "skipped", "reason": "pull .dat files lack r_target (the PMF coordinate)"}
     pmf = pd.read_csv(path, usecols=["speed", "estimator", "r_coord", "dG"])
     pmf = pmf[pmf.speed == 0.0]
     if pmf.empty:
         return {"status": "skipped", "reason": f"{path} has no v->0 (speed 0) profile"}
     kbt = KramersEstimator.R_GAS_KJ_MOL_K * temperature
-    q = np.percentile(r_ts_frames, [5, 25, 50, 75, 95])
-    out = {"status": "ok", "temperature_K": float(temperature), "ts_r_quantiles": [float(v) for v in q],
+    q = np.percentile(ts_target, [5, 25, 50, 75, 95])
+    out = {"status": "ok", "coordinate": "r_target", "temperature_K": float(temperature),
+           "ts_quantiles": [float(v) for v in q],
+           "ts_r_after_quantiles": [float(v) for v in np.percentile(ts_r_after, [5, 25, 50, 75, 95])],
            "estimators": {}}
     for est, g in pmf.groupby("estimator"):
         g = g.dropna(subset=["r_coord", "dG"]).sort_values("r_coord")
         r_ts = KramersEstimator.detect_ts(g.r_coord.to_numpy(float), g.dG.to_numpy(float), kbt)
         out["estimators"][str(est)] = (
-            {"r_ts": None, "ts_r_percentile": None, "within_ts_iqr": None} if r_ts is None else
-            {"r_ts": float(r_ts), "ts_r_percentile": float(np.mean(r_ts_frames <= r_ts)),
+            {"r_ts": None, "ts_percentile": None, "within_ts_iqr": None} if r_ts is None else
+            {"r_ts": float(r_ts), "ts_percentile": float(np.mean(ts_target <= r_ts)),
              "within_ts_iqr": bool(q[1] <= r_ts <= q[3])})
     return out
 
@@ -415,6 +425,7 @@ def rupture_report(frames, labels, z, Z, kept_names, diag, order=RUPTURE_ORDER, 
     kept_names : k names
     diag : per-pull dicts with ``reason`` ("" when labelled)
     order : [B, TS, U]
+    frames : also r_target (spring-centre coordinate) for the barrier check; without it the check is skipped
     analysis_dir : directory holding ``mixture_pmfs.csv``; None skips the barrier check
     temperature : K, for the PMF-peak prominence threshold
 
@@ -448,11 +459,23 @@ def rupture_report(frames, labels, z, Z, kept_names, diag, order=RUPTURE_ORDER, 
                              for s, m in zip(sps, means)}
     out["ts_speed_max_smd"] = (float(np.max(np.abs(means[:, None] - means[None]) / sd))
                                if len(sps) > 1 else float("nan"))
-    out["v0_barrier"] = _v0_barrier(frames.r.values[ts], analysis_dir, temperature)
+    tgt = frames["r_target"].values[ts] if "r_target" in frames else None
+    if tgt is not None and not np.isfinite(tgt).all():
+        tgt = None
+    out["v0_barrier"] = _v0_barrier(tgt, frames.r.values[ts], analysis_dir, temperature)
     return out
 
 
-def _finish_rupture(shared, Z, z, diag, reducer, funnel, analysis_dir):
+def _strict(x):
+    """x with every non-finite float replaced by None (strict JSON)."""
+    if isinstance(x, dict):
+        return {k: _strict(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [_strict(v) for v in x]
+    return None if isinstance(x, float) and not np.isfinite(x) else x
+
+
+def _finish_rupture(shared, Z, z, diag, reducer, funnel, analysis_dir, temperature=300.0):
     """Fit s_w on the standardised kept features; write learned_cv.npz, rupture_report.json and report.png."""
     sh = shared
     names, kept, frames, labels, order = sh["names"], sh["kept"], sh["frames"], sh["labels"], sh["order"]
@@ -462,15 +485,18 @@ def _finish_rupture(shared, Z, z, diag, reducer, funnel, analysis_dir):
     # training range over all labelled frames (U holds the bulk plateau): the hard edges of s_w
     sw_lo, sw_hi = float(s[m].min()), float(s[m].max())
     hw = float(0.5 * s[labels == order[0]].std())
+    if not np.isfinite(hw) or hw <= 1e-9 * (sw_hi - sw_lo):
+        raise ValueError(f"s_w hill width is {hw} (s_w is constant or undefined over the {order[0]} frames)")
     Wl = lda_reference(fit["X"][m], labels[m], 2, order)
     kl, _ = choose_component(fit["X"] @ Wl, labels, order)
     acc = _grouped_accuracy(fit["X"], labels, frames.pull.values, order)
-    rep = rupture_report(frames, labels, z, Z, names[kept], diag, order, analysis_dir=analysis_dir)
+    rep = rupture_report(frames, labels, z, Z, names[kept], diag, order, analysis_dir=analysis_dir,
+                         temperature=temperature)
     rep.update(kept=[str(n) for n in names[kept]], component=int(fit["component"]),
                corr_sz=float(fit["corr_plain"]), corr_sz_resid=float(fit["corr_resid"]),
                residualised=bool(fit["residualised"]), cv_acc=acc, sw_lo=sw_lo, sw_hi=sw_hi, sw_hill_width=hw)
     with open(os.path.join(sh["out_dir"], RUPTURE_REPORT_NAME), "w") as fh:
-        json.dump(rep, fh, indent=1)
+        json.dump(_strict(rep), fh, indent=1, allow_nan=False)
     basin = {c: [float(np.median(z[labels == c])), float(np.median(s[labels == c]))] for c in (order[0], order[2])}
     out = _write_learned(sh, s[:, None], fit["w"][:, None], Wl[:, [kl]], dict(
         weights=fit["weights"], lda_weights=Wl, component=fit["component"], sw_weights=fit["w"],
