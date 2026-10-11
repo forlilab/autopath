@@ -26,12 +26,14 @@ from .modules import choose_resolution
 from .sw import choose_component, fit_sw
 from .select import find_pulls, labels_from_r, pull_frames, relevance, select
 from .water import WATER_RES, define_water_features
+from .visualize import write_feature_pse
 
 logger = logging.getLogger("autopath.metadynamics.learned")
 ORDER = R_ORDER
 SUBSAMPLE = 10
 SW_BOUND_SIGMAS = 3.0
 NPZ_NAME, REPORT_NAME, RUPTURE_REPORT_NAME = "learned_cv.npz", "report.png", "rupture_report.json"
+PSE_NAME = "features.pse"
 ANALYSIS_DIRNAME = "analysis_traces"
 FEATURE_SETS = ("water", "contacts")
 
@@ -183,7 +185,7 @@ def learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_dir
              direction="forward", stride=2, n_perm=1000, reducer=None, hidden=True,
              use_cache=True, classes="r", milestones=None, milestone_pocket_idx=None,
              mosaic_resolution="cv", funnel=None, masses=None, exclude_families=None, temperature=300.0,
-             analysis_dir=None, feature_set=None, system=None) -> str:
+             analysis_dir=None, feature_set=None, system=None, milestone_pdbs=None) -> str:
     """classes="r": bound/vestibule/bulk cut from r; "milestones": nearest AutoPath milestone
     (milestones = XML list or directory; milestone_pocket_idx = atoms the milestone clustering used,
     required for milestones: the pocket atoms the milestones were clustered on);
@@ -195,7 +197,8 @@ def learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_dir
     feature_set: "water" (W1/W3 cn features; default for "rupture", which alone supports it) or "contacts"
     (round-2 families; default otherwise). Water frames with a cn centre atom closer than CN_DMAX to a face of
     the imaged cell are excluded from training.
-    system: openmm.System or system.xml path; required by "water" (exclusions); masses default to its masses."""
+    system: openmm.System or system.xml path; required by "water" (exclusions); masses default to its masses.
+    milestone_pdbs: milestone_<class>_frame_<n>.pdb paths (list, or {name: path}) shown in features.pse."""
     if not (isinstance(mosaic_resolution, str) and mosaic_resolution == "cv"
             or isinstance(mosaic_resolution, (int, float, np.floating)) and not isinstance(mosaic_resolution, bool)
             and 0 < mosaic_resolution <= 1):
@@ -240,7 +243,7 @@ def learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_dir
                          direction, stride, n_perm, reducer, hidden, use_cache,
                          classes, milestones, milestone_pocket_idx, mosaic_resolution,
                          exclude_families, funnel, masses, temperature, analysis_dir, feature_set, system,
-                         system_sha)
+                         system_sha, milestone_pdbs)
 
 
 def _extract(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, pulls, stride, classes="r",
@@ -339,7 +342,7 @@ def _check_classes(labels, order):
 def _learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_dir,
               direction, stride, n_perm, reducer, hidden, use_cache, classes="r", milestones=None,
               milestone_pocket_idx=None, mosaic_resolution="cv", exclude_families=(), funnel=None, masses=None,
-              temperature=300.0, analysis_dir=None, feature_set="contacts", system=None, system_sha=None):
+              temperature=300.0, analysis_dir=None, feature_set="contacts", system=None, system_sha=None, milestone_pdbs=None):
     os.makedirs(out_dir, exist_ok=True)
     pulls = find_pulls(traj_dir, direction)
     if not pulls:
@@ -393,7 +396,8 @@ def _learn_cv(topology_pdb, ligand_sdf, ligand_idx, pocket_idx, traj_dir, out_di
     Z = (V[:, kept] - mu) / sd
     shared = dict(out_dir=out_dir, feats=feats, names=names, kept=kept, mu=mu, sd=sd, sel=sel, res=res,
                   cv_tab=cv_tab, frames=frames, labels=labels, order=order, n_pulls=len(pulls),
-                  feature_set=feature_set, extra=extra, system=system, fams=fams)
+                  feature_set=feature_set, extra=extra, system=system, fams=fams,
+                  structures=_viewer_structures(topology_pdb, milestone_pdbs))
     if classes == "rupture":
         analysis = analysis_dir or os.path.join(os.path.dirname(os.path.normpath(traj_dir)), ANALYSIS_DIRNAME)
         return _finish_rupture(shared, Z, z, diag, reducer, funnel, analysis, temperature)
@@ -434,6 +438,18 @@ def _safe_radius_summary(valid, labels, pulls):
             "excluded_per_pull": {p: n for p, n in per_pull.items() if n}}
 
 
+def _viewer_structures(topology_pdb, milestone_pdbs):
+    """Ordered {name: pdb} for features.pse: the bound topology first, then the milestones."""
+    out = {"bound": topology_pdb}
+    if isinstance(milestone_pdbs, dict):
+        out.update(milestone_pdbs)
+    else:
+        for p in milestone_pdbs or ():
+            stem = os.path.splitext(os.path.basename(p))[0]
+            out[stem[len("milestone_"):] if stem.startswith("milestone_") else stem] = p
+    return out
+
+
 def _write_learned(shared, cv, Wt, Wl, extra):
     """Write learned_cv.npz (shared keys + extra) and report.png, log the class sizes; returns the npz path.
 
@@ -451,6 +467,7 @@ def _write_learned(shared, cv, Wt, Wl, extra):
              **features_to_dict(sh["feats"]), **extra)
     _report(os.path.join(sh["out_dir"], REPORT_NAME), frames, labels, cv, names[kept], Wt, Wl, order,
             sh["cv_tab"], sh["res"])
+    write_feature_pse(out, sh["structures"], os.path.join(sh["out_dir"], PSE_NAME))
     for c in order:
         r = frames.r.values[labels == c]
         logger.info("learned CV class %s: %d frames, r %.2f-%.2f nm", c, len(r),
