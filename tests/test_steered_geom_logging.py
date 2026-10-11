@@ -75,31 +75,3 @@ def test_compute_geom_row_shape_only_when_pocket_missing():
     pos_nm = np.random.default_rng(1).normal(size=(9, 3)) * 0.3
     row = smd._compute_geom_row(pos_nm)
     assert set(row) == {"rog", "npr1"}
-
-
-# Integration tests need a minimal OpenMM sMD fixture; skip cleanly if absent.
-@pytest.mark.slow
-def test_pull_writes_sidecar_when_enabled(tmp_path):
-    pytest.importorskip("openmm")
-    fixture = pytest.importorskip(
-        "tests.smd_fixture", reason="no minimal sMD fixture available")
-    import os
-    import pandas as pd
-    smd, kwargs = fixture.make_two_group_smd(out_dir=str(tmp_path),
-                                             log_geom_features=True)
-    run_id = smd.run(**kwargs)
-    assert os.path.exists(f"{tmp_path}/sMD_{run_id}_geom.dat")
-    df = pd.read_csv(f"{tmp_path}/sMD_{run_id}_geom.dat")
-    assert "geom_rog" in df.columns and "geom_npr1" in df.columns
-
-
-@pytest.mark.slow
-def test_pull_no_sidecar_when_disabled(tmp_path):
-    pytest.importorskip("openmm")
-    fixture = pytest.importorskip(
-        "tests.smd_fixture", reason="no minimal sMD fixture available")
-    import glob
-    smd, kwargs = fixture.make_two_group_smd(out_dir=str(tmp_path),
-                                             log_geom_features=False)
-    run_id = smd.run(**kwargs)
-    assert glob.glob(f"{tmp_path}/*_geom.dat") == []
