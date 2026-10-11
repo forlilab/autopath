@@ -81,7 +81,7 @@ def _graph(topology):
     return np.unique([find(i) for i in range(n)], return_inverse=True)[1], edges
 
 
-BRICK_FIT_MAX_NM = 0.05
+BRICK_FIT_MAX_NM = 0.005
 
 
 def brick_fit(X, half, centre_idx, water_mols):
