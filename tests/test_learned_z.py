@@ -29,7 +29,7 @@ def _specs(tmp_path, residualised=True):
     zspec = funnel_z_cv(HOST, GUEST, AXIS, grid_min=Z0 - 1.0, grid_max=Z0 + 1.0, hill_width=0.05,
                         grid_points=81)
     sw = learned_cv_spec(write_npz_r2(str(tmp_path / "r2.npz"), residualised), toy_system(), 1,
-                         n_plain_cvs=1)
+                         n_plain_cvs=1, fused=not residualised)
     return [zspec, *sw]
 
 
@@ -197,10 +197,10 @@ def _npz_with_n_features(path, n):
 
 def test_cv_budget_is_checked_at_spec_build_time(tmp_path):
     ok = _npz_with_n_features(str(tmp_path / "ok.npz"), MAX_CVS - 2)           # + z of the residual + funnel z
-    assert len(learned_cv_spec(ok, toy_system(), 1, n_plain_cvs=1)) == 1
+    assert len(learned_cv_spec(ok, toy_system(), 1, n_plain_cvs=1, fused=False)) == 1
     big = _npz_with_n_features(str(tmp_path / "big.npz"), MAX_CVS - 1)
     with pytest.raises(ValueError, match="collective variables.*not supported"):
-        learned_cv_spec(big, toy_system(), 1, n_plain_cvs=1)
+        learned_cv_spec(big, toy_system(), 1, n_plain_cvs=1, fused=False)
 
 
 @pytest.fixture

@@ -107,7 +107,8 @@ def _write_npz_r1(path):
 
 @pytest.mark.parametrize("residualised", [True, False])
 def test_learned_cv_spec_builds_s_w_from_a_rupture_npz(tmp_path, residualised):
-    specs = learned_cv_spec(write_npz_r2(str(tmp_path / "r2.npz"), residualised), toy_system(), 1)
+    specs = learned_cv_spec(write_npz_r2(str(tmp_path / "r2.npz"), residualised), toy_system(), 1,
+                            fused=not residualised)
     c = s_ref(X0) if residualised else s_plain(X0)
     assert len(specs) == 1 and specs[0].name == "learned_sw"
     assert specs[0].bounds == pytest.approx((c - 2.0, c + 2.0))           # boundary correction on
@@ -136,7 +137,7 @@ def test_md_run_applies_the_boundary_factor_to_the_learned_sw_bias(tmp_path, mon
 
     monkeypatch.setattr(sys.modules[MetadynamicsMD.__module__], "BoundaryCorrectedMetadynamics", Spy)
     s = toy_system()
-    specs = learned_cv_spec(write_npz_r2(str(tmp_path / "r2.npz")), s, 1)
+    specs = learned_cv_spec(write_npz_r2(str(tmp_path / "r2.npz")), s, 1, fused=False)
     md = MetadynamicsMD(topology=top, ligand_atoms=[0], pocket_atoms=[1], platform="Reference",
                         out_dir=str(tmp_path / "out"))
     md.run(pdb_file=pdb, system=s, run_id="w", cv_specs=specs, mMD_time=0.02, bias_factor=10,

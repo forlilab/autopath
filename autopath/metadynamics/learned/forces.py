@@ -62,6 +62,128 @@ def feature_cv(f, system, name):
     raise ValueError(f"unknown feature kind {f.kind!r}")
 
 
+def _fused_contacts(feats, coeffs, system):
+    """One CustomNonbondedForce for every contacts feature: sum_k c_k * contacts_k."""
+    n = system.getNumParticles()
+    sides = {}                                      # atom -> set of (feature, side)
+    for k, f in enumerate(feats):
+        if set(f.group_a) & set(f.group_b):
+            raise ValueError(f"contacts feature {f.name!r} has atoms in both groups: "
+                             "not supported in the fused s_w")
+        for side, g in ((0, f.group_a), (1, f.group_b)):
+            for i in g:
+                sides.setdefault(int(i), set()).add((k, side))
+    # atoms with the same feature sides form a class; class pairs are disjoint interaction groups,
+    # so every atom pair is computed at most once
+    sig = {}
+    for i in sorted(sides):
+        sig.setdefault(frozenset(sides[i]), []).append(i)
+    sigs, members = list(sig), list(sig.values())
+    cls = np.zeros(n, dtype=int)
+    for c, m in enumerate(members):
+        cls[m] = c
+    r0s = sorted({f.r0 for f in feats})
+    nc = len(members)
+    tables = {r0: np.zeros((nc, nc)) for r0 in r0s}
+    links = set()
+    for c1 in range(nc):
+        for c2 in range(c1 + 1, nc):
+            for (k, s1) in sigs[c1]:
+                if (k, 1 - s1) in sigs[c2]:
+                    t = tables[feats[k].r0]
+                    t[c1, c2] += coeffs[k]
+                    t[c2, c1] = t[c1, c2]
+                    links.add((c1, c2))
+    terms, defs = [], []
+    for g, r0 in enumerate(r0s):
+        rs, rc = CONTACT_SWITCH_FACTOR * r0, CONTACT_CUTOFF_FACTOR * r0
+        terms.append(f"t{g}(cls1, cls2)*sw{g}/(1+(r/{r0!r})^6)")
+        defs.append(f"sw{g} = 1-10*x{g}^3+15*x{g}^4-6*x{g}^5")
+        defs.append(f"x{g} = min(1, max(0, (r-{rs!r})/({rc!r}-{rs!r})))")
+    force = mm.CustomNonbondedForce("; ".join([" + ".join(terms)] + defs))
+    force.addPerParticleParameter("cls")
+    for g, r0 in enumerate(r0s):
+        force.addTabulatedFunction(f"t{g}", mm.Discrete2DFunction(nc, nc, tables[r0].ravel(order="F").tolist()))
+    for i in range(n):
+        force.addParticle([float(cls[i])])
+    nb = _nonbonded(system)
+    for e in range(nb.getNumExceptions()):
+        i, j, *_ = nb.getExceptionParameters(e)
+        force.addExclusion(i, j)
+    pbc = nb.usesPeriodicBoundaryConditions()
+    force.setNonbondedMethod(mm.CustomNonbondedForce.CutoffPeriodic if pbc
+                             else mm.CustomNonbondedForce.CutoffNonPeriodic)
+    force.setCutoffDistance(CONTACT_CUTOFF_FACTOR * max(r0s))
+    force.setUseSwitchingFunction(False)            # per-r0 switching is in the expression
+    force.setUseLongRangeCorrection(False)
+    for c1, c2 in sorted(links):
+        force.addInteractionGroup(members[c1], members[c2])
+    return force
+
+
+def fused_sw_forces(features, weights, mu, sd, system):
+    """Few forces whose energies sum to sum_k c_k f_k, c_k = weights_k / sd_k.
+
+    Parameters
+    ----------
+    features : list of Feature (kinds pair, contacts, centroid_distance, cos)
+    weights, mu, sd : (n_features,) arrays
+    system : openmm.System with a NonbondedForce (contacts exclusions and PBC)
+
+    Returns
+    -------
+    forces : list of cvpack CVs, one per kind present
+    const : float, -sum_k c_k mu_k; s = sum(forces) + const
+    """
+    w, mu, sd = (np.asarray(a, dtype=float).ravel() for a in (weights, mu, sd))
+    if not (len(w) == len(mu) == len(sd) == len(features)):
+        raise ValueError("fused s_w needs one weight, mu and sd per feature")
+    c = w / sd
+    by_kind = {}
+    for k, f in enumerate(features):
+        if f.kind not in ("pair", "contacts", "centroid_distance", "cos"):
+            raise ValueError(f"feature {f.name!r} of kind {f.kind!r} is not supported in the fused s_w")
+        by_kind.setdefault(f.kind, []).append(k)
+    forces = []
+    if "pair" in by_kind:
+        b = mm.CustomBondForce("c/(1+(r/r0)^6)")
+        b.addPerBondParameter("c")
+        b.addPerBondParameter("r0")
+        for k in by_kind["pair"]:
+            for i, j in features[k].pairs:
+                b.addBond(int(i), int(j), [float(c[k]), features[k].r0])
+        b.setUsesPeriodicBoundaryConditions(True)
+        forces.append(_wrap(b, "fused_pair"))
+    if "contacts" in by_kind:
+        ks = by_kind["contacts"]
+        forces.append(_wrap(_fused_contacts([features[k] for k in ks], c[ks], system), "fused_contacts"))
+    for kind, n_groups, expr in (
+            ("centroid_distance", 2, "distance(g1,g2)"),
+            ("cos", 4, "(distance(g2,g3)^2 + distance(g1,g4)^2 - distance(g2,g4)^2 - distance(g1,g3)^2)"
+                       "/(2*distance(g1,g2)*distance(g3,g4))")):
+        if kind not in by_kind:
+            continue
+        cb = mm.CustomCentroidBondForce(n_groups, f"c*{expr}")
+        cb.addPerBondParameter("c")
+        for k in by_kind[kind]:
+            first = cb.getNumGroups()
+            for g in features[k].groups:
+                cb.addGroup([int(i) for i in g], [1.0] * len(g))
+            cb.addBond(list(range(first, first + n_groups)), [float(c[k])])
+        cb.setUsesPeriodicBoundaryConditions(True)
+        forces.append(_wrap(cb, f"fused_{kind}"))
+    return forces, float(-np.sum(c * mu))
+
+
+def fused_sw_composite(features, weights, mu, sd, system, key=None):
+    """LinearComposite over the fused forces with the same value as ``composite_cv``."""
+    from ..BoundaryCorrection import LinearComposite
+    forces, const = fused_sw_forces(features, weights, mu, sd, system)
+    shift = np.zeros(len(forces))
+    shift[0] = -const
+    return LinearComposite(forces, np.ones(len(forces)), shift, np.ones(len(forces)), key=key)
+
+
 def combined_cv(features, weights, mu, sd, system, name="learned"):
     if len(features) > 32:
         raise ValueError(f"{len(features)} features exceed OpenMM CustomCVForce's limit of 32 collective variables")
@@ -124,15 +246,18 @@ def check_funnel_match(npz_path, funnel):
         raise ValueError("learned CV funnel differs from --funnel-from: not supported")
 
 
-def _sw_spec(d, system, kept, n_plain_cvs=0):
-    """[CVSpec] of s_w from a rupture-class npz (residual composite when residualised)."""
+def _sw_spec(d, system, kept, n_plain_cvs=0, fused=True):
+    """[CVSpec] of s_w from a rupture-class npz (fused forces, or residual composite when residualised)."""
     from ..BoundaryCorrection import MAX_CVS, LinearComposite, ResidualComposite
     from ..CV import CVSpec
-    n_cvs = len(kept) + bool(d["residualised"]) + n_plain_cvs
-    if n_cvs > MAX_CVS:
-        raise ValueError(f"{n_cvs} collective variables ({len(kept)} features, the residual z, "
-                         f"{n_plain_cvs} plain) exceed OpenMM's limit of {MAX_CVS}: not supported")
     w, mu, sd = (np.array(d[k], dtype=float) for k in ("sw_weights", "mu", "sd"))
+    if fused and bool(d["residualised"]):
+        raise ValueError("fused s_w does not support residualised features; pass fused=False")
+    n_feat = len(fused_sw_forces(kept, w, mu, sd, system)[0]) if fused else len(kept)
+    n_cvs = n_feat + bool(d["residualised"]) + n_plain_cvs
+    if n_cvs > MAX_CVS:
+        raise ValueError(f"{n_cvs} collective variables ({n_feat} feature forces, the residual z, "
+                         f"{n_plain_cvs} plain) exceed OpenMM's limit of {MAX_CVS}: not supported")
     lo, hi, hw = (float(d[k]) for k in ("sw_grid_min", "sw_grid_max", "sw_hill_width"))
     edges = (float(d["sw_lo"]), float(d["sw_hi"]))       # training range: boundary-corrected edges
     resid = bool(d["residualised"])
@@ -142,6 +267,8 @@ def _sw_spec(d, system, kept, n_plain_cvs=0):
         z_min, z_max, tables = float(d["z_min"]), float(d["z_max"]), np.array(d["z_tables"], dtype=float)
 
     def factory(pos, n_atoms, top):
+        if fused:
+            return fused_sw_composite(kept, w, mu, sd, system)
         forces = [feature_cv(f, system, f"f{k}") for k, f in enumerate(kept)]
         if not resid:
             return LinearComposite(forces, w, mu, sd)
@@ -153,12 +280,13 @@ def _sw_spec(d, system, kept, n_plain_cvs=0):
                    name="learned_sw", bounds=edges, _factory=factory)]
 
 
-def learned_cv_spec(npz_path, system, n_components=1, nested=False, n_plain_cvs=0):
+def learned_cv_spec(npz_path, system, n_components=1, nested=False, n_plain_cvs=0, fused=True):
     """One CVSpec per HLDA component. Flat LinearComposite by default (components share
     their features); ``nested=True`` gives the old MetaCollectiveVariable (parity tests only).
     A rupture-class npz (key "component") gives the single s_w spec "learned_sw",
     boundary-corrected on (sw_lo, sw_hi); ``n_plain_cvs`` counts the other biased variables'
-    CVs against the CustomCVForce limit.
+    CVs against the CustomCVForce limit. ``fused`` builds s_w from one force per feature kind
+    (``fused_sw_forces``); a residualised npz needs ``fused=False``.
     """
     from ..CV import CVSpec
     from .features import features_from_dict
@@ -169,7 +297,7 @@ def learned_cv_spec(npz_path, system, n_components=1, nested=False, n_plain_cvs=
         if n_components != 1 or nested:
             raise ValueError("a rupture-class learned CV has one biased component (s_w); "
                              f"n_components={n_components}, nested={nested} is not supported")
-        return _sw_spec(d, system, kept, n_plain_cvs)
+        return _sw_spec(d, system, kept, n_plain_cvs, fused)
     key = object()                                  # shared by this call's components
     specs = []
     for k in range(n_components):

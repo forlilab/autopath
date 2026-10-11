@@ -370,7 +370,7 @@ def test_learn_cv_rupture_runs_the_residualised_path(monkeypatch, tmp_path):
     assert float(d["sw_lo"]) == pytest.approx(s[m].min() - 3 * sb) and float(d["sw_hi"]) == pytest.approx(s[m].max() + 3 * sb)
     assert d["basin_B"][1] == pytest.approx(np.median(s[lab == "B"]))
     assert json.load(open(os.path.join(out, "rupture_report.json")))["residualised"] is True
-    assert learned_cv_spec(path, toy_system(), 1)[0].grid_min < float(d["sw_hi"]) + 3 * hw
+    assert learned_cv_spec(path, toy_system(), 1, fused=False)[0].grid_min < float(d["sw_hi"]) + 3 * hw
 
 
 def test_rupture_report_v0_barrier_skips_with_a_reason(tmp_path):
