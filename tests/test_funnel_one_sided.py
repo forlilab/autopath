@@ -94,3 +94,24 @@ def test_k_z_is_saved_loaded_and_used(tmp_path):
     del p["k_z"]
     save_funnel_params(p, str(tmp_path / "old"))
     assert "k_z" not in load_funnel_params(str(tmp_path / "old.npz"))
+
+
+def test_z_low_is_saved_loaded_and_used(tmp_path):
+    from autopath.metadynamics.Funnel import save_funnel_params, load_funnel_params
+    p = dict(_params(), z_low=-1.5 * A, unbinding_axis=np.array([0.0, 0.0, 1.0]),
+             com_trajectory=np.zeros((2, 3)), host_com_trajectory=np.zeros((2, 3)),
+             guest_com_trajectory=np.zeros((2, 3)), radial_distances=np.zeros(2),
+             axial_distances=np.array([4.0, 4.0]), trajectory_length=2, force_group=10)
+    save_funnel_params(p, str(tmp_path / "fp"))
+    loaded = load_funnel_params(str(tmp_path / "fp.npz"))
+    assert funnel_lower_wall_ang(loaded) == pytest.approx(-1.5)
+    assert funnel_z_grid_min_ang(loaded) == pytest.approx(-4.5)
+    force = create_funnel_force_from_trajectory_analysis(loaded)
+    g = {force.getGlobalParameterName(i): force.getGlobalParameterDefaultValue(i)
+         for i in range(force.getNumGlobalParameters())}
+    assert g["z_low"] == pytest.approx(-0.15)
+    del p["z_low"]
+    save_funnel_params(p, str(tmp_path / "old"))
+    old = load_funnel_params(str(tmp_path / "old.npz"))
+    assert "z_low" not in old
+    assert funnel_lower_wall_ang(old) == pytest.approx(4.0 - 6.0)

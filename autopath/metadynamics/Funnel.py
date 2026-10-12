@@ -641,10 +641,12 @@ def save_funnel_params(params_dict: Dict, filepath: str) -> None:
     Saves a single .npz file that can be reloaded with load_funnel_params() for
     post-hoc PMF correction or funnel visualisation.
 
-    Units: z_cc, z_max, R_cylinder and trajectory arrays in Å; alpha in degrees;
+    Units: z_cc, z_max, z_low, R_cylinder and trajectory arrays in Å; alpha in degrees;
     k_xy and k_z in kcal/mol/Å².
     """
     extra = {}
+    if "z_low" in params_dict:
+        extra["z_low_ang"] = np.array(params_dict["z_low"].value_in_unit(openmmunit.angstrom))
     if "k_z" in params_dict:
         extra["k_z_kcal_per_mol_per_ang2"] = np.array(params_dict["k_z"].value_in_unit(
             openmmunit.kilocalorie_per_mole / openmmunit.angstrom**2))
@@ -703,6 +705,8 @@ def load_funnel_params(filepath: str) -> Dict:
     # older files have no k_z; the force then falls back to k_xy
     extra = ({"k_z": float(data["k_z_kcal_per_mol_per_ang2"]) * kcal_a2}
              if "k_z_kcal_per_mol_per_ang2" in data.files else {})
+    if "z_low_ang" in data.files:
+        extra["z_low"] = float(data["z_low_ang"]) * openmmunit.angstrom
     if "axis_coeffs" in data.files:
         extra.update(frame_b_index=[int(i) for i in data["frame_b_index"]],
                      frame_c_index=[int(i) for i in data["frame_c_index"]],
