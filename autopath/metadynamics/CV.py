@@ -459,37 +459,128 @@ def pathCV_cv(
     )
 
 
+CONTACTS_DEF_KEYS = ("group1", "group2", "threshold_nm", "step_function", "cutoff_factor",
+                     "switch_factor", "bounds", "hill_width")
+
+
+def _step_at_threshold(step_function: str) -> tuple:
+    """(value, d/dx) of a cvpack step function at x = 1, evaluated by Lepton."""
+    import openmm as mm
+    s = mm.System()
+    s.addParticle(1.0)
+    s.addParticle(1.0)
+    f = mm.CustomBondForce(f"{step_function}; x=r")
+    f.addBond(0, 1, [])
+    s.addForce(f)
+    ctx = mm.Context(s, mm.VerletIntegrator(0.001), mm.Platform.getPlatformByName("Reference"))
+    ctx.setPositions([mm.Vec3(0, 0, 0), mm.Vec3(1, 0, 0)])
+    st = ctx.getState(getEnergy=True, getForces=True)
+    return (st.getPotentialEnergy().value_in_unit(openmmunit.kilojoule_per_mole),
+            -st.getForces(asNumpy=True)[1][0].value_in_unit(openmmunit.kilojoule_per_mole / openmmunit.nanometer))
+
+
 def contacts_cv(
-    pocket_atoms: list[int],
-    ligand_atoms: list[int],
+    group1: list[int],
+    group2: list[int],
     system,
-    grid_min: float,
-    grid_max: float,
-    hill_width: float = 5.0,
-    grid_points: int = 100,
-    step_function: str = "1/(1+x^6)",
-    threshold_distance: float = 0.35,
-    cutoff_factor: float = 2.0,
-    switch_factor: float = 1.5,
-    reference: int = 50,
+    threshold_nm: float,
+    step_function: str,
+    cutoff_factor: float,
+    switch_factor: float,
+    bounds: tuple,
+    hill_width: float,
+    grid_min: Optional[float] = None,
+    grid_max: Optional[float] = None,
+    name: str = "contacts",
 ) -> CVSpec:
-    """Number of pocket-ligand contacts CV."""
-    forces = {f.getName(): f for f in system.getForces()}
-    cv = cvpack.NumberOfContacts(
-        pocket_atoms,
-        ligand_atoms,
-        forces["NonbondedForce"],
-        stepFunction=step_function,
-        thresholdDistance=threshold_distance,
-        cutoffFactor=cutoff_factor,
-        switchFactor=switch_factor,
-        reference=reference,
-    )
+    """Total group1-group2 contacts, sum of step(r/threshold) times OpenMM's switch (dimensionless).
+
+    Built as ``cvpack.NumberOfContacts`` with reference 1, cutoff ``cutoff_factor * threshold_nm``
+    and switching from ``switch_factor * threshold_nm``; PBC and exclusions follow the system's
+    NonbondedForce. Clamped to ``bounds``, which are also the boundary-correction edges.
+
+    Parameters
+    ----------
+    group1, group2 : disjoint system atom indices
+    system : openmm.System with a NonbondedForce
+    threshold_nm : contact distance r0 (nm)
+    step_function : Lepton expression in x = r/r0, finite with finite derivative at x = 1
+    cutoff_factor, switch_factor : cutoff and switching distance in units of r0
+    bounds : finite (lo, hi) clamp and boundary-correction edges
+    hill_width : hill width (contacts); grid spacing is hill_width / 5
+    grid_min, grid_max : bias grid edges; default bounds -/+ 3 hill widths
+    name : CV name
+    """
+    import openmm as mm
+    from .BoundaryCorrection import LinearComposite
+    g1, g2 = [int(i) for i in group1], [int(i) for i in group2]
+    if set(g1) & set(g2):
+        raise ValueError("contacts groups share atoms: not supported")
+    lo, hi = (float(b) for b in bounds)
+    if not (np.isfinite(lo) and np.isfinite(hi) and hi > lo):
+        raise ValueError(f"contacts bounds {bounds} must be finite with hi > lo")
+    v, dv = _step_at_threshold(step_function)
+    if not (np.isfinite(v) and np.isfinite(dv)):
+        raise ValueError(f"step function {step_function!r} is not finite at x = 1: not supported; "
+                         "use its factored form")
+    n_nb = sum(isinstance(f, mm.NonbondedForce) for f in system.getForces())
+    if n_nb != 1:
+        raise ValueError(f"contacts CV needs exactly one NonbondedForce, system has {n_nb}")
+    hw = float(hill_width)
+    gmin = lo - 3 * hw if grid_min is None else float(grid_min)
+    gmax = hi + 3 * hw if grid_max is None else float(grid_max)
+
+    def factory(input_positions, n_atoms, topology):
+        # fetched here so the closure keeps the System (owner of the force) alive
+        nb = next(f for f in system.getForces() if isinstance(f, mm.NonbondedForce))
+        f = cvpack.NumberOfContacts(g1, g2, nb, reference=1.0, stepFunction=step_function,
+                                    thresholdDistance=float(threshold_nm) * openmmunit.nanometer,
+                                    cutoffFactor=float(cutoff_factor), switchFactor=float(switch_factor),
+                                    name=name)
+        return LinearComposite([f], [1.0], [0.0], [1.0], clamp=(lo, hi))
+
     return CVSpec(
-        cv=cv,
-        grid_min=grid_min,
-        grid_max=grid_max,
-        hill_width=hill_width,
-        grid_points=grid_points,
-        name="nc",
+        cv=None,
+        grid_min=gmin,
+        grid_max=gmax,
+        hill_width=hw,
+        grid_points=int(round((gmax - gmin) / (hw / 5))) + 1,
+        name=name,
+        bounds=(lo, hi),
+        _factory=factory,
     )
+
+
+def load_contacts_def(path: str) -> dict:
+    """Read and validate a contact-CV JSON definition.
+
+    Schema: ``{"contacts": {<CONTACTS_DEF_KEYS>}, "learned_cv_file": optional str}``.
+
+    Returns
+    -------
+    dict with "contacts" (``contacts_cv`` keyword arguments, bounds as a tuple) and
+    "learned_cv_file" (str or None). Raises ValueError on missing or unknown keys.
+    """
+    import json
+    with open(path) as fh:
+        d = json.load(fh)
+    if not isinstance(d, dict) or not isinstance(d.get("contacts"), dict):
+        raise ValueError(f"{path}: needs a 'contacts' object")
+    unknown = set(d) - {"contacts", "learned_cv_file"}
+    c = d["contacts"]
+    missing = [k for k in CONTACTS_DEF_KEYS if k not in c]
+    unknown |= {f"contacts.{k}" for k in set(c) - set(CONTACTS_DEF_KEYS)}
+    if missing:
+        raise ValueError(f"{path}: contacts is missing {missing}")
+    if unknown:
+        raise ValueError(f"{path}: unknown keys {sorted(unknown)}")
+    if len(c["bounds"]) != 2:
+        raise ValueError(f"{path}: contacts.bounds must be [lo, hi]")
+    out = {k: c[k] for k in CONTACTS_DEF_KEYS}
+    out["group1"], out["group2"] = [int(i) for i in c["group1"]], [int(i) for i in c["group2"]]
+    out["bounds"] = (float(c["bounds"][0]), float(c["bounds"][1]))
+    for k in ("threshold_nm", "cutoff_factor", "switch_factor", "hill_width"):
+        out[k] = float(c[k])
+    out["step_function"] = str(c["step_function"])
+    lf = d.get("learned_cv_file")
+    return {"contacts": out, "learned_cv_file": None if lf is None else str(lf)}

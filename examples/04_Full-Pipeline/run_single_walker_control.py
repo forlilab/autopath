@@ -6,6 +6,7 @@ existing milestones (bound -> unbound), so results are on the same coordinate.
 --seed-from         'equil' or a milestone name to start from
 --bias-dir          shared bias directory for concurrent walkers
 --cv                path progress or funnel z coordinate
+--cv-def            JSON contact-total definition for funnel_z_contacts / contacts_learned
 --expect-cv-length  abort if the path CV length (Å/unit) differs
 """
 import argparse
@@ -25,7 +26,7 @@ import numpy as np
 from openmm import unit as ommunit
 
 from autopath.clustering import read_positions
-from autopath.metadynamics.CV import CVSpec, pathCV_cv, funnel_z_cv, com_cv
+from autopath.metadynamics.CV import CVSpec, pathCV_cv, funnel_z_cv, com_cv, contacts_cv, load_contacts_def
 from cvpack import Torsion
 from autopath.metadynamics.Funnel import (create_funnel_force_from_trajectory_analysis,
                                           load_funnel_params, com_distance_at_z,
@@ -64,12 +65,19 @@ def main():
     ap.add_argument("--hill-width", dest="hill_width", type=float, default=None,
                     help="hill width in CV units (overrides the matched-width default)")
     ap.add_argument("--cv", choices=["path", "funnel_z", "funnel_z_unclamped", "dist", "funnel_z_dist",
-                                       "dist_torsion", "learned", "learned_z"],
+                                       "dist_torsion", "learned", "learned_z",
+                                       "funnel_z_contacts", "contacts_learned"],
                     default="path",
                     help="path: progress along the milestones, extended to the funnel "
                          "cap; funnel_z: the funnel axis coordinate, from below the lower wall to z_max; "
                          "dist: two-atom distance (Limongelli 2013); funnel_z_dist: both, 2D"
-                         "; learned_z: funnel z plus the rupture-class s_w (--learned-cv-file), 2D")
+                         "; learned_z: funnel z plus the rupture-class s_w (--learned-cv-file), 2D"
+                         "; funnel_z_contacts: funnel z plus the --cv-def contact total, 2D"
+                         "; contacts_learned: the --cv-def contact total plus its learned_cv_file s_w, 2D")
+    ap.add_argument("--cv-def", default=None,
+                    help='JSON: {"contacts": {"group1", "group2", "threshold_nm", "step_function", '
+                         '"cutoff_factor", "switch_factor", "bounds", "hill_width"}, '
+                         '"learned_cv_file": optional}')
     ap.add_argument("--learned-cv-file", default=None,
                     help="--cv learned: learned_cv.npz from autopath.metadynamics.learned.learn_cv")
     ap.add_argument("--learned-components", type=int, default=1)
@@ -108,6 +116,18 @@ def main():
             ap.error("--tt-basins-from-classes: --tt-basins is not allowed with it")
         if args.cv != "learned_z" or not args.learned_cv_file:
             ap.error("--tt-basins-from-classes needs --cv learned_z and --learned-cv-file")
+    cv_def = None
+    if args.cv in ("funnel_z_contacts", "contacts_learned"):
+        if not args.cv_def:
+            ap.error(f"--cv {args.cv} needs --cv-def")
+        try:
+            cv_def = load_contacts_def(args.cv_def)
+        except (OSError, ValueError) as e:
+            ap.error(f"--cv-def: {e}")
+        if args.tt_basins:
+            ap.error(f"--tt-basins with --cv {args.cv}: not supported (well-tempered only)")
+        if args.cv == "contacts_learned" and not cv_def["learned_cv_file"]:
+            ap.error("--cv contacts_learned needs learned_cv_file in --cv-def")
 
     base = args.base
     os.makedirs(args.out, exist_ok=True)
@@ -183,7 +203,7 @@ def main():
             f"{args.expect_cv_length}. The selections or milestones differ, so the "
             "two ΔG(t) curves would not be comparable.")
 
-    if args.cv in ("dist", "dist_torsion", "learned"):
+    if args.cv in ("dist", "dist_torsion", "learned", "contacts_learned"):
         cv = None
     elif args.cv == "path":
         cv = path
@@ -235,6 +255,21 @@ def main():
             raise SystemExit(str(e))
         cvs.extend(learned_cv_spec(args.learned_cv_file, load_system(system_xml), 1, n_plain_cvs=1))
         log.info("CV: funnel z + s_w (%s), 2D", args.learned_cv_file)
+    if cv_def is not None:
+        cvs.append(contacts_cv(**cv_def["contacts"], system=load_system(system_xml)))
+        log.info("CV: contact total %s, bounds %s, hills %.3f", args.cv_def,
+                 cv_def["contacts"]["bounds"], cv_def["contacts"]["hill_width"])
+    if args.cv == "contacts_learned":
+        from autopath.metadynamics.learned.forces import check_funnel_match, is_rupture_cv, learned_cv_spec
+        lf = cv_def["learned_cv_file"]
+        if not is_rupture_cv(lf):
+            raise SystemExit(f"{lf}: --cv contacts_learned needs a learn_cv(classes='rupture') npz")
+        try:
+            check_funnel_match(lf, params)
+        except ValueError as e:
+            raise SystemExit(str(e))
+        cvs.extend(learned_cv_spec(lf, load_system(system_xml), 1, n_plain_cvs=1))
+        log.info("CV: contact total + s_w (%s), 2D; funnel z monitored", lf)
     tt_basins = [[float(x) for x in b.split(",")] for b in args.tt_basins] if args.tt_basins else None
     if args.tt_basins_from_classes:
         from autopath.metadynamics.learned.forces import tt_basins_from_classes
@@ -286,7 +321,8 @@ def main():
               monitor_cvs=({"funnel_z": funnel_z_cv(
                   params["host_index"], params["guest_index"], params["unbinding_axis"],
                   grid_min=-10.0, grid_max=10.0, frame=frame)}
-                  if funnel_force is not None and args.cv not in ("funnel_z", "funnel_z_unclamped", "funnel_z_dist", "learned_z") else None),
+                  if funnel_force is not None and args.cv not in ("funnel_z", "funnel_z_unclamped", "funnel_z_dist", "learned_z",
+                                                                  "funnel_z_contacts") else None),
               boundary_correction=args.boundary_correction,
               reweight=args.reweight, rct_ustride=args.rct_ustride,
               dcd_interval=args.dcd_interval,
