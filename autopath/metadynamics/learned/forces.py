@@ -352,11 +352,13 @@ def check_funnel_match(npz_path, funnel):
         raise ValueError("learned CV funnel differs from --funnel-from: not supported")
 
 
-def _sw_spec(d, system, kept, n_plain_cvs=0, fused=True):
+def _sw_spec(d, system, kept, n_plain_cvs=0, fused=None):
     """[CVSpec] of s_w from a rupture-class npz (fused forces, or residual composite when residualised)."""
     from ..BoundaryCorrection import MAX_CVS, LinearComposite, ResidualComposite
     from ..CV import CVSpec
     w, mu, sd = (np.array(d[k], dtype=float) for k in ("sw_weights", "mu", "sd"))
+    if fused is None:
+        fused = not bool(d["residualised"])
     if fused and bool(d["residualised"]):
         raise ValueError("fused s_w does not support residualised features; pass fused=False")
     n_feat = len(fused_sw_forces(kept, w, mu, sd, system)[0]) if fused else len(kept)
@@ -386,13 +388,14 @@ def _sw_spec(d, system, kept, n_plain_cvs=0, fused=True):
                    name="learned_sw", bounds=edges, _factory=factory)]
 
 
-def learned_cv_spec(npz_path, system, n_components=1, nested=False, n_plain_cvs=0, fused=True):
+def learned_cv_spec(npz_path, system, n_components=1, nested=False, n_plain_cvs=0, fused=None):
     """One CVSpec per HLDA component. Flat LinearComposite by default (components share
     their features); ``nested=True`` gives the old MetaCollectiveVariable (parity tests only).
     A rupture-class npz (key "component") gives the single s_w spec "learned_sw",
     clamped and boundary-corrected on (sw_lo, sw_hi); ``n_plain_cvs`` counts the other biased variables'
     CVs against the CustomCVForce limit. ``fused`` builds s_w from one force per feature kind
-    (``fused_sw_forces``); a residualised npz needs ``fused=False``.
+    (``fused_sw_forces``); None (default) fuses unless the npz is residualised, which uses the residual
+    composite; fused=True on a residualised npz is not supported.
     """
     from ..CV import CVSpec
     from .features import features_from_dict

@@ -7,7 +7,7 @@ import openmm as mm
 import openmm.unit as u
 import pytest
 
-from autopath.metadynamics import LinearComposite, MetadynamicsMD
+from autopath.metadynamics import LinearComposite, ResidualComposite, MetadynamicsMD
 from autopath.metadynamics.BoundaryCorrection import composite_bias_force
 from autopath.metadynamics.CV import funnel_z_cv
 from autopath.metadynamics.learned.features import Feature
@@ -143,15 +143,17 @@ def test_centroid_count_and_overlapping_contacts_groups_are_not_supported():
         fused_sw_forces([ov], W[:1], MU[:1], SD[:1], _system())
 
 
-def test_learned_cv_spec_fused_default_and_residualised_rejected(tmp_path):
+def test_learned_cv_spec_default_is_fused_unless_residualised(tmp_path):
     plain = write_npz_r2(str(tmp_path / "plain.npz"), residualised=False)
     resid = write_npz_r2(str(tmp_path / "resid.npz"), residualised=True)
     fused = learned_cv_spec(plain, toy_system(), 1)[0].resolve(None, 5, None).cv
     per = learned_cv_spec(plain, toy_system(), 1, fused=False)[0].resolve(None, 5, None).cv
     assert isinstance(fused, LinearComposite) and len(fused.forces) == 3 and len(per.forces) == 3
+    assert not isinstance(fused, ResidualComposite)
+    default = learned_cv_spec(resid, toy_system(), 1)[0].resolve(None, 5, None).cv
+    assert isinstance(default, ResidualComposite)
     with pytest.raises(ValueError, match="fused s_w does not support residualised features"):
-        learned_cv_spec(resid, toy_system(), 1)
-    assert learned_cv_spec(resid, toy_system(), 1, fused=False)[0].name == "learned_sw"
+        learned_cv_spec(resid, toy_system(), 1, fused=True)
 
 
 def _seeded(monkeypatch):
