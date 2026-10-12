@@ -337,6 +337,7 @@ def test_contacts_feature_set_keeps_the_round2_families(toy, tmp_path, monkeypat
     path = _learn(toy, tmp_path / "o", feature_set="contacts", system=None,
                   masses=[toy["system"].getParticleMass(i).value_in_unit(unit.dalton)
                           for i in range(toy["system"].getNumParticles())])
+    assert os.path.exists(os.path.join(tmp_path / "o", "features.pse"))
     d = np.load(os.path.join(tmp_path / "o", "features.npz"), allow_pickle=False)
     assert str(d["feature_set"]) == "contacts"
     assert [str(n) for n in d["names"]] == ["F1_p", "F2_c", "F7_d"]

@@ -10,6 +10,7 @@ from .features import CN_DMAX, CN_R0, features_from_dict
 WATER_RESN = "HOH+WAT+SOL+TIP3+TIP4+T3P"
 POCKET_CA_NM = 0.6
 KEPT_RGB = {"pos": (0.9, 0.1, 0.1), "neg": (0.1, 0.2, 0.9), "other": (0.95, 0.6, 0.1)}
+SHELL_RGB = (0.2, 0.8, 0.3)
 GREY = (0.6, 0.6, 0.6)
 
 
@@ -65,7 +66,7 @@ def _draw(cmd, f, weight, wmax, ref, X, rgb, kept):
             cmd.label(f"first {nm}", f'"{f.name} {weight:+.2f}"')
         objs.append(nm)
     elif f.kind == "pair":
-        for k, (i, j) in enumerate(f.pairs):
+        for i, j in f.pairs:
             cmd.distance(nm, _sel([i], ref), _sel([j], ref))
         cmd.hide("labels", nm)
         cmd.color(col, nm)
@@ -125,7 +126,25 @@ def _funnel_cgo_obj(cmd, funnel, X, ref):
     cmd.load_cgo(cgo, "funnel")
 
 
-def write_feature_pse(learned_npz, structures, out_pse, funnel=None, waters=True, water_cut_nm=None, ligand_idx=None) -> str:
+def _to_nearest_image(cmd, obj, Y, o_ids, centre_ids, box):
+    """Move each water of obj (whole molecule) to the image of its O nearest the given centre."""
+    from MDAnalysis.lib.distances import minimize_vectors
+    shift = {}
+    for o, c in zip(o_ids, centre_ids):
+        d = Y[o] - Y[c]
+        shift[int(o)] = (Y[c] + (minimize_vectors(d[None], box)[0] if box is not None else d)) - Y[o]
+    ranks, resid = [], []
+    cmd.iterate(obj, "ranks.append(rank); resid.append((chain, resi))", space={"ranks": ranks, "resid": resid})
+    ores = {}
+    cmd.iterate(f"{obj} and name O+OW", "ores[(chain, resi)] = rank", space={"ores": ores})
+    xyz = np.array(cmd.get_coords(obj), float)
+    for k, key in enumerate(resid):
+        xyz[k] += shift[int(ores[key])]
+    cmd.load_coords(xyz, obj, state=1)
+
+
+def write_feature_pse(learned_npz, structures, out_pse, funnel=None, waters=True, water_cut_nm=None,
+                      ligand_idx=None) -> str:
     """Write a PyMOL session of the kept learned-CV features.
 
     Parameters
@@ -140,7 +159,8 @@ def write_feature_pse(learned_npz, structures, out_pse, funnel=None, waters=True
     funnel : dict, optional
         Funnel parameters as used by ``write_funnel_pymol``; drawn in the reference frame.
     waters : bool
-        Add per-structure water oxygens within ``water_cut_nm`` of any kept cn centre.
+        Add per-structure waters (whole molecules) within ``water_cut_nm`` of any kept cn centre, drawn at the
+        periodic image nearest that centre. The reference structure's CRYST1 box is used for every structure.
     water_cut_nm : float, optional
         Water cutoff (nm), default CN_DMAX; minimum image with the reference CRYST1 box when present.
     ligand_idx : sequence of int, optional
@@ -233,7 +253,7 @@ def write_feature_pse(learned_npz, structures, out_pse, funnel=None, waters=True
             from pymol.cgo import ALPHA, COLOR, SPHERE
             cgo = [ALPHA, 0.15]
             for i in centres:
-                cgo += [COLOR, 0.9, 0.9, 0.2, SPHERE, *map(float, X[i]), CN_R0 * 10.0]
+                cgo += [COLOR, *SHELL_RGB, SPHERE, *map(float, X[i]), CN_R0 * 10.0]
             cmd.load_cgo(cgo, "shell_cgo")
             cmd.group("shells", "shell_cgo")
             cmd.disable("shells shell_cgo")
@@ -248,31 +268,36 @@ def write_feature_pse(learned_npz, structures, out_pse, funnel=None, waters=True
                 cmd.iterate(f"({o} and resn {WATER_RESN} and name O+OW)", "ids.append(rank)", space={"ids": ids})
                 Y = cmd.get_coords(o)
                 ids = np.asarray(ids, int)
+                near = np.zeros(0, int)
                 if len(ids):
-                    dist = distance_array(Y[ids], Y[centres], box=box).min(1)
-                    ids = ids[dist <= cut * 10.0]
+                    dist = distance_array(Y[ids], Y[centres], box=box)
+                    keep = dist.min(1) <= cut * 10.0
+                    ids, near = ids[keep], np.asarray(centres)[dist.argmin(1)[keep]]
                 wo = f"waters_{_safe(n)}"
                 if len(ids):
-                    cmd.create(wo, _sel(ids, o))
+                    cmd.create(wo, f"byres {_sel(ids, o)}")
+                    cmd.show("lines", wo)
+                    _to_nearest_image(cmd, wo, Y, ids, near, box)
                 else:
                     cmd.create(wo, f"({o} and none)")
-                cmd.hide("everything", wo)
-                cmd.show("spheres", wo)
-                cmd.set("sphere_scale", 0.3, wo)
-                cmd.color("tv_blue", wo)
+                cmd.show("spheres", f"{wo} and name O+OW")
+                cmd.set("sphere_scale", 0.25, wo)
+                cmd.set("sphere_transparency", 0.4, wo)
+                cmd.color("lightblue", wo)
                 wat.append(wo)
 
         if funnel is not None:
             _funnel_cgo_obj(cmd, funnel, X, ref)
 
         states = [f"state_{_safe(n)}" for n in names]
+        view_ids = sorted(set(lig_ids) | set(pocket_ids))
         for k, n in enumerate(names):
             for o in states + wat:
                 cmd.disable(o)
             cmd.enable(states[k])
             if wat:
                 cmd.enable(f"waters_{_safe(n)}")
-            cmd.zoom(ref, 5)
+            cmd.zoom(_sel(view_ids, states[k]), 8)
             cmd.scene(f"scene_{_safe(n)}", "store")
         cmd.save(out_pse)
     return out_pse

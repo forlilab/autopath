@@ -109,8 +109,10 @@ def test_session_objects_groups_scenes_and_colours(toy):
         # larger |weight| gives a larger sphere
         s = [cmd.get_setting_float("sphere_scale", o) for o in ("W1_a", "W1_b")]
         assert s[0] > s[1]
+        wcol = _color(cmd, "waters_bound")
+        assert min(np.abs(wcol - red).max(), np.abs(wcol - blue).max()) > 0.2
         # only waters within the cutoff of a centre: the two near waters, one oxygen each
-        assert cmd.count_atoms("waters_bound") == 2
+        assert cmd.count_atoms("waters_bound and name O") == 2
         on = cmd.get_names("objects", enabled_only=1)
         assert "shell_cgo" not in on and "W1_c_dropped" not in on and "W1_a" in on
     finally:
@@ -137,7 +139,7 @@ def test_waters_off_and_cutoff(toy):
         pm.stop()
     pm = _open(write_feature_pse(npz, structs, str(tmp / "wide.pse"), water_cut_nm=5.0))
     try:
-        assert pm.cmd.count_atoms("waters_bound") == 5
+        assert pm.cmd.count_atoms("waters_bound and name O") == 5
     finally:
         pm.stop()
 
@@ -165,7 +167,7 @@ def test_atom_count_mismatch_raises(toy):
 
 def _across_boundary(tmp):
     X = _coords()
-    X[WATERS[2]] = [4.9, 0.0, 0.0]                  # 0.1 nm from the ligand through the periodic image
+    X[WATERS[2]:WATERS[2] + 3] = [[4.9, 0, 0], [5.0, 0, 0], [4.9, 0.1, 0]]  # 0.1 nm from the ligand through the periodic image
     return X
 
 
@@ -177,7 +179,14 @@ def test_water_selection_uses_the_cryst1_minimum_image(toy):
     for name, want in (("box", 3), ("nobox", 2)):
         pm = _open(write_feature_pse(npz, {"bound": str(tmp / f"{name}.pdb")}, str(tmp / f"{name}.pse")))
         try:
-            assert pm.cmd.count_atoms("waters_bound") == want
+            assert pm.cmd.count_atoms("waters_bound and name O") == want
+            if name == "box":
+                # the across-boundary water is drawn at its image, next to the ligand centre
+                xyz = np.array(pm.cmd.get_coords("waters_bound and name O"))
+                c = np.array(pm.cmd.get_coords("state_bound and rank 24"))[0]
+                assert np.linalg.norm(xyz - c, axis=1).max() <= 10.0 + 1e-3
+                h = np.array(pm.cmd.get_coords("waters_bound and name H1"))
+                assert np.linalg.norm(h - xyz, axis=1).max() < 2.0          # molecule moved whole
         finally:
             pm.stop()
 
