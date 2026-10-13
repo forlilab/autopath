@@ -100,13 +100,15 @@ class Combined:
     spread: Optional[float] = None
 
 
-def _weights_arrays(bias, ct, temperature, burn=0.2):
-    """Kept-frame mask and normalised c(t) weights exp[(V - c)/kT] for bias/ct arrays."""
+def _weights_arrays(bias, ct, temperature, burn=0.2, normalise=True):
+    """Kept-frame mask and c(t) weights exp[(V - c)/kT]: normalised, or log-weights if not ``normalise``."""
     if bias is None:
         raise ValueError("no REWEIGHT data: reweighting not supported")
     n = len(bias)
     m = np.arange(n) >= int(burn * n)
     lw = (bias[m] - ct[m]) / (KT_PER_K * temperature)
+    if not normalise:
+        return m, lw
     w = np.exp(lw - lw.max())
     return m, w / w.sum()
 
@@ -120,6 +122,14 @@ def weights(walker, temperature, burn=0.2):
     w : ndarray, normalised over the kept frames
     """
     return _weights_arrays(walker.bias, walker.ct, temperature, burn)
+
+
+def _free_energy(p, kt):
+    """-kT ln p with empty bins as NaN, shifted to min 0."""
+    with np.errstate(divide="ignore"):
+        F = -kt * np.log(p)
+    F[~np.isfinite(F)] = np.nan
+    return F - np.nanmin(F)
 
 
 def apply(run, fn: Callable, scalar: Optional[Callable] = None) -> Combined:
@@ -158,22 +168,18 @@ def fes_reweighted(run, x, y=None, bins=60, burn=0.2) -> Combined:
     kt = KT_PER_K * run.temperature
 
     def f(ws):
-        xs, ys, wt = [], [], []
+        xs, ys, lws = [], [], []
         for w in ws:
-            m, ww = weights(w, run.temperature, burn)
-            xs.append(w.cvs[x][m]); wt.append(ww)          # one bias and one c(t): weights pool directly
+            m, lw = _weights_arrays(w.bias, w.ct, run.temperature, burn, normalise=False)
+            xs.append(w.cvs[x][m]); lws.append(lw)
             if y is not None:
                 ys.append(w.cvs[y][m])
-        X, Wt = np.concatenate(xs), np.concatenate(wt)
+        lw = np.concatenate(lws)                  # shared bias: raw weights pooled, one common shift
+        Wt = np.exp(lw - lw.max()); Wt /= Wt.sum()
+        X = np.concatenate(xs)
         if y is None:
             p, e = np.histogram(X, bins=bins, weights=Wt)
-            with np.errstate(divide="ignore"):
-                F = -kt * np.log(p)
-            F[~np.isfinite(F)] = np.nan
-            return 0.5 * (e[1:] + e[:-1]), F - np.nanmin(F)
+            return 0.5 * (e[1:] + e[:-1]), _free_energy(p, kt)
         p, ex, ey = np.histogram2d(X, np.concatenate(ys), bins=bins, weights=Wt)
-        with np.errstate(divide="ignore"):
-            F = -kt * np.log(p)
-        F[~np.isfinite(F)] = np.nan
-        return 0.5 * (ex[1:] + ex[:-1]), 0.5 * (ey[1:] + ey[:-1]), F - np.nanmin(F)
+        return 0.5 * (ex[1:] + ex[:-1]), 0.5 * (ey[1:] + ey[:-1]), _free_energy(p, kt)
     return apply(run, f)

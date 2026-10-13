@@ -46,3 +46,27 @@ def test_fes_reweighted_needs_reweight(tmp_path):
     run = load_run(make_run(str(tmp_path / "r"), reweight=False))
     with pytest.raises(ValueError, match="no REWEIGHT data"):
         fes_reweighted(run, "funnel_z")
+
+
+def test_pooled_weights_keep_relative_walker_weight(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r"), n_walkers=2))
+    kt = 0.0083144626 * run.temperature
+    for w, off, xv in zip(run.walkers, (kt * np.log(4.0), 0.0), (0.0, 1.0)):
+        w.bias = w.ct + off
+        w.cvs["funnel_z"] = np.full(len(w.t), xv)
+    xc, F = fes_reweighted(run, "funnel_z", bins=2).pooled
+    assert F[1] - F[0] == pytest.approx(kt * np.log(4.0))
+
+
+def test_fes_reweighted_isolated_is_per_walker(tmp_path):
+    run = load_run(make_run(str(tmp_path / "i"), layout="isolated", n_walkers=2))
+    c = fes_reweighted(run, "funnel_z")
+    assert c.pooled is None and set(c.per_walker) == {"w0", "w1"}
+    for xc, F in c.per_walker.values():
+        assert F.shape == xc.shape and np.nanmin(F) == 0.0
+
+
+def test_fes_reweighted_2d_has_finite_values(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r"), cvs=("funnel_z", "learned_sw"), monitors=()))
+    _, _, F2 = fes_reweighted(run, "funnel_z", "learned_sw", bins=10).pooled
+    assert np.isfinite(F2).any() and np.nanmin(F2) == 0.0
