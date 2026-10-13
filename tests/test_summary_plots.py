@@ -213,3 +213,73 @@ def test_fig_fe_wt_tt_numbers(tmp_path):
     _, _, _, nums = fig_fe(run, bands(run), step_ns=0.1)
     assert nums["binding"]["pooled"]["kind"] == "dG0" and nums["blocks"]["n_valid_blocks"] >= 1
     assert len(nums["blocks"]["block_dg"]) == 10
+
+
+def test_fig_fe_uses_given_numbers(tmp_path):
+    from autopath.metadynamics.summary.analysis import fe_numbers
+    run = load_run(make_run(str(tmp_path / "r")), funnel=FP)
+    b = bands(run)
+    nums = fe_numbers(run, b, step_ns=0.1, n_boot=20)
+    nums["binding"].pooled["value"] = -41.84                       # marker: -10.00 kcal/mol
+    _, axes, skipped, out = fig_fe(run, b, numbers=nums)
+    assert any("ΔG° -10.00" in t for t in _legend_texts(axes["w"]))
+    assert out["blocks"] is nums["blocks"] and out["series"]["pooled"]["t"][-1] == nums["series"].pooled["t"][-1]
+
+
+def test_fig_fe_text_box_shows_ess(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r"), layout="isolated", n_walkers=2), funnel=FP)
+    _, axes, _, nums = fig_fe(run, bands(run), step_ns=0.1)
+    txt = " ".join(t.get_text() for t in axes["dg"].texts)
+    for rid, v in nums["binding"]["per_walker"].items():
+        assert f"{rid}: ΔG°" in txt and f"ESS {v['ess']:.0f}" in txt
+    assert "min block ESS" in txt and set(nums["fes_ess"]["map"]) == {"w0", "w1"}
+
+
+def test_fig_fe_accepts_axes(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r")), funnel=FP)
+    fig, ax = plt.subplots(1, 4)
+    given = dict(bias=ax[0], map=ax[1], w=ax[2], dg=ax[3])
+    f, axes, _, _ = fig_fe(run, bands(run), step_ns=0.5, axes=given)
+    assert f is fig and axes["w"] is ax[2] and ax[2].lines and ax[3].lines
+    with pytest.raises(ValueError, match="not supported"):
+        fig_fe(run, bands(run), step_ns=0.5, axes=dict(bias=ax[0], map=ax[1], w=ax[2]))
+
+
+def test_fig_fe_isolated_axes_without_bars(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r"), layout="isolated", n_walkers=2), funnel=FP)
+    fig, ax = plt.subplots(2, 4)
+    _, _, skipped, _ = fig_fe(run, bands(run), step_ns=0.5,
+                              axes=dict(bias=list(ax[:, 0]), map=list(ax[:, 1]), w=ax[0, 2], dg=ax[0, 3]))
+    assert "per-walker bars: no axes given" in skipped
+
+
+def test_fig_fe_all_nan_no_warnings(tmp_path):
+    import warnings
+    run = load_run(make_run(str(tmp_path / "r"), cvs=("funnel_z", "learned_sw"), monitors=()), funnel=FP)
+    for w in run.walkers:
+        w.cvs["funnel_z"][:] = 0.1                                 # never reaches bulk: every ΔG° NaN
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        warnings.simplefilter("error", RuntimeWarning)
+        _, _, _, nums = fig_fe(run, bands(run), step_ns=0.1, out_path=str(tmp_path / "fe.png"))
+    assert np.isnan(nums["binding"]["pooled"]["value"]) and nums["blocks"]["n_valid_blocks"] == 0
+
+
+def test_overlay_shows_recrossings(tmp_path):
+    from autopath.metadynamics.summary.analysis import recrossings
+    run = load_run(make_run(str(tmp_path / "r"), n_walkers=8))
+    b = bands(run)
+    _, axes, _ = fig_cvs(run, b, out_path=str(tmp_path / "c.png"))
+    txt = " ".join(t.get_text() for t in axes[0, 0].texts)
+    for w in run.walkers:
+        assert f"{w.rid}: {recrossings(w, 'funnel_z', b['funnel_z'])['n_cycles']} cyc" in txt
+
+
+def test_outline_starts_at_shared_z_low(tmp_path):
+    from autopath.metadynamics.summary.analysis import funnel_z_low
+    from autopath.metadynamics.summary.plots import _funnel_outline
+    fp = {k: v for k, v in FP.items() if k != "z_low"}
+    run = load_run(make_run(str(tmp_path / "r")), funnel=fp)
+    z, _ = _funnel_outline(run, 10.0)
+    assert z[0] == pytest.approx(run.cvs[0].grid_min) == pytest.approx(funnel_z_low(run, 10.0) / 10.0)
+    assert bands(run)["funnel_z"].bound[0] == pytest.approx(z[0])

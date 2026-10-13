@@ -1,13 +1,16 @@
-"""Summary figures: CVs and bias deposition. Each returns (fig, axes, skipped)."""
+"""Summary figures: CVs (fig_cvs), bias deposition (fig_bias) and free energy (fig_fe).
+
+fig_cvs and fig_bias return (fig, axes, skipped); fig_fe returns (fig, axes, skipped, numbers).
+"""
+from dataclasses import asdict
+
 import numpy as np
 import matplotlib.pyplot as plt
 from openmm import unit
 
-from dataclasses import asdict
-
 from ..Hills import bias_from_hills
-from .analysis import (FUNNEL_Z, _frames_in_window, _frames_in_windows, _value, binding, block_analysis,
-                       clamp_fractions, dg_series, fes_bias, fes_reweighted, recrossings)
+from .analysis import (FUNNEL_Z, _ang, ang_per_unit, clamp_fractions, fe_numbers, fes_bias, fes_reweighted,
+                       funnel_z_low, length_unit, recrossings)
 
 KJ_TO_KCAL = 1 / 4.184
 
@@ -17,10 +20,14 @@ _BOUND, _UNBOUND = "#9ecae1", "#fdd0a2"
 
 def _label(run, name):
     """Axis label ``name (unit)``; a CV without a length scale keeps the bare name."""
-    spec = next((c for c in run.cvs if c.name == name), None)
-    a = spec.ang_per_unit if spec is not None else (10.0 if name == "funnel_z" else None)
-    unit = {10.0: "nm", 1.0: "A"}.get(a) if a is not None else None
-    return f"{name} ({unit})" if unit else name
+    u = length_unit(run, name)
+    return f"{name} ({u})" if u else name
+
+
+def _legend(ax, **kw):
+    """Legend only when something is labelled."""
+    if ax.get_legend_handles_labels()[0]:
+        ax.legend(**kw)
 
 
 def _names(run):
@@ -49,6 +56,7 @@ def fig_cvs(run, bands_, out_path=None, axes=None):
                                  constrained_layout=True)
     else:
         fig = axes.flat[0].figure
+    lines = {}
     for i, w in enumerate(run.walkers):
         r = 0 if overlay else i
         for j, nm in enumerate(names):
@@ -59,8 +67,11 @@ def fig_cvs(run, bands_, out_path=None, axes=None):
             a.plot(w.t, w.cvs[nm], lw=0.5, label=w.rid if overlay else None)
             for s in w.segments:
                 a.axvline(s, color="k", ls="--", lw=0.6)
-            if not overlay:
-                rc = recrossings(w, nm, b)
+            rc = recrossings(w, nm, b)
+            if overlay:
+                lines.setdefault(j, []).append(f"{w.rid}: {rc['n_cycles']} cyc, b {rc['frac_bound']:.2f}, "
+                                               f"u {rc['frac_unbound']:.2f}")
+            else:
                 a.set_title(f"{w.rid} {nm}\n{rc['n_cycles']} cycles, bound {rc['frac_bound']:.2f}, "
                             f"unbound {rc['frac_unbound']:.2f}", fontsize=7, loc="left")
             a.set(xlabel="walker time (ns)", ylabel=_label(run, nm))
@@ -72,7 +83,10 @@ def fig_cvs(run, bands_, out_path=None, axes=None):
             if not overlay or i == 0:
                 fig.colorbar(sc, ax=axes[r, -1], label="time (ns)")
     if overlay:
-        axes[0, 0].legend(fontsize=6, ncol=2, frameon=False)
+        _legend(axes[0, 0], fontsize=6, ncol=2, frameon=False)
+        for j, ls in lines.items():
+            axes[0, j].text(0.01, 0.99, "\n".join(ls), transform=axes[0, j].transAxes, va="top", fontsize=5.5,
+                            bbox=dict(fc="w", ec="0.8", alpha=0.8))
     fig.suptitle(f"CVs, {run.layout} bias, {len(run.walkers)} walkers; blue = bound band, orange = unbound band", fontsize=9)
     if out_path:
         fig.savefig(out_path, dpi=110)
@@ -119,7 +133,7 @@ def fig_bias(run, out_path=None, axes=None, n_snap=5):
         axes[0, 0].plot(w.hill_t, w.hill_h, lw=0.6, alpha=0.6, color=cols[w.rid], label=w.rid)
     axes[0, 0].set(yscale="log", xlabel="walker time (ns)", ylabel="hill height (kJ/mol)")
     axes[0, 0].set_title("hill heights", fontsize=8, loc="left")
-    axes[0, 0].legend(fontsize=7, ncol=2, frameon=False, loc="lower left")
+    _legend(axes[0, 0], fontsize=7, ncol=2, frameon=False, loc="lower left")
     clamp = clamp_fractions(run)
     for j, c in enumerate(run.cvs):
         a = axes[j, 1]
@@ -166,12 +180,12 @@ def fig_bias(run, out_path=None, axes=None, n_snap=5):
             for k in range(2):
                 axes[gi, 3 + k].set(xlabel=_label(run, run.cvs[k].name), ylabel="mean V (kJ/mol)")
                 axes[gi, 3 + k].set_title(f"bias marginal on {run.cvs[k].name} {tag}", fontsize=8, loc="left")
-            axes[gi, 3].legend(fontsize=7, frameon=False)
+            _legend(axes[gi, 3], fontsize=7, frameon=False)
         else:
             skipped.append(f"bias growth: {nrow} biased CVs not supported")
             break
     if nrow == 1:
-        axes[0, 2].legend(fontsize=7, ncol=2, frameon=False)
+        _legend(axes[0, 2], fontsize=7, ncol=2, frameon=False)
     vstar = False
     if "tt" in run.tempering:
         have = [w for w in run.walkers if any("vstar_kj" in h for h in w.hills_raw)]
@@ -187,7 +201,7 @@ def fig_bias(run, out_path=None, axes=None, n_snap=5):
         if vstar:
             axes[0, vcol].set(xlabel="walker time (ns)", ylabel="V* (kJ/mol)")
             axes[0, vcol].set_title("TT tempering level", fontsize=8, loc="left")
-            axes[0, vcol].legend(fontsize=7, ncol=2, frameon=False)
+            _legend(axes[0, vcol], fontsize=7, ncol=2, frameon=False)
         elif not have:
             skipped.append("V*(t): not logged in HILLS")
     else:
@@ -230,13 +244,12 @@ def _default_pair(run):
     return ((names[0], names[1]) if len(names) > 1 else (names[0], None)), note
 
 
-def _funnel_outline(run, a, x, y):
-    """Radial limit vs z (CV units): cone below z_cc, cylinder beyond."""
+def _funnel_outline(run, a):
+    """Radial limit vs z (CV units, ``a`` Å per unit): cone below z_cc, cylinder beyond."""
     f = run.funnel
-    ang = lambda k: float(f[k].value_in_unit(unit.angstrom))
-    z_cc, z_max, r0 = ang("z_cc"), ang("z_max"), ang("R_cylinder")
+    z_cc, z_max, r0 = _ang(f, "z_cc"), _ang(f, "z_max"), _ang(f, "R_cylinder")
     tan = np.tan(float(f["alpha"].value_in_unit(unit.radian)))
-    z = np.linspace(ang("z_low") if "z_low" in f else 0.0, z_max, 100)
+    z = np.linspace(funnel_z_low(run, a), z_max, 100)
     return z / a, (r0 + np.maximum(z_cc - z, 0.0) * tan) / a
 
 
@@ -248,37 +261,81 @@ def _pick(c, key):
     return c.pooled if c.pooled is not None else c.per_walker[key]
 
 
-def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=None):
+def _pick_ess(c, key):
+    return c.ess if not isinstance(c.ess, dict) else c.ess.get(key)
+
+
+def _ess(v):
+    return f"ESS {v:.0f}" if v is not None and np.isfinite(v) else "ESS n/a"
+
+
+def _fe_axes(axes, n, iso, skipped):
+    """Validate a user ``axes`` dict for fig_fe; rows ``bias``/``map`` as lists of ``n`` axes."""
+    miss = {"bias", "map", "w", "dg"} - set(axes)
+    if miss:
+        raise ValueError(f"fig_fe axes missing {sorted(miss)}: not supported")
+    out = dict(axes)
+    for k in ("bias", "map"):
+        v = out[k]
+        v = [v] if not isinstance(v, (list, tuple, np.ndarray)) else list(np.ravel(v))
+        if len(v) != n:
+            raise ValueError(f"fig_fe axes[{k!r}] has {len(v)} axes for {n} rows: not supported")
+        out[k] = v
+    out.setdefault("bars", None)
+    if iso and out["bars"] is None:
+        skipped.append("per-walker bars: no axes given")
+    return out
+
+
+def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=None, axes=None, numbers=None,
+           min_points=12):
     """Bias FES, reweighted map, W along the main CV and ΔG°(t) with block numbers (kcal/mol).
 
     Shared and single biases are pooled; isolated walkers get their own rows and curves and are never pooled.
 
+    Parameters
+    ----------
+    axes : dict, optional
+        ``bias`` and ``map`` (one axis per drawn row), ``w``, ``dg`` and, for isolated runs, ``bars``.
+    numbers : dict, optional
+        ``fe_numbers`` output; computed with ``burn``, ``t_rej``, ``step_ns``, ``min_points`` if None.
+
     Returns
     -------
     fig, axes, skipped, numbers
-        ``numbers = {"binding": Combined as dict or None, "blocks": dict | {rid: dict} | None}``; free
-        energies in kJ/mol.
+        ``numbers``: ``binding`` and ``series`` (Combined as dict or None), ``blocks`` and ``fes_ess``
+        (Kish ESS of the reweighted map and of W, float or ``{rid: float}``); free energies in kJ/mol.
     """
-    skipped, nums = [], {"binding": None, "blocks": None}
+    if numbers is None:
+        numbers = fe_numbers(run, bands_, burn=burn, t_rej=t_rej, step_ns=step_ns, min_points=min_points)
+    skipped = list(numbers["skipped"])
+    nums = {"binding": None if numbers["binding"] is None else asdict(numbers["binding"]),
+            "series": None if numbers["series"] is None else asdict(numbers["series"]),
+            "blocks": numbers["blocks"], "fes_ess": None}
     iso = run.layout == "isolated"
     groups = [(w.rid, [w]) for w in run.walkers] if iso else [("all", run.walkers)]
     shown = groups[:MAX_ROWS]
     if len(groups) > len(shown):
         skipped.append(f"map rows: {len(groups) - len(shown)} of {len(groups)} isolated walkers not drawn")
     n = len(shown)
-    fig = plt.figure(figsize=(21, 3.8 * n + 0.8), constrained_layout=True)
-    gs = fig.add_gridspec(n, 4)
-    ax_a = [fig.add_subplot(gs[r, 0]) for r in range(n)]
-    ax_b = [fig.add_subplot(gs[r, 1]) for r in range(n)]
-    ax_c = fig.add_subplot(gs[:, 2])
-    if iso:
-        sub = gs[:, 3].subgridspec(2, 1, height_ratios=[3, 1.3])
-        ax_d, ax_e = fig.add_subplot(sub[0]), fig.add_subplot(sub[1])
+    if axes is None:
+        fig = plt.figure(figsize=(21, 3.8 * n + 0.8), constrained_layout=True)
+        gs = fig.add_gridspec(n, 4)
+        ax_a = [fig.add_subplot(gs[r, 0]) for r in range(n)]
+        ax_b = [fig.add_subplot(gs[r, 1]) for r in range(n)]
+        ax_c = fig.add_subplot(gs[:, 2])
+        if iso:
+            sub = gs[:, 3].subgridspec(2, 1, height_ratios=[3, 1.3])
+            ax_d, ax_e = fig.add_subplot(sub[0]), fig.add_subplot(sub[1])
+        else:
+            ax_d, ax_e = fig.add_subplot(gs[:, 3]), None
+        axes = dict(bias=ax_a, map=ax_b, w=ax_c, dg=ax_d, bars=ax_e)
     else:
-        ax_d, ax_e = fig.add_subplot(gs[:, 3]), None
-    axes = dict(bias=ax_a, map=ax_b, w=ax_c, dg=ax_d, bars=ax_e)
+        axes = _fe_axes(axes, n, iso, skipped)
+        ax_a, ax_b, ax_c, ax_d, ax_e = (axes[k] for k in ("bias", "map", "w", "dg", "bars"))
+        fig = ax_c.figure
     fb = fes_bias(run)
-    main = FUNNEL_Z if FUNNEL_Z in bands_ else run.cvs[0].name
+    main = numbers["cv"]
     if pair is None:
         pair, note = _default_pair(run)
         if note:
@@ -295,8 +352,7 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
             fig.colorbar(im, ax=a, label="F (kcal/mol)")
             a.set(xlabel=_label(run, run.cvs[0].name), ylabel=_label(run, run.cvs[1].name))
         a.set_title(f"{lab}: bias-derived FES (not reweighted)", fontsize=8, loc="left")
-    if not run.has_reweight:
-        skipped.append("reweighted FES, ΔG° and blocks: no REWEIGHT data")
+    if numbers["binding"] is None:
         for a in ax_b + [ax_c, ax_d]:
             a.text(0.5, 0.5, "no REWEIGHT data", ha="center", va="center", transform=a.transAxes)
             a.set_axis_off()
@@ -304,22 +360,29 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
         if out_path:
             fig.savefig(out_path, dpi=110)
         return fig, axes, skipped, nums
+    rw = {w.rid for w in run.reweighted()}
+    rgroups = [(lab, ws) for lab, ws in groups if not iso or lab in rw]
     fr = fes_reweighted(run, x, y, burn=burn)
-    bd = binding(run, bands_, cv=main, burn=burn)
-    ser = dg_series(run, bands_, cv=main, burn=burn, step_ns=step_ns)
     f1 = fes_reweighted(run, main, burn=burn)
-    nums["binding"] = asdict(bd)
-    nums["blocks"] = {} if iso else None
+    nums["fes_ess"] = {"map": fr.ess, "w": f1.ess}
+    bd, ser = numbers["binding"], numbers["series"]
     b = bands_[main]
     for a, (lab, ws) in zip(ax_b, shown):
+        if iso and lab not in rw:
+            a.text(0.5, 0.5, "no REWEIGHT data", ha="center", va="center", transform=a.transAxes)
+            a.set_axis_off()
+            continue
         res = _pick(fr, lab)
         if y is None:
             a.plot(res[0], res[1] * KJ_TO_KCAL)
             a.set(xlabel=_label(run, x), ylabel="F (kcal/mol)")
         else:
             xc, yc, F2 = res
-            cf = a.contourf(xc, yc, (F2 * KJ_TO_KCAL).T, levels=20, cmap="rainbow")
-            fig.colorbar(cf, ax=a, label="F (kcal/mol)")
+            if np.isfinite(F2).any():
+                cf = a.contourf(xc, yc, (F2 * KJ_TO_KCAL).T, levels=20, cmap="rainbow")
+                fig.colorbar(cf, ax=a, label="F (kcal/mol)")
+            else:
+                skipped.append(f"{lab}: reweighted map: no weight")
             a.set(xlabel=_label(run, x), ylabel=_label(run, y))
             if y in bands_:
                 a.axhspan(*bands_[y].bound, color=_BOUND, alpha=0.3, lw=0)
@@ -328,12 +391,12 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
             a.axvspan(*bands_[x].bound, color=_BOUND, alpha=0.3, lw=0)
             a.axvspan(*bands_[x].unbound, color=_UNBOUND, alpha=0.3, lw=0)
         if run.funnel is not None and y == _rxy(run) and x == FUNNEL_Z:
-            zs = next((c.ang_per_unit for c in run.cvs if c.name == x), None) or 10.0
-            a.plot(*_funnel_outline(run, zs, x, y), "k--", lw=1)
-        a.set_title(f"{lab}: reweighted F({x}{', ' + y if y else ''})", fontsize=8, loc="left")
+            a.plot(*_funnel_outline(run, ang_per_unit(run, x)), "k--", lw=1)
+        a.set_title(f"{lab}: reweighted F({x}{', ' + y if y else ''}), {_ess(_pick_ess(fr, lab))}",
+                    fontsize=8, loc="left")
     ax_c.axvspan(*b.bound, color=_BOUND, alpha=0.6, lw=0)
     ax_c.axvspan(*b.unbound, color=_UNBOUND, alpha=0.6, lw=0)
-    kind = _pick(bd, groups[0][0])["kind"]
+    kind = _pick(bd, rgroups[0][0])["kind"]
     sym = "ΔG°" if kind == "dG0" else "band ΔF"
     lines = []
     if run.funnel is None:
@@ -341,57 +404,50 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
     elif not (x == FUNNEL_Z and y is not None and y == _rxy(run)):
         skipped.append("funnel outline: needs the (funnel_z, r_xy) pair")
     bars = []
-    for r, (lab, ws) in enumerate(groups):
+    for r, (lab, ws) in enumerate(rgroups):
         col = f"C{r % 10}" if iso else "k"
         c1 = _pick(f1, lab)
         v = _pick(bd, lab)
         val = f"{v['value'] * KJ_TO_KCAL:.2f}" if np.isfinite(v["value"]) else f"n/a ({v['reason']})"
-        ax_c.plot(c1[0], c1[1] * KJ_TO_KCAL, color=col, lw=1, label=f"{lab}: {sym} {val}")
+        ax_c.plot(c1[0], c1[1] * KJ_TO_KCAL, color=col, lw=1, label=f"{lab}: {sym} {val}, {_ess(v['ess'])}")
         s = _pick(ser, lab)
         ax_d.plot(s["t"], s["dg"] * KJ_TO_KCAL, color=col, lw=1, label=lab if iso else None)
-        main_ws = ws
-
-        def block_value(lo, hi, ws_=main_ws):
-            return _value(run, bands_, main, *_frames_in_window(ws_, run, main, lo, hi))["value"]
-
-        def windows_value(wins, ws_=main_ws, cache={}):
-            return _value(run, bands_, main, *_frames_in_windows(ws_, run, main, wins, cache))["value"]
-        if len(s["t"]) < 12:
-            skipped.append(f"{lab}: blocks: ΔG°(t) has {len(s['t'])} < 12 points")
-            blk = None
-        else:
-            blk = block_analysis(s["t"], s["dg"], block_value, t_rej=t_rej, windows_value=windows_value)
-        if iso:
-            nums["blocks"][lab] = blk
-        else:
-            nums["blocks"] = blk
+        blk = numbers["blocks"].get(lab) if iso else numbers["blocks"]
         if len(s["t"]):
             ax_d.axvline(t_rej * s["t"][-1], color=col, ls=":", lw=0.8)
-        if blk is not None:
-            nb = len(blk["block_dg"])
-            lines.append(f"{lab + ': ' if iso else ''}time mean {_num(blk['time_mean'])} ± {_num(blk['time_sd'])}\n"
-                         f"{'  ' if iso else ''}boot SD {_num(blk['boot_sd'])}, last-blocks Δ "
-                         f"{_num(blk['last_blocks_diff'])}, {blk['n_valid_blocks']}/{nb} blocks")
-            if iso:
-                bars.append((lab, col, blk["time_mean"], blk["time_sd"]))
-            else:
-                ed = np.linspace(t_rej * s["t"][-1], s["t"][-1], nb + 1)
-                for k, v in enumerate(blk["block_dg"]):
-                    if np.isfinite(v):
-                        ax_d.hlines(v * KJ_TO_KCAL, ed[k], ed[k + 1], color="C3", lw=2.5,
-                                    label=f"block {sym}" if k == 0 else None)
-                ax_d.legend(fontsize=7, frameon=False, loc="upper right")
+        pre = f"{lab}: " if iso else ""
+        if blk is None:
+            lines.append(f"{pre}{sym} {_num(v['value'])}, {_ess(v['ess'])}; blocks n/a")
+            continue
+        nb = len(blk["block_dg"])
+        be = blk.get("block_ess")
+        lines.append(f"{pre}{sym} {_num(v['value'])}, {_ess(v['ess'])}; time mean {_num(blk['time_mean'])} ± "
+                     f"{_num(blk['time_sd'])}\n{'  ' if iso else ''}boot SD {_num(blk['boot_sd'])}, last-blocks Δ "
+                     f"{_num(blk['last_blocks_diff'])}, {blk['n_valid_blocks']}/{nb} blocks"
+                     + (f", min block {_ess(min(be))}" if be else ""))
+        if iso:
+            bars.append((lab, col, blk["time_mean"], blk["time_sd"]))
+        else:
+            ed = np.linspace(t_rej * s["t"][-1], s["t"][-1], nb + 1)
+            first = True
+            for k, bv in enumerate(blk["block_dg"]):
+                if np.isfinite(bv):
+                    ax_d.hlines(bv * KJ_TO_KCAL, ed[k], ed[k + 1], color="C3", lw=2.5,
+                                label=f"block {sym}" if first else None)
+                    first = False
+            _legend(ax_d, fontsize=7, frameon=False, loc="upper right")
     ttl = f"W along {main}; {sym} (kcal/mol)"
     if iso and bd.mean is not None:
-        ttl += f"\nmean {bd.mean * KJ_TO_KCAL:.2f} ± {bd.sd * KJ_TO_KCAL:.2f}, spread {bd.spread * KJ_TO_KCAL:.2f}"
+        ttl += (f"\nmean {_num(bd.mean)} ± {_num(bd.sd)}, spread {_num(bd.spread)}; "
+                f"{bd.n_defined}/{bd.n_walkers} walkers defined")
     ax_c.set(xlabel=_label(run, main), ylabel="W (kcal/mol)")
     ax_c.set_title(ttl, fontsize=8, loc="left")
-    ax_c.legend(fontsize=7, frameon=False)
+    _legend(ax_c, fontsize=7, frameon=False)
     ax_d.set(xlabel="per-walker time (ns)", ylabel=f"{sym} (kcal/mol)")
     ax_d.set_title(f"{sym}(t); dotted = rejection time", fontsize=8, loc="left")
     if iso:
-        ax_d.legend(fontsize=7, frameon=False, ncol=2, loc="upper right")
-    if iso:
+        _legend(ax_d, fontsize=7, frameon=False, ncol=2, loc="upper right")
+    if iso and ax_e is not None:
         for i, (lab, col, m, sd) in enumerate(bars):
             if np.isfinite(m):
                 ax_e.bar(i, m * KJ_TO_KCAL, yerr=sd * KJ_TO_KCAL, color=col, capsize=3)
