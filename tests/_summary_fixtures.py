@@ -3,7 +3,8 @@ import os
 import numpy as np
 
 GRIDS = {"funnel_z": (-0.4, 2.4, 0.096, 10.0, 0.0), "learned_sw": (-2.0, 4.0, 0.15, np.nan, np.nan),
-         "r_xy": (0.0, 1.5, 0.05, np.nan, np.nan), "dist": (0.2, 3.6, 0.01, np.nan, np.nan), "torsion": (-np.pi, np.pi, 0.1, np.nan, np.nan)}
+         "r_xy": (0.0, 1.5, 0.05, np.nan, np.nan), "dist": (0.2, 3.6, 0.01, np.nan, np.nan), "torsion": (-np.pi, np.pi, 0.1, np.nan, np.nan),
+         "contacts": (-0.75, 6.75, 0.25, np.nan, np.nan)}
 
 
 def _traj(rng, lo, hi, n):
@@ -15,7 +16,7 @@ def _traj(rng, lo, hi, n):
 
 
 def make_run(path, layout="shared", n_walkers=2, cvs=("funnel_z",), tempering="wt", n_rows=400, extend=False,
-             truncate=None, reweight=True, monitors=("funnel_z",), seed=0, extra_meta=None, cross=False):
+             truncate=None, reweight=True, monitors=("funnel_z",), seed=0, extra_meta=None, cross=False, bounds=None):
     rng = np.random.default_rng(seed)
     os.makedirs(path, exist_ok=True)
     dt, dcd = 0.01, 0.05
@@ -47,8 +48,10 @@ def make_run(path, layout="shared", n_walkers=2, cvs=("funnel_z",), tempering="w
                        grid_min=np.array([x[0] for x in g]), grid_max=np.array([x[1] for x in g]),
                        grid_points=np.array([101] * len(cvs)), sigma=np.array([x[2] for x in g]),
                        periodic=np.array([c == "torsion" for c in cvs]),
-                       bounds_lo=np.array([-np.inf if c == "funnel_z" else np.nan for c in cvs]),
-                       bounds_hi=np.array([GRIDS[c][1] if c == "funnel_z" else np.nan for c in cvs]),
+                       bounds_lo=np.array([(bounds or {}).get(c, (-np.inf if c == "funnel_z" else np.nan,))[0]
+                                           for c in cvs], float),
+                       bounds_hi=np.array([(bounds or {}).get(c, (None, GRIDS[c][1] if c == "funnel_z" else np.nan))[1]
+                                           for c in cvs], float),
                        bias_factor=20.0, temperature=300.0, tempering=tempering, cv_names=np.array(cvs),
                        cv_length_per_unit_ang=np.array([x[3] for x in g]), origin=np.array([x[4] for x in g]),
                        record_dt_ns=dt, dcd_interval_ns=dcd, **(extra_meta or {}))
@@ -63,3 +66,20 @@ def make_run(path, layout="shared", n_walkers=2, cvs=("funnel_z",), tempering="w
         elif kind == "length":
             c = np.load(os.path.join(path, f"COLVAR_{rid}.npy")); np.save(os.path.join(path, f"COLVAR_{rid}.npy"), c[:-7])
     return path
+
+
+def add_fresh(path, rid, n_hills=0, n_rows=1, like="w0", bias_dir=None):
+    """A just-started segment ``rid`` (as written at its first save): ``n_hills`` hills, ``n_rows`` records."""
+    h = dict(np.load(os.path.join(path, f"HILLS_{like}.npz")))
+    ncv = np.atleast_1d(h["cv_names"]).size
+    h.update(run_id=rid, time_ns=np.zeros(n_hills), wall_s=np.zeros(n_hills), cv=np.full((n_hills, ncv), 0.1),
+             height_kj=np.ones(n_hills), finished=False)
+    if bias_dir is not None:
+        h["bias_dir"] = bias_dir
+    np.savez(os.path.join(path, f"HILLS_{rid}.npz"), **h)
+    np.save(os.path.join(path, f"COLVAR_{rid}.npy"), np.full((n_rows, ncv) if ncv > 1 else n_rows, 0.1))
+    r = dict(np.load(os.path.join(path, f"REWEIGHT_{like}.npz")))
+    for k in list(r):
+        if k in ("time_ns", "bias_kj", "rct_kj") or k.startswith("monitor_"):
+            r[k] = r[k][:n_rows]
+    np.savez(os.path.join(path, f"REWEIGHT_{rid}.npz"), **r)
