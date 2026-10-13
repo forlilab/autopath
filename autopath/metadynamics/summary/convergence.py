@@ -44,22 +44,25 @@ def _arg(*a):
 def min_recrossings(n, cv=None):
     """Bound-unbound-bound cycles >= n: per walker if isolated, summed over walkers otherwise.
 
-    ``cv=None`` checks the funnel z when the summary has a funnel, else every biased CV.
+    ``cv=None`` checks the funnel z when the summary has a funnel, else every biased CV. A CV without
+    recrossings in the summary fails as unknown.
     """
     def f(s):
         names = [cv] if cv else (["funnel_z"] if s.get("funnel") else [c["name"] for c in s["cvs"]])
         ws = s["walkers"]
         units = ws if s["layout"] == "isolated" else {"all": None}
-        bad = []
+        bad, unknown = [], set()
         for k in names:
             for rid in units:
-                if rid == "all":
-                    tot = sum(w["recrossings"].get(k, 0) for w in ws.values())
-                else:
-                    tot = ws[rid]["recrossings"].get(k, 0)
+                have = ws.values() if rid == "all" else [ws[rid]]
+                if any(k not in w["recrossings"] for w in have):
+                    unknown.add(k)
+                    continue
+                tot = sum(w["recrossings"][k] for w in have)
                 if tot < n:
                     bad.append(f"{rid}/{k}={tot}")
-        return (not bad, f"recrossings below {n}: {', '.join(bad)}" if bad else f"recrossings >= {n}")
+        msg = [f"unknown CV {k}" for k in sorted(unknown)] + ([f"recrossings below {n}: {', '.join(bad)}"] if bad else [])
+        return (not msg, "; ".join(msg) if msg else f"recrossings >= {n}")
     return _named(f"min_recrossings({_arg(n, cv)})", f)
 
 
@@ -71,8 +74,25 @@ def _blocks(s):
     return {"all": b}
 
 
-def _block_check(key, tol_kcal, strict, label):
+def _kinds(s):
+    """Kinds of the binding values in a summary ("dG0", "band_dF")."""
+    b = s.get("binding") or {}
+    vals = [b["pooled"]] if b.get("pooled") else list((b.get("per_walker") or {}).values())
+    return {v.get("kind") for v in vals if v}
+
+
+def _band_fail(s, allow_band):
+    """Failure reason when ΔG° thresholds meet a band ΔF and ``allow_band`` is False."""
+    if not allow_band and "band_dF" in _kinds(s):
+        return "kind is band ΔF, not ΔG°"
+    return None
+
+
+def _block_check(key, tol_kcal, strict, label, allow_band):
     def f(s):
+        why = _band_fail(s, allow_band)
+        if why:
+            return False, f"{label}: {why}"
         bad = []
         for k, v in _blocks(s).items():
             if v is None:
@@ -90,22 +110,38 @@ def _block_check(key, tol_kcal, strict, label):
     return f
 
 
-def last_blocks_within(tol_kcal):
-    """|last block - previous block| <= tol_kcal (kcal/mol); undefined fails."""
-    return _named(f"last_blocks_within({tol_kcal})", _block_check("last_blocks_diff", tol_kcal, False, "last blocks"))
+def last_blocks_within(tol_kcal, allow_band=False):
+    """|last block - previous block| <= tol_kcal (kcal/mol); undefined fails; band ΔF fails unless
+    ``allow_band``."""
+    return _named(f"last_blocks_within({tol_kcal})",
+                  _block_check("last_blocks_diff", tol_kcal, False, "last blocks", allow_band))
 
 
-def bootstrap_sd_below(tol_kcal):
-    """Block-bootstrap SD < tol_kcal (kcal/mol); undefined fails."""
-    return _named(f"bootstrap_sd_below({tol_kcal})", _block_check("boot_sd", tol_kcal, True, "bootstrap SD"))
+def bootstrap_sd_below(tol_kcal, allow_band=False):
+    """Block-bootstrap SD < tol_kcal (kcal/mol); undefined fails; band ΔF fails unless ``allow_band``."""
+    return _named(f"bootstrap_sd_below({tol_kcal})", _block_check("boot_sd", tol_kcal, True, "bootstrap SD",
+                                                                    allow_band))
 
 
-def walker_spread_within(tol_kcal):
-    """Max-min of per-walker binding free energies <= tol_kcal (kcal/mol); isolated runs only."""
+def walker_spread_within(tol_kcal, allow_band=False):
+    """Max-min of per-walker binding free energies <= tol_kcal (kcal/mol); isolated runs only.
+
+    Fails when any walker's value is undefined, with fewer than two defined walkers, and for band ΔF
+    unless ``allow_band``.
+    """
     def f(s):
         if s["layout"] != "isolated":
             return True, "walker spread: not applicable (shared)"
-        sp = _kcal((s.get("binding") or {}).get("spread"))
+        why = _band_fail(s, allow_band)
+        if why:
+            return False, f"walker spread: {why}"
+        b = s.get("binding") or {}
+        n, k = b.get("n_walkers"), b.get("n_defined")
+        if n is not None and k is not None and k < n:
+            return False, f"walker spread: {n - k} of {n} walkers undefined"
+        if k is not None and k < 2:
+            return False, "walker spread undefined (fewer than 2 defined walkers)"
+        sp = _kcal(b.get("spread"))
         if not math.isfinite(sp):
             return False, "walker spread undefined"
         if sp <= tol_kcal:
@@ -127,3 +163,23 @@ def clamp_fraction_below(frac):
                                     + ([f"hills at a clamp >= {frac}: {', '.join(bad)}"] if bad else []))
         return True, f"clamp fraction < {frac}"
     return _named(f"clamp_fraction_below({frac})", f)
+
+
+def min_ess(n):
+    """Kish ESS of the binding estimate >= n: pooled, or every walker if isolated; undefined fails."""
+    def f(s):
+        b = s.get("binding") or {}
+        vals = {"all": b["pooled"]} if b.get("pooled") else dict(b.get("per_walker") or {})
+        if s["layout"] == "isolated":
+            vals.update({r: None for r in s["walkers"] if r not in vals})
+        if not vals:
+            return False, "ESS undefined (no binding estimate)"
+        bad = []
+        for k, v in vals.items():
+            e = (v or {}).get("ess")
+            if e is None or not math.isfinite(e):
+                bad.append(f"{k}: ESS undefined")
+            elif e < n:
+                bad.append(f"{k}: ESS {e:.0f}")
+        return (False, f"ESS below {n}: " + "; ".join(bad)) if bad else (True, f"ESS >= {n}")
+    return _named(f"min_ess({n})", f)

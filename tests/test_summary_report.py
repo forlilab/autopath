@@ -117,8 +117,9 @@ def test_min_recrossings_default_cv_choice():
 
 
 def _all():
-    return [min_recrossings(3), last_blocks_within(1.0), walker_spread_within(1.0), bootstrap_sd_below(1.0),
-            clamp_fraction_below(0.05)]
+    # fixture runs have no funnel: band ΔF numbers
+    return [min_recrossings(3), last_blocks_within(1.0, allow_band=True), walker_spread_within(1.0, allow_band=True),
+            bootstrap_sd_below(1.0, allow_band=True), clamp_fraction_below(0.05)]
 
 
 def _both(d, out, **kw):
@@ -167,3 +168,82 @@ def test_clamp_undefined_and_empty():
     assert ok and "not applicable" in r
     ok, r = clamp_fraction_below(0.1)(_s(clamp={"funnel_z": {"w0": None}}))
     assert not ok and "undefined" in r
+
+
+def test_spread_fails_on_undefined_walkers():
+    s = _s(binding=dict(spread=0.0, n_walkers=3, n_defined=1, per_walker={"w0": dict(kind="dG0")}))
+    ok, r = walker_spread_within(0.5)(s)
+    assert not ok and "2 of 3 walkers undefined" in r
+    s = _s(binding=dict(spread=float("nan"), n_walkers=1, n_defined=1, per_walker={"w0": dict(kind="dG0")}))
+    ok, r = walker_spread_within(0.5)(s)
+    assert not ok and "spread undefined" in r
+
+
+def test_spread_fails_end_to_end_when_walker_never_reaches_bulk(tmp_path):
+    from openmm import unit
+    A = unit.angstrom
+    fp = {"z_cc": 12.0 * A, "z_max": 24.0 * A, "z_low": -1.5 * A, "R_cylinder": 1.0 * A, "alpha": 31.5 * unit.degrees}
+    d = make_run(str(tmp_path / "r"), layout="isolated", n_walkers=3, cross=True)
+    for rid in ("w1", "w2"):
+        f = os.path.join(d, f"COLVAR_{rid}.npy")
+        np.save(f, np.full_like(np.load(f), 0.1))
+    s = report(d, funnel=fp, out_dir=str(tmp_path / "o"), step_ns=0.5)
+    assert s["binding"]["n_walkers"] == 3 and s["binding"]["n_defined"] == 1
+    v = check_convergence(s, [walker_spread_within(0.5)])
+    assert v.needs_more_sampling and "2 of 3 walkers undefined" in v.reasons[0]
+
+
+def test_band_dF_fails_dG_criteria_unless_allowed():
+    s = _s(binding=dict(spread=0.1 * KJ, n_walkers=2, n_defined=2,
+                        per_walker={"w0": dict(kind="band_dF"), "w1": dict(kind="band_dF")}),
+           blocks={"w0": dict(last_blocks_diff=0.0, boot_sd=0.0), "w1": dict(last_blocks_diff=0.0, boot_sd=0.0)})
+    for c in (last_blocks_within(1.0), bootstrap_sd_below(1.0), walker_spread_within(1.0)):
+        ok, r = c(s)
+        assert not ok and "kind is band ΔF, not ΔG°" in r
+    for c in (last_blocks_within(1.0, allow_band=True), bootstrap_sd_below(1.0, allow_band=True),
+              walker_spread_within(1.0, allow_band=True)):
+        assert c(s)[0]
+
+
+def test_min_recrossings_unknown_cv():
+    ok, r = min_recrossings(1, cv="nope")(_s())
+    assert not ok and "unknown CV nope" in r
+    ok, r = min_recrossings(1, cv="nope")(_s(layout="shared"))
+    assert not ok and "unknown CV nope" in r
+
+
+def test_min_ess_unit():
+    from autopath.metadynamics.summary.convergence import min_ess
+    s = _s(layout="shared", binding=dict(pooled=dict(ess=120.0, kind="dG0")))
+    assert min_ess(50)(s)[0] and not min_ess(200)(s)[0]
+    s = _s(binding=dict(per_walker={"w0": dict(ess=80.0), "w1": dict(ess=float("nan"))}))
+    ok, r = min_ess(50)(s)
+    assert not ok and "w1: ESS undefined" in r and "w0" not in r
+    s = _s(binding=dict(per_walker={"w0": dict(ess=80.0)}))
+    ok, r = min_ess(50)(s)
+    assert not ok and "w1: ESS undefined" in r
+    assert not min_ess(1)(_s(layout="shared", binding=None))[0]
+
+
+@pytest.mark.parametrize("layout", ["shared", "isolated"])
+def test_min_ess_end_to_end(tmp_path, layout):
+    from autopath.metadynamics.summary.convergence import min_ess
+    d = make_run(str(tmp_path / "r"), layout=layout)
+    for s in _both(d, str(tmp_path / "o"), step_ns=0.1):
+        vals = [s["binding"]["pooled"]] if layout == "shared" else list(s["binding"]["per_walker"].values())
+        e = min(v["ess"] for v in vals)
+        assert e >= 1
+        assert check_convergence(s, [min_ess(1)]).passed["min_ess(1)"]
+        v = check_convergence(s, [min_ess(e + 1)])
+        assert v.needs_more_sampling and "ESS below" in v.reasons[0]
+        blk = [s["blocks"]] if layout == "shared" else list(s["blocks"].values())
+        assert all(len(b["block_ess"]) == 10 for b in blk)
+        ser = [s["series"]["pooled"]] if layout == "shared" else list(s["series"]["per_walker"].values())
+        assert all(len(x["ess"]) == len(x["t"]) for x in ser)
+        assert s["fes_ess"]["map"] is not None
+
+
+def test_bands_carry_unit(tmp_path):
+    d = make_run(str(tmp_path / "r"), cvs=("funnel_z", "learned_sw"), monitors=())
+    for s in _both(d, str(tmp_path / "o"), step_ns=0.5):
+        assert s["bands"]["funnel_z"]["unit"] == "nm" and s["bands"]["learned_sw"]["unit"] == "CV units"

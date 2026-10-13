@@ -9,7 +9,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from .analysis import bands as _bands, clamp_fractions, recrossings
+from .analysis import bands as _bands, clamp_fractions, fe_numbers, length_unit, recrossings
 from .data import load_run
 from .plots import fig_bias, fig_cvs, fig_fe
 
@@ -40,7 +40,7 @@ def _version():
 
 
 def report(run_dir, funnel=None, learned_cv=None, bands=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_dir=None,
-           prefix="metad") -> dict:
+           prefix="metad", min_points=12) -> dict:
     """Write ``<prefix>_{cvs,bias,fe}.png`` and ``<prefix>_summary.json``; return the summary dict.
 
     Reports numbers only; convergence decisions are made by ``check_convergence``.
@@ -56,6 +56,8 @@ def report(run_dir, funnel=None, learned_cv=None, bands=None, burn=0.2, t_rej=0.
         Burn-in fraction for reweighting; rejection fraction for block analysis.
     step_ns : float
         ΔG°(t) time step.
+    min_points : int
+        Fewest ΔG°(t) points for a block analysis.
     out_dir : str, optional
         Output directory; default ``run_dir``.
 
@@ -63,6 +65,8 @@ def report(run_dir, funnel=None, learned_cv=None, bands=None, burn=0.2, t_rej=0.
     -------
     dict
         Same content as the JSON file; non-finite numbers stay NaN here and are null in the file.
+        Reweighted numbers carry their Kish ESS: ``binding`` (per value), ``series["ess"]`` (per point),
+        ``blocks["block_ess"]`` and ``fes_ess``.
     """
     run = load_run(run_dir, funnel=funnel, learned_cv=learned_cv)
     out_dir = out_dir or run_dir
@@ -71,7 +75,9 @@ def report(run_dir, funnel=None, learned_cv=None, bands=None, burn=0.2, t_rej=0.
     p = lambda k: os.path.join(out_dir, f"{prefix}_{k}")
     f1, _, s1 = fig_cvs(run, b, out_path=p("cvs.png")); plt.close(f1)
     f2, _, s2 = fig_bias(run, out_path=p("bias.png")); plt.close(f2)
-    f3, _, s3, nums = fig_fe(run, b, burn=burn, t_rej=t_rej, step_ns=step_ns, out_path=p("fe.png")); plt.close(f3)
+    numbers = fe_numbers(run, b, burn=burn, t_rej=t_rej, step_ns=step_ns, min_points=min_points)
+    f3, _, s3, nums = fig_fe(run, b, burn=burn, t_rej=t_rej, step_ns=step_ns, out_path=p("fe.png"), numbers=numbers)
+    plt.close(f3)
     walkers = {}
     for w in run.walkers:
         rc = {nm: recrossings(w, nm, b[nm]) for nm in b}
@@ -84,9 +90,11 @@ def report(run_dir, funnel=None, learned_cv=None, bands=None, burn=0.2, t_rej=0.
         temperature=run.temperature, bias_factor=run.bias_factor, funnel=run.funnel is not None,
         cvs=[dict(name=c.name, grid_min=c.grid_min, grid_max=c.grid_max, periodic=c.periodic, bounds=c.bounds,
                   sigma=c.sigma, ang_per_unit=c.ang_per_unit) for c in run.cvs],
-        monitored=list(run.monitored), bands={k: asdict(v) for k, v in b.items()},
-        params=dict(burn=burn, t_rej=t_rej, step_ns=step_ns, prefix=prefix), walkers=walkers,
-        clamp=clamp_fractions(run), binding=nums["binding"], blocks=nums["blocks"], unit="kJ/mol",
+        monitored=list(run.monitored),
+        bands={k: dict(asdict(v), unit=length_unit(run, k) or "CV units") for k, v in b.items()},
+        params=dict(burn=burn, t_rej=t_rej, step_ns=step_ns, prefix=prefix, min_points=min_points),
+        walkers=walkers, clamp=clamp_fractions(run), binding=nums["binding"], series=nums["series"],
+        blocks=nums["blocks"], fes_ess=nums["fes_ess"], unit="kJ/mol",
         skipped_walkers=list(run.skipped), skipped_panels=s1 + s2 + s3,
         files=dict(cvs=p("cvs.png"), bias=p("bias.png"), fe=p("fe.png"), summary=p("summary.json")))
     with open(p("summary.json"), "w") as fh:
