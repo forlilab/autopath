@@ -26,12 +26,18 @@ def _default_band(run, name):
     spec = next((c for c in run.cvs if c.name == name), None)
     if name == FUNNEL_Z and run.funnel is not None:
         a = 10.0 if spec is None or spec.ang_per_unit is None else spec.ang_per_unit
-        z_low = _ang(run.funnel, "z_low") if "z_low" in run.funnel else spec.grid_min * a
+        if "z_low" in run.funnel:
+            z_low = _ang(run.funnel, "z_low")
+        elif spec is not None:
+            z_low = spec.grid_min * a
+        else:  # monitor-only funnel z: no grid, use the observed minimum
+            z_low = float(min(np.min(w.cvs[name]) for w in run.walkers)) * a
         zmax, zcc = _ang(run.funnel, "z_max"), _ang(run.funnel, "z_cc")
-        return Band((z_low / a, SITE_FRAC * (zmax / a)), (zcc / a, (zmax - BULK_MARGIN_ANG) / a), "low", "funnel")
+        return Band((z_low / a, SITE_FRAC * zmax / a), (zcc / a, (zmax - BULK_MARGIN_ANG) / a), "low", "funnel")
     lcv = run.learned_cv
     if name == "learned_sw" and lcv is not None and "basin_B" in lcv and "basin_U" in lcv:
-        w = float(lcv["sw_hill_width"])
+        # basins are class medians; hill width is half the bound-class SD, so ±2 widths = ±1 SD (σ_U not stored)
+        w = 2.0 * float(lcv["sw_hill_width"])
         b, u = float(np.atleast_1d(lcv["basin_B"])[-1]), float(np.atleast_1d(lcv["basin_U"])[-1])
         return Band((b - w, b + w), (u - w, u + w), "low" if b < u else "high", "learned_cv")
     if spec is None:

@@ -14,17 +14,25 @@ def _funnel():
 def test_funnel_z_bands(tmp_path):
     run = load_run(make_run(str(tmp_path / "r")), funnel=_funnel())
     b = bands(run)["funnel_z"]
-    assert b.bound == (-0.15, 0.2 * 2.4) and b.unbound == (1.2, 2.4 - 0.15) and b.source == "funnel"
+    assert np.allclose(b.bound, (-0.15, 0.2 * 2.4)) and np.allclose(b.unbound, (1.2, 2.4 - 0.15)) and b.source == "funnel"
+
+
+def test_monitor_only_funnel_z_without_z_low(tmp_path):
+    fp = _funnel()
+    del fp["z_low"]
+    run = load_run(make_run(str(tmp_path / "r"), cvs=("dist",), monitors=("funnel_z",)), funnel=fp)
+    lo = min(w.cvs["funnel_z"].min() for w in run.walkers)
+    assert np.allclose(bands(run)["funnel_z"].bound[0], lo)
 
 
 def test_grid_edge_bands_and_override(tmp_path):
     run = load_run(make_run(str(tmp_path / "r"), cvs=("dist",), monitors=()))
     b = bands(run)["dist"]
-    assert b.bound == (0.2, 0.2 + 0.34) and b.unbound == (3.6 - 0.34, 3.6) and b.source == "grid"
+    assert np.allclose(b.bound, (0.2, 0.2 + 0.34)) and np.allclose(b.unbound, (3.6 - 0.34, 3.6)) and b.source == "grid"
     b2 = bands(run, {"dist": {"bound_end": "high"}})["dist"]
-    assert b2.bound == (3.6 - 0.34, 3.6) and b2.unbound == (0.2, 0.2 + 0.34)
+    assert np.allclose(b2.bound, (3.6 - 0.34, 3.6)) and np.allclose(b2.unbound, (0.2, 0.2 + 0.34))
     b3 = bands(run, {"dist": {"bound": (0.2, 0.5)}})["dist"]
-    assert b3.bound == (0.2, 0.5) and b3.source == "override"
+    assert np.allclose(b3.bound, (0.2, 0.5)) and b3.source == "override"
 
 
 def test_learned_without_basins(tmp_path):
@@ -36,7 +44,7 @@ def test_learned_with_basins(tmp_path):
     lcv = {"basin_B": np.array([0.1, -0.5]), "basin_U": np.array([1.4, 0.8]), "sw_hill_width": 0.2}
     run = load_run(make_run(str(tmp_path / "r"), cvs=("funnel_z", "learned_sw"), monitors=()), learned_cv=lcv)
     b = bands(run)["learned_sw"]
-    assert np.allclose(b.bound, (-0.7, -0.3)) and np.allclose(b.unbound, (0.6, 1.0)) and b.source == "learned_cv"
+    assert np.allclose(b.bound, (-0.9, -0.1)) and np.allclose(b.unbound, (0.4, 1.2)) and b.source == "learned_cv"
 
 
 def test_periodic_cv_bands(tmp_path):
