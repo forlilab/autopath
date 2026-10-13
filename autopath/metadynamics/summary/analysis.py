@@ -183,3 +183,127 @@ def fes_reweighted(run, x, y=None, bins=60, burn=0.2) -> Combined:
         p, ex, ey = np.histogram2d(X, np.concatenate(ys), bins=bins, weights=Wt)
         return 0.5 * (ex[1:] + ex[:-1]), 0.5 * (ey[1:] + ey[:-1]), _free_energy(p, kt)
     return apply(run, f)
+
+
+C0_PER_A3 = 1.0 / 1661.0
+KJ_TO_KCAL = 1.0 / 4.184
+
+
+def dg_from_frames(z_ang, w, bound, bulk, r_cyl_ang, temperature) -> float:
+    """Standard-state ΔG° (kJ/mol) from weighted frames.
+
+    ΔG° = -kT ln(C0 π R² ∫_bound e^{-β(W - W_bulk)} dz); NaN if the bound or bulk band has no weight.
+    """
+    z_ang, w = np.asarray(z_ang, float), np.asarray(w, float)
+    site = (z_ang >= bound[0]) & (z_ang <= bound[1])
+    blk = (z_ang >= bulk[0]) & (z_ang <= bulk[1])
+    if w[site].sum() <= 0 or w[blk].sum() <= 0:
+        return float("nan")
+    p_bulk = w[blk].sum() / (bulk[1] - bulk[0])
+    kt = KT_PER_K * temperature
+    return float(-kt * np.log(C0_PER_A3 * np.pi * r_cyl_ang ** 2 * w[site].sum() / p_bulk))
+
+
+def band_dF(x, w, band, temperature) -> float:
+    """F(bound) - F(unbound) (kJ/mol) from weighted frames; NaN if either band is empty."""
+    x, w = np.asarray(x, float), np.asarray(w, float)
+    pb = w[(x >= band.bound[0]) & (x <= band.bound[1])].sum()
+    pu = w[(x >= band.unbound[0]) & (x <= band.unbound[1])].sum()
+    if pb <= 0 or pu <= 0:
+        return float("nan")
+    return float(-KT_PER_K * temperature * np.log(pb / pu))
+
+
+def _pool(vals, lws):
+    """Concatenate values and raw log-weights; one global shift and one normalisation."""
+    if not vals:
+        return np.zeros(0), np.zeros(0)
+    v, lw = np.concatenate(vals), np.concatenate(lws)
+    if lw.size == 0:
+        return v, lw
+    w = np.exp(lw - lw.max())
+    return v, w / w.sum()
+
+
+def _frames(ws, run, cv, burn, t_max=None):
+    """Pooled (values, weights) after truncating at ``t_max`` and dropping the first ``burn`` fraction."""
+    vs, lws = [], []
+    for w in ws:
+        keep = np.ones(len(w.t), bool) if t_max is None else (w.t <= t_max)
+        m, lw = _weights_arrays(w.bias[keep], w.ct[keep], run.temperature, burn, normalise=False)
+        vs.append(w.cvs[cv][keep][m]); lws.append(lw)
+    return _pool(vs, lws)
+
+
+def _frames_in_window(ws, run, cv, lo, hi):
+    """Pooled (values, weights) of frames with lo <= t <= hi, no burn-in."""
+    vs, lws = [], []
+    for w in ws:
+        k = (w.t >= lo) & (w.t <= hi)
+        _, lw = _weights_arrays(w.bias[k], w.ct[k], run.temperature, 0.0, normalise=False)
+        vs.append(w.cvs[cv][k]); lws.append(lw)
+    return _pool(vs, lws)
+
+
+def _value(run, bands_, cv, values, weights):
+    b = bands_[cv]
+    spec = next((c for c in run.cvs if c.name == cv), None)
+    a = spec.ang_per_unit if spec is not None and spec.ang_per_unit else (10.0 if cv == FUNNEL_Z else None)
+    if cv == FUNNEL_Z and run.funnel is not None and a is not None:
+        v = dg_from_frames(values * a, weights, (b.bound[0] * a, b.bound[1] * a),
+                           (b.unbound[0] * a, b.unbound[1] * a), _ang(run.funnel, "R_cylinder"), run.temperature)
+        return dict(value=v, kind="dG0", reason=None if np.isfinite(v) else "no weight in bound or bulk band")
+    v = band_dF(values, weights, b, run.temperature)
+    return dict(value=v, kind="band_dF", reason=None if np.isfinite(v) else "no weight in bound or unbound band")
+
+
+def binding(run, bands_, cv=FUNNEL_Z, burn=0.2) -> Combined:
+    """ΔG° from the funnel (kind "dG0") or the bound-unbound band difference (kind "band_dF")."""
+    if not run.has_reweight:
+        raise ValueError("no REWEIGHT data: ΔG° not supported")
+    return apply(run, lambda ws: _value(run, bands_, cv, *_frames(ws, run, cv, burn)),
+                 scalar=lambda r: r["value"])
+
+
+def dg_series(run, bands_, cv=FUNNEL_Z, burn=0.2, step_ns=1.0) -> Combined:
+    """ΔG°(t): each point from frames up to time t, first ``burn`` of that span dropped."""
+    if not run.has_reweight:
+        raise ValueError("no REWEIGHT data: ΔG°(t) not supported")
+
+    def f(ws):
+        T = min(w.t[-1] for w in ws)
+        t = np.arange(step_ns, T + 1e-12, step_ns)
+        dg = np.array([_value(run, bands_, cv, *_frames(ws, run, cv, burn, t_max=ti))["value"] for ti in t])
+        return dict(t=t, dg=dg)
+    return apply(run, f)
+
+
+def block_analysis(t, dg, block_value, t_rej=0.2, n_blocks=10, n_boot=2000, seed=0) -> dict:
+    """Convergence numbers after the rejection time ``t_rej`` (fraction of the run).
+
+    Parameters
+    ----------
+    t, dg : array_like
+        ΔG°(t) series.
+    block_value : callable
+        ``block_value(mask_t)`` returns ΔG° from frames whose time falls in the masked part of ``t``.
+
+    Returns
+    -------
+    dict
+        time_mean, time_sd, block_dg, boot_sd (bootstrap over blocks), last_blocks_diff.
+    """
+    t, dg = np.asarray(t, float), np.asarray(dg, float)
+    t0 = t_rej * t[-1]
+    after = t >= t0
+    edges = np.linspace(t0, t[-1], n_blocks + 1)
+    masks = [(t >= lo) & ((t < hi) if k < n_blocks - 1 else (t <= hi))
+             for k, (lo, hi) in enumerate(zip(edges[:-1], edges[1:]))]
+    blocks = [block_value(m) for m in masks]
+    rng = np.random.default_rng(seed)
+    boots = [np.nanmean([blocks[i] for i in rng.integers(0, n_blocks, n_blocks)]) for _ in range(n_boot)]
+    ok = np.isfinite(dg[after])
+    return dict(time_mean=float(np.mean(dg[after][ok])) if ok.any() else float("nan"),
+                time_sd=float(np.std(dg[after][ok])) if ok.any() else float("nan"),
+                block_dg=[float(b) for b in blocks], boot_sd=float(np.nanstd(boots)),
+                last_blocks_diff=float(abs(blocks[-1] - blocks[-2])) if np.all(np.isfinite(blocks[-2:])) else float("nan"))
