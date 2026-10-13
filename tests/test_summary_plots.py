@@ -83,3 +83,48 @@ def test_bias_growth_with_extension(tmp_path):
     _, axes, _ = fig_bias(run, out_path=str(tmp_path / "b.png"), n_snap=3)
     last = axes[0, 2].lines[-1].get_ydata()
     np.testing.assert_allclose(last, np.asarray(bias_from_hills(w.hills_raw)).ravel())
+
+
+def _set_hill_cv(rd, rid, value):
+    f = os.path.join(rd, f"HILLS_{rid}.npz")
+    with np.load(f) as d:
+        rec = {k: d[k] for k in d.files}
+    rec["cv"] = np.full_like(rec["cv"], value)
+    np.savez(f, **rec)
+
+
+def test_isolated_clamp_per_walker(tmp_path):
+    from autopath.metadynamics.summary.analysis import clamp_fractions
+    rd = make_run(str(tmp_path / "r"), layout="isolated", n_walkers=2)
+    _set_hill_cv(rd, "w0", 2.4)
+    _set_hill_cv(rd, "w1", 1.0)
+    run = load_run(rd)
+    assert clamp_fractions(run) == {"funnel_z": {"w0": 1.0, "w1": 0.0}}
+    _, axes, _ = fig_bias(run, out_path=str(tmp_path / "b.png"))
+    assert len(axes[0, 1].patches) >= 2 and "w0 1.000" in axes[0, 1].texts[0].get_text()
+
+
+def test_shared_clamp_pooled(tmp_path):
+    from autopath.metadynamics.summary.analysis import clamp_fractions
+    rd = make_run(str(tmp_path / "r"), n_walkers=2)
+    _set_hill_cv(rd, "w0", 2.4)
+    _set_hill_cv(rd, "w1", 1.0)
+    assert clamp_fractions(load_run(rd)) == {"funnel_z": {"pooled": 0.5}}
+
+
+def test_vstar_length_mismatch_skipped(tmp_path):
+    rd = make_run(str(tmp_path / "r"), tempering="wt+tt", n_walkers=1)
+    f = os.path.join(rd, "HILLS_w0.npz")
+    with np.load(f) as d:
+        rec = {k: d[k] for k in d.files}
+    rec["vstar_kj"] = rec["vstar_kj"][:-3]
+    np.savez(f, **rec)
+    _, axes, skipped = fig_bias(load_run(rd), out_path=str(tmp_path / "b.png"))
+    assert "V* length != hill count: not supported" in skipped and not axes[0, 3].lines
+
+
+def test_2d_marginals_per_walker(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r"), layout="isolated", n_walkers=2,
+                            cvs=("funnel_z", "learned_sw"), monitors=()))
+    _, axes, _ = fig_bias(run, out_path=str(tmp_path / "b.png"), n_snap=4)
+    assert all(len(axes[g, k].lines) == 4 for g in range(2) for k in (4, 5))

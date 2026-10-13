@@ -90,6 +90,29 @@ def recrossings(walker, cv, band) -> dict:
 KT_PER_K = 0.0083144626
 
 
+def clamp_fractions(run) -> dict:
+    """Fraction of hills deposited at a CV bound: ``{cv: {rid or "pooled": fraction}}``.
+
+    Isolated walkers are reported one by one; shared and single runs have one bias and are pooled.
+    CVs without bounds are omitted.
+    """
+    out = {}
+    pooled = run.layout != "isolated"
+    for j, c in enumerate(run.cvs):
+        if c.bounds is None:
+            continue
+        lo, hi = c.bounds
+        tol = 1e-6 * (c.grid_max - c.grid_min)
+
+        def frac(x):
+            return float(np.mean((x <= lo + tol) | (x >= hi - tol)))
+        if pooled:
+            out[c.name] = {"pooled": frac(np.concatenate([w.hill_cv[:, j] for w in run.walkers]))}
+        else:
+            out[c.name] = {w.rid: frac(w.hill_cv[:, j]) for w in run.walkers}
+    return out
+
+
 @dataclass
 class Combined:
     layout: str
