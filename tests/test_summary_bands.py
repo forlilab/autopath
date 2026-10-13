@@ -58,3 +58,34 @@ def test_recrossings_counts_full_cycles():
         cvs = {"x": np.array([0.0, 0.05, 0.5, 0.95, 0.5, 0.05, 0.08, 0.06, 0.95, 0.04])}
     r = recrossings(W, "x", Band((0.0, 0.1), (0.9, 1.0), "low", "grid"))
     assert r["n_cycles"] == 2 and r["frac_bound"] == 0.6 and r["frac_unbound"] == 0.2
+
+
+def test_clamped_cv_bands_inside_clamp(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r"), cvs=("dist",), monitors=(), bounds={"dist": (0.5, 2.0)}))
+    b = bands(run)["dist"]
+    assert b.source == "clamp" and b.bound_end == "low"
+    assert np.allclose(b.bound, (0.5, 0.65)) and np.allclose(b.unbound, (1.85, 2.0))
+
+
+def test_half_open_clamp_uses_grid_for_open_edge(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r"), cvs=("dist",), monitors=(), bounds={"dist": (-np.inf, 2.0)}))
+    b = bands(run)["dist"]
+    assert np.allclose(b.bound, (0.2, 0.38)) and np.allclose(b.unbound, (1.82, 2.0))
+
+
+def test_contacts_bound_at_high_edge(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r"), cvs=("contacts",), monitors=(), bounds={"contacts": (0.0, 6.0)}))
+    b = bands(run)["contacts"]
+    assert b.bound_end == "high" and b.source == "clamp"
+    assert np.allclose(b.bound, (5.4, 6.0)) and np.allclose(b.unbound, (0.0, 0.6))
+    low = bands(run, {"contacts": {"bound_end": "low"}})["contacts"]
+    assert np.allclose(low.bound, (0.0, 0.6))
+
+
+def test_recorded_cv_type_overrides_name(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r"), cvs=("dist",), monitors=(),
+                            extra_meta={"cv_types": np.array(["contacts"])}))
+    assert bands(run)["dist"].bound_end == "high"
+    run = load_run(make_run(str(tmp_path / "s"), cvs=("contacts",), monitors=(),
+                            extra_meta={"cv_types": np.array(["distance"])}))
+    assert bands(run)["contacts"].bound_end == "low"

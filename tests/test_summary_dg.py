@@ -1,3 +1,4 @@
+import os
 import warnings
 
 import numpy as np
@@ -178,7 +179,7 @@ def test_pooled_weights_keep_relative_scale(tmp_path):
 
 def test_dg_series_ends_at_T_and_blocks_cover_frames(tmp_path):
     run = load_run(make_run(str(tmp_path / "r")), funnel=FP)
-    T = min(w.t[-1] for w in run.walkers)
+    T = max(w.t[-1] for w in run.walkers)
     assert abs(T / 0.5 - round(T / 0.5)) > 1e-6
     s = dg_series(run, bands(run), step_ns=0.5).pooled
     assert s["t"][-1] == pytest.approx(T)
@@ -232,3 +233,122 @@ def test_repeated_window_doubles_weight(tmp_path):
     # uniform raw weights: the doubled window carries twice the weight mass
     assert w2[:n1].sum() / w2[-n2:].sum() == pytest.approx(n1 / n2)
     assert w2[:2 * n1].sum() / w2[-n2:].sum() == pytest.approx(2 * n1 / n2)
+
+
+def test_contacts_band_dF_sign(tmp_path):
+    from autopath.metadynamics.summary.analysis import Band
+    run = load_run(make_run(str(tmp_path / "r"), cvs=("contacts",), monitors=(), bounds={"contacts": (0.0, 6.0)}))
+    for w in run.walkers:
+        w.bias = np.zeros_like(w.bias); w.ct = np.zeros_like(w.ct)
+        n = len(w.t)
+        x = np.full(n, 3.0)
+        x[: int(0.4 * n)] = 5.8                                  # bound (high contacts): 4x the unbound time
+        x[int(0.4 * n): int(0.5 * n)] = 0.2
+        w.cvs["contacts"] = x
+    b = bands(run)
+    assert b["contacts"].bound_end == "high"
+    v = binding(run, b, cv="contacts", burn=0.0).pooled
+    pb = sum(int((w.cvs["contacts"] == 5.8).sum()) for w in run.walkers)
+    pu = sum(int((w.cvs["contacts"] == 0.2).sum()) for w in run.walkers)
+    assert v["kind"] == "band_dF" and v["value"] < 0
+    assert v["value"] == pytest.approx(-KT_PER_K * 300.0 * np.log(pb / pu))
+
+
+def test_isolated_aggregates_count_undefined_walkers():
+    import types
+    from autopath.metadynamics.summary.analysis import apply
+    W = [types.SimpleNamespace(rid=r) for r in ("a", "b", "c")]
+    run = types.SimpleNamespace(layout="isolated", walkers=W)
+    vals = {"a": -20.0, "b": float("nan"), "c": float("nan")}
+    c = apply(run, lambda ws: {"value": vals[ws[0].rid]}, scalar=lambda r: r["value"])
+    assert c.n_walkers == 3 and c.n_defined == 1 and c.mean == -20.0
+    assert np.isnan(c.sd) and np.isnan(c.spread)
+
+
+def test_series_ends_at_longest_walker_and_equals_binding(tmp_path):
+    d = make_run(str(tmp_path / "r"), n_walkers=2)
+    f = os.path.join(d, "COLVAR_w1.npy")
+    np.save(f, np.load(f)[:120])                               # late-joining walker
+    run = load_run(d, funnel=FP)
+    b = bands(run)
+    s = dg_series(run, b, step_ns=0.1).pooled
+    assert s["t"][-1] == pytest.approx(max(w.t[-1] for w in run.walkers))
+    assert s["dg"][-1] == binding(run, b).pooled["value"]
+    assert s["ess"][-1] == binding(run, b).pooled["ess"] and len(s["ess"]) == len(s["t"])
+
+
+def test_series_shorter_walker_contributes_all_frames(tmp_path):
+    d = make_run(str(tmp_path / "r"), n_walkers=2)
+    f = os.path.join(d, "COLVAR_w1.npy")
+    np.save(f, np.load(f)[:120])
+    run = load_run(d, funnel=FP)
+    for w in run.walkers:
+        w.bias = np.zeros_like(w.bias); w.ct = np.zeros_like(w.ct)
+    s = dg_series(run, bands(run), step_ns=0.5).pooled
+    k = int(np.argmin(abs(s["t"] - 3.0)))
+    assert s["t"][k] > run.walkers[1].t[-1]
+    assert s["dg"][k] == pytest.approx(_hand_dg(run, t_max=s["t"][k]), abs=1e-9)
+    n_used = sum(int((w.t <= s["t"][k]).sum()) - int(0.2 * (w.t <= s["t"][k]).sum()) for w in run.walkers)
+    assert s["ess"][k] == pytest.approx(n_used)                 # uniform weights
+
+
+def test_late_walker_keeps_blocks(tmp_path):
+    from autopath.metadynamics.summary.analysis import fe_numbers
+    d = make_run(str(tmp_path / "r"), n_walkers=2)
+    from ._summary_fixtures import add_fresh
+    add_fresh(d, "w2", n_hills=1, n_rows=4)
+    run = load_run(d, funnel=FP)
+    assert len(run.walkers) == 3 and len(run.walkers[2].t) == 3
+    out = fe_numbers(run, bands(run), step_ns=0.1)
+    assert out["blocks"] is not None and len(out["series"].pooled["t"]) > 12
+
+
+def test_kish_ess():
+    from autopath.metadynamics.summary.analysis import kish_ess
+    assert kish_ess(np.full(250, 0.3)) == pytest.approx(250)
+    w = np.full(1000, 1e-9); w[0] = 1.0
+    assert kish_ess(w) == pytest.approx(1.0, abs=1e-3)
+    assert kish_ess(np.zeros(0)) == 0.0
+
+
+def test_binding_carries_ess(tmp_path):
+    from autopath.metadynamics.summary.analysis import kish_ess
+    run = load_run(make_run(str(tmp_path / "r")), funnel=FP)
+    v = binding(run, bands(run)).pooled
+    _, w = _frames(run.walkers, run, "funnel_z", 0.2)
+    assert v["ess"] == pytest.approx(kish_ess(w)) and v["n_frames"] == len(w)
+    assert 1.0 <= v["ess"] <= len(w)
+
+
+def test_fe_numbers_blocks_have_ess_and_min_points(tmp_path):
+    from autopath.metadynamics.summary.analysis import fe_numbers, kish_ess
+    run = load_run(make_run(str(tmp_path / "r"), layout="isolated", n_walkers=2), funnel=FP)
+    b = bands(run)
+    out = fe_numbers(run, b, step_ns=0.1, n_boot=20)
+    assert out["series"].pooled is None and set(out["blocks"]) == {"w0", "w1"}
+    blk = out["blocks"]["w0"]
+    assert len(blk["block_ess"]) == 10
+    T = out["series"].per_walker["w0"]["t"][-1]
+    lo, hi = 0.2 * T, 0.2 * T + 0.08 * T
+    w0 = run.walkers[0]
+    assert blk["block_ess"][0] == pytest.approx(kish_ess(_frames_in_window([w0], run, "funnel_z", lo, hi)[1]))
+    out = fe_numbers(run, b, step_ns=0.1, min_points=10 ** 6)
+    assert out["blocks"] == {"w0": None, "w1": None}
+    assert any(f"< {10 ** 6} points" in s for s in out["skipped"])
+
+
+def test_isolated_different_walkers_not_pooled(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r"), layout="isolated", n_walkers=2), funnel=FP)
+    for w, frac in zip(run.walkers, (0.5, 0.2)):
+        w.bias = np.zeros_like(w.bias); w.ct = np.zeros_like(w.ct)
+        n = len(w.t)
+        z = np.full(n, 1.8)                                        # bulk
+        z[: int(frac * n)] = 0.1                                   # bound
+        w.cvs["funnel_z"] = z
+    b = bands(run)
+    c = binding(run, b, burn=0.0)
+    v0, v1 = c.per_walker["w0"]["value"], c.per_walker["w1"]["value"]
+    assert c.pooled is None and np.isfinite(v0) and np.isfinite(v1) and abs(v0 - v1) > 1.0
+    pooled = _value(run, b, "funnel_z", *_frames(run.walkers, run, "funnel_z", 0.0))["value"]
+    assert min(abs(pooled - v0), abs(pooled - v1)) > 0.1
+    assert c.mean == pytest.approx((v0 + v1) / 2) and c.spread == pytest.approx(abs(v0 - v1))

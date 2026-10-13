@@ -70,3 +70,31 @@ def test_fes_reweighted_2d_has_finite_values(tmp_path):
     run = load_run(make_run(str(tmp_path / "r"), cvs=("funnel_z", "learned_sw"), monitors=()))
     _, _, F2 = fes_reweighted(run, "funnel_z", "learned_sw", bins=10).pooled
     assert np.isfinite(F2).any() and np.nanmin(F2) == 0.0
+
+
+def test_fes_bias_prefactor_wt_tt(tmp_path):
+    run_wtt = load_run(make_run(str(tmp_path / "a"), tempering="wt+tt"))
+    run_tt = load_run(make_run(str(tmp_path / "b"), tempering="tt"))
+    (_, fw), (_, ft) = fes_bias(run_wtt).pooled, fes_bias(run_tt).pooled
+    assert np.nanmax(fw) == pytest.approx(np.nanmax(ft) * 20.0 / 19.0, rel=1e-6)
+
+
+def test_fes_reweighted_reports_ess(tmp_path):
+    from autopath.metadynamics.summary.analysis import kish_ess
+    run = load_run(make_run(str(tmp_path / "r"), n_walkers=2))
+    for w in run.walkers:
+        w.bias = np.zeros_like(w.bias); w.ct = np.zeros_like(w.ct)
+    c = fes_reweighted(run, "funnel_z", burn=0.0)
+    assert c.ess == pytest.approx(sum(len(w.t) for w in run.walkers))
+    iso = load_run(make_run(str(tmp_path / "i"), layout="isolated", n_walkers=2))
+    c = fes_reweighted(iso, "funnel_z")
+    assert set(c.ess) == {"w0", "w1"} and all(1.0 <= v <= 400 for v in c.ess.values())
+
+
+def test_fes_empty_histogram_no_warning(tmp_path):
+    import warnings
+    from autopath.metadynamics.summary.analysis import _free_energy
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        F = _free_energy(np.zeros(10), 2.5)
+    assert np.isnan(F).all()
