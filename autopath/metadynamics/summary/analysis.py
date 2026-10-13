@@ -1,8 +1,11 @@
 """Bands, recrossings, reweighting, the shared/isolated combination rule, free energies and ΔG°."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Callable, Optional
 
 import numpy as np
 from openmm import unit
+
+from ..Hills import bias_from_hills, fes_scale
 
 FUNNEL_Z = "funnel_z"
 SITE_FRAC = 0.2
@@ -82,3 +85,95 @@ def recrossings(walker, cv, band) -> dict:
         elif u and state == 1:
             state, seen_u = 2, True
     return dict(n_cycles=int(n), frac_bound=float(inb.mean()), frac_unbound=float(inu.mean()))
+
+
+KT_PER_K = 0.0083144626
+
+
+@dataclass
+class Combined:
+    layout: str
+    pooled: object = None
+    per_walker: dict = field(default_factory=dict)
+    mean: Optional[float] = None
+    sd: Optional[float] = None
+    spread: Optional[float] = None
+
+
+def _weights_arrays(bias, ct, temperature, burn=0.2):
+    """Kept-frame mask and normalised c(t) weights exp[(V - c)/kT] for bias/ct arrays."""
+    if bias is None:
+        raise ValueError("no REWEIGHT data: reweighting not supported")
+    n = len(bias)
+    m = np.arange(n) >= int(burn * n)
+    lw = (bias[m] - ct[m]) / (KT_PER_K * temperature)
+    w = np.exp(lw - lw.max())
+    return m, w / w.sum()
+
+
+def weights(walker, temperature, burn=0.2):
+    """c(t) reweighting weights over frames after the first ``burn`` fraction of the walker.
+
+    Returns
+    -------
+    mask : ndarray of bool
+    w : ndarray, normalised over the kept frames
+    """
+    return _weights_arrays(walker.bias, walker.ct, temperature, burn)
+
+
+def apply(run, fn: Callable, scalar: Optional[Callable] = None) -> Combined:
+    """Shared/single bias: ``fn`` on all walkers pooled. Isolated: ``fn`` per walker, never pooled."""
+    if run.layout in ("shared", "single"):
+        return Combined(run.layout, pooled=fn(run.walkers))
+    per = {w.rid: fn([w]) for w in run.walkers}
+    c = Combined(run.layout, per_walker=per)
+    if scalar is not None:
+        v = np.array([scalar(r) for r in per.values()], float)
+        v = v[np.isfinite(v)]
+        if len(v):
+            c.mean = float(v.mean())
+            c.sd = float(v.std(ddof=1)) if len(v) > 1 else 0.0
+            c.spread = float(v.max() - v.min())
+    return c
+
+
+def fes_bias(run) -> Combined:
+    """Bias-derived FES (kJ/mol, min 0): -γ/(γ-1)·V for well tempering, -V for transition tempering alone."""
+    def f(ws):
+        raw = [h for w in ws for h in w.hills_raw]
+        V = np.asarray(bias_from_hills(raw))
+        h0 = raw[0]
+        grids = [np.linspace(float(a), float(b), int(n)) for a, b, n in
+                 zip(np.atleast_1d(h0["grid_min"]), np.atleast_1d(h0["grid_max"]), np.atleast_1d(h0["grid_points"]))]
+        F = -fes_scale(h0) * V
+        return grids, F - np.nanmin(F)
+    return apply(run, f)
+
+
+def fes_reweighted(run, x, y=None, bins=60, burn=0.2) -> Combined:
+    """Reweighted FES (kJ/mol, min 0) on one or two logged CVs (biased or monitored)."""
+    if not run.has_reweight:
+        raise ValueError("no REWEIGHT data: reweighted FES not supported")
+    kt = KT_PER_K * run.temperature
+
+    def f(ws):
+        xs, ys, wt = [], [], []
+        for w in ws:
+            m, ww = weights(w, run.temperature, burn)
+            xs.append(w.cvs[x][m]); wt.append(ww)          # one bias and one c(t): weights pool directly
+            if y is not None:
+                ys.append(w.cvs[y][m])
+        X, Wt = np.concatenate(xs), np.concatenate(wt)
+        if y is None:
+            p, e = np.histogram(X, bins=bins, weights=Wt)
+            with np.errstate(divide="ignore"):
+                F = -kt * np.log(p)
+            F[~np.isfinite(F)] = np.nan
+            return 0.5 * (e[1:] + e[:-1]), F - np.nanmin(F)
+        p, ex, ey = np.histogram2d(X, np.concatenate(ys), bins=bins, weights=Wt)
+        with np.errstate(divide="ignore"):
+            F = -kt * np.log(p)
+        F[~np.isfinite(F)] = np.nan
+        return 0.5 * (ex[1:] + ex[:-1]), 0.5 * (ey[1:] + ey[:-1]), F - np.nanmin(F)
+    return apply(run, f)
