@@ -2,8 +2,13 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
+from dataclasses import asdict
+
 from ..Hills import bias_from_hills
-from .analysis import clamp_fractions, recrossings
+from .analysis import (FUNNEL_Z, _frames_in_window, _value, binding, block_analysis, clamp_fractions, dg_series,
+                       fes_bias, fes_reweighted, recrossings)
+
+KJ_TO_KCAL = 1 / 4.184
 
 MAX_ROWS = 6
 _BOUND, _UNBOUND = "#9ecae1", "#fdd0a2"
@@ -199,3 +204,137 @@ def fig_bias(run, out_path=None, axes=None, n_snap=5):
     if out_path:
         fig.savefig(out_path, dpi=110)
     return fig, axes, skipped
+
+
+def _default_pair(run):
+    names = _names(run)
+    if FUNNEL_Z in names and len(names) > 1:
+        return FUNNEL_Z, next(n for n in names if n != FUNNEL_Z)
+    return (names[0], names[1]) if len(names) > 1 else (names[0], None)
+
+
+def _pick(c, key):
+    return c.pooled if c.pooled is not None else c.per_walker[key]
+
+
+def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=None):
+    """Bias FES, reweighted map, W along the main CV and ΔG°(t) with block numbers (kcal/mol).
+
+    Shared and single biases are pooled; isolated walkers get their own rows and curves and are never pooled.
+
+    Returns
+    -------
+    fig, axes, skipped, numbers
+        ``numbers = {"binding": Combined as dict or None, "blocks": dict | {rid: dict} | None}``; free
+        energies in kJ/mol.
+    """
+    skipped, nums = [], {"binding": None, "blocks": None}
+    iso = run.layout == "isolated"
+    groups = [(w.rid, [w]) for w in run.walkers] if iso else [("all", run.walkers)]
+    shown = groups[:MAX_ROWS]
+    if len(groups) > len(shown):
+        skipped.append(f"map rows: {len(groups) - len(shown)} of {len(groups)} isolated walkers not drawn")
+    n = len(shown)
+    fig = plt.figure(figsize=(21, 3.8 * n + 0.8), constrained_layout=True)
+    gs = fig.add_gridspec(n, 4)
+    ax_a = [fig.add_subplot(gs[r, 0]) for r in range(n)]
+    ax_b = [fig.add_subplot(gs[r, 1]) for r in range(n)]
+    ax_c, ax_d = fig.add_subplot(gs[:, 2]), fig.add_subplot(gs[:, 3])
+    axes = dict(bias=ax_a, map=ax_b, w=ax_c, dg=ax_d)
+    fb = fes_bias(run)
+    main = FUNNEL_Z if FUNNEL_Z in bands_ else run.cvs[0].name
+    x, y = pair or _default_pair(run)
+    for a, (lab, ws) in zip(ax_a, shown):
+        grids, F = _pick(fb, lab)
+        if F.ndim == 1:
+            a.plot(grids[0], F * KJ_TO_KCAL, "k")
+            a.set(xlabel=_label(run, run.cvs[0].name), ylabel="F (kcal/mol)")
+        else:
+            im = a.imshow(F * KJ_TO_KCAL, origin="lower", aspect="auto",
+                          extent=[grids[0][0], grids[0][-1], grids[1][0], grids[1][-1]])
+            fig.colorbar(im, ax=a, label="F (kcal/mol)")
+            a.set(xlabel=_label(run, run.cvs[0].name), ylabel=_label(run, run.cvs[1].name))
+        a.set_title(f"{lab}: bias-derived FES (not reweighted)", fontsize=8, loc="left")
+    if not run.has_reweight:
+        skipped.append("reweighted FES, ΔG° and blocks: no REWEIGHT data")
+        for a in ax_b + [ax_c, ax_d]:
+            a.text(0.5, 0.5, "no REWEIGHT data", ha="center", va="center", transform=a.transAxes)
+            a.set_axis_off()
+        fig.suptitle(f"free energy, {run.layout}", fontsize=9)
+        if out_path:
+            fig.savefig(out_path, dpi=110)
+        return fig, axes, skipped, nums
+    fr = fes_reweighted(run, x, y, burn=burn)
+    bd = binding(run, bands_, cv=main, burn=burn)
+    ser = dg_series(run, bands_, cv=main, burn=burn, step_ns=step_ns)
+    f1 = fes_reweighted(run, main, burn=burn)
+    nums["binding"] = asdict(bd)
+    nums["blocks"] = {} if iso else None
+    b = bands_[main]
+    for a, (lab, ws) in zip(ax_b, shown):
+        res = _pick(fr, lab)
+        if y is None:
+            a.plot(res[0], res[1] * KJ_TO_KCAL)
+            a.set(xlabel=_label(run, x), ylabel="F (kcal/mol)")
+        else:
+            xc, yc, F2 = res
+            cf = a.contourf(xc, yc, (F2 * KJ_TO_KCAL).T, levels=20, cmap="rainbow")
+            fig.colorbar(cf, ax=a, label="F (kcal/mol)")
+            a.set(xlabel=_label(run, x), ylabel=_label(run, y))
+            if y in bands_:
+                a.axhspan(*bands_[y].bound, color=_BOUND, alpha=0.3, lw=0)
+                a.axhspan(*bands_[y].unbound, color=_UNBOUND, alpha=0.3, lw=0)
+        if x in bands_:
+            a.axvspan(*bands_[x].bound, color=_BOUND, alpha=0.3, lw=0)
+            a.axvspan(*bands_[x].unbound, color=_UNBOUND, alpha=0.3, lw=0)
+        a.set_title(f"{lab}: reweighted F({x}{', ' + y if y else ''})", fontsize=8, loc="left")
+    ax_c.axvspan(*b.bound, color=_BOUND, alpha=0.6, lw=0)
+    ax_c.axvspan(*b.unbound, color=_UNBOUND, alpha=0.6, lw=0)
+    kind = _pick(bd, groups[0][0])["kind"]
+    sym = "ΔG°" if kind == "dG0" else "band ΔF"
+    lines = []
+    for r, (lab, ws) in enumerate(groups):
+        col = f"C{r % 10}" if iso else "k"
+        c1 = _pick(f1, lab)
+        v = _pick(bd, lab)
+        val = f"{v['value'] * KJ_TO_KCAL:.2f}" if np.isfinite(v["value"]) else f"n/a ({v['reason']})"
+        ax_c.plot(c1[0], c1[1] * KJ_TO_KCAL, color=col, lw=1, label=f"{lab}: {sym} {val}")
+        s = _pick(ser, lab)
+        ax_d.plot(s["t"], s["dg"] * KJ_TO_KCAL, color=col, lw=1, label=lab if iso else None)
+        main_ws = ws
+
+        def block_value(lo, hi, ws_=main_ws):
+            return _value(run, bands_, main, *_frames_in_window(ws_, run, main, lo, hi))["value"]
+        if len(s["t"]) < 12:
+            skipped.append(f"{lab}: blocks: ΔG°(t) has {len(s['t'])} < 12 points")
+            blk = None
+        else:
+            blk = block_analysis(s["t"], s["dg"], block_value, t_rej=t_rej)
+        if iso:
+            nums["blocks"][lab] = blk
+        else:
+            nums["blocks"] = blk
+        if len(s["t"]):
+            ax_d.axvline(t_rej * s["t"][-1], color=col, ls=":", lw=0.8)
+        if blk is not None:
+            lines.append(f"{lab + ': ' if iso else ''}mean {blk['time_mean'] * KJ_TO_KCAL:.2f} ± "
+                         f"{blk['time_sd'] * KJ_TO_KCAL:.2f}\n{'  ' if iso else ''}boot SD {blk['boot_sd'] * KJ_TO_KCAL:.2f}, "
+                         f"last-blocks Δ {blk['last_blocks_diff'] * KJ_TO_KCAL:.2f}, "
+                         f"{blk['n_valid_blocks']}/10 blocks")
+    ttl = f"W along {main}; {sym} (kcal/mol)"
+    if iso and bd.mean is not None:
+        ttl += f"\nmean {bd.mean * KJ_TO_KCAL:.2f} ± {bd.sd * KJ_TO_KCAL:.2f}, spread {bd.spread * KJ_TO_KCAL:.2f}"
+    ax_c.set(xlabel=_label(run, main), ylabel="W (kcal/mol)")
+    ax_c.set_title(ttl, fontsize=8, loc="left")
+    ax_c.legend(fontsize=7, frameon=False)
+    ax_d.set(xlabel="per-walker time (ns)", ylabel=f"{sym} (kcal/mol)")
+    ax_d.set_title(f"{sym}(t); dotted = rejection time, text = after rejection (kcal/mol)", fontsize=8, loc="left")
+    if iso:
+        ax_d.legend(fontsize=7, frameon=False, ncol=2, loc="upper right")
+    if lines:
+        ax_d.text(0.02, 0.02, "\n".join(lines), transform=ax_d.transAxes, fontsize=6.5, va="bottom",
+                  bbox=dict(fc="w", ec="0.8", alpha=0.8))
+    fig.suptitle(f"free energy, {run.layout}; burn {burn:g}, rejection {t_rej:g}", fontsize=9)
+    if out_path:
+        fig.savefig(out_path, dpi=110)
+    return fig, axes, skipped, nums

@@ -5,11 +5,12 @@ matplotlib.use("Agg")
 import numpy as np
 import matplotlib.pyplot as plt
 import pytest
+from openmm import unit
 
 from autopath.metadynamics.Hills import bias_from_hills
 from autopath.metadynamics.summary.analysis import bands
 from autopath.metadynamics.summary.data import load_run
-from autopath.metadynamics.summary.plots import fig_cvs, fig_bias, _until
+from autopath.metadynamics.summary.plots import fig_cvs, fig_bias, fig_fe, _until
 from ._summary_fixtures import make_run
 
 @pytest.fixture(autouse=True)
@@ -128,3 +129,40 @@ def test_2d_marginals_per_walker(tmp_path):
                             cvs=("funnel_z", "learned_sw"), monitors=()))
     _, axes, _ = fig_bias(run, out_path=str(tmp_path / "b.png"), n_snap=4)
     assert all(len(axes[g, k].lines) == 4 for g in range(2) for k in (3, 4))
+
+
+FP = {"z_cc": 12.0 * unit.angstrom, "z_max": 24.0 * unit.angstrom, "z_low": -1.5 * unit.angstrom,
+      "R_cylinder": 1.0 * unit.angstrom, "alpha": 31.5 * unit.degrees}
+
+
+@pytest.mark.parametrize("kw", MODES)
+def test_fig_fe_writes(tmp_path, kw):
+    run = load_run(make_run(str(tmp_path / "r"), **kw), funnel=FP)
+    fig, axes, skipped, nums = fig_fe(run, bands(run), out_path=str(tmp_path / "fe.png"), step_ns=0.5)
+    assert os.path.getsize(str(tmp_path / "fe.png")) > 1000 and "binding" in nums
+
+
+def test_fig_fe_isolated_never_pools(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r"), layout="isolated", n_walkers=3), funnel=FP)
+    _, _, _, nums = fig_fe(run, bands(run), out_path=str(tmp_path / "fe.png"), step_ns=0.5)
+    assert nums["binding"]["pooled"] is None and len(nums["binding"]["per_walker"]) == 3
+    assert set(nums["blocks"]) == {"w0", "w1", "w2"}
+
+
+def test_fig_fe_without_reweight_skips(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r"), reweight=False), funnel=FP)
+    _, _, skipped, nums = fig_fe(run, bands(run), out_path=str(tmp_path / "fe.png"))
+    assert any("no REWEIGHT data" in s for s in skipped) and nums["binding"] is None
+
+
+def test_fig_fe_short_series_recorded(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r")), funnel=FP)
+    _, _, skipped, nums = fig_fe(run, bands(run), step_ns=1.0)
+    assert any("< 12 points" in s for s in skipped) and nums["blocks"] is None
+
+
+def test_fig_fe_blocks_when_long_enough(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r")), funnel=FP)
+    _, _, skipped, nums = fig_fe(run, bands(run), step_ns=0.1)
+    assert not any("< 12" in s for s in skipped)
+    assert nums["blocks"]["unit"] == "kJ/mol" and "n_valid_blocks" in nums["blocks"]
