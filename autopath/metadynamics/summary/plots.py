@@ -9,6 +9,14 @@ MAX_ROWS = 6
 _BOUND, _UNBOUND = "#9ecae1", "#fdd0a2"
 
 
+def _label(run, name):
+    """Axis label ``name (unit)``; a CV without a length scale keeps the bare name."""
+    spec = next((c for c in run.cvs if c.name == name), None)
+    a = spec.ang_per_unit if spec is not None else (10.0 if name == "funnel_z" else None)
+    unit = {10.0: "nm", 1.0: "A"}.get(a) if a is not None else None
+    return f"{name} ({unit})" if unit else name
+
+
 def _names(run):
     return [c.name for c in run.cvs] + list(run.monitored)
 
@@ -49,12 +57,12 @@ def fig_cvs(run, bands_, out_path=None, axes=None):
                 rc = recrossings(w, nm, b)
                 a.set_title(f"{w.rid} {nm}\n{rc['n_cycles']} cycles, bound {rc['frac_bound']:.2f}, "
                             f"unbound {rc['frac_unbound']:.2f}", fontsize=7, loc="left")
-            a.set(xlabel="walker time (ns)", ylabel=nm)
+            a.set(xlabel="walker time (ns)", ylabel=_label(run, nm))
         if two_d:
             x, y = run.cvs[0].name, run.cvs[1].name
             sc = axes[r, -1].scatter(w.cvs[x], w.cvs[y], c=w.t, s=1, cmap="viridis")
             axes[r, -1].set_title("paths" if overlay else f"{w.rid} path", fontsize=7, loc="left")
-            axes[r, -1].set(xlabel=x, ylabel=y)
+            axes[r, -1].set(xlabel=_label(run, x), ylabel=_label(run, y))
             if not overlay or i == 0:
                 fig.colorbar(sc, ax=axes[r, -1], label="time (ns)")
     if overlay:
@@ -93,7 +101,9 @@ def fig_bias(run, out_path=None, axes=None, n_snap=5):
         skipped.append(f"bias maps: {len(groups) - MAX_ROWS} of {len(groups)} isolated walkers not drawn")
         groups = groups[:MAX_ROWS]
     nr = max(nrow, len(groups) if nrow > 1 else 1)
-    nc = 6 if nrow == 2 else 4
+    has_tt = "tt" in run.tempering
+    nc = 3 + (2 if nrow == 2 else 0) + int(has_tt)
+    vcol = nc - 1
     if axes is None:
         fig, axes = plt.subplots(nr, nc, figsize=(4.2 * nc, 3.4 * nr), squeeze=False, constrained_layout=True)
     else:
@@ -118,7 +128,7 @@ def fig_bias(run, out_path=None, axes=None, n_snap=5):
                     a.axvline(edge, color="r", lw=1)
             a.text(0.02, 0.97, "at clamp:\n" + "\n".join(f"{k} {v:.3f}" for k, v in clamp[c.name].items()),
                    transform=a.transAxes, va="top", fontsize=7)
-        a.set(xlabel=c.name, ylabel="hills")
+        a.set(xlabel=_label(run, c.name), ylabel="hills")
         a.set_title(f"deposition on {c.name}", fontsize=8, loc="left")
     for gi, g in enumerate(groups):
         raw = [h for w in g for h in w.hills_raw]
@@ -132,25 +142,25 @@ def fig_bias(run, out_path=None, axes=None, n_snap=5):
             for tt in times:
                 V = np.asarray(bias_from_hills(raw, until=_until(g, tt))).ravel()
                 axes[0, 2].plot(x, V, lw=1, label=f"{tag} t<={tt:.1f}")
-            axes[0, 2].set(xlabel=run.cvs[0].name, ylabel="V (kJ/mol)")
+            axes[0, 2].set(xlabel=_label(run, run.cvs[0].name), ylabel="V (kJ/mol)")
             axes[0, 2].set_title("bias growth", fontsize=8, loc="left")
         elif nrow == 2:
             a = axes[gi, 2]
             im = a.imshow(np.asarray(bias_from_hills(raw)), origin="lower", aspect="auto",
                           extent=[gmin[0], gmax[0], gmin[1], gmax[1]])
             fig.colorbar(im, ax=a, label="V (kJ/mol)")
-            a.set(xlabel=run.cvs[0].name, ylabel=run.cvs[1].name)
+            a.set(xlabel=_label(run, run.cvs[0].name), ylabel=_label(run, run.cvs[1].name))
             a.set_title(f"final bias {tag}", fontsize=8, loc="left")
             xs = [np.linspace(float(gmin[k]), float(gmax[k]), int(np.atleast_1d(h0["grid_points"])[k]))
                   for k in range(2)]
             for tt in times:
                 V = np.asarray(bias_from_hills(raw, until=_until(g, tt)))
                 for k in range(2):
-                    axes[gi, 4 + k].plot(xs[k], V.mean(axis=k), lw=1, label=f"t<={tt:.1f}")
+                    axes[gi, 3 + k].plot(xs[k], V.mean(axis=k), lw=1, label=f"t<={tt:.1f}")
             for k in range(2):
-                axes[gi, 4 + k].set(xlabel=run.cvs[k].name, ylabel="mean V (kJ/mol)")
-                axes[gi, 4 + k].set_title(f"bias marginal on {run.cvs[k].name} {tag}", fontsize=8, loc="left")
-            axes[gi, 4].legend(fontsize=7, frameon=False)
+                axes[gi, 3 + k].set(xlabel=_label(run, run.cvs[k].name), ylabel="mean V (kJ/mol)")
+                axes[gi, 3 + k].set_title(f"bias marginal on {run.cvs[k].name} {tag}", fontsize=8, loc="left")
+            axes[gi, 3].legend(fontsize=7, frameon=False)
         else:
             skipped.append(f"bias growth: {nrow} biased CVs not supported")
             break
@@ -164,23 +174,23 @@ def fig_bias(run, out_path=None, axes=None, n_snap=5):
             if len(v) != len(w.hill_t):
                 skipped.append("V* length != hill count: not supported")
                 vstar = False
-                axes[0, 3].cla()
+                axes[0, vcol].cla()
                 break
-            axes[0, 3].plot(w.hill_t, v, lw=0.8, color=cols[w.rid], label=w.rid)
+            axes[0, vcol].plot(w.hill_t, v, lw=0.8, color=cols[w.rid], label=w.rid)
             vstar = True
         if vstar:
-            axes[0, 3].set(xlabel="walker time (ns)", ylabel="V* (kJ/mol)")
-            axes[0, 3].set_title("TT tempering level", fontsize=8, loc="left")
-            axes[0, 3].legend(fontsize=7, ncol=2, frameon=False)
+            axes[0, vcol].set(xlabel="walker time (ns)", ylabel="V* (kJ/mol)")
+            axes[0, vcol].set_title("TT tempering level", fontsize=8, loc="left")
+            axes[0, vcol].legend(fontsize=7, ncol=2, frameon=False)
         elif not have:
             skipped.append("V*(t): not logged in HILLS")
     else:
         skipped.append("V*(t): not a transition-tempered run")
-    used = {(0, 0)} | {(j, 1) for j in range(nrow)} | ({(0, 3)} if vstar else set())
+    used = {(0, 0)} | {(j, 1) for j in range(nrow)} | ({(0, vcol)} if vstar else set())
     n_g = len(groups) if nrow == 2 else 1
     used |= {(g, 2) for g in range(n_g)}
     if nrow == 2:
-        used |= {(g, k) for g in range(n_g) for k in (4, 5)}
+        used |= {(g, k) for g in range(n_g) for k in (3, 4)}
     for r in range(nr):
         for k in range(nc):
             if (r, k) not in used:

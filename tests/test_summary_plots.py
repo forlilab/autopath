@@ -127,4 +127,4 @@ def test_2d_marginals_per_walker(tmp_path):
     run = load_run(make_run(str(tmp_path / "r"), layout="isolated", n_walkers=2,
                             cvs=("funnel_z", "learned_sw"), monitors=()))
     _, axes, _ = fig_bias(run, out_path=str(tmp_path / "b.png"), n_snap=4)
-    assert all(len(axes[g, k].lines) == 4 for g in range(2) for k in (4, 5))
+    assert all(len(axes[g, k].lines) == 4 for g in range(2) for k in (3, 4))
