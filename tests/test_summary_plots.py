@@ -43,7 +43,7 @@ def test_tt_panel_skipped_without_vstar(tmp_path):
 def test_tt_panel_drawn(tmp_path):
     run = load_run(make_run(str(tmp_path / "r"), tempering="wt+tt"))
     _, axes, skipped = fig_bias(run, out_path=str(tmp_path / "b.png"))
-    assert not any("V*" in s for s in skipped) and len(axes[0, 3].lines) == len(run.walkers)
+    assert not any("V*" in s for s in skipped) and len(axes[0, 2].lines) == len(run.walkers)
 
 
 def test_overlaid_when_many_walkers(tmp_path):
@@ -61,14 +61,14 @@ def test_one_row_per_walker(tmp_path):
 def test_isolated_bias_drawn_per_walker(tmp_path):
     run = load_run(make_run(str(tmp_path / "r"), layout="isolated", n_walkers=3))
     _, axes, _ = fig_bias(run, out_path=str(tmp_path / "b.png"), n_snap=4)
-    assert len(axes[0, 2].lines) == 3 * 4
+    assert len(axes[0, 1].lines) == 3 * 4
 
 
 def test_isolated_2d_one_map_per_walker(tmp_path):
     run = load_run(make_run(str(tmp_path / "r"), layout="isolated", n_walkers=3,
                             cvs=("funnel_z", "learned_sw"), monitors=()))
     _, axes, _ = fig_bias(run, out_path=str(tmp_path / "b.png"))
-    assert all(len(axes[g, 2].images) == 1 for g in range(3))
+    assert all(len(axes[g, 1].collections) >= 2 for g in range(3))
 
 
 def test_bias_growth_with_extension(tmp_path):
@@ -82,7 +82,7 @@ def test_bias_growth_with_extension(tmp_path):
     half = _until(run.walkers, w.segments[0] / 2)
     assert float(half["w0_x2"]) < 0
     _, axes, _ = fig_bias(run, out_path=str(tmp_path / "b.png"), n_snap=3)
-    last = axes[0, 2].lines[-1].get_ydata()
+    last = axes[0, 1].lines[-1].get_ydata()
     np.testing.assert_allclose(last, np.asarray(bias_from_hills(w.hills_raw)).ravel())
 
 
@@ -102,7 +102,7 @@ def test_isolated_clamp_per_walker(tmp_path):
     run = load_run(rd)
     assert clamp_fractions(run) == {"funnel_z": {"w0": 1.0, "w1": 0.0}}
     _, axes, _ = fig_bias(run, out_path=str(tmp_path / "b.png"))
-    assert len(axes[0, 1].patches) >= 2 and "w0 1.000" in axes[0, 1].texts[0].get_text()
+    assert axes.shape[1] == 2                                   # no deposition column
 
 
 def test_shared_clamp_pooled(tmp_path):
@@ -121,14 +121,14 @@ def test_vstar_length_mismatch_skipped(tmp_path):
     rec["vstar_kj"] = rec["vstar_kj"][:-3]
     np.savez(f, **rec)
     _, axes, skipped = fig_bias(load_run(rd), out_path=str(tmp_path / "b.png"))
-    assert "V* length != hill count: not supported" in skipped and not axes[0, 3].lines
+    assert "V* length != hill count: not supported" in skipped and not axes[0, 2].lines
 
 
 def test_2d_marginals_per_walker(tmp_path):
     run = load_run(make_run(str(tmp_path / "r"), layout="isolated", n_walkers=2,
                             cvs=("funnel_z", "learned_sw"), monitors=()))
     _, axes, _ = fig_bias(run, out_path=str(tmp_path / "b.png"), n_snap=4)
-    assert all(len(axes[g, k].lines) == 4 for g in range(2) for k in (3, 4))
+    assert all(len(axes[g, k].lines) == 4 for g in range(2) for k in (2, 3))
 
 
 FP = {"z_cc": 12.0 * unit.angstrom, "z_max": 24.0 * unit.angstrom, "z_low": -1.5 * unit.angstrom,
@@ -231,25 +231,25 @@ def test_fig_fe_text_box_shows_ess(tmp_path):
     _, axes, _, nums = fig_fe(run, bands(run), step_ns=0.1)
     txt = " ".join(t.get_text() for t in axes["dg"].texts)
     for rid, v in nums["binding"]["per_walker"].items():
-        assert f"{rid}: ΔG°" in txt and f"ESS {v['ess']:.0f}" in txt
+        assert f"{rid}:" in txt and "final ΔG°" in txt and f"ESS {v['ess']:.0f}" in txt
     assert "min block ESS" in txt and set(nums["fes_ess"]["map"]) == {"w0", "w1"}
 
 
 def test_fig_fe_accepts_axes(tmp_path):
     run = load_run(make_run(str(tmp_path / "r")), funnel=FP)
     fig, ax = plt.subplots(1, 4)
-    given = dict(bias=ax[0], map=ax[1], w=ax[2], dg=ax[3])
+    given = dict(ct=ax[0], map=ax[1], w=ax[2], dg=ax[3])
     f, axes, _, _ = fig_fe(run, bands(run), step_ns=0.5, axes=given)
     assert f is fig and axes["w"] is ax[2] and ax[2].lines and ax[3].lines
     with pytest.raises(ValueError, match="not supported"):
-        fig_fe(run, bands(run), step_ns=0.5, axes=dict(bias=ax[0], map=ax[1], w=ax[2]))
+        fig_fe(run, bands(run), step_ns=0.5, axes=dict(ct=ax[0], map=ax[1], w=ax[2]))
 
 
 def test_fig_fe_isolated_axes_without_bars(tmp_path):
     run = load_run(make_run(str(tmp_path / "r"), layout="isolated", n_walkers=2), funnel=FP)
     fig, ax = plt.subplots(2, 4)
     _, _, skipped, _ = fig_fe(run, bands(run), step_ns=0.5,
-                              axes=dict(bias=list(ax[:, 0]), map=list(ax[:, 1]), w=ax[0, 2], dg=ax[0, 3]))
+                              axes=dict(ct=list(ax[:, 0]), map=list(ax[:, 1]), w=ax[0, 2], dg=ax[0, 3]))
     assert "per-walker bars: no axes given" in skipped
 
 
@@ -283,3 +283,180 @@ def test_outline_starts_at_shared_z_low(tmp_path):
     z, _ = _funnel_outline(run, 10.0)
     assert z[0] == pytest.approx(run.cvs[0].grid_min) == pytest.approx(funnel_z_low(run, 10.0) / 10.0)
     assert bands(run)["funnel_z"].bound[0] == pytest.approx(z[0])
+
+
+def _stars_on(ax):
+    return [l for l in ax.get_lines() if l.get_marker() == "*"]
+
+
+def _drop_basins(rd):
+    for f in os.listdir(rd):
+        if f.startswith("HILLS_") and f.endswith(".npz"):
+            with np.load(os.path.join(rd, f)) as d:
+                rec = {k: d[k] for k in d.files if k != "tt_basins"}
+            np.savez(os.path.join(rd, f), **rec)
+
+
+def _tt_basins(rd, pts):
+    for f in os.listdir(rd):
+        if f.startswith("HILLS_") and f.endswith(".npz"):
+            with np.load(os.path.join(rd, f)) as d:
+                rec = {k: d[k] for k in d.files}
+            rec["tt_basins"] = np.asarray(pts, float)
+            np.savez(os.path.join(rd, f), **rec)
+
+
+def test_bias_figure_has_no_deposition_column(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r"), cvs=("funnel_z", "learned_sw"), monitors=()))
+    _, axes, _ = fig_bias(run, out_path=str(tmp_path / "b.png"))
+    assert axes.shape == (1, 4)
+    assert not any("deposition on" in a.get_title("left") for a in axes.flat)
+    assert "F marginal on funnel_z (from bias)" in axes[0, 2].get_title("left")
+    assert axes[0, 2].get_ylabel() == "F (kcal/mol)" and axes[0, 1].xaxis.get_gridlines()[0].get_visible()
+
+
+def test_bias_marginal_min_zero_and_matches_helper(tmp_path):
+    from autopath.metadynamics.summary.analysis import fes_marginal, bias_fes_scale, KT_PER_K
+    run = load_run(make_run(str(tmp_path / "r"), cvs=("funnel_z", "learned_sw"), monitors=()))
+    _, axes, _ = fig_bias(run, out_path=str(tmp_path / "b.png"), n_snap=3)
+    y = axes[0, 2].lines[-1].get_ydata()
+    raw = [h for w in run.walkers for h in w.hills_raw]
+    F = -bias_fes_scale(run) * np.asarray(bias_from_hills(raw))
+    np.testing.assert_allclose(y, fes_marginal(F, 0, KT_PER_K * 300.0) / 4.184)
+    assert y.min() == pytest.approx(0.0)
+
+
+def test_fes_marginal_separable():
+    from autopath.metadynamics.summary.analysis import fes_marginal
+    x, y = np.linspace(0, 1, 40), np.linspace(-1, 2, 60)
+    f, g = 3.0 * np.sin(4 * x) + 5.0, (y - 0.5) ** 2 * 2.0
+    F = f[None, :] + g[:, None]                     # F[iy, ix]
+    m = fes_marginal(F, 0, 2.5)
+    np.testing.assert_allclose(m, f - f.min(), atol=1e-9)
+    m1 = fes_marginal(F, 1, 2.5)
+    np.testing.assert_allclose(m1, g - g.min(), atol=1e-9)
+
+
+def test_marginal_integrates_boltzmann():
+    from autopath.metadynamics.summary.analysis import fes_marginal
+    F = np.array([[0.0, 2.0], [1.0, 3.0]])
+    kt = 1.7
+    want = -kt * np.log(np.exp(-F / kt).sum(axis=0))
+    np.testing.assert_allclose(fes_marginal(F, 0, kt), want - want.min())
+
+
+def test_hills_record_basins_loaded(tmp_path):
+    from autopath.metadynamics.summary.analysis import tt_basins
+    rd = make_run(str(tmp_path / "r"), tempering="tt")
+    _tt_basins(rd, [[0.3], [1.5]])
+    np.testing.assert_allclose(tt_basins(load_run(rd)), [[0.3], [1.5]])
+    assert tt_basins(load_run(make_run(str(tmp_path / "w"), tempering="wt"))) is None
+
+
+def test_fig_bias_stars_2d(tmp_path):
+    rd = make_run(str(tmp_path / "r"), cvs=("funnel_z", "learned_sw"), monitors=(), tempering="wt+tt")
+    _tt_basins(rd, [[0.2, 0.0], [1.5, 3.0]])
+    _, axes, skipped = fig_bias(load_run(rd), out_path=str(tmp_path / "b.png"))
+    for k in (1, 2, 3):
+        st = _stars_on(axes[0, k])
+        assert len(st) == 1 and len(st[0].get_xdata()) == 2 and st[0].get_markersize() == 14
+    assert not any("TT basins" in s for s in skipped)
+
+
+def test_fig_bias_basins_not_recorded(tmp_path):
+    rd = make_run(str(tmp_path / "r"), cvs=("funnel_z", "learned_sw"), monitors=(), tempering="wt+tt")
+    _drop_basins(rd)
+    _, axes, skipped = fig_bias(load_run(rd), out_path=str(tmp_path / "b.png"))
+    assert "TT basins: not recorded" in skipped and not _stars_on(axes[0, 1])
+
+
+def test_non_tt_has_no_stars_or_skip(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r"), cvs=("funnel_z", "learned_sw"), monitors=()), funnel=FP)
+    _, axes, skipped = fig_bias(run, out_path=str(tmp_path / "b.png"))
+    assert not _stars_on(axes[0, 1]) and not any("TT basins" in s for s in skipped)
+    _, axes, skipped, _ = fig_fe(run, bands(run), step_ns=0.5)
+    assert not _stars_on(axes["map"][0]) and not _stars_on(axes["w"]) and not any("TT basins" in s for s in skipped)
+
+
+def test_fig_fe_stars_and_no_band_spans(tmp_path):
+    rd = make_run(str(tmp_path / "r"), tempering="wt+tt", monitors=("funnel_z", "r_xy"))
+    _tt_basins(rd, [[0.2], [1.5]])
+    run = load_run(rd, funnel=FP)
+    _, axes, skipped, _ = fig_fe(run, bands(run), step_ns=0.5)
+    m = axes["map"][0]
+    assert not any(isinstance(p, plt.Polygon) for p in m.patches)    # axvspan/axhspan make Polygons
+    assert not m.patches
+    assert len(_stars_on(m)) == 0 and any("TT basins" in s for s in skipped)   # r_xy is not a biased CV
+    assert len(_stars_on(axes["w"])) == 1 and len(_stars_on(axes["w"])[0].get_xdata()) == 2
+
+
+def test_fig_fe_map_stars_biased_pair(tmp_path):
+    rd = make_run(str(tmp_path / "r"), cvs=("funnel_z", "learned_sw"), monitors=(), tempering="wt+tt")
+    _tt_basins(rd, [[0.2, 0.0], [1.5, 3.0]])
+    run = load_run(rd, funnel=FP)
+    _, axes, skipped, _ = fig_fe(run, bands(run), pair=("funnel_z", "learned_sw"), step_ns=0.5)
+    st = _stars_on(axes["map"][0])
+    assert len(st) == 1 and list(st[0].get_ydata()) == [0.0, 3.0]
+    assert not axes["map"][0].patches
+
+
+def test_fig_fe_basins_not_recorded(tmp_path):
+    rd = make_run(str(tmp_path / "r"), tempering="tt")
+    _drop_basins(rd)
+    run = load_run(rd, funnel=FP)
+    _, axes, skipped, _ = fig_fe(run, bands(run), step_ns=0.5)
+    assert "TT basins: not recorded" in skipped and not _stars_on(axes["w"])
+
+
+def test_fig_fe_ct_panel(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r"), n_walkers=2, extend=True), funnel=FP)
+    _, axes, _, _ = fig_fe(run, bands(run), step_ns=0.5)
+    a = axes["ct"][0]
+    assert len(a.lines) == 2 * 2 + 2 * len(run.walkers[0].segments)    # c(t), V per walker + boundaries
+    np.testing.assert_allclose([l for l in a.lines if l.get_label() == f"{run.walkers[0].rid} c(t)"][0].get_ydata(), run.walkers[0].ct)
+    assert "c(t) bold" in a.get_title("left")
+    iso = load_run(make_run(str(tmp_path / "i"), layout="isolated", n_walkers=2), funnel=FP)
+    _, axes, _, _ = fig_fe(iso, bands(iso), step_ns=0.5)
+    assert len(axes["ct"]) == 2 and all(len(a.lines) >= 2 for a in axes["ct"])
+
+
+def test_fig_fe_maps_share_limits_and_levels(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r"), layout="isolated", n_walkers=3,
+                            cvs=("funnel_z", "learned_sw"), monitors=()), funnel=FP)
+    _, axes, _, _ = fig_fe(run, bands(run), pair=("funnel_z", "learned_sw"), step_ns=0.5)
+    ms = axes["map"]
+    assert len({m.get_xlim() for m in ms}) == 1 and len({m.get_ylim() for m in ms}) == 1
+    lv = [np.asarray(m.collections[0].levels) for m in ms]
+    assert all(np.array_equal(lv[0], l) for l in lv[1:])
+
+
+def test_fig_bias_maps_share_levels(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r"), layout="isolated", n_walkers=3,
+                            cvs=("funnel_z", "learned_sw"), monitors=()))
+    _, axes, _ = fig_bias(run, out_path=str(tmp_path / "b.png"))
+    lv = [np.asarray(axes[g, 1].collections[0].levels) for g in range(3)]
+    assert all(np.array_equal(lv[0], l) for l in lv[1:])
+    assert len({axes[g, 1].get_xlim() for g in range(3)}) == 1
+
+
+def test_fig_fe_ct_linestyles_distinct_and_on_top(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r"), n_walkers=3), funnel=FP)
+    _, axes, _, _ = fig_fe(run, bands(run), step_ns=0.5)
+    ct = [l for l in axes["ct"][0].get_lines() if l.get_label().endswith("c(t)")]
+    assert len({l.get_linestyle() for l in ct}) == 3
+    faint = [l for l in axes["ct"][0].get_lines() if l.get_alpha() == 0.35]
+    assert min(l.get_zorder() for l in ct) > max(l.get_zorder() for l in faint)
+
+
+def test_fig_fe_dg_panel_plain_labels(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r")), funnel=FP)
+    _, axes, _, _ = fig_fe(run, bands(run), step_ns=0.1)
+    d = axes["dg"]
+    leg = _legend_texts(d)
+    assert "ΔG°(t): from all frames up to t" in leg and "start of statistics (t_rej)" in leg
+    assert "block ΔG° (each block alone)" in leg
+    assert d.get_title("left") == "ΔG° vs simulation time"
+    txt = d.texts[0].get_text().split("\n")
+    for k in ("final ΔG°", "mean ± SD after t_rej", "block bootstrap SD", "last two blocks differ by",
+              "valid blocks", "ESS"):
+        assert any(l.startswith(k) for l in txt), k
