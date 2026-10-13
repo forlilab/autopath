@@ -1,6 +1,7 @@
 """Summary figures: CVs and bias deposition. Each returns (fig, axes, skipped)."""
 import numpy as np
 import matplotlib.pyplot as plt
+from openmm import unit
 
 from dataclasses import asdict
 
@@ -206,11 +207,41 @@ def fig_bias(run, out_path=None, axes=None, n_snap=5):
     return fig, axes, skipped
 
 
+_RXY = ("r_xy", "funnel_r_xy", "funnel_rxy")
+
+
+def _rxy(run):
+    """Name of the logged funnel radial coordinate, or None."""
+    return next((n for n in _RXY if n in _names(run) and all(n in w.cvs for w in run.walkers)), None)
+
+
 def _default_pair(run):
+    """(funnel z, r_xy) when a funnel exists and r_xy is logged, else the first two CVs; plus a skip note."""
     names = _names(run)
+    if run.funnel is not None and FUNNEL_Z in names:
+        r = _rxy(run)
+        if r is not None:
+            return (FUNNEL_Z, r), None
+        note = "default pair: r_xy not logged"
+    else:
+        note = None
     if FUNNEL_Z in names and len(names) > 1:
-        return FUNNEL_Z, next(n for n in names if n != FUNNEL_Z)
-    return (names[0], names[1]) if len(names) > 1 else (names[0], None)
+        return (FUNNEL_Z, next(n for n in names if n != FUNNEL_Z)), note
+    return ((names[0], names[1]) if len(names) > 1 else (names[0], None)), note
+
+
+def _funnel_outline(run, a, x, y):
+    """Radial limit vs z (CV units): cone below z_cc, cylinder beyond."""
+    f = run.funnel
+    ang = lambda k: float(f[k].value_in_unit(unit.angstrom))
+    z_cc, z_max, r0 = ang("z_cc"), ang("z_max"), ang("R_cylinder")
+    tan = np.tan(float(f["alpha"].value_in_unit(unit.radian)))
+    z = np.linspace(ang("z_low") if "z_low" in f else 0.0, z_max, 100)
+    return z / a, (r0 + np.maximum(z_cc - z, 0.0) * tan) / a
+
+
+def _num(v):
+    return f"{v * KJ_TO_KCAL:.2f}" if np.isfinite(v) else "n/a"
 
 
 def _pick(c, key):
@@ -239,11 +270,20 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
     gs = fig.add_gridspec(n, 4)
     ax_a = [fig.add_subplot(gs[r, 0]) for r in range(n)]
     ax_b = [fig.add_subplot(gs[r, 1]) for r in range(n)]
-    ax_c, ax_d = fig.add_subplot(gs[:, 2]), fig.add_subplot(gs[:, 3])
-    axes = dict(bias=ax_a, map=ax_b, w=ax_c, dg=ax_d)
+    ax_c = fig.add_subplot(gs[:, 2])
+    if iso:
+        sub = gs[:, 3].subgridspec(2, 1, height_ratios=[3, 1.3])
+        ax_d, ax_e = fig.add_subplot(sub[0]), fig.add_subplot(sub[1])
+    else:
+        ax_d, ax_e = fig.add_subplot(gs[:, 3]), None
+    axes = dict(bias=ax_a, map=ax_b, w=ax_c, dg=ax_d, bars=ax_e)
     fb = fes_bias(run)
     main = FUNNEL_Z if FUNNEL_Z in bands_ else run.cvs[0].name
-    x, y = pair or _default_pair(run)
+    if pair is None:
+        pair, note = _default_pair(run)
+        if note:
+            skipped.append(note)
+    x, y = pair
     for a, (lab, ws) in zip(ax_a, shown):
         grids, F = _pick(fb, lab)
         if F.ndim == 1:
@@ -287,12 +327,20 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
         if x in bands_:
             a.axvspan(*bands_[x].bound, color=_BOUND, alpha=0.3, lw=0)
             a.axvspan(*bands_[x].unbound, color=_UNBOUND, alpha=0.3, lw=0)
+        if run.funnel is not None and y == _rxy(run) and x == FUNNEL_Z:
+            zs = next((c.ang_per_unit for c in run.cvs if c.name == x), None) or 10.0
+            a.plot(*_funnel_outline(run, zs, x, y), "k--", lw=1)
         a.set_title(f"{lab}: reweighted F({x}{', ' + y if y else ''})", fontsize=8, loc="left")
     ax_c.axvspan(*b.bound, color=_BOUND, alpha=0.6, lw=0)
     ax_c.axvspan(*b.unbound, color=_UNBOUND, alpha=0.6, lw=0)
     kind = _pick(bd, groups[0][0])["kind"]
     sym = "ΔG°" if kind == "dG0" else "band ΔF"
     lines = []
+    if run.funnel is None:
+        skipped.append("funnel outline: no funnel")
+    elif not (x == FUNNEL_Z and y is not None and y == _rxy(run)):
+        skipped.append("funnel outline: needs the (funnel_z, r_xy) pair")
+    bars = []
     for r, (lab, ws) in enumerate(groups):
         col = f"C{r % 10}" if iso else "k"
         c1 = _pick(f1, lab)
@@ -317,10 +365,19 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
         if len(s["t"]):
             ax_d.axvline(t_rej * s["t"][-1], color=col, ls=":", lw=0.8)
         if blk is not None:
-            lines.append(f"{lab + ': ' if iso else ''}mean {blk['time_mean'] * KJ_TO_KCAL:.2f} ± "
-                         f"{blk['time_sd'] * KJ_TO_KCAL:.2f}\n{'  ' if iso else ''}boot SD {blk['boot_sd'] * KJ_TO_KCAL:.2f}, "
-                         f"last-blocks Δ {blk['last_blocks_diff'] * KJ_TO_KCAL:.2f}, "
-                         f"{blk['n_valid_blocks']}/10 blocks")
+            nb = len(blk["block_dg"])
+            lines.append(f"{lab + ': ' if iso else ''}time mean {_num(blk['time_mean'])} ± {_num(blk['time_sd'])}\n"
+                         f"{'  ' if iso else ''}boot SD {_num(blk['boot_sd'])}, last-blocks Δ "
+                         f"{_num(blk['last_blocks_diff'])}, {blk['n_valid_blocks']}/{nb} blocks")
+            if iso:
+                bars.append((lab, col, blk["time_mean"], blk["time_sd"]))
+            else:
+                ed = np.linspace(t_rej * s["t"][-1], s["t"][-1], nb + 1)
+                for k, v in enumerate(blk["block_dg"]):
+                    if np.isfinite(v):
+                        ax_d.hlines(v * KJ_TO_KCAL, ed[k], ed[k + 1], color="C3", lw=2.5,
+                                    label=f"block {sym}" if k == 0 else None)
+                ax_d.legend(fontsize=7, frameon=False, loc="upper right")
     ttl = f"W along {main}; {sym} (kcal/mol)"
     if iso and bd.mean is not None:
         ttl += f"\nmean {bd.mean * KJ_TO_KCAL:.2f} ± {bd.sd * KJ_TO_KCAL:.2f}, spread {bd.spread * KJ_TO_KCAL:.2f}"
@@ -328,9 +385,16 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
     ax_c.set_title(ttl, fontsize=8, loc="left")
     ax_c.legend(fontsize=7, frameon=False)
     ax_d.set(xlabel="per-walker time (ns)", ylabel=f"{sym} (kcal/mol)")
-    ax_d.set_title(f"{sym}(t); dotted = rejection time, text = after rejection (kcal/mol)", fontsize=8, loc="left")
+    ax_d.set_title(f"{sym}(t); dotted = rejection time", fontsize=8, loc="left")
     if iso:
         ax_d.legend(fontsize=7, frameon=False, ncol=2, loc="upper right")
+    if iso:
+        for i, (lab, col, m, sd) in enumerate(bars):
+            if np.isfinite(m):
+                ax_e.bar(i, m * KJ_TO_KCAL, yerr=sd * KJ_TO_KCAL, color=col, capsize=3)
+        ax_e.set_xticks(range(len(bars)), [b[0] for b in bars], rotation=30, ha="right", fontsize=6)
+        ax_e.set(ylabel=f"time mean {sym} (kcal/mol)")
+        ax_e.set_title("per walker, mean ± SD of ΔG(t) after rejection", fontsize=8, loc="left")
     if lines:
         ax_d.text(0.02, 0.02, "\n".join(lines), transform=ax_d.transAxes, fontsize=6.5, va="bottom",
                   bbox=dict(fc="w", ec="0.8", alpha=0.8))

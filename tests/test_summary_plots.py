@@ -166,3 +166,50 @@ def test_fig_fe_blocks_when_long_enough(tmp_path):
     _, _, skipped, nums = fig_fe(run, bands(run), step_ns=0.1)
     assert not any("< 12" in s for s in skipped)
     assert nums["blocks"]["unit"] == "kJ/mol" and "n_valid_blocks" in nums["blocks"]
+
+
+def _legend_texts(ax):
+    return [x.get_text() for x in ax.get_legend().get_texts()]
+
+
+def test_fig_fe_no_funnel_says_band_dF(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r")))
+    _, axes, skipped, nums = fig_fe(run, bands(run), step_ns=0.1)
+    assert nums["binding"]["pooled"]["kind"] == "band_dF"
+    txt = " ".join(_legend_texts(axes["w"]) + [axes["dg"].get_ylabel(), axes["w"].get_title()])
+    assert "band ΔF" in txt and "ΔG°" not in txt
+    assert "funnel outline: no funnel" in skipped
+
+
+def test_fig_fe_shown_value_equals_binding(tmp_path):
+    from autopath.metadynamics.summary.analysis import binding
+    run = load_run(make_run(str(tmp_path / "r"), layout="isolated", n_walkers=3), funnel=FP)
+    _, axes, _, nums = fig_fe(run, bands(run), step_ns=0.1)
+    bd = binding(run, bands(run))
+    for rid, v in bd.per_walker.items():
+        np.testing.assert_equal(nums["binding"]["per_walker"][rid]["value"], v["value"])
+        want = f"{v['value'] / 4.184:.2f}" if np.isfinite(v["value"]) else "n/a"
+        assert any(s.startswith(f"{rid}: ΔG° {want}") for s in _legend_texts(axes["w"]))
+    np.testing.assert_equal(nums["binding"]["mean"], bd.mean) and axes["bars"] is not None
+
+
+def test_fig_fe_2d_without_rxy_records_outline_skip(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r"), cvs=("funnel_z", "learned_sw"), monitors=()), funnel=FP)
+    _, _, skipped, _ = fig_fe(run, bands(run), step_ns=0.5)
+    assert "funnel outline: needs the (funnel_z, r_xy) pair" in skipped
+    assert "default pair: r_xy not logged" in skipped
+
+
+def test_fig_fe_rxy_monitor_default_pair_draws_outline(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r"), monitors=("funnel_z", "r_xy")), funnel=FP)
+    _, axes, skipped, _ = fig_fe(run, bands(run), step_ns=0.5)
+    assert not any("funnel outline" in s or "default pair" in s for s in skipped)
+    assert "funnel_z" in axes["map"][0].get_xlabel() and "r_xy" in axes["map"][0].get_ylabel()
+    assert any(l.get_linestyle() == "--" for l in axes["map"][0].get_lines())
+
+
+def test_fig_fe_wt_tt_numbers(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r"), tempering="wt+tt"), funnel=FP)
+    _, _, _, nums = fig_fe(run, bands(run), step_ns=0.1)
+    assert nums["binding"]["pooled"]["kind"] == "dG0" and nums["blocks"]["n_valid_blocks"] >= 1
+    assert len(nums["blocks"]["block_dg"]) == 10

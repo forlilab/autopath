@@ -3,7 +3,7 @@ import os
 import numpy as np
 
 GRIDS = {"funnel_z": (-0.4, 2.4, 0.096, 10.0, 0.0), "learned_sw": (-2.0, 4.0, 0.15, np.nan, np.nan),
-         "dist": (0.2, 3.6, 0.01, np.nan, np.nan), "torsion": (-np.pi, np.pi, 0.1, np.nan, np.nan)}
+         "r_xy": (0.0, 1.5, 0.05, np.nan, np.nan), "dist": (0.2, 3.6, 0.01, np.nan, np.nan), "torsion": (-np.pi, np.pi, 0.1, np.nan, np.nan)}
 
 
 def _traj(rng, lo, hi, n):
