@@ -13,7 +13,10 @@ def main(argv=None):
     ap.add_argument("--step-ns", type=float, default=1.0)
     ap.add_argument("--bands"); ap.add_argument("--out"); ap.add_argument("--prefix", default="metad")
     a = ap.parse_args(argv)
-    bands = json.load(open(a.bands)) if a.bands else None
+    bands = None
+    if a.bands:
+        with open(a.bands) as fh:
+            bands = json.load(fh)
     s = report(a.run_dir, funnel=a.funnel, learned_cv=a.learned_cv, bands=bands, burn=a.burn, t_rej=a.t_rej,
                step_ns=a.step_ns, out_dir=a.out, prefix=a.prefix)
     print(f"layout: {s['layout']}")

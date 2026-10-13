@@ -35,7 +35,7 @@ def _version():
     try:
         from autopath import __version__
         return __version__
-    except Exception:
+    except (ImportError, AttributeError):
         return None
 
 

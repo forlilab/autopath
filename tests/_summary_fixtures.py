@@ -15,7 +15,7 @@ def _traj(rng, lo, hi, n):
 
 
 def make_run(path, layout="shared", n_walkers=2, cvs=("funnel_z",), tempering="wt", n_rows=400, extend=False,
-             truncate=None, reweight=True, monitors=("funnel_z",), seed=0, extra_meta=None):
+             truncate=None, reweight=True, monitors=("funnel_z",), seed=0, extra_meta=None, cross=False):
     rng = np.random.default_rng(seed)
     os.makedirs(path, exist_ok=True)
     dt, dcd = 0.01, 0.05
@@ -25,6 +25,11 @@ def make_run(path, layout="shared", n_walkers=2, cvs=("funnel_z",), tempering="w
         bias_dir = os.path.abspath(path if layout != "isolated" else os.path.join(path, f"bias_{rid}"))
         for s in segs:
             X = np.stack([_traj(rng, GRIDS[c][0], GRIDS[c][1], n_rows) for c in cvs], 1)
+            if cross:                                  # sweeps the whole grid every 0.5 ns
+                tt = np.arange(n_rows) * dt
+                for j, c in enumerate(cvs):
+                    lo, hi = GRIDS[c][:2]
+                    X[:, j] = 0.5 * (lo + hi) + 0.5 * (hi - lo) * np.sin(2 * np.pi * tt / 0.5 + w)
             np.save(os.path.join(path, f"COLVAR_{s}.npy"), X if len(cvs) > 1 else X[:, 0])
             t = np.arange(n_rows) * dt
             V = 2.0 * np.log1p(t)                      # slowly growing bias

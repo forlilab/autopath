@@ -4,6 +4,7 @@ import subprocess
 import sys
 
 import numpy as np
+import pytest
 
 from autopath.metadynamics.summary import check_convergence, report
 from autopath.metadynamics.summary.convergence import (
@@ -59,7 +60,8 @@ def test_cli(tmp_path):
     d = make_run(str(tmp_path / "r"))
     bj = tmp_path / "b.json"
     bj.write_text(json.dumps({"funnel_z": {"bound": [-0.4, 0.5], "unbound": [1.5, 2.3], "bound_end": "low"}}))
-    env = dict(os.environ, PYTHONPATH=os.getcwd() + os.pathsep + os.environ.get("PYTHONPATH", ""))
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = dict(os.environ, PYTHONPATH=root + os.pathsep + os.environ.get("PYTHONPATH", ""))
     r = subprocess.run([sys.executable, "-m", "autopath.metadynamics.summary", d, "--out", str(tmp_path / "o"),
                         "--step-ns", "0.5", "--bands", str(bj)], capture_output=True, text=True, timeout=600, env=env)
     assert r.returncode == 0, r.stderr
@@ -112,3 +114,56 @@ def test_min_recrossings_default_cv_choice():
     s["funnel"] = False
     assert not min_recrossings(3)(s)[0]
     assert min_recrossings(3, cv="funnel_z")(s)[0]
+
+
+def _all():
+    return [min_recrossings(3), last_blocks_within(1.0), walker_spread_within(1.0), bootstrap_sd_below(1.0),
+            clamp_fraction_below(0.05)]
+
+
+def _both(d, out, **kw):
+    s = report(d, out_dir=out, **kw)
+    with open(os.path.join(out, "metad_summary.json")) as fh:
+        return [s, json.load(fh)]
+
+
+def test_names_include_cv():
+    assert min_recrossings(3, "a").__name__ != min_recrossings(3, "b").__name__
+    assert min_recrossings(3, "a").__name__ == "min_recrossings(3, a)"
+
+
+def test_e2e_isolated_none_blocks(tmp_path):
+    d = make_run(str(tmp_path / "r"), layout="isolated")
+    for s in _both(d, str(tmp_path / "o"), step_ns=0.5):
+        assert s["blocks"]["w0"] is None
+        v = check_convergence(s, _all())
+        assert v.needs_more_sampling and not v.passed["last_blocks_within(1.0)"]
+        assert any("w0: blocks undefined (ΔG°(t) too short)" in r for r in v.reasons)
+
+
+@pytest.mark.parametrize("layout", ["isolated", "shared"])
+def test_e2e_crossing_run_finite_blocks(tmp_path, layout):
+    d = make_run(str(tmp_path / "r"), layout=layout, cross=True)
+    for s in _both(d, str(tmp_path / "o"), step_ns=0.2):
+        assert all(w["recrossings"]["funnel_z"] > 0 for w in s["walkers"].values())
+        v = check_convergence(s, _all() + [min_recrossings(1)])
+        assert v.passed["min_recrossings(1)"]
+        blk = list(s["blocks"].values()) if layout == "isolated" else [s["blocks"]]
+        assert all(b is not None and np.isfinite(b["boot_sd"] if b["boot_sd"] is not None else np.nan) for b in blk)
+        assert not any("too short" in r for r in v.reasons)
+        assert len(v.passed) == 6
+
+
+def test_e2e_shared_none_blocks(tmp_path):
+    d = make_run(str(tmp_path / "r"))
+    for s in _both(d, str(tmp_path / "o"), step_ns=0.5):
+        v = check_convergence(s, _all())
+        assert any("all: blocks undefined" in r for r in v.reasons)
+        assert v.passed["walker_spread_within(1.0)"]
+
+
+def test_clamp_undefined_and_empty():
+    ok, r = clamp_fraction_below(0.1)(_s(clamp={}))
+    assert ok and "not applicable" in r
+    ok, r = clamp_fraction_below(0.1)(_s(clamp={"funnel_z": {"w0": None}}))
+    assert not ok and "undefined" in r

@@ -34,7 +34,11 @@ def _kcal(v):
 
 
 def _fmt(v):
-    return "n/a" if not math.isfinite(v) else f"{v:.2f}"
+    return "undefined" if not math.isfinite(v) else f"{v:.2f}"
+
+
+def _arg(*a):
+    return ", ".join(str(x) for x in a if x is not None)
 
 
 def min_recrossings(n, cv=None):
@@ -56,36 +60,43 @@ def min_recrossings(n, cv=None):
                 if tot < n:
                     bad.append(f"{rid}/{k}={tot}")
         return (not bad, f"recrossings below {n}: {', '.join(bad)}" if bad else f"recrossings >= {n}")
-    return _named(f"min_recrossings({n})", f)
+    return _named(f"min_recrossings({_arg(n, cv)})", f)
 
 
 def _blocks(s):
+    """{unit: block dict or None}; one unit per walker if isolated, else "all"."""
     b = s.get("blocks")
-    if not b:
-        return {}
-    return b if s["layout"] == "isolated" else {"all": b}
+    if s["layout"] == "isolated":
+        return {rid: (b or {}).get(rid) for rid in s["walkers"]}
+    return {"all": b}
 
 
 def _block_check(key, tol_kcal, strict, label):
     def f(s):
-        bl = _blocks(s)
-        if not bl:
-            return False, f"{label}: no block analysis"
-        vals = {k: _kcal(v.get(key)) for k, v in bl.items()}
-        bad = {k: x for k, x in vals.items() if not (x <= tol_kcal if not strict else x < tol_kcal)}
+        bad = []
+        for k, v in _blocks(s).items():
+            if v is None:
+                bad.append(f"{k}: blocks undefined (ΔG°(t) too short)")
+                continue
+            x = _kcal(v.get(key))
+            if not math.isfinite(x):
+                bad.append(f"{k}: {label} undefined")
+            elif not (x < tol_kcal if strict else x <= tol_kcal):
+                bad.append(f"{k}: {label} {x:.2f} kcal/mol")
+        op = "<" if strict else "<="
         if bad:
-            return False, f"{label} not within {tol_kcal} kcal/mol: " + ", ".join(f"{k}={_fmt(x)}" for k, x in bad.items())
-        return True, f"{label} ok (<= {tol_kcal} kcal/mol)"
+            return False, f"{label} not {op} {tol_kcal} kcal/mol: " + "; ".join(bad)
+        return True, f"{label} {op} {tol_kcal} kcal/mol"
     return f
 
 
 def last_blocks_within(tol_kcal):
-    """|last block - previous block| <= tol_kcal (kcal/mol); NaN fails."""
+    """|last block - previous block| <= tol_kcal (kcal/mol); undefined fails."""
     return _named(f"last_blocks_within({tol_kcal})", _block_check("last_blocks_diff", tol_kcal, False, "last blocks"))
 
 
 def bootstrap_sd_below(tol_kcal):
-    """Block-bootstrap SD < tol_kcal (kcal/mol); NaN fails."""
+    """Block-bootstrap SD < tol_kcal (kcal/mol); undefined fails."""
     return _named(f"bootstrap_sd_below({tol_kcal})", _block_check("boot_sd", tol_kcal, True, "bootstrap SD"))
 
 
@@ -95,15 +106,24 @@ def walker_spread_within(tol_kcal):
         if s["layout"] != "isolated":
             return True, "walker spread: not applicable (shared)"
         sp = _kcal((s.get("binding") or {}).get("spread"))
+        if not math.isfinite(sp):
+            return False, "walker spread undefined"
         if sp <= tol_kcal:
-            return True, f"walker spread {_fmt(sp)} kcal/mol ok"
-        return False, f"walker spread {_fmt(sp)} kcal/mol > {tol_kcal}"
+            return True, f"walker spread {sp:.2f} kcal/mol <= {tol_kcal}"
+        return False, f"walker spread {sp:.2f} kcal/mol > {tol_kcal}"
     return _named(f"walker_spread_within({tol_kcal})", f)
 
 
 def clamp_fraction_below(frac):
     """Fraction of hills at a CV bound < frac, for every bounded CV and walker (or pooled)."""
     def f(s):
-        bad = [f"{k}/{r}={v:.2f}" for k, d in (s.get("clamp") or {}).items() for r, v in d.items() if v >= frac]
-        return (not bad, f"hills at a clamp >= {frac}: {', '.join(bad)}" if bad else f"clamp fraction < {frac}")
+        items = [(f"{k}/{r}", v) for k, d in (s.get("clamp") or {}).items() for r, v in d.items()]
+        if not items:
+            return True, "clamp fraction: not applicable (no bounded CV)"
+        und = [k for k, v in items if v is None or not math.isfinite(v)]
+        bad = [f"{k}={v:.2f}" for k, v in items if k not in und and v >= frac]
+        if und or bad:
+            return False, "; ".join(([f"clamp fraction undefined: {', '.join(und)}"] if und else [])
+                                    + ([f"hills at a clamp >= {frac}: {', '.join(bad)}"] if bad else []))
+        return True, f"clamp fraction < {frac}"
     return _named(f"clamp_fraction_below({frac})", f)
