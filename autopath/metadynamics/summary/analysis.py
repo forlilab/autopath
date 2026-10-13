@@ -246,6 +246,30 @@ def fes_bias(run) -> Combined:
     return apply(run, f)
 
 
+def fes_marginal(F, axis, kt):
+    """Boltzmann marginal ``-kt ln sum exp(-F/kt)`` over ``axis`` of ``F``, shifted to min 0 (units of ``F``)."""
+    F = np.asarray(F, float)
+    a = -F / kt
+    m = np.nanmax(a, axis=axis, keepdims=True)
+    with np.errstate(divide="ignore"):
+        g = -kt * (np.log(np.nansum(np.exp(a - m), axis=axis)) + np.squeeze(m, axis=axis))
+    return g - np.nanmin(g)
+
+
+def bias_fes_scale(run):
+    """Bias-to-FES prefactor ``-F/V`` of the run (see ``fes_scale``)."""
+    return fes_scale(run.walkers[0].hills_raw[0])
+
+
+def tt_basins(run):
+    """Recorded transition-tempering basins as an (n_basins, n_cvs) array in CV units, or None."""
+    for w in run.walkers:
+        for h in w.hills_raw:
+            if "tt_basins" in h:
+                return np.atleast_2d(np.asarray(h["tt_basins"], float))
+    return None
+
+
 def fes_reweighted(run, x, y=None, bins=60, burn=0.2) -> Combined:
     """Reweighted FES (kJ/mol, min 0) on one or two logged CVs (biased or monitored).
 
