@@ -39,6 +39,20 @@ POCKET_RESIDUES = [180, 181, 182, 183, 226, 227, 228, 229, 230, 204, 205, 206,
                    157, 158, 159, 160, 161, 162]
 
 
+def run_meta_for(args, cv_def=None):
+    """HILLS metadata: the funnel params file, the learned-CV npz (--learned-cv-file or, for
+    contacts_learned, the --cv-def's learned_cv_file) and the --cv-def file."""
+    meta = {"funnel_file": os.path.abspath(args.funnel_from)}
+    lf = args.learned_cv_file
+    if args.cv == "contacts_learned" and cv_def is not None and cv_def.get("learned_cv_file"):
+        lf = cv_def["learned_cv_file"]
+    if lf:
+        meta["learned_cv_file"] = os.path.abspath(lf)
+    if cv_def is not None and getattr(args, "cv_def", None):
+        meta["cv_def_file"] = os.path.abspath(args.cv_def)
+    return meta
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--base", default="3ptb")
@@ -313,9 +327,7 @@ def main():
              "SHARED with concurrent walkers"
              if args.bias_dir and os.path.abspath(bias_dir) == os.path.abspath(args.out)
              else "private")
-    run_meta = {"funnel_file": os.path.abspath(args.funnel_from)}
-    if args.learned_cv_file:
-        run_meta["learned_cv_file"] = os.path.abspath(args.learned_cv_file)
+    run_meta = run_meta_for(args, cv_def)
     metad.run(state_xml_file=state, system=load_system(system_xml),
               run_id=run_id, cv_specs=cvs,
               mMD_time=args.ns, bias_factor=args.bias_factor, hill_height=args.hill_height,

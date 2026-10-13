@@ -86,6 +86,7 @@ def learned_cv_atom_sets(topology_pdb, ligand_selection, positions=None):
 
 LEARNED_CV_DIRNAME = "learned_cv"
 LEARNED_Z_DIRNAME = "learned_cv_rupture"
+LEARNED_CV_NPZ = "learned_cv.npz"
 
 
 def learned_cv_out_dir(smd_outdir: str, group_key: str | None, name: str = LEARNED_CV_DIRNAME) -> str:
@@ -124,6 +125,17 @@ def build_learned_z_cv(system, sys_name, ligand_file, ligand_idx, pocket_idx, tr
                            direction=direction, hidden=False, classes="rupture", funnel=funnel_params,
                            masses=masses, system=system)
     return learned.learned_cv_spec(npz, system, 1, n_plain_cvs=1)
+
+
+def metad_run_meta(funnel_dir=None, learned_dir=None) -> dict:
+    """HILLS run metadata: ``funnel_file`` (funnel_params.npz in ``funnel_dir``) and ``learned_cv_file``
+    (learned_cv.npz in ``learned_dir``), each only when the file exists."""
+    meta = {}
+    for key, d, name in (("funnel_file", funnel_dir, "funnel_params.npz"),
+                         ("learned_cv_file", learned_dir, LEARNED_CV_NPZ)):
+        if d and os.path.exists(os.path.join(d, name)):
+            meta[key] = os.path.abspath(os.path.join(d, name))
+    return meta
 
 
 def milestones_dir_for_group(milestones_outdir: str, group_key: str | None) -> str:
@@ -1606,6 +1618,10 @@ class AutoPath:
                         learned_cv_out_dir(self.sMD_outdir, group_key, name=LEARNED_Z_DIRNAME),
                         self.sMD_pulling_dir, funnel_params)]
                 metad_cvs = as_cv_list(metad_cv)
+                _learned_dir = (learned_cv_out_dir(self.sMD_outdir, group_key) if self.mMD_cv == "learned" else
+                                learned_cv_out_dir(self.sMD_outdir, group_key, name=LEARNED_Z_DIRNAME)
+                                if self.mMD_cv == "learned_z" else None)
+                metad_meta = metad_run_meta(group_out_dir if funnel_force is not None else None, _learned_dir)
 
                 # most-bound milestone, resolved before the walker order is applied
                 first_milestone_name = os.path.basename(path_milestones[0]).split('.')[0]
@@ -1668,6 +1684,7 @@ class AutoPath:
                             reweight=self.mMD_reweight,
                             rct_ustride=self.mMD_rct_ustride,
                             dcd_interval=self.mMD_dcd_interval,
+                            run_meta=metad_meta,
                         )
                     except Exception as e:
                         logger.error(f"Error during WTMetaD for {milestone_name}: {e}")
@@ -1684,7 +1701,7 @@ class AutoPath:
                         if self.mMD_cv == "learned_z":
                             from autopath.metadynamics.report import check_sw_range
                             _sw_npz = os.path.join(learned_cv_out_dir(self.sMD_outdir, group_key,
-                                                                      name=LEARNED_Z_DIRNAME), "learned_cv.npz")
+                                                                      name=LEARNED_Z_DIRNAME), LEARNED_CV_NPZ)
                             logger.info("s_w training-range check: %s", check_sw_range(group_out_dir, _sw_npz))
                     elif colvar_files_diag:
                         ma = MetadynamicsAnalysis(out_dir=group_out_dir)
