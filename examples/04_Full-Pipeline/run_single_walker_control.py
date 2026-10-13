@@ -313,6 +313,9 @@ def main():
              "SHARED with concurrent walkers"
              if args.bias_dir and os.path.abspath(bias_dir) == os.path.abspath(args.out)
              else "private")
+    run_meta = {"funnel_file": os.path.abspath(args.funnel_from)}
+    if args.learned_cv_file:
+        run_meta["learned_cv_file"] = os.path.abspath(args.learned_cv_file)
     metad.run(state_xml_file=state, system=load_system(system_xml),
               run_id=run_id, cv_specs=cvs,
               mMD_time=args.ns, bias_factor=args.bias_factor, hill_height=args.hill_height,
@@ -327,7 +330,8 @@ def main():
               reweight=args.reweight, rct_ustride=args.rct_ustride,
               dcd_interval=args.dcd_interval,
               tt_basins=tt_basins,
-              tt_threshold=args.tt_threshold, tt_bias_factor=args.tt_bias_factor)
+              tt_threshold=args.tt_threshold, tt_bias_factor=args.tt_bias_factor,
+              run_meta=run_meta)
     log.info("finished: %.1f ns, seed=%s", args.ns, args.seed_from)
 
 

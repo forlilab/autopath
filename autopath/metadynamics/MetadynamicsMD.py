@@ -187,6 +187,7 @@ class MetadynamicsMD:
         tt_basins: list = None,
         tt_threshold: float = 0.0,
         tt_bias_factor: float = None,
+        run_meta: dict = None,
     ) -> str:
         """Run a single WT-MetaD trajectory and return the run identifier.
 
@@ -225,6 +226,9 @@ class MetadynamicsMD:
         funnel_params : dict, optional
             Funnel parameters for the Limongelli 2013 standard-state correction
             and the funnel-axis trace.  Skipped when ``None``.
+        run_meta : dict, optional
+            Strings stored in the HILLS record, e.g. ``funnel_file``,
+            ``learned_cv_file``. Items that are ``None`` or empty are skipped.
         bias_dir : str, optional
             Hill-file directory.  ``None`` uses ``self.out_dir``, shared by all
             walkers (multi-walker); a per-walker directory makes it independent.
@@ -462,7 +466,8 @@ class MetadynamicsMD:
                          tempering=tempering)
             _atomic_save(os.path.join(self.out_dir, f"HILLS_{run_id}.npz"),
                          **hills_record(meta, run_id, _started_at, _ps_per_step, resolved,
-                                        tempering, finished=finished, **intervals))
+                                        tempering, finished=finished, **intervals),
+                         **{k: str(v) for k, v in (run_meta or {}).items() if v not in (None, "")})
         _started_at = time.time()
         _store_every = max(1, round(self.store_CV / record_steps))
         for k, i in enumerate(range(0, int(mMD_steps), record_steps)):
