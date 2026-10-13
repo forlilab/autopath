@@ -174,9 +174,7 @@ def fes_reweighted(run, x, y=None, bins=60, burn=0.2) -> Combined:
             xs.append(w.cvs[x][m]); lws.append(lw)
             if y is not None:
                 ys.append(w.cvs[y][m])
-        lw = np.concatenate(lws)                  # shared bias: raw weights pooled, one common shift
-        Wt = np.exp(lw - lw.max()); Wt /= Wt.sum()
-        X = np.concatenate(xs)
+        X, Wt = _pool(xs, lws)
         if y is None:
             p, e = np.histogram(X, bins=bins, weights=Wt)
             return 0.5 * (e[1:] + e[:-1]), _free_energy(p, kt)
@@ -186,13 +184,13 @@ def fes_reweighted(run, x, y=None, bins=60, burn=0.2) -> Combined:
 
 
 C0_PER_A3 = 1.0 / 1661.0
-KJ_TO_KCAL = 1.0 / 4.184
 
 
 def dg_from_frames(z_ang, w, bound, bulk, r_cyl_ang, temperature) -> float:
     """Standard-state ΔG° (kJ/mol) from weighted frames.
 
     ΔG° = -kT ln(C0 π R² ∫_bound e^{-β(W - W_bulk)} dz); NaN if the bound or bulk band has no weight.
+    The bulk density uses the nominal bulk-band width.
     """
     z_ang, w = np.asarray(z_ang, float), np.asarray(w, float)
     site = (z_ang >= bound[0]) & (z_ang <= bound[1])
@@ -236,10 +234,10 @@ def _frames(ws, run, cv, burn, t_max=None):
 
 
 def _frames_in_window(ws, run, cv, lo, hi):
-    """Pooled (values, weights) of frames with lo <= t <= hi, no burn-in."""
+    """Pooled (values, weights) of frames with lo <= t < hi, no burn-in."""
     vs, lws = [], []
     for w in ws:
-        k = (w.t >= lo) & (w.t <= hi)
+        k = (w.t >= lo) & (w.t < hi)
         _, lw = _weights_arrays(w.bias[k], w.ct[k], run.temperature, 0.0, normalise=False)
         vs.append(w.cvs[cv][k]); lws.append(lw)
     return _pool(vs, lws)
@@ -250,11 +248,13 @@ def _value(run, bands_, cv, values, weights):
     spec = next((c for c in run.cvs if c.name == cv), None)
     a = spec.ang_per_unit if spec is not None and spec.ang_per_unit else (10.0 if cv == FUNNEL_Z else None)
     if cv == FUNNEL_Z and run.funnel is not None and a is not None:
+        if "R_cylinder" not in run.funnel:
+            raise ValueError("funnel without R_cylinder: ΔG° not supported")
         v = dg_from_frames(values * a, weights, (b.bound[0] * a, b.bound[1] * a),
                            (b.unbound[0] * a, b.unbound[1] * a), _ang(run.funnel, "R_cylinder"), run.temperature)
-        return dict(value=v, kind="dG0", reason=None if np.isfinite(v) else "no weight in bound or bulk band")
+        return dict(value=v, unit="kJ/mol", kind="dG0", reason=None if np.isfinite(v) else "no weight in bound or bulk band")
     v = band_dF(values, weights, b, run.temperature)
-    return dict(value=v, kind="band_dF", reason=None if np.isfinite(v) else "no weight in bound or unbound band")
+    return dict(value=v, unit="kJ/mol", kind="band_dF", reason=None if np.isfinite(v) else "no weight in bound or unbound band")
 
 
 def binding(run, bands_, cv=FUNNEL_Z, burn=0.2) -> Combined:
@@ -274,36 +274,46 @@ def dg_series(run, bands_, cv=FUNNEL_Z, burn=0.2, step_ns=1.0) -> Combined:
         T = min(w.t[-1] for w in ws)
         t = np.arange(step_ns, T + 1e-12, step_ns)
         dg = np.array([_value(run, bands_, cv, *_frames(ws, run, cv, burn, t_max=ti))["value"] for ti in t])
-        return dict(t=t, dg=dg)
+        return dict(t=t, dg=dg, unit="kJ/mol")
     return apply(run, f)
 
 
 def block_analysis(t, dg, block_value, t_rej=0.2, n_blocks=10, n_boot=2000, seed=0) -> dict:
     """Convergence numbers after the rejection time ``t_rej`` (fraction of the run).
 
+    Blocks are contiguous half-open windows [lo, hi) of walker time between ``t_rej * t[-1]`` and ``t[-1]``;
+    the last window is closed at ``t[-1]``.
+
     Parameters
     ----------
     t, dg : array_like
         ΔG°(t) series.
     block_value : callable
-        ``block_value(mask_t)`` returns ΔG° from frames whose time falls in the masked part of ``t``.
+        ``block_value(lo, hi)`` returns ΔG° from frames with lo <= t < hi (NaN if undefined).
 
     Returns
     -------
     dict
-        time_mean, time_sd, block_dg, boot_sd (bootstrap over blocks), last_blocks_diff.
+        time_mean, time_sd, n_finite (finite ΔG°(t) points used), block_dg, n_valid_blocks, nan_blocks
+        (indices), boot_sd (bootstrap over valid blocks; NaN if fewer than 2), last_blocks_diff, unit.
     """
     t, dg = np.asarray(t, float), np.asarray(dg, float)
     t0 = t_rej * t[-1]
     after = t >= t0
     edges = np.linspace(t0, t[-1], n_blocks + 1)
-    masks = [(t >= lo) & ((t < hi) if k < n_blocks - 1 else (t <= hi))
-             for k, (lo, hi) in enumerate(zip(edges[:-1], edges[1:]))]
-    blocks = [block_value(m) for m in masks]
-    rng = np.random.default_rng(seed)
-    boots = [np.nanmean([blocks[i] for i in rng.integers(0, n_blocks, n_blocks)]) for _ in range(n_boot)]
+    his = edges[1:].copy()
+    his[-1] = np.nextafter(his[-1], np.inf)
+    blocks = np.array([block_value(lo, hi) for lo, hi in zip(edges[:-1], his)], float)
+    valid = np.isfinite(blocks)
+    boot_sd = float("nan")
+    if valid.sum() >= 2:
+        vb = blocks[valid]
+        rng = np.random.default_rng(seed)
+        boot_sd = float(np.std([vb[rng.integers(0, len(vb), len(vb))].mean() for _ in range(n_boot)]))
     ok = np.isfinite(dg[after])
     return dict(time_mean=float(np.mean(dg[after][ok])) if ok.any() else float("nan"),
                 time_sd=float(np.std(dg[after][ok])) if ok.any() else float("nan"),
-                block_dg=[float(b) for b in blocks], boot_sd=float(np.nanstd(boots)),
-                last_blocks_diff=float(abs(blocks[-1] - blocks[-2])) if np.all(np.isfinite(blocks[-2:])) else float("nan"))
+                n_finite=int(ok.sum()), block_dg=[float(b) for b in blocks], n_valid_blocks=int(valid.sum()),
+                nan_blocks=[int(k) for k in np.flatnonzero(~valid)], boot_sd=boot_sd,
+                last_blocks_diff=float(abs(blocks[-1] - blocks[-2])) if valid[-2:].all() else float("nan"),
+                unit="kJ/mol")
