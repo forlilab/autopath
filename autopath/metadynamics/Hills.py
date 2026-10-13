@@ -16,6 +16,12 @@ import openmm.unit as unit
 from .BoundaryCorrection import boundary_factor
 
 HILLS_VERSION = 2
+# every key hills_record (with record intervals and TT extras) writes
+HILLS_KEYS = frozenset({
+    "hills_version", "run_id", "finished", "bias_dir", "started_at", "time_ns", "wall_s", "cv", "height_kj",
+    "grid_min", "grid_max", "grid_points", "sigma", "periodic", "bounds_lo", "bounds_hi", "bias_factor",
+    "temperature", "tempering", "cv_names", "cv_length_per_unit_ang", "origin", "record_dt_ns", "dcd_interval_ns",
+    "vstar_kj", "tt_basins", "tt_threshold", "tt_bias_factor"})
 
 
 def hills_record(meta, run_id, started_at, ps_per_step, specs, tempering, finished=False,

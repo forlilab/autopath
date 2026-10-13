@@ -14,7 +14,7 @@ import cvpack
 from autopath.metadynamics.CV import CVSpec
 from autopath.metadynamics.BoundaryCorrection import BoundaryCorrectedMetadynamics
 from autopath.metadynamics.TransitionTempered import TransitionTemperedMetadynamics
-from autopath.metadynamics.Hills import hills_record
+from autopath.metadynamics.Hills import HILLS_KEYS, hills_record
 from autopath.metadynamics.Analysis import (
     correct_fe_for_funnel,
     plot_bias,
@@ -228,7 +228,8 @@ class MetadynamicsMD:
             and the funnel-axis trace.  Skipped when ``None``.
         run_meta : dict, optional
             Strings stored in the HILLS record, e.g. ``funnel_file``,
-            ``learned_cv_file``. Items that are ``None`` or empty are skipped.
+            ``learned_cv_file``. Items that are ``None`` or empty are skipped; keys of
+            the HILLS record itself (``Hills.HILLS_KEYS``) raise ValueError.
         bias_dir : str, optional
             Hill-file directory.  ``None`` uses ``self.out_dir``, shared by all
             walkers (multi-walker); a per-walker directory makes it independent.
@@ -287,6 +288,10 @@ class MetadynamicsMD:
         assert cv_specs is not None and len(cv_specs) > 0, \
             "cv_specs must be a non-empty list of CVSpec objects. " \
             "Use autopath.metadynamics CV factory functions (e.g. com_cv, rmsd_cv) to build them."
+
+        clash = sorted(set(run_meta or {}) & HILLS_KEYS)
+        if clash:
+            raise ValueError(f"run_meta keys {clash} are HILLS record keys: not supported")
 
         if run_id is None:
             run_id = f'W-{datetime.now().strftime("%H%M%S%f")}'
