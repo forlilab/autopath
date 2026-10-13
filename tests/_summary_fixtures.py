@@ -15,7 +15,7 @@ def _traj(rng, lo, hi, n):
 
 
 def make_run(path, layout="shared", n_walkers=2, cvs=("funnel_z",), tempering="wt", n_rows=400, extend=False,
-             truncate=None, reweight=True, monitors=("funnel_z",), seed=0):
+             truncate=None, reweight=True, monitors=("funnel_z",), seed=0, extra_meta=None):
     rng = np.random.default_rng(seed)
     os.makedirs(path, exist_ok=True)
     dt, dcd = 0.01, 0.05
@@ -46,7 +46,7 @@ def make_run(path, layout="shared", n_walkers=2, cvs=("funnel_z",), tempering="w
                        bounds_hi=np.array([GRIDS[c][1] if c == "funnel_z" else np.nan for c in cvs]),
                        bias_factor=20.0, temperature=300.0, tempering=tempering, cv_names=np.array(cvs),
                        cv_length_per_unit_ang=np.array([x[3] for x in g]), origin=np.array([x[4] for x in g]),
-                       record_dt_ns=dt, dcd_interval_ns=dcd)
+                       record_dt_ns=dt, dcd_interval_ns=dcd, **(extra_meta or {}))
             if "tt" in tempering:
                 rec.update(vstar_kj=np.linspace(0, 10, nh), tt_basins=np.zeros((2, len(cvs))), tt_threshold=0.0,
                            tt_bias_factor=20.0)

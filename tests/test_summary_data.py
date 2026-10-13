@@ -70,3 +70,56 @@ def test_empty_dir_raises(tmp_path):
     (tmp_path / "e").mkdir()
     with pytest.raises(ValueError, match="no HILLS"):
         load_run(str(tmp_path / "e"))
+
+
+def _funnel_npz(path):
+    from openmm import unit
+    from autopath.metadynamics.Funnel import save_funnel_params
+    A = unit.angstrom
+    p = {"host_index": [0], "guest_index": [1], "k_xy": 10.0 * unit.kilocalorie_per_mole / A**2,
+         "z_cc": 14.0 * A, "z_max": 26.0 * A, "alpha": 45.0 * unit.degrees, "R_cylinder": 4.0 * A,
+         "unbinding_axis": np.array([0.0, 0.0, 1.0]), "axial_distances": np.array([4.0, 4.0]),
+         "com_trajectory": np.zeros((2, 3)), "host_com_trajectory": np.zeros((2, 3)),
+         "guest_com_trajectory": np.zeros((2, 3)), "radial_distances": np.zeros(2),
+         "trajectory_length": 2, "force_group": 10}
+    save_funnel_params(p, str(path))
+    return str(path) + ".npz"
+
+
+def test_funnel_from_hills_metadata(tmp_path):
+    f = _funnel_npz(tmp_path / "fp")
+    run = load_run(make_run(str(tmp_path / "r"), extra_meta={"funnel_file": f}))
+    assert run.funnel is not None and "z_cc" in run.funnel and not run.skipped
+
+
+def test_missing_metadata_funnel_recorded(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r"), extra_meta={"funnel_file": str(tmp_path / "gone.npz")}))
+    assert run.funnel is None and any("funnel_file" in s and "not found" in s for s in run.skipped)
+
+
+def test_explicit_missing_funnel_raises(tmp_path):
+    r = make_run(str(tmp_path / "r"))
+    with pytest.raises(FileNotFoundError):
+        load_run(r, funnel="missing.npz")
+
+
+def test_explicit_funnel_accepts_path(tmp_path):
+    from pathlib import Path
+    f = _funnel_npz(tmp_path / "fp")
+    assert load_run(make_run(str(tmp_path / "r")), funnel=Path(f)).funnel is not None
+
+
+def test_learned_cv_from_metadata(tmp_path):
+    f = tmp_path / "lcv.npz"
+    np.savez(f, w=np.arange(3.0))
+    run = load_run(make_run(str(tmp_path / "r"), extra_meta={"learned_cv_file": str(f)}))
+    assert list(run.learned_cv["w"]) == [0.0, 1.0, 2.0]
+    run = load_run(make_run(str(tmp_path / "r2"), extra_meta={"learned_cv_file": str(tmp_path / "gone.npz")}))
+    assert run.learned_cv is None and any("learned_cv_file" in s for s in run.skipped)
+
+
+def test_failed_segment_lists_later_segments(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r"), n_walkers=2, extend=True, truncate=("w1", "reweight-empty")))
+    assert [w.rid for w in run.walkers] == ["w0"]
+    assert any(s.startswith("w1:") for s in run.skipped)
+    assert any(s.startswith("w1_x2:") and "earlier segment failed" in s for s in run.skipped)

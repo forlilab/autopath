@@ -95,6 +95,22 @@ def _layout(walkers):
     return "shared" if len({w.bias_dir for w in walkers}) == 1 else "isolated"
 
 
+def _resolve(given, from_meta, loader, key, skipped):
+    """Explicit path/dict (errors raise) or the HILLS-metadata path (errors are recorded and give None)."""
+    if given is not None:
+        return loader(os.fspath(given)) if isinstance(given, (str, os.PathLike)) else given
+    if not from_meta:
+        return None
+    path = str(from_meta)
+    try:
+        return loader(path)
+    except Exception as e:
+        reason = "not found" if isinstance(e, FileNotFoundError) else f"unreadable ({e})"
+        skipped.append(f"{key} {path}: {reason}")
+        logger.warning("summary: %s %s: %s", key, path, reason)
+        return None
+
+
 def load_run(run_dir, funnel=None, learned_cv=None) -> RunData:
     """Per-walker data of a metadynamics run directory; extension segments ``<rid>_x2, ...`` are appended in time.
 
@@ -121,7 +137,7 @@ def load_run(run_dir, funnel=None, learned_cv=None) -> RunData:
     walkers, skipped, specs, meta = [], [], None, None
     for base, segs in sorted(groups.items()):
         parts = []
-        for _, rid in sorted(segs):
+        for order, (_, rid) in enumerate(sorted(segs)):
             try:
                 if meta is None:
                     meta = _npz(os.path.join(run_dir, f"HILLS_{rid}.npz"))
@@ -130,6 +146,7 @@ def load_run(run_dir, funnel=None, learned_cv=None) -> RunData:
             except Exception as e:                      # unreadable / truncated segment
                 skipped.append(f"{rid}: {e}")
                 logger.warning("summary: skipping %s (%s)", rid, e)
+                skipped += [f"{r}: not loaded, earlier segment failed" for _, r in sorted(segs)[order + 1:]]
                 break
         if not parts:
             continue
@@ -169,13 +186,8 @@ def load_run(run_dir, funnel=None, learned_cv=None) -> RunData:
                     else float(np.atleast_1d(meta["cv_length_per_unit_ang"])[j]))
              for j, nm in enumerate(names)]
     monitored = sorted(set(walkers[0].cvs) - set(names))
-    if funnel is None and meta.get("funnel_file"):
-        funnel = str(meta["funnel_file"])
-    if isinstance(funnel, str):
-        funnel = load_funnel_params(funnel)
-    if learned_cv is None and meta.get("learned_cv_file"):
-        learned_cv = str(meta["learned_cv_file"])
-    lcv = _npz(learned_cv) if isinstance(learned_cv, str) else learned_cv
+    funnel = _resolve(funnel, meta.get("funnel_file"), load_funnel_params, "funnel_file", skipped)
+    lcv = _resolve(learned_cv, meta.get("learned_cv_file"), _npz, "learned_cv_file", skipped)
     return RunData(run_dir=os.path.abspath(run_dir), walkers=walkers, cvs=specs, monitored=monitored,
                    layout=_layout(walkers), tempering=str(meta["tempering"]), temperature=float(meta["temperature"]),
                    bias_factor=float(meta["bias_factor"]), funnel=funnel, learned_cv=lcv, skipped=skipped,
