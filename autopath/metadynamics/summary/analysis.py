@@ -256,13 +256,35 @@ def _frames(ws, run, cv, burn, t_max=None):
     return _pool(vs, lws)
 
 
-def _frames_in_window(ws, run, cv, lo, hi):
-    """Pooled (values, weights) of frames with lo <= t < hi, no burn-in."""
+def _window_raw(ws, run, cv, lo, hi):
+    """Per-walker values and raw log-weights of frames with lo <= t < hi."""
     vs, lws = [], []
     for w in ws:
         k = (w.t >= lo) & (w.t < hi)
         _, lw = _weights_arrays(w.bias[k], w.ct[k], run.temperature, 0.0, normalise=False)
         vs.append(w.cvs[cv][k]); lws.append(lw)
+    return vs, lws
+
+
+def _frames_in_window(ws, run, cv, lo, hi):
+    """Pooled (values, weights) of frames with lo <= t < hi, no burn-in."""
+    return _pool(*_window_raw(ws, run, cv, lo, hi))
+
+
+def _frames_in_windows(ws, run, cv, windows, cache=None):
+    """Pooled (values, weights) of the frames of every (lo, hi) window, repeated windows counted repeatedly.
+
+    ``cache`` is an optional dict reused across calls to avoid recomputing per-window raw weights.
+    """
+    vs, lws = [], []
+    for lo, hi in windows:
+        if cache is None:
+            raw = _window_raw(ws, run, cv, lo, hi)
+        else:
+            raw = cache.get((lo, hi))
+            if raw is None:
+                raw = cache[(lo, hi)] = _window_raw(ws, run, cv, lo, hi)
+        vs += raw[0]; lws += raw[1]
     return _pool(vs, lws)
 
 
@@ -306,11 +328,12 @@ def dg_series(run, bands_, cv=FUNNEL_Z, burn=0.2, step_ns=1.0) -> Combined:
     return apply(run, f)
 
 
-def block_analysis(t, dg, block_value, t_rej=0.2, n_blocks=10, n_boot=2000, seed=0) -> dict:
+def block_analysis(t, dg, block_value, t_rej=0.2, n_blocks=10, n_boot=2000, seed=0, windows_value=None) -> dict:
     """Convergence numbers after the rejection time ``t_rej`` (fraction of the run).
 
     Blocks are contiguous half-open windows [lo, hi) of walker time between ``t_rej * t[-1]`` and ``t[-1]``;
-    the last window is closed at ``t[-1]``.
+    the last window is closed at ``t[-1]``. The bootstrap resamples whole blocks with replacement and recomputes
+    ΔG° from the pooled frames of the drawn blocks.
 
     Parameters
     ----------
@@ -318,30 +341,37 @@ def block_analysis(t, dg, block_value, t_rej=0.2, n_blocks=10, n_boot=2000, seed
         ΔG°(t) series.
     block_value : callable
         ``block_value(lo, hi)`` returns ΔG° from frames with lo <= t < hi (NaN if undefined).
+    windows_value : callable
+        ``windows_value([(lo, hi), ...])`` returns ΔG° from the frames of all windows, concatenated with
+        multiplicity (NaN if undefined). Required.
 
     Returns
     -------
     dict
         time_mean, time_sd, n_finite (finite ΔG°(t) points used), block_dg, n_valid_blocks, nan_blocks
-        (indices), boot_sd (bootstrap over valid blocks; NaN if fewer than 2), last_blocks_diff, unit.
+        (indices), boot_sd (SD over finite replicates; NaN if fewer than 2), n_boot_nan, last_blocks_diff, unit.
     """
+    if windows_value is None:
+        raise ValueError("frame-block bootstrap needs windows_value: not supported")
     t, dg = np.asarray(t, float), np.asarray(dg, float)
     t0 = t_rej * t[-1]
     after = t >= t0
     edges = np.linspace(t0, t[-1], n_blocks + 1)
     his = edges[1:].copy()
     his[-1] = np.nextafter(his[-1], np.inf)
-    blocks = np.array([block_value(lo, hi) for lo, hi in zip(edges[:-1], his)], float)
+    wins = list(zip(edges[:-1], his))
+    blocks = np.array([block_value(lo, hi) for lo, hi in wins], float)
     valid = np.isfinite(blocks)
-    boot_sd = float("nan")
-    if valid.sum() >= 2:
-        vb = blocks[valid]
-        rng = np.random.default_rng(seed)
-        boot_sd = float(np.std([vb[rng.integers(0, len(vb), len(vb))].mean() for _ in range(n_boot)]))
+    rng = np.random.default_rng(seed)
+    boots = np.array([windows_value([wins[i] for i in rng.integers(0, n_blocks, n_blocks)])
+                      for _ in range(n_boot)], float)
+    fin = np.isfinite(boots)
+    boot_sd = float(np.std(boots[fin])) if fin.sum() >= 2 else float("nan")
     ok = np.isfinite(dg[after])
     return dict(time_mean=float(np.mean(dg[after][ok])) if ok.any() else float("nan"),
                 time_sd=float(np.std(dg[after][ok])) if ok.any() else float("nan"),
                 n_finite=int(ok.sum()), block_dg=[float(b) for b in blocks], n_valid_blocks=int(valid.sum()),
                 nan_blocks=[int(k) for k in np.flatnonzero(~valid)], boot_sd=boot_sd,
+                n_boot_nan=int((~fin).sum()),
                 last_blocks_diff=float(abs(blocks[-1] - blocks[-2])) if valid[-2:].all() else float("nan"),
                 unit="kJ/mol")

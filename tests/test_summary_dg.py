@@ -4,8 +4,8 @@ import numpy as np
 import pytest
 from openmm import unit
 
-from autopath.metadynamics.summary.analysis import (KT_PER_K, _frames, _frames_in_window, band_dF, bands, binding,
-                                                    block_analysis, dg_from_frames, dg_series)
+from autopath.metadynamics.summary.analysis import (KT_PER_K, _frames, _frames_in_window, _frames_in_windows, band_dF, bands, binding,
+                                                    block_analysis, dg_from_frames, dg_series, _value)
 from autopath.metadynamics.summary.data import load_run
 from ._summary_fixtures import make_run
 
@@ -59,6 +59,13 @@ def _bv(t, dg):
     return f
 
 
+def _wv(t, dg):
+    def f(wins):
+        m = np.concatenate([dg[(t >= lo) & (t < hi)] for lo, hi in wins])
+        return float(m.mean()) if m.size else float("nan")
+    return f
+
+
 def _synthetic(n=101, seed=1):
     rng = np.random.default_rng(seed)
     t = np.linspace(0, 100, n)
@@ -67,25 +74,31 @@ def _synthetic(n=101, seed=1):
 
 def test_block_analysis_values():
     t, dg = _synthetic()
-    r = block_analysis(t, dg, _bv(t, dg), t_rej=0.2, n_blocks=10, n_boot=500, seed=0)
+    r = block_analysis(t, dg, _bv(t, dg), t_rej=0.2, n_blocks=10, n_boot=500, seed=0,
+                       windows_value=_wv(t, dg))
     edges = np.linspace(20, 100, 11)
     exp = [dg[(t >= lo) & (t < hi)].mean() for lo, hi in zip(edges[:-2], edges[1:-1])]
     exp.append(dg[(t >= edges[-2]) & (t <= 100)].mean())
     assert r["block_dg"] == pytest.approx(exp)
-    rng = np.random.default_rng(0); eb = np.array(exp)
-    boots = [eb[rng.integers(0, 10, 10)].mean() for _ in range(500)]
+    rng = np.random.default_rng(0)
+    wins = [(lo, hi if k < 9 else np.nextafter(hi, np.inf)) for k, (lo, hi) in enumerate(zip(edges[:-1], edges[1:]))]
+    boots = []
+    for _ in range(500):
+        idx = rng.integers(0, 10, 10)
+        boots.append(np.concatenate([dg[(t >= wins[i][0]) & (t < wins[i][1])] for i in idx]).mean())
     assert r["boot_sd"] == pytest.approx(np.std(boots))
     assert r["last_blocks_diff"] == pytest.approx(abs(exp[-1] - exp[-2]))
     assert r["time_mean"] == pytest.approx(dg[t >= 20].mean()) and r["n_finite"] == int((t >= 20).sum())
     assert r["n_valid_blocks"] == 10 and r["nan_blocks"] == []
-    assert r == block_analysis(t, dg, _bv(t, dg), t_rej=0.2, n_blocks=10, n_boot=500, seed=0)
+    assert r == block_analysis(t, dg, _bv(t, dg), t_rej=0.2, n_blocks=10, n_boot=500, seed=0,
+                       windows_value=_wv(t, dg))
 
 
 def test_block_analysis_one_nan_block():
     t, dg = _synthetic()
     bv = _bv(t, dg)
     r = block_analysis(t, dg, lambda lo, hi: float("nan") if lo == pytest.approx(44.0) else bv(lo, hi),
-                       t_rej=0.2, n_blocks=10, n_boot=200)
+                       t_rej=0.2, n_blocks=10, n_boot=200, windows_value=_wv(t, dg))
     assert r["nan_blocks"] == [3] and r["n_valid_blocks"] == 9 and np.isfinite(r["boot_sd"])
 
 
@@ -93,7 +106,8 @@ def test_block_analysis_all_nan_no_warnings():
     t, dg = _synthetic()
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        r = block_analysis(t, np.full_like(dg, np.nan), lambda lo, hi: float("nan"), n_boot=50)
+        r = block_analysis(t, np.full_like(dg, np.nan), lambda lo, hi: float("nan"), n_boot=50,
+                           windows_value=lambda wins: float("nan"))
     assert np.isnan(r["boot_sd"]) and r["n_valid_blocks"] == 0 and np.isnan(r["time_mean"]) and r["n_finite"] == 0
 
 
@@ -101,7 +115,7 @@ def test_blocks_partition_frames():
     t = np.linspace(0, 10, 101)
     seen = []
     block_analysis(t, np.zeros(101), lambda lo, hi: seen.append(((t >= lo) & (t < hi)).astype(int)) or 0.0,
-                   t_rej=0.2, n_blocks=7, n_boot=2)
+                   t_rej=0.2, n_blocks=7, n_boot=2, windows_value=lambda wins: 0.0)
     assert (np.sum(seen, 0) == (t >= 2.0).astype(int)).all()
 
 
@@ -173,5 +187,48 @@ def test_dg_series_ends_at_T_and_blocks_cover_frames(tmp_path):
     def bv(lo, hi):
         counts.append(len(_frames_in_window(run.walkers, run, "funnel_z", lo, hi)[0]))
         return 0.0
-    block_analysis(s["t"], s["dg"], bv, t_rej=0.2, n_blocks=10, n_boot=2)
+    block_analysis(s["t"], s["dg"], bv, t_rej=0.2, n_blocks=10, n_boot=2, windows_value=lambda wins: 0.0)
     assert sum(counts) == sum(int((w.t >= 0.2 * T).sum()) for w in run.walkers)
+
+
+def test_block_analysis_needs_windows_value():
+    t, dg = _synthetic()
+    with pytest.raises(ValueError, match="not supported"):
+        block_analysis(t, dg, _bv(t, dg))
+
+
+def test_frame_bootstrap_on_run_matches_hand_loop(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r")), funnel=FP)
+    b = bands(run)
+    s = dg_series(run, b, step_ns=0.5).pooled
+    bvf = lambda lo, hi: _value(run, b, "funnel_z", *_frames_in_window(run.walkers, run, "funnel_z", lo, hi))["value"]
+    wvf = lambda wins: _value(run, b, "funnel_z", *_frames_in_windows(run.walkers, run, "funnel_z", wins, {}))["value"]
+    r = block_analysis(s["t"], s["dg"], bvf, n_boot=40, seed=3, windows_value=wvf)
+    T = s["t"][-1]; edges = np.linspace(0.2 * T, T, 11)
+    wins = [(lo, hi if k < 9 else np.nextafter(hi, np.inf)) for k, (lo, hi) in enumerate(zip(edges[:-1], edges[1:]))]
+    rng = np.random.default_rng(3)
+    vals = []
+    for _ in range(40):
+        idx = rng.integers(0, 10, 10)
+        z = np.concatenate([w.cvs["funnel_z"][(w.t >= wins[i][0]) & (w.t < wins[i][1])] for i in idx for w in run.walkers])
+        lw = np.concatenate([((w.bias - w.ct) / (KT_PER_K * run.temperature))[(w.t >= wins[i][0]) & (w.t < wins[i][1])]
+                             for i in idx for w in run.walkers])
+        p = np.exp(lw - lw.max()); p /= p.sum()
+        vals.append(_value(run, b, "funnel_z", z, p)["value"])
+    vals = np.array(vals); fin = np.isfinite(vals)
+    assert r["boot_sd"] == pytest.approx(np.std(vals[fin])) and r["n_boot_nan"] == int((~fin).sum())
+
+
+def test_repeated_window_doubles_weight(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r")), funnel=FP)
+    kt = KT_PER_K * run.temperature
+    for w in run.walkers:
+        w.bias = np.zeros_like(w.bias); w.ct = np.zeros_like(w.ct)
+    z1, w1 = _frames_in_windows(run.walkers, run, "funnel_z", [(1.0, 2.0), (2.0, 3.0)])
+    z2, w2 = _frames_in_windows(run.walkers, run, "funnel_z", [(1.0, 2.0), (1.0, 2.0), (2.0, 3.0)])
+    n1 = sum(int(((x.t >= 1) & (x.t < 2)).sum()) for x in run.walkers)
+    n2 = sum(int(((x.t >= 2) & (x.t < 3)).sum()) for x in run.walkers)
+    assert len(z2) == len(z1) + n1 and len(z1) == n1 + n2
+    # uniform raw weights: the doubled window carries twice the weight mass
+    assert w2[:n1].sum() / w2[-n2:].sum() == pytest.approx(n1 / n2)
+    assert w2[:2 * n1].sum() / w2[-n2:].sum() == pytest.approx(2 * n1 / n2)

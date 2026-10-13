@@ -6,8 +6,8 @@ from openmm import unit
 from dataclasses import asdict
 
 from ..Hills import bias_from_hills
-from .analysis import (FUNNEL_Z, _frames_in_window, _value, binding, block_analysis, clamp_fractions, dg_series,
-                       fes_bias, fes_reweighted, recrossings)
+from .analysis import (FUNNEL_Z, _frames_in_window, _frames_in_windows, _value, binding, block_analysis,
+                       clamp_fractions, dg_series, fes_bias, fes_reweighted, recrossings)
 
 KJ_TO_KCAL = 1 / 4.184
 
@@ -353,11 +353,14 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
 
         def block_value(lo, hi, ws_=main_ws):
             return _value(run, bands_, main, *_frames_in_window(ws_, run, main, lo, hi))["value"]
+
+        def windows_value(wins, ws_=main_ws, cache={}):
+            return _value(run, bands_, main, *_frames_in_windows(ws_, run, main, wins, cache))["value"]
         if len(s["t"]) < 12:
             skipped.append(f"{lab}: blocks: ΔG°(t) has {len(s['t'])} < 12 points")
             blk = None
         else:
-            blk = block_analysis(s["t"], s["dg"], block_value, t_rej=t_rej)
+            blk = block_analysis(s["t"], s["dg"], block_value, t_rej=t_rej, windows_value=windows_value)
         if iso:
             nums["blocks"][lab] = blk
         else:
