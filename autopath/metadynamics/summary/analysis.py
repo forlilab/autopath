@@ -266,13 +266,18 @@ def binding(run, bands_, cv=FUNNEL_Z, burn=0.2) -> Combined:
 
 
 def dg_series(run, bands_, cv=FUNNEL_Z, burn=0.2, step_ns=1.0) -> Combined:
-    """ΔG°(t): each point from frames up to time t, first ``burn`` of that span dropped."""
+    """ΔG°(t): each point from frames up to time t, first ``burn`` of that span dropped.
+
+    The grid ends exactly at T, the common end time (with several pooled walkers, the shortest walker's).
+    """
     if not run.has_reweight:
         raise ValueError("no REWEIGHT data: ΔG°(t) not supported")
 
     def f(ws):
         T = min(w.t[-1] for w in ws)
         t = np.arange(step_ns, T + 1e-12, step_ns)
+        if len(t) == 0 or abs(t[-1] - T) > 1e-9:
+            t = np.append(t, T)
         dg = np.array([_value(run, bands_, cv, *_frames(ws, run, cv, burn, t_max=ti))["value"] for ti in t])
         return dict(t=t, dg=dg, unit="kJ/mol")
     return apply(run, f)

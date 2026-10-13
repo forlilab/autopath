@@ -160,3 +160,18 @@ def test_pooled_weights_keep_relative_scale(tmp_path):
         _, w = fn()
         n = len(a.t)
         assert w[n:].sum() / w[:n].sum() == pytest.approx(4.0)
+
+
+def test_dg_series_ends_at_T_and_blocks_cover_frames(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r")), funnel=FP)
+    T = min(w.t[-1] for w in run.walkers)
+    assert abs(T / 0.5 - round(T / 0.5)) > 1e-6
+    s = dg_series(run, bands(run), step_ns=0.5).pooled
+    assert s["t"][-1] == pytest.approx(T)
+    counts = []
+
+    def bv(lo, hi):
+        counts.append(len(_frames_in_window(run.walkers, run, "funnel_z", lo, hi)[0]))
+        return 0.0
+    block_analysis(s["t"], s["dg"], bv, t_rej=0.2, n_blocks=10, n_boot=2)
+    assert sum(counts) == sum(int((w.t >= 0.2 * T).sum()) for w in run.walkers)
