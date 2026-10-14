@@ -344,6 +344,9 @@ def _fe_axes(axes, n, iso, skipped):
             raise ValueError(f"fig_fe axes[{k!r}] has {len(v)} axes for {n} rows: not supported")
         out[k] = v
     out.setdefault("bars", None)
+    out.setdefault("text", None)
+    if out["text"] is None:
+        skipped.append("ΔG° numbers: no text axes given")
     if iso and out["bars"] is None:
         skipped.append("per-walker bars: no axes given")
     return out
@@ -420,15 +423,17 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
         ax_b = [fig.add_subplot(gs[r, 1]) for r in range(n)]
         ax_c = fig.add_subplot(gs[:, 2])
         if iso:
-            sub = gs[:, 3].subgridspec(2, 1, height_ratios=[3, 1.3])
-            ax_d, ax_e = fig.add_subplot(sub[0]), fig.add_subplot(sub[1])
+            sub = gs[:, 3].subgridspec(3, 1, height_ratios=[3, 1.3, 2.6])
+            ax_d, ax_e, ax_t = (fig.add_subplot(sub[k]) for k in range(3))
         else:
-            ax_d, ax_e = fig.add_subplot(gs[:, 3]), None
-        axes = dict(ct=ax_a, map=ax_b, w=ax_c, dg=ax_d, bars=ax_e)
+            sub = gs[:, 3].subgridspec(2, 1, height_ratios=[3, 1.4])
+            ax_d, ax_t, ax_e = fig.add_subplot(sub[0]), fig.add_subplot(sub[1]), None
+        axes = dict(ct=ax_a, map=ax_b, w=ax_c, dg=ax_d, bars=ax_e, text=ax_t)
     else:
         axes = _fe_axes(axes, n, iso, skipped)
         ax_a, ax_b, ax_c, ax_d, ax_e = (axes[k] for k in ("ct", "map", "w", "dg", "bars"))
         fig = ax_c.figure
+    ax_t = axes["text"]
     main = numbers["cv"]
     if pair is None:
         pair, note = _default_pair(run)
@@ -553,6 +558,8 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
     _legend(ax_c, fontsize=7, frameon=False)
     ax_d.set(xlabel="walker time (ns)", ylabel=f"{sym} (kcal/mol)")
     ax_d.set_title(f"{sym} vs simulation time", fontsize=8, loc="left")
+    lo, hi = ax_d.get_ylim()
+    ax_d.set_ylim(lo, hi + 0.4 * (hi - lo))                 # headroom keeps the legend off the curves
     _legend(ax_d, fontsize=7, frameon=False, loc="upper right")
     if iso and ax_e is not None:
         for i, (lab, col, m, sd) in enumerate(bars):
@@ -561,9 +568,9 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
         ax_e.set_xticks(range(len(bars)), [b[0] for b in bars], rotation=30, ha="right", fontsize=6)
         ax_e.set(ylabel=f"time mean {sym} (kcal/mol)")
         ax_e.set_title("per walker, mean ± SD of ΔG(t) after rejection", fontsize=8, loc="left")
-    if lines:
-        ax_d.text(0.02, 0.02, "\n".join(lines), transform=ax_d.transAxes, fontsize=6, va="bottom",
-                  bbox=dict(fc="w", ec="0.8", alpha=0.8))
+    if lines and ax_t is not None:
+        ax_t.axis("off")
+        ax_t.text(0.0, 1.0, "\n".join(lines), transform=ax_t.transAxes, fontsize=6.5, va="top")
     fig.suptitle(f"free energy, {run.layout}; burn {burn:g}, rejection {t_rej:g}", fontsize=9)
     if out_path:
         fig.savefig(out_path, dpi=110)
