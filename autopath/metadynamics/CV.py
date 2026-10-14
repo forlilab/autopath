@@ -174,6 +174,53 @@ def funnel_z_cv(
     )
 
 
+def torsion_cv(
+    atoms: tuple[int, int, int, int],
+    hill_width: float = 0.1,
+    grid_points: int = 181,
+    name: str = "torsion",
+    pbc: bool = False,
+    periodic: bool = True,
+) -> CVSpec:
+    """Dihedral angle about a bond, in radians, on [-pi, pi].
+
+    Parameters
+    ----------
+    atoms : tuple of int
+        The four atom indices i-j-k-l defining the dihedral; j-k is the rotated bond.
+    hill_width : float, optional
+        Gaussian width in radians (default 0.1 rad, about 6 deg).
+    grid_points : int, optional
+        Grid points spanning the full period (default 181, 2 deg spacing).
+    pbc : bool, optional
+        Apply periodic boundary conditions when computing the angle.
+    periodic : bool, optional
+        Treat the grid as periodic (default). Set False to pair this CV with a
+        non-periodic one; the caller must then keep the walker off the +/-pi seam,
+        where the angle is discontinuous.
+
+    Returns
+    -------
+    CVSpec
+        The boundary correction is a no-op while ``periodic`` is True.
+    """
+    i, j, k, l = (int(a) for a in atoms)
+
+    def factory(input_positions, n_atoms, topology):
+        return cvpack.Torsion(i, j, k, l, pbc=pbc)
+
+    return CVSpec(
+        cv=None,
+        grid_min=-np.pi,
+        grid_max=np.pi,
+        hill_width=hill_width,
+        grid_points=grid_points,
+        periodic=periodic,
+        name=name,
+        _factory=factory,
+    )
+
+
 def rmsd_cv(
     ligand_atoms: list[int],
     grid_min: float,
