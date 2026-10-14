@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 import numpy as np
+from scipy.spatial import cKDTree
 from openmm import unit
 
 from ..Hills import bias_from_hills, fes_scale
@@ -167,6 +168,7 @@ class Combined:
     n_walkers: Optional[int] = None
     n_defined: Optional[int] = None
     ess: object = None
+    n_masked: object = None
 
 
 def kish_ess(w) -> float:
@@ -233,27 +235,81 @@ def apply(run, fn: Callable, scalar: Optional[Callable] = None, reweighted=False
     return c
 
 
-def fes_bias(run) -> Combined:
-    """Bias-derived FES (kJ/mol, min 0): -γ/(γ-1)·V for well tempering, -V for transition tempering alone."""
+def fes_bias(run, hill_mask_sigmas=2.0) -> Combined:
+    """Bias-derived FES (kJ/mol, min 0): -γ/(γ-1)·V for well tempering, -V for transition tempering alone.
+
+    Grid points farther than ``hill_mask_sigmas`` hill widths from every deposited hill are NaN.
+    """
     def f(ws):
         raw = [h for w in ws for h in w.hills_raw]
         V = np.asarray(bias_from_hills(raw))
         h0 = raw[0]
         grids = [np.linspace(float(a), float(b), int(n)) for a, b, n in
                  zip(np.atleast_1d(h0["grid_min"]), np.atleast_1d(h0["grid_max"]), np.atleast_1d(h0["grid_points"]))]
-        F = -fes_scale(h0) * V
+        F = np.where(hill_mask(raw, hill_mask_sigmas), -fes_scale(h0) * V, np.nan)
         return grids, F - np.nanmin(F)
     return apply(run, f)
 
 
 def fes_marginal(F, axis, kt):
-    """Boltzmann marginal ``-kt ln sum exp(-F/kt)`` over ``axis`` of ``F``, shifted to min 0 (units of ``F``)."""
+    """Boltzmann marginal ``-kt ln sum exp(-F/kt)`` over ``axis`` of ``F``, shifted to min 0 (units of ``F``).
+
+    NaN entries of ``F`` are left out of the integral; positions with no finite entry are NaN.
+    """
     F = np.asarray(F, float)
-    a = -F / kt
-    m = np.nanmax(a, axis=axis, keepdims=True)
+    ok = np.isfinite(F)
+    a = np.where(ok, -F / kt, -np.inf)
+    m = a.max(axis=axis, keepdims=True)
+    m = np.where(np.isfinite(m), m, 0.0)
     with np.errstate(divide="ignore"):
-        g = -kt * (np.log(np.nansum(np.exp(a - m), axis=axis)) + np.squeeze(m, axis=axis))
-    return g - np.nanmin(g)
+        g = -kt * (np.log(np.exp(a - m).sum(axis=axis)) + np.squeeze(m, axis=axis))
+    g[~ok.any(axis=axis)] = np.nan
+    return g - np.nanmin(g) if np.isfinite(g).any() else g
+
+
+def hill_mask(raw, nsig=2.0, until=None):
+    """Grid points within ``nsig`` hill widths (σ units) of a deposited hill centre.
+
+    Parameters
+    ----------
+    raw : list of dict
+        HILLS records of one bias (same grid).
+    nsig : float
+        Radius in σ units; ``inf`` marks every point sampled.
+    until : dict, optional
+        ``{run_id: t_ns}``: only hills deposited up to each time count.
+
+    Returns
+    -------
+    ndarray of bool
+        Shape of ``bias_from_hills`` output (axes in reverse variable order).
+    """
+    h0 = raw[0]
+    gmin, gmax = np.atleast_1d(h0["grid_min"]).astype(float), np.atleast_1d(h0["grid_max"]).astype(float)
+    npts = np.atleast_1d(h0["grid_points"]).astype(int)
+    sig, per = np.atleast_1d(h0["sigma"]).astype(float), np.atleast_1d(h0["periodic"]).astype(bool)
+    shape = tuple(reversed(npts))
+    if not np.isfinite(nsig):
+        return np.ones(shape, bool)
+    cs = []
+    for h in raw:
+        c = np.asarray(h["cv"], float).reshape(len(h["height_kj"]), len(npts))
+        if until is not None:
+            c = c[np.asarray(h["time_ns"]) <= until.get(h["run_id"], np.inf)]
+        cs.append(c)
+    c = np.concatenate(cs)
+    if not len(c):
+        return np.zeros(shape, bool)
+    grids = [np.linspace(a, b, n) for a, b, n in zip(gmin, gmax, npts)]
+    pts = np.stack([g.ravel() for g in np.meshgrid(*grids, indexing="ij")], 1)
+    box = np.where(per, (gmax - gmin) / sig, 0.0)
+
+    def scale(x):
+        u = (x - gmin) / sig
+        return np.where(per, u % np.where(per, box, 1.0), u)
+    tree = cKDTree(scale(c), boxsize=box if per.any() else None)
+    d, _ = tree.query(scale(pts), distance_upper_bound=nsig)
+    return np.isfinite(d).reshape(tuple(npts)).T
 
 
 def bias_fes_scale(run):
@@ -270,10 +326,28 @@ def tt_basins(run):
     return None
 
 
-def fes_reweighted(run, x, y=None, bins=60, burn=0.2) -> Combined:
+def _masked_hist(sample, Wt, bins, kt, min_count, min_bin_ess):
+    """Weighted histogram -> (edges, F, n_masked); sparse bins (few frames or low per-bin ESS) are NaN.
+
+    F is shifted to min 0 after masking; ``n_masked`` counts non-empty bins removed.
+    """
+    p, edges = np.histogramdd(sample, bins=bins, weights=Wt)
+    n = np.histogramdd(sample, bins=edges)[0]
+    s2 = np.histogramdd(sample, bins=edges, weights=Wt ** 2)[0]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ess = np.where(s2 > 0, p ** 2 / s2, 0.0)
+    bad = (n < min_count) | (ess < min_bin_ess)
+    nm = int(np.sum(bad & (n > 0)))
+    p = np.where(bad, 0.0, p)
+    return edges, _free_energy(p, kt), nm
+
+
+def fes_reweighted(run, x, y=None, bins=60, burn=0.2, min_count=5, min_bin_ess=3.0) -> Combined:
     """Reweighted FES (kJ/mol, min 0) on one or two logged CVs (biased or monitored).
 
-    ``Combined.ess`` holds the Kish ESS of the frames used (a float, or ``{rid: float}`` if isolated).
+    Bins with fewer than ``min_count`` frames or a per-bin Kish ESS below ``min_bin_ess`` are NaN; the
+    shift to min 0 follows the masking. ``Combined.ess`` holds the Kish ESS of the frames used and
+    ``Combined.n_masked`` the number of non-empty bins masked (float/int, or ``{rid: value}`` if isolated).
     """
     if not run.has_reweight:
         raise ValueError("no REWEIGHT data: reweighted FES not supported")
@@ -288,15 +362,16 @@ def fes_reweighted(run, x, y=None, bins=60, burn=0.2) -> Combined:
                 ys.append(w.cvs[y][m])
         X, Wt = _pool(xs, lws)
         if y is None:
-            p, e = np.histogram(X, bins=bins, weights=Wt)
-            return (0.5 * (e[1:] + e[:-1]), _free_energy(p, kt)), kish_ess(Wt)
-        p, ex, ey = np.histogram2d(X, np.concatenate(ys), bins=bins, weights=Wt)
-        return (0.5 * (ex[1:] + ex[:-1]), 0.5 * (ey[1:] + ey[:-1]), _free_energy(p, kt)), kish_ess(Wt)
+            e, F, nm = _masked_hist(X[:, None], Wt, [bins], kt, min_count, min_bin_ess)
+            return (0.5 * (e[0][1:] + e[0][:-1]), F), kish_ess(Wt), nm
+        e, F, nm = _masked_hist(np.stack([X, np.concatenate(ys)], 1), Wt, [bins, bins], kt, min_count, min_bin_ess)
+        return (0.5 * (e[0][1:] + e[0][:-1]), 0.5 * (e[1][1:] + e[1][:-1]), F), kish_ess(Wt), nm
     c = apply(run, f, reweighted=True)
     if c.pooled is not None:
-        c.pooled, c.ess = c.pooled
+        c.pooled, c.ess, c.n_masked = c.pooled
     else:
         c.ess = {k: v[1] for k, v in c.per_walker.items()}
+        c.n_masked = {k: v[2] for k, v in c.per_walker.items()}
         c.per_walker = {k: v[0] for k, v in c.per_walker.items()}
     return c
 

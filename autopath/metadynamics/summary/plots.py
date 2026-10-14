@@ -10,7 +10,7 @@ from openmm import unit
 
 from ..Hills import bias_from_hills
 from .analysis import (FUNNEL_Z, KT_PER_K, _ang, ang_per_unit, bias_fes_scale, fe_numbers, fes_marginal,
-                       fes_reweighted, funnel_z_low, length_unit, recrossings, tt_basins)
+                       fes_reweighted, funnel_z_low, hill_mask, length_unit, recrossings, tt_basins)
 
 KJ_TO_KCAL = 1 / 4.184
 
@@ -102,6 +102,11 @@ def _until(group, tt):
     return out
 
 
+def _masked_bias(raw, nsig, until=None):
+    """Bias on the grid, NaN away from deposited hills."""
+    return np.where(hill_mask(raw, nsig, until), np.asarray(bias_from_hills(raw, until=until)), np.nan)
+
+
 def _grid(ax):
     """Grid drawn behind the artists."""
     ax.set_axisbelow(True)
@@ -162,13 +167,14 @@ def _note(skipped, msg):
         skipped.append(msg)
 
 
-def fig_bias(run, out_path=None, axes=None, n_snap=5):
+def fig_bias(run, out_path=None, axes=None, n_snap=5, hill_mask_sigmas=2.0):
     """Hill heights, bias growth and, for transition tempering, V*(t).
 
     Isolated biases are drawn per walker, never summed. Bias growth is shown for one CV as ``n_snap``
     snapshots. For two CVs the final bias map and the Boltzmann marginals of the bias-derived FES at
     ``n_snap`` times are drawn, per walker if isolated (up to ``MAX_ROWS``). Recorded transition-tempering
-    basins are marked with stars on the map and the marginals.
+    basins are marked with stars on the map and the marginals. Grid points farther than ``hill_mask_sigmas``
+    hill widths from every hill deposited by then are left blank and excluded from the marginals.
 
     Returns
     -------
@@ -202,7 +208,7 @@ def fig_bias(run, out_path=None, axes=None, n_snap=5):
         skipped.append("TT basins: not recorded")
     vrange = None
     if nrow == 2:
-        vrange = _range([np.asarray(bias_from_hills([h for w in g for h in w.hills_raw])) for g in groups])
+        vrange = _range([_masked_bias([h for w in g for h in w.hills_raw], hill_mask_sigmas) for g in groups])
     for gi, g in enumerate(groups):
         raw = [h for w in g for h in w.hills_raw]
         h0 = raw[0]
@@ -222,13 +228,13 @@ def fig_bias(run, out_path=None, axes=None, n_snap=5):
             a = axes[gi, 1]
             xs = [np.linspace(float(gmin[k]), float(gmax[k]), int(np.atleast_1d(h0["grid_points"])[k]))
                   for k in range(2)]
-            _fill(fig, a, xs[0], xs[1], np.asarray(bias_from_hills(raw)), "V (kJ/mol)", vrange)
+            _fill(fig, a, xs[0], xs[1], _masked_bias(raw, hill_mask_sigmas), "V (kJ/mol)", vrange)
             a.set(xlabel=_label(run, run.cvs[0].name), ylabel=_label(run, run.cvs[1].name))
             a.set_title(f"final bias {tag}".strip(), fontsize=8, loc="left")
             if basins is not None:
                 _stars(a, basins[:, 0], basins[:, 1])
             for tt in times:
-                V = np.asarray(bias_from_hills(raw, until=_until(g, tt)))
+                V = _masked_bias(raw, hill_mask_sigmas, _until(g, tt))
                 for k in range(2):
                     m = fes_marginal(-scale * V, k, kt) * KJ_TO_KCAL
                     axes[gi, 2 + k].plot(xs[k], m, lw=1, label=f"t<={tt:.1f}")
@@ -386,7 +392,7 @@ def _ct_panel(a, ws, lab, iso, run):
 
 
 def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=None, axes=None, numbers=None,
-           min_points=12):
+           min_points=12, min_count=5, min_bin_ess=3.0):
     """c(t) and bias at the walker, reweighted map, W along the main CV and ΔG°(t) with block numbers (kcal/mol).
 
     Shared and single biases are pooled; isolated walkers get their own rows and curves and are never pooled.
@@ -409,7 +415,7 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
     skipped = list(numbers["skipped"])
     nums = {"binding": None if numbers["binding"] is None else asdict(numbers["binding"]),
             "series": None if numbers["series"] is None else asdict(numbers["series"]),
-            "blocks": numbers["blocks"], "fes_ess": None}
+            "blocks": numbers["blocks"], "fes_ess": None, "fes_masked": None}
     iso = run.layout == "isolated"
     groups = [(w.rid, [w]) for w in run.walkers] if iso else [("all", run.walkers)]
     shown = groups[:MAX_ROWS]
@@ -452,9 +458,11 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
         return fig, axes, skipped, nums
     rw = {w.rid for w in run.reweighted()}
     rgroups = [(lab, ws) for lab, ws in groups if not iso or lab in rw]
-    fr = fes_reweighted(run, x, y, burn=burn)
-    f1 = fes_reweighted(run, main, burn=burn)
+    fr = fes_reweighted(run, x, y, burn=burn, min_count=min_count, min_bin_ess=min_bin_ess)
+    f1 = fes_reweighted(run, main, burn=burn, min_count=min_count, min_bin_ess=min_bin_ess)
     nums["fes_ess"] = {"map": fr.ess, "w": f1.ess}
+    nums["fes_masked"] = {k: (v.n_masked if isinstance(v.n_masked, dict) else {"pooled": v.n_masked})
+                          for k, v in (("map", fr), ("w", f1))}
     bd, ser = numbers["binding"], numbers["series"]
     b = bands_[main]
     mapped = [lab for lab, _ in shown if not iso or lab in rw]

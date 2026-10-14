@@ -318,7 +318,7 @@ def test_bias_figure_has_no_deposition_column(tmp_path):
 def test_bias_marginal_min_zero_and_matches_helper(tmp_path):
     from autopath.metadynamics.summary.analysis import fes_marginal, bias_fes_scale, KT_PER_K
     run = load_run(make_run(str(tmp_path / "r"), cvs=("funnel_z", "learned_sw"), monitors=()))
-    _, axes, _ = fig_bias(run, out_path=str(tmp_path / "b.png"), n_snap=3)
+    _, axes, _ = fig_bias(run, out_path=str(tmp_path / "b.png"), n_snap=3, hill_mask_sigmas=np.inf)
     y = axes[0, 2].lines[-1].get_ydata()
     raw = [h for w in run.walkers for h in w.hills_raw]
     F = -bias_fes_scale(run) * np.asarray(bias_from_hills(raw))
