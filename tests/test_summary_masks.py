@@ -53,7 +53,7 @@ def test_sparse_bin_masked_and_colour_max_excludes_it(tmp_path):
                               out_path=str(tmp_path / "f.png"))
     assert nums["fes_masked"]["map"] == {"pooled": 1}
     cb = [a for a in axes["map"][0].figure.axes if a.get_label() == "<colorbar>"][0]
-    assert cb.get_ylim()[1] < 1.0                   # the masked bin sits at several kcal/mol
+    assert np.nanmax(off.pooled[2]) / 4.184 > 1.5 and cb.get_ylim()[1] <= 1.0
     assert np.nanmax(on.pooled[2]) == 0.0
 
 
