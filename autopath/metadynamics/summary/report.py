@@ -46,8 +46,9 @@ def _version():
 
 
 def report(run_dir, funnel=None, learned_cv=None, bands=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_dir=None,
-           prefix="metad", min_points=12, min_count=5, min_bin_ess=3.0,
-           hill_mask_sigmas=2.0, smooth_sigma=2.0, fmax=None) -> dict:
+           prefix="metad", min_points=12, min_count=0, min_bin_ess=0.0,
+           hill_mask_sigmas=2.0, smooth_sigma=2.0, fmax=None, bins=None, bins_per_hill=4, bins_fallback=60,
+           min_density=0.05) -> dict:
     """Write ``<prefix>_{cvs,bias,fe}.png`` and ``<prefix>_summary.json``; return the summary dict.
 
     Reports numbers only; convergence decisions are made by ``check_convergence``.
@@ -65,8 +66,16 @@ def report(run_dir, funnel=None, learned_cv=None, bands=None, burn=0.2, t_rej=0.
         ΔG°(t) time step.
     min_points : int
         Fewest ΔG°(t) points for a block analysis.
+    bins : int or dict, optional
+        Explicit bin count (or ``{cv: count}``) of the reweighted FES; overrides the two rules below.
+    bins_per_hill : float
+        Reweighted-FES bin width of a biased CV is its hill width / ``bins_per_hill``.
+    bins_fallback : int
+        Bin count over the padded sampled range for a CV without a hill width (monitored only).
+    min_density : float
+        Display mask of the reweighted FES: bins whose smoothed frame count is below this are blank.
     min_count, min_bin_ess : float
-        Display mask of the reweighted FES: bins with fewer frames or a lower per-bin Kish ESS are blank.
+        Optional extra masks (0 = off): bins whose smoothed neighbourhood has fewer frames or a lower Kish ESS.
     smooth_sigma : float
         Gaussian smoothing (bins) of the reweighted FES histogram; 0 disables it.
     fmax : float, optional
@@ -92,7 +101,9 @@ def report(run_dir, funnel=None, learned_cv=None, bands=None, burn=0.2, t_rej=0.
     f2, _, s2 = fig_bias(run, out_path=p("bias.png"), hill_mask_sigmas=hill_mask_sigmas); plt.close(f2)
     numbers = fe_numbers(run, b, burn=burn, t_rej=t_rej, step_ns=step_ns, min_points=min_points)
     f3, _, s3, nums = fig_fe(run, b, burn=burn, t_rej=t_rej, step_ns=step_ns, out_path=p("fe.png"), numbers=numbers,
-                            min_count=min_count, min_bin_ess=min_bin_ess, smooth_sigma=smooth_sigma, fmax=fmax)
+                            min_count=min_count, min_bin_ess=min_bin_ess, smooth_sigma=smooth_sigma, fmax=fmax,
+                            bins=bins, bins_per_hill=bins_per_hill, bins_fallback=bins_fallback,
+                            min_density=min_density)
     plt.close(f3)
     walkers = {}
     for w in run.walkers:
@@ -110,9 +121,10 @@ def report(run_dir, funnel=None, learned_cv=None, bands=None, burn=0.2, t_rej=0.
         bands={k: dict(asdict(v), unit=length_unit(run, k) or "CV units") for k, v in b.items()},
         params=dict(burn=burn, t_rej=t_rej, step_ns=step_ns, prefix=prefix, min_points=min_points,
                     min_count=min_count, min_bin_ess=min_bin_ess, hill_mask_sigmas=hill_mask_sigmas,
-                    smooth_sigma=smooth_sigma, fmax=fmax),
+                    smooth_sigma=smooth_sigma, fmax=fmax, bins=bins, bins_per_hill=bins_per_hill,
+                    bins_fallback=bins_fallback, min_density=min_density),
         walkers=walkers, clamp=clamp_fractions(run), binding=nums["binding"], series=nums["series"],
-        blocks=nums["blocks"], fes_ess=nums["fes_ess"], fes_masked=nums["fes_masked"], fes_kept=nums["fes_kept"], fmax_kcal=nums["fmax"],
+        blocks=nums["blocks"], fes_ess=nums["fes_ess"], fes_masked=nums["fes_masked"], fes_kept=nums["fes_kept"], fes_bins=nums["fes_bins"], fmax_kcal=nums["fmax"],
         bias_unsampled=_unsampled(run, hill_mask_sigmas), unit="kJ/mol",
         skipped_walkers=list(run.skipped), skipped_panels=s1 + s2 + s3,
         files=dict(cvs=p("cvs.png"), bias=p("bias.png"), fe=p("fe.png"), summary=p("summary.json")))

@@ -418,7 +418,8 @@ def _ct_panel(a, ws, lab, iso, run):
 
 
 def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=None, axes=None, numbers=None,
-           min_points=12, min_count=5, min_bin_ess=3.0, smooth_sigma=2.0, fmax=None):
+           min_points=12, min_count=0, min_bin_ess=0.0, smooth_sigma=2.0, fmax=None,
+           bins=None, bins_per_hill=4, bins_fallback=60, min_density=0.05):
     """c(t) and bias at the walker, reweighted map, W along the main CV and ΔG°(t) with block numbers (kcal/mol).
 
     Shared and single biases are pooled; isolated walkers get their own rows and curves and are never pooled.
@@ -429,6 +430,8 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
         ``ct`` and ``map`` (one axis per drawn row), ``w``, ``dg`` and, for isolated runs, ``bars``.
     numbers : dict, optional
         ``fe_numbers`` output; computed with ``burn``, ``t_rej``, ``step_ns``, ``min_points`` if None.
+    bins, bins_per_hill, bins_fallback, min_density, min_count, min_bin_ess, smooth_sigma
+        Binning, smoothing and display masks of the reweighted FES; see ``fes_reweighted``.
 
     Returns
     -------
@@ -442,7 +445,7 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
     nums = {"binding": None if numbers["binding"] is None else asdict(numbers["binding"]),
             "series": None if numbers["series"] is None else asdict(numbers["series"]),
             "blocks": numbers["blocks"], "fes_ess": None, "fes_masked": None, "fes_kept": None,
-            "fmax": None}
+            "fes_bins": None, "fmax": None}
     iso = run.layout == "isolated"
     groups = [(w.rid, [w]) for w in run.walkers] if iso else [("all", run.walkers)]
     shown = groups[:MAX_ROWS]
@@ -485,10 +488,11 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
         return fig, axes, skipped, nums
     rw = {w.rid for w in run.reweighted()}
     rgroups = [(lab, ws) for lab, ws in groups if not iso or lab in rw]
-    fr = fes_reweighted(run, x, y, burn=burn, min_count=min_count, min_bin_ess=min_bin_ess,
-                         smooth_sigma=smooth_sigma)
-    f1 = fes_reweighted(run, main, burn=burn, min_count=min_count, min_bin_ess=min_bin_ess,
-                         smooth_sigma=smooth_sigma)
+    kw = dict(bins=bins, burn=burn, min_count=min_count, min_bin_ess=min_bin_ess, smooth_sigma=smooth_sigma,
+              bins_per_hill=bins_per_hill, bins_fallback=bins_fallback, min_density=min_density)
+    fr = fes_reweighted(run, x, y, **kw)
+    f1 = fes_reweighted(run, main, **kw)
+    nums["fes_bins"] = {k: v.bin_info for k, v in (("map", fr), ("w", f1))}
     nums["fes_ess"] = {"map": fr.ess, "w": f1.ess}
     nums["fes_masked"] = {k: (v.n_masked if isinstance(v.n_masked, dict) else {"pooled": v.n_masked})
                           for k, v in (("map", fr), ("w", f1))}

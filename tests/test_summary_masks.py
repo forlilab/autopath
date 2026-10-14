@@ -13,7 +13,7 @@ from autopath.metadynamics.summary.plots import fig_bias, fig_fe
 from autopath.metadynamics.summary.report import report
 from ._summary_fixtures import make_run
 
-OFF = dict(min_count=0, min_bin_ess=0, hill_mask_sigmas=np.inf, smooth_sigma=0)
+OFF = dict(min_count=0, min_bin_ess=0, min_density=0, bins=60, hill_mask_sigmas=np.inf, smooth_sigma=0)
 
 
 @pytest.fixture(autouse=True)
@@ -24,7 +24,7 @@ def _close():
 
 def _strip(o):
     if isinstance(o, dict):
-        return {k: _strip(v) for k, v in o.items() if k not in ("files", "run_dir", "params", "fes_masked", "fes_kept", "fmax_kcal", "bias_unsampled")}
+        return {k: _strip(v) for k, v in o.items() if k not in ("files", "run_dir", "params", "fes_masked", "fes_kept", "fmax_kcal", "bias_unsampled", "fes_bins")}
     if isinstance(o, list):
         return [_strip(v) for v in o]
     return o
@@ -36,7 +36,8 @@ def test_report_numbers_unchanged_by_masks(tmp_path):
     b = report(rd, out_dir=str(tmp_path / "b"), **OFF)
     assert json.dumps(_strip(a), sort_keys=True, default=str) == json.dumps(_strip(b), sort_keys=True, default=str)
     assert a["params"]["smooth_sigma"] == 2.0 and a["fmax_kcal"] is not None and "pooled" in a["fes_kept"]["map"]
-    assert a["params"]["min_count"] == 5 and a["params"]["min_bin_ess"] == 3.0
+    assert a["params"]["min_count"] == 0 and a["params"]["min_density"] == 0.05 and a["params"]["bins_per_hill"] == 4
+    assert a["fes_bins"]["map"]["funnel_z"]["rule"] == "hill"
     assert a["params"]["hill_mask_sigmas"] == 2.0 and "pooled" in a["fes_masked"]["map"]
 
 
@@ -47,11 +48,11 @@ def test_sparse_bin_masked_and_colour_max_excludes_it(tmp_path):
     w.cvs["funnel_z"] = np.concatenate([np.zeros(len(w.t) - 2), [2.3, 2.3]])
     w.cvs["learned_sw"] = np.concatenate([np.zeros(len(w.t) - 2), [3.9, 3.9]])
     off = fes_reweighted(run, "funnel_z", "learned_sw", burn=0.0, min_count=0, min_bin_ess=0, smooth_sigma=0)
-    on = fes_reweighted(run, "funnel_z", "learned_sw", burn=0.0, smooth_sigma=0)
+    on = fes_reweighted(run, "funnel_z", "learned_sw", burn=0.0, smooth_sigma=0, min_count=5, min_bin_ess=3.0)
     assert np.isfinite(off.pooled[2]).sum() == 2 and np.isfinite(on.pooled[2]).sum() == 1
     assert on.n_masked == 1 and np.nanmin(on.pooled[2]) == 0.0
     _, axes, _, nums = fig_fe(run, bands(run), pair=("funnel_z", "learned_sw"), burn=0.0,
-                              smooth_sigma=0, out_path=str(tmp_path / "f.png"))
+                              smooth_sigma=0, min_count=5, min_bin_ess=3.0, out_path=str(tmp_path / "f.png"))
     assert nums["fes_masked"]["map"] == {"pooled": 1}
     cb = [a for a in axes["map"][0].figure.axes if a.get_label() == "<colorbar>"][0]
     assert np.nanmax(off.pooled[2]) / 4.184 > 1.5 and cb.get_ylim()[1] <= 1.0
@@ -63,7 +64,7 @@ def test_bin_ess_mask():
     from autopath.metadynamics.summary.analysis import _masked_hist
     x = np.array([[0.1]] * 10 + [[0.9]] * 10)
     w = np.array([1.0] * 10 + [100.0] + [1e-6] * 9)
-    _, F, nm, kept = _masked_hist(x, w / w.sum(), [2], 2.5, 5, 3.0)
+    _, F, nm, kept = _masked_hist(x, w / w.sum(), [2], 2.5, 5, 3.0, 0.0)
     assert np.isnan(F[1]) and np.isfinite(F[0]) and nm == 1
 
 
@@ -200,3 +201,45 @@ def test_neighbourhood_sigma_zero_is_raw_rule():
     nb, ess = _neighbourhood(w, n, s2, 0.0)
     np.testing.assert_array_equal(nb, n)
     np.testing.assert_allclose(ess[s2 > 0], (w ** 2 / np.where(s2 > 0, s2, 1))[s2 > 0])
+
+
+def _binned(tmp_path, **kw):
+    run = load_run(make_run(str(tmp_path / "r"), cvs=("funnel_z", "learned_sw"), monitors=("r_xy",), n_walkers=1))
+    return run, fes_reweighted(run, "funnel_z", "r_xy", burn=0.0, **kw)
+
+
+def test_bin_width_is_hill_over_bins_per_hill(tmp_path):
+    run, c = _binned(tmp_path)
+    hill = {s.name: s.sigma for s in run.cvs}["funnel_z"]
+    xc, _, _ = c.pooled
+    assert np.diff(xc) == pytest.approx(hill / 4)
+    assert c.bin_info["funnel_z"]["rule"] == "hill"
+    _, c8 = _binned(tmp_path / "b", bins_per_hill=8)
+    assert np.diff(c8.pooled[0]) == pytest.approx(hill / 8)
+
+
+def test_monitored_cv_uses_fallback_bins(tmp_path):
+    _, c = _binned(tmp_path, bins_fallback=17)
+    assert len(c.pooled[1]) == 17 and c.bin_info["r_xy"] == dict(width=pytest.approx(np.diff(c.pooled[1])[0]),
+                                                                 n_bins=17, rule="fallback")
+
+
+def test_explicit_bins_override(tmp_path):
+    _, c = _binned(tmp_path, bins=9)
+    assert F_shape(c) == (9, 9) and c.bin_info["funnel_z"]["rule"] == "explicit"
+    _, c = _binned(tmp_path / "d", bins={"funnel_z": 7, "r_xy": 5})
+    assert F_shape(c) == (7, 5)
+
+
+def F_shape(c):
+    return c.pooled[2].shape
+
+
+def test_min_density_masks_empty_keeps_sparse():
+    from autopath.metadynamics.summary.analysis import _masked_hist
+    x = np.array([[0.0]] * 40 + [[1.0]] * 40 + [[0.5]])
+    w = np.ones(81) / 81
+    _, F, _, _ = _masked_hist(x, w, [21], 2.5, 0, 0, 1.0, 0.05)
+    assert np.isfinite(F[0]) and np.isfinite(F[10]) and np.isnan(F[7])
+    _, F0, _, _ = _masked_hist(x, w, [21], 2.5, 0, 0, 1.0, 0.0)
+    assert np.isfinite(F0[7])

@@ -171,6 +171,7 @@ class Combined:
     ess: object = None
     n_masked: object = None
     kept_frac: object = None
+    bin_info: object = None
 
 
 def kish_ess(w) -> float:
@@ -344,24 +345,26 @@ def _neighbourhood(p, n, s2, sigma):
         return n, np.where(s2 > 0, p ** 2 / s2, 0.0)
 
 
-def _masked_hist(sample, Wt, bins, kt, min_count, min_bin_ess, smooth_sigma=0.0):
+def _masked_hist(sample, Wt, bins, kt, min_count, min_bin_ess, smooth_sigma=0.0, min_density=0.0):
     """Weighted histogram -> (edges, F, n_masked, kept_frac).
 
     The weight histogram is smoothed with a Gaussian of ``smooth_sigma`` bins (0: none) before F = -kT ln p.
-    Bins whose kernel-weighted neighbourhood count is below ``min_count`` or whose neighbourhood Kish ESS is
-    below ``min_bin_ess`` are NaN (``smooth_sigma`` 0: the raw per-bin rule); F is shifted to min 0 after
-    masking. ``n_masked`` counts bins with any smoothed weight that were masked; ``kept_frac`` is the unmasked
+    Bins are NaN where the smoothed frame count (mean frames per bin) is below ``min_density``, where the
+    kernel-weighted neighbourhood count is below ``min_count`` or where the neighbourhood Kish ESS is below
+    ``min_bin_ess`` (``smooth_sigma`` 0: the raw per-bin rules); F is shifted to min 0 after masking.
+    ``n_masked`` counts bins with any smoothed weight that were masked; ``kept_frac`` is the unmasked
     fraction of the bins holding at least one frame.
     """
     p, edges = np.histogramdd(sample, bins=bins, weights=Wt)
     n = np.histogramdd(sample, bins=edges)[0]
     s2 = np.histogramdd(sample, bins=edges, weights=Wt ** 2)[0]
     n_nb, ess = _neighbourhood(p, n, s2, smooth_sigma)
+    dens = gaussian_filter(n, smooth_sigma, mode="nearest") if smooth_sigma > 0 else n
     if smooth_sigma > 0:
         tot = p.sum()
         p = gaussian_filter(p, smooth_sigma, mode="nearest")
         p = p * (tot / p.sum()) if p.sum() > 0 else p
-    bad = (n_nb < min_count) | (ess < min_bin_ess)
+    bad = (n_nb < min_count) | (ess < min_bin_ess) | (dens < min_density)
     nm = int(np.sum(bad & (p > 0)))
     occ = n > 0
     kept = float(np.sum(occ & ~bad & (p > 0)) / occ.sum()) if occ.any() else float("nan")
@@ -369,40 +372,75 @@ def _masked_hist(sample, Wt, bins, kt, min_count, min_bin_ess, smooth_sigma=0.0)
     return edges, _free_energy(p, kt), nm, kept
 
 
-def fes_reweighted(run, x, y=None, bins=60, burn=0.2, min_count=5, min_bin_ess=3.0, smooth_sigma=2.0) -> Combined:
+def _edges(vals, info, bins, per_hill, fallback):
+    """Bin edges of one CV and the rule used.
+
+    Width is hill width / ``per_hill`` over [min - hill, max + hill] clipped to the CV grid. A CV without a
+    hill width (monitored only) gets ``fallback`` equal bins over its range padded by one bin at each end.
+    An integer ``bins`` sets the bin count over that same padded range.
+    """
+    lo, hi = float(np.min(vals)), float(np.max(vals))
+    if info is not None and np.isfinite(info.sigma) and info.sigma > 0:
+        lo, hi = max(lo - info.sigma, info.grid_min), min(hi + info.sigma, info.grid_max)
+        width, rule = info.sigma / per_hill, "hill"
+    else:
+        span = (hi - lo) or 1.0
+        pad = span / fallback
+        lo, hi = lo - pad, hi + pad
+        width, rule = (hi - lo) / fallback, "fallback"
+    if bins is not None:
+        return np.linspace(lo, hi, int(bins) + 1), "explicit"
+    n = max(1, int(np.ceil((hi - lo) / width - 1e-9)))
+    return lo + width * np.arange(n + 1), rule
+
+
+def fes_reweighted(run, x, y=None, bins=None, burn=0.2, min_count=0, min_bin_ess=0.0, smooth_sigma=2.0,
+                   bins_per_hill=4, bins_fallback=60, min_density=0.05) -> Combined:
     """Reweighted FES (kJ/mol, min 0) on one or two logged CVs (biased or monitored).
 
-    The weighted histogram is Gaussian-smoothed (``smooth_sigma`` bins, 0 = off) before F = -kT ln p; bins
-    whose smoothed neighbourhood has fewer than ``min_count`` frames or an ESS below ``min_bin_ess`` are NaN,
-    and the shift to min 0 follows. ``Combined.ess`` holds the Kish ESS of the frames used,
-    ``n_masked`` the bins masked and ``kept_frac`` the unmasked fraction of the occupied bins (each a number,
-    or ``{rid: value}`` if isolated).
+    Bin width of a biased CV is its hill width / ``bins_per_hill`` over the sampled range padded by one hill
+    width and clipped to the CV grid. A CV without a hill width uses ``bins_fallback`` equal bins over its
+    padded sampled range. ``bins`` (int, or ``{cv: int}``) overrides both.
+
+    The weighted histogram is Gaussian-smoothed (``smooth_sigma`` bins, 0 = off) before F = -kT ln p. Bins
+    are NaN where the smoothed frame count is below ``min_density``; ``min_count`` and ``min_bin_ess`` add
+    neighbourhood count and ESS rules (0 = off). The shift to min 0 follows. ``Combined.ess`` holds the Kish
+    ESS of the frames used, ``n_masked`` the bins masked, ``kept_frac`` the unmasked fraction of the occupied
+    bins and ``bin_info`` ``{cv: {"width", "n_bins", "rule"}}`` (each a number or dict, or ``{rid: value}``
+    if isolated).
     """
     if not run.has_reweight:
         raise ValueError("no REWEIGHT data: reweighted FES not supported")
     kt = KT_PER_K * run.temperature
+    infos = {c.name: c for c in run.cvs}
+    names = [x] if y is None else [x, y]
 
     def f(ws):
-        xs, ys, lws = [], [], []
+        cols, lws = {k: [] for k in names}, []
         for w in ws:
             m, lw = _weights_arrays(w.bias, w.ct, run.temperature, burn, normalise=False)
-            xs.append(w.cvs[x][m]); lws.append(lw)
-            if y is not None:
-                ys.append(w.cvs[y][m])
-        X, Wt = _pool(xs, lws)
-        if y is None:
-            e, F, nm, kf = _masked_hist(X[:, None], Wt, [bins], kt, min_count, min_bin_ess, smooth_sigma)
-            return (0.5 * (e[0][1:] + e[0][:-1]), F), kish_ess(Wt), nm, kf
-        e, F, nm, kf = _masked_hist(np.stack([X, np.concatenate(ys)], 1), Wt, [bins, bins], kt, min_count,
-                                    min_bin_ess, smooth_sigma)
-        return (0.5 * (e[0][1:] + e[0][:-1]), 0.5 * (e[1][1:] + e[1][:-1]), F), kish_ess(Wt), nm, kf
+            for k in names:
+                cols[k].append(w.cvs[k][m])
+            lws.append(lw)
+        _, Wt = _pool(cols[x], lws)
+        X = [np.concatenate(cols[k]) for k in names]
+        ed, info = [], {}
+        for k, v in zip(names, X):
+            nb = bins.get(k) if isinstance(bins, dict) else bins
+            e, rule = _edges(v, infos.get(k), nb, bins_per_hill, bins_fallback)
+            ed.append(e)
+            info[k] = dict(width=float(e[1] - e[0]), n_bins=len(e) - 1, rule=rule)
+        e, F, nm, kf = _masked_hist(np.stack(X, 1), Wt, ed, kt, min_count, min_bin_ess, smooth_sigma, min_density)
+        cen = tuple(0.5 * (a[1:] + a[:-1]) for a in e)
+        return (cen + (F,), kish_ess(Wt), nm, kf, info)
     c = apply(run, f, reweighted=True)
     if c.pooled is not None:
-        c.pooled, c.ess, c.n_masked, c.kept_frac = c.pooled
+        c.pooled, c.ess, c.n_masked, c.kept_frac, c.bin_info = c.pooled
     else:
         c.ess = {k: v[1] for k, v in c.per_walker.items()}
         c.n_masked = {k: v[2] for k, v in c.per_walker.items()}
         c.kept_frac = {k: v[3] for k, v in c.per_walker.items()}
+        c.bin_info = {k: v[4] for k, v in c.per_walker.items()}
         c.per_walker = {k: v[0] for k, v in c.per_walker.items()}
     return c
 
