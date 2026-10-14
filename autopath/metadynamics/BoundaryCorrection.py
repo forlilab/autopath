@@ -199,6 +199,33 @@ def boundary_factor(variables, bounds) -> np.ndarray:
     return 1.0 / smooth_floor(n, 0.5 ** n_edges)
 
 
+def _padded_variable(v, pad):
+    """Copy of ``v`` widened by ``pad`` grid points each side and declared NON-periodic.
+
+    OpenMM's Metadynamics refuses mixed periodic/non-periodic variables because
+    Continuous{1,2,3}DFunction carries ONE periodic flag for the whole table, not one per
+    axis (PLUMED's Grid keeps a per-dimension ``pbc_`` vector, which is why it has no such
+    restriction). Padding sidesteps that: the axis is widened, hills are deposited with
+    minimum-image wrapping over the TRUE period so the padding holds the exact periodic
+    continuation, and the table is then declared non-periodic. The CV only ever reports
+    values inside the original range, so the spline at either true edge has real data on
+    both sides and both the bias and its derivative are continuous across the seam.
+
+    Declaring the axis non-periodic WITHOUT padding is not equivalent: the endpoint values
+    match but a one-sided spline gives mismatched derivatives, so the force jumps at the seam.
+    """
+    from openmm.app.metadynamics import BiasVariable
+    dx = (v.maxValue - v.minValue) / (v.gridWidth - 1)
+    return BiasVariable(v.force, v.minValue - pad * dx, v.maxValue + pad * dx,
+                        v.biasWidth, periodic=False, gridWidth=v.gridWidth + 2 * pad)
+
+
+def _pad_width(v, n_sigma=4.0):
+    """Grid points of padding needed to carry a hill ``n_sigma`` past the true edge."""
+    dx = (v.maxValue - v.minValue) / (v.gridWidth - 1)
+    return int(np.ceil(n_sigma * v.biasWidth / dx))
+
+
 class BoundaryCorrectedMetadynamics(Metadynamics):
     """OpenMM Metadynamics whose hills are divided by the in-domain fraction N(s).
 
@@ -218,12 +245,34 @@ class BoundaryCorrectedMetadynamics(Metadynamics):
         self.hills = []
         self.hill_wall = []
         self._cv_map = None
+        # Mixed periodicity: pad every periodic axis and present NON-periodic copies to
+        # Metadynamics.__init__, which would otherwise raise. Only this case is padded; a
+        # wholly periodic or wholly non-periodic set keeps OpenMM's native table untouched,
+        # so existing runs and their saved biases are bit-for-bit unchanged.
+        n_per = sum(bool(v.periodic) for v in variables)
+        self._mixed = 0 < n_per < len(variables)
+        self._pad = [(_pad_width(v) if v.periodic else 0) for v in variables] if self._mixed \
+            else [0] * len(variables)
         if any(isinstance(v.force, LinearComposite) for v in variables):
+            if self._mixed:
+                raise ValueError(
+                    "mixed periodic/non-periodic variables are not supported alongside a "
+                    "LinearComposite CV: the composite path allocates its own bias arrays and "
+                    "does not pad. Make the periodic variable non-periodic, or drop the "
+                    "composite.")
             self._init_composite(system, variables, temperature, biasFactor, height, frequency,
                                  saveFrequency, biasDir)
         else:
-            super().__init__(system, variables, temperature, biasFactor, height, frequency,
+            init_vars = [_padded_variable(v, p) if p else v
+                         for v, p in zip(variables, self._pad)] if self._mixed else variables
+            super().__init__(system, init_vars, temperature, biasFactor, height, frequency,
                              saveFrequency=saveFrequency, biasDir=biasDir)
+            if self._mixed:
+                self._padded_variables = init_vars
+                self.variables = list(variables)      # restore TRUE periodicity for deposition
+        if self._mixed:
+            self.boundaryFactor = boundary_factor(
+                getattr(self, "_padded_variables", variables), self.bounds)
 
     def _init_composite(self, system, variables, temperature, biasFactor, height, frequency,
                         saveFrequency, biasDir):
@@ -304,16 +353,103 @@ class BoundaryCorrectedMetadynamics(Metadynamics):
                 self._syncWithDisk()
             stepsToGo -= nextSteps
 
+    def _axis_pad(self):
+        """Padding per ARRAY axis. Bias arrays run in reversed variable order."""
+        return list(reversed(self._pad))
+
+    def _bias_view(self, arr):
+        """The unpadded part of a bias array: what the FES, c(t) and disk all use.
+
+        Every consumer goes through here rather than slicing itself, so the padding can only
+        leak in one place instead of six.
+        """
+        if not self._mixed:
+            return arr
+        sl = tuple(slice(p, arr.shape[a] - p) if p else slice(None)
+                   for a, p in enumerate(self._axis_pad()))
+        return arr[sl]
+
+    def _pad_from_view(self, arr):
+        """Rebuild the padded array from an unpadded one by exact periodic extension.
+
+        Used when loading another walker's bias: the file holds the unpadded view, and for a
+        periodic axis the padding is just its periodic images, so nothing is lost.
+        """
+        if not self._mixed:
+            return arr
+        out = arr
+        for a, p in enumerate(self._axis_pad()):
+            if not p:
+                continue
+            n = out.shape[a]
+            # grid point n-1 coincides with point 0, so the period is n-1 distinct points
+            idx = (np.arange(-p, n + p) - 0) % (n - 1)
+            out = np.take(out, idx, axis=a)
+        return out
+
+    def getFreeEnergy(self):
+        """Free energy on the UNPADDED grid, so the shape matches the declared variables."""
+        return (-((self.temperature + self._deltaT) / self._deltaT)
+                * self._bias_view(self._totalBias) * unit.kilojoules_per_mole)
+
+    def _syncWithDisk(self):
+        """As Metadynamics, but the file holds the unpadded view.
+
+        Keeping the on-disk shape equal to the declared grid means every existing reader of
+        bias_*.npy keeps working unchanged; the padding is reconstructed on load.
+        """
+        if self.biasDir is None:
+            return
+        import os, re as _re
+        from openmm.app.metadynamics import _LoadedBias
+        oldName = os.path.join(self.biasDir, 'bias_%d_%d.npy' % (self._id, self._saveIndex))
+        self._saveIndex += 1
+        tempName = os.path.join(self.biasDir, 'temp_%d_%d.npy' % (self._id, self._saveIndex))
+        fileName = os.path.join(self.biasDir, 'bias_%d_%d.npy' % (self._id, self._saveIndex))
+        np.save(tempName, self._bias_view(self._selfBias))
+        os.rename(tempName, fileName)
+        if os.path.exists(oldName):
+            os.remove(oldName)
+        fileLoaded = False
+        pattern = _re.compile(r'bias_(.*)_(.*)\.npy')
+        for filename in os.listdir(self.biasDir):
+            match = pattern.match(filename)
+            if match is None:
+                continue
+            matchId, matchIndex = int(match.group(1)), int(match.group(2))
+            if matchId != self._id and (matchId not in self._loadedBiases
+                                        or matchIndex > self._loadedBiases[matchId].index):
+                try:
+                    data = self._pad_from_view(np.load(os.path.join(self.biasDir, filename)))
+                    self._loadedBiases[matchId] = _LoadedBias(matchId, matchIndex, data)
+                    fileLoaded = True
+                except IOError:
+                    pass
+        if fileLoaded:
+            self._totalBias = np.copy(self._selfBias)
+            for bias in self._loadedBiases.values():
+                self._totalBias += bias.bias
+
     def _addGaussian(self, position, height, context):
         axisGaussians = []
         for i, v in enumerate(self.variables):
-            x = (position[i] - v.minValue) / (v.maxValue - v.minValue)
-            if v.periodic:
-                x = x % 1.0
-            dist = np.abs(np.linspace(0, 1.0, num=v.gridWidth) - x)
-            if v.periodic:
-                dist = np.min(np.array([dist, np.abs(dist - 1)]), axis=0)
-                dist[-1] = dist[0]
+            if self._mixed and v.periodic:
+                # Deposit on the PADDED axis, with minimum-image distance over the TRUE
+                # period: the hill's periodic images then fill the padding exactly, which is
+                # what makes the seam smooth once the table is declared non-periodic.
+                pv = self._padded_variables[i]
+                period = v.maxValue - v.minValue
+                d = np.linspace(pv.minValue, pv.maxValue, pv.gridWidth) - position[i]
+                d -= period * np.round(d / period)
+                dist = np.abs(d) / period          # normalised to the ORIGINAL range
+            else:
+                x = (position[i] - v.minValue) / (v.maxValue - v.minValue)
+                if v.periodic:
+                    x = x % 1.0
+                dist = np.abs(np.linspace(0, 1.0, num=v.gridWidth) - x)
+                if v.periodic:
+                    dist = np.min(np.array([dist, np.abs(dist - 1)]), axis=0)
+                    dist[-1] = dist[0]
             axisGaussians.append(np.exp(-0.5 * dist * dist / v._scaledVariance))
         if len(self.variables) == 1:
             gaussian = axisGaussians[0]
@@ -340,5 +476,5 @@ class BoundaryCorrectedMetadynamics(Metadynamics):
     def rct(self) -> float:
         """c(t) in kJ/mol: frame weights are exp[(V(s_t, t) - c(t)) / kT]."""
         kt = (unit.MOLAR_GAS_CONSTANT_R * self.temperature).value_in_unit(unit.kilojoules_per_mole)
-        a = self._totalBias.ravel() / (kt * (self.biasFactor - 1.0))
+        a = self._bias_view(self._totalBias).ravel() / (kt * (self.biasFactor - 1.0))
         return kt * (logsumexp(self.biasFactor * a) - logsumexp(a))

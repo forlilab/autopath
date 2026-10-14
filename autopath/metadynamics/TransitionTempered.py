@@ -122,7 +122,7 @@ class TransitionTemperedMetadynamics(BoundaryCorrectedMetadynamics):
         return tuple(reversed(idx))                 # grid axes run in reverse variable order
 
     def vstar(self) -> float:
-        return vstar(self._totalBias, self.basins, [v.periodic for v in reversed(self.variables)],
+        return vstar(self._bias_view(self._totalBias), self.basins, [v.periodic for v in reversed(self.variables)],
                      lower=self.vstar_log[-1] if self.vstar_log else None)
 
     def step(self, simulation, steps):
@@ -151,12 +151,12 @@ class TransitionTemperedMetadynamics(BoundaryCorrectedMetadynamics):
     def getFreeEnergy(self):
         if self.wellTempered:
             return super().getFreeEnergy()
-        return -self._totalBias * unit.kilojoules_per_mole
+        return -self._bias_view(self._totalBias) * unit.kilojoules_per_mole
 
     def rct(self) -> float:
         """c(t) for a bias converging to -F: kT ln <exp(V/kT)> over the grid."""
         if self.wellTempered:
             return super().rct()
         kt = (unit.MOLAR_GAS_CONSTANT_R * self.temperature).value_in_unit(unit.kilojoules_per_mole)
-        v = self._totalBias.ravel() / kt
+        v = self._bias_view(self._totalBias).ravel() / kt
         return kt * (logsumexp(v) - np.log(v.size))
