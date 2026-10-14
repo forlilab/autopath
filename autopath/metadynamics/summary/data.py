@@ -77,7 +77,18 @@ def _npz(path):
 
 
 def _names(h):
-    return [str(x) for x in np.atleast_1d(h["cv_names"])]
+    """CV names from a HILLS record, rejecting duplicates.
+
+    Values are keyed by name downstream, so duplicates collapse silently and only surface
+    as a shape error inside the histogram.
+    """
+    names = [str(x) for x in np.atleast_1d(h["cv_names"])]
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    if dupes:
+        raise ValueError(
+            f"duplicate CV names {dupes} in {names}: the loader keys CV values by name, so "
+            "these would collapse into one. Pass a distinct name= to each CV constructor.")
+    return names
 
 
 def _segment(run_dir, rid):

@@ -88,6 +88,7 @@ def com_cv(
     grid_max: float,
     hill_width: float = 0.05,
     grid_points: int = 125,
+    name: str = "com",
 ) -> CVSpec:
     """Center-of-mass distance between pocket and ligand centroids (nm).
 
@@ -109,7 +110,7 @@ def com_cv(
         grid_max=grid_max,
         hill_width=hill_width,
         grid_points=grid_points,
-        name="com",
+        name=name,
         _factory=factory,
     )
 
@@ -124,6 +125,7 @@ def funnel_z_cv(
     grid_points: int = 125,
     bounds: Optional[tuple] = None,
     frame: Optional[dict] = None,
+    name: str = "funnel_z",
 ) -> CVSpec:
     """Guest position along the funnel axis, r_z = n·(COM_guest - COM_host) (nm).
 
@@ -166,7 +168,7 @@ def funnel_z_cv(
         grid_max=grid_max,
         hill_width=hill_width,
         grid_points=grid_points,
-        name="funnel_z",
+        name=name,
         cv_length_per_unit_ang=10.0,
         origin=0.0,
         bounds=bounds,
@@ -227,6 +229,7 @@ def rmsd_cv(
     grid_max: float,
     hill_width: float = 0.05,
     grid_points: int = 125,
+    name: str = "rmsd",
 ) -> CVSpec:
     """Ligand RMSD relative to the starting conformation (deferred: needs positions).
 
@@ -241,7 +244,7 @@ def rmsd_cv(
         grid_max=grid_max,
         hill_width=hill_width,
         grid_points=grid_points,
-        name="rmsd",
+        name=name,
         _factory=factory,
     )
 
@@ -255,6 +258,7 @@ def rmsd_states_cv(
     grid_points: int = 125,
     exclude_residues: tuple = ("UNK", "HOH", "NA", "CL", "K"),
     sigma: float = 0.01,
+    name: str = "rmsd_states",
 ) -> CVSpec:
     """Path-in-RMSD-space CV through protein CA milestones (deferred: needs positions)."""
     from glob import glob
@@ -296,7 +300,7 @@ def rmsd_states_cv(
         grid_max=grid_max,
         hill_width=hill_width,
         grid_points=grid_points,
-        name="rmsd_states",
+        name=name,
         _factory=factory,
     )
 
@@ -402,6 +406,7 @@ def pathCV_cv(
     grid_points: int = 125,
     sigma: Union[float, str] = 'auto',
     extend_path_to_nm: float = None,
+    name: str = "pathCV_progress",
 ) -> CVSpec:
     """Path-in-CV-space CV through milestones evaluated with COM distance (deferred: needs positions).
 
@@ -500,7 +505,7 @@ def pathCV_cv(
         grid_max=grid_max,
         hill_width=hill_width,
         grid_points=grid_points,
-        name="pathCV_progress",
+        name=name,
         cv_length_per_unit_ang=_span_ang,
         _factory=factory,
     )
