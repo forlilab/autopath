@@ -173,8 +173,9 @@ def fig_bias(run, out_path=None, axes=None, n_snap=5, hill_mask_sigmas=2.0):
     Isolated biases are drawn per walker, never summed. Bias growth is shown for one CV as ``n_snap``
     snapshots. For two CVs the final bias map and the Boltzmann marginals of the bias-derived FES at
     ``n_snap`` times are drawn, per walker if isolated (up to ``MAX_ROWS``). Recorded transition-tempering
-    basins are marked with stars on the map and the marginals. Grid points farther than ``hill_mask_sigmas``
-    hill widths from every hill deposited by then are left blank and excluded from the marginals.
+    basins are marked with stars on the map and the marginals. The bias map is drawn unmasked with a dashed
+    outline around grid points within ``hill_mask_sigmas`` hill widths of a hill; the marginals leave out
+    points farther than that from every hill deposited by then (NaN).
 
     Returns
     -------
@@ -208,7 +209,7 @@ def fig_bias(run, out_path=None, axes=None, n_snap=5, hill_mask_sigmas=2.0):
         skipped.append("TT basins: not recorded")
     vrange = None
     if nrow == 2:
-        vrange = _range([_masked_bias([h for w in g for h in w.hills_raw], hill_mask_sigmas) for g in groups])
+        vrange = _range([np.asarray(bias_from_hills([h for w in g for h in w.hills_raw])) for g in groups])
     for gi, g in enumerate(groups):
         raw = [h for w in g for h in w.hills_raw]
         h0 = raw[0]
@@ -228,7 +229,11 @@ def fig_bias(run, out_path=None, axes=None, n_snap=5, hill_mask_sigmas=2.0):
             a = axes[gi, 1]
             xs = [np.linspace(float(gmin[k]), float(gmax[k]), int(np.atleast_1d(h0["grid_points"])[k]))
                   for k in range(2)]
-            _fill(fig, a, xs[0], xs[1], _masked_bias(raw, hill_mask_sigmas), "V (kJ/mol)", vrange)
+            _fill(fig, a, xs[0], xs[1], np.asarray(bias_from_hills(raw)), "V (kJ/mol)", vrange)
+            sampled = hill_mask(raw, hill_mask_sigmas)
+            if sampled.any() and not sampled.all():
+                a.contour(xs[0], xs[1], sampled.astype(float), levels=[0.5], colors="k", linestyles="--",
+                          linewidths=0.8)
             a.set(xlabel=_label(run, run.cvs[0].name), ylabel=_label(run, run.cvs[1].name))
             a.set_title(f"final bias {tag}".strip(), fontsize=8, loc="left")
             if basins is not None:

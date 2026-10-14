@@ -111,3 +111,15 @@ def test_fig_bias_blanks_unsampled(tmp_path):
     y = axes[0, 2].lines[-1].get_ydata()
     xs = np.linspace(-0.4, 2.4, 101)
     assert np.isnan(y[xs > 1.5]).all() and np.isfinite(y[xs < 0.5]).all()
+
+
+def test_bias_map_unmasked_with_outline(tmp_path):
+    run, raw = _half_grid_raw(tmp_path)
+    _, axes, _ = fig_bias(run, out_path=str(tmp_path / "b.png"), n_snap=2)
+    a = axes[0, 1]
+    assert not any(np.isnan(np.ma.getdata(c.get_paths()[0].vertices)).any() for c in a.collections if c.get_paths())
+    dashed = [c for c in a.collections if len(c.get_linestyle()) and c.get_linestyle()[0][1] is not None
+              and c.get_linestyle()[0][1] and c.get_linewidths()[0] == pytest.approx(0.8)]
+    assert len(dashed) == 1
+    cb = [x for x in axes[0, 1].figure.axes if x.get_label() == "<colorbar>"][0]
+    assert cb.get_ylim()[0] == pytest.approx(0.0, abs=1e-6)
