@@ -328,27 +328,42 @@ def tt_basins(run):
     return None
 
 
+def _neighbourhood(p, n, s2, sigma):
+    """Kernel-weighted neighbourhood count and Kish ESS per bin, for a peak-1 Gaussian kernel (σ in bins).
+
+    ``p``, ``n``, ``s2`` are the per-bin sums of weight, count and squared weight. With ``sigma`` 0 they
+    are returned as the raw count and ``p**2 / s2``.
+    """
+    if sigma > 0:
+        d = p.ndim
+        a1, a2 = (2 * np.pi * sigma ** 2) ** (d / 2), (np.pi * sigma ** 2) ** (d / 2)
+        n = gaussian_filter(n, sigma, mode="nearest") * a1
+        p = gaussian_filter(p, sigma, mode="nearest") * a1
+        s2 = gaussian_filter(s2, sigma / np.sqrt(2), mode="nearest") * a2
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return n, np.where(s2 > 0, p ** 2 / s2, 0.0)
+
+
 def _masked_hist(sample, Wt, bins, kt, min_count, min_bin_ess, smooth_sigma=0.0):
     """Weighted histogram -> (edges, F, n_masked, kept_frac).
 
-    The weight, squared-weight and count histograms are smoothed with a Gaussian of ``smooth_sigma`` bins
-    (0: none). Bins whose smoothed count is below ``min_count`` or whose neighbourhood ESS
-    (smoothed weight)² / (smoothed squared weight) is below ``min_bin_ess`` are NaN; F is shifted to min 0
-    after masking. ``n_masked`` counts bins with any smoothed weight that were masked; ``kept_frac`` is the
-    unmasked fraction of the bins holding at least one frame.
+    The weight histogram is smoothed with a Gaussian of ``smooth_sigma`` bins (0: none) before F = -kT ln p.
+    Bins whose kernel-weighted neighbourhood count is below ``min_count`` or whose neighbourhood Kish ESS is
+    below ``min_bin_ess`` are NaN (``smooth_sigma`` 0: the raw per-bin rule); F is shifted to min 0 after
+    masking. ``n_masked`` counts bins with any smoothed weight that were masked; ``kept_frac`` is the unmasked
+    fraction of the bins holding at least one frame.
     """
     p, edges = np.histogramdd(sample, bins=bins, weights=Wt)
     n = np.histogramdd(sample, bins=edges)[0]
     s2 = np.histogramdd(sample, bins=edges, weights=Wt ** 2)[0]
+    n_nb, ess = _neighbourhood(p, n, s2, smooth_sigma)
     if smooth_sigma > 0:
         tot = p.sum()
-        p, n, s2 = (gaussian_filter(h, smooth_sigma, mode="nearest") for h in (p, n, s2))
+        p = gaussian_filter(p, smooth_sigma, mode="nearest")
         p = p * (tot / p.sum()) if p.sum() > 0 else p
-    with np.errstate(divide="ignore", invalid="ignore"):
-        ess = np.where(s2 > 0, p ** 2 / s2, 0.0)
-    bad = (n < min_count) | (ess < min_bin_ess)
+    bad = (n_nb < min_count) | (ess < min_bin_ess)
     nm = int(np.sum(bad & (p > 0)))
-    occ = np.histogramdd(sample, bins=edges)[0] > 0
+    occ = n > 0
     kept = float(np.sum(occ & ~bad & (p > 0)) / occ.sum()) if occ.any() else float("nan")
     p = np.where(bad, 0.0, p)
     return edges, _free_energy(p, kt), nm, kept

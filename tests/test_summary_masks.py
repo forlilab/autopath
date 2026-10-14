@@ -172,3 +172,31 @@ def test_fmax_is_99th_percentile_and_override(tmp_path):
     assert n2["fmax"] == 4.0
     cb = [a for a in f.axes if a.get_label() == "<colorbar>"][0]
     assert cb.get_ylim()[1] == pytest.approx(4.0)
+
+
+def test_neighbourhood_ess_equals_count_for_equal_weights_in_one_bin():
+    from autopath.metadynamics.summary.analysis import _neighbourhood
+    for shape in ((21,), (21, 21)):
+        n = np.zeros(shape); c = (10,) * len(shape)
+        n[c] = 12.0
+        for sig in (0.0, 2.0):
+            nb, ess = _neighbourhood(0.3 * n, n, 0.09 * n, sig)
+            assert nb[c] == pytest.approx(12.0, rel=1e-3) and ess[c] == pytest.approx(12.0, rel=1e-3)
+
+
+def test_neighbourhood_dominant_frame_ess_one():
+    from autopath.metadynamics.summary.analysis import _neighbourhood
+    n = np.zeros((21, 21)); n[10, 10] = 30
+    p = np.full_like(n, 1e-8); p[10, 10] = 1.0
+    n_nb, ess = _neighbourhood(p, n + 1, p ** 2, 2.0)
+    assert ess[10, 10] == pytest.approx(1.0, abs=1e-3)
+
+
+def test_neighbourhood_sigma_zero_is_raw_rule():
+    from autopath.metadynamics.summary.analysis import _neighbourhood
+    rng = np.random.default_rng(1)
+    n = rng.integers(0, 9, (8, 8)).astype(float); w = rng.random((8, 8)) * n
+    s2 = w ** 2 / np.maximum(n, 1) + 0.1 * n
+    nb, ess = _neighbourhood(w, n, s2, 0.0)
+    np.testing.assert_array_equal(nb, n)
+    np.testing.assert_allclose(ess[s2 > 0], (w ** 2 / np.where(s2 > 0, s2, 1))[s2 > 0])
