@@ -15,6 +15,7 @@ The class also logs every hill and gives the bias at the walker and c(t)
 """
 
 import time
+from types import SimpleNamespace
 from dataclasses import dataclass
 from functools import reduce
 from typing import Any
@@ -271,8 +272,15 @@ class BoundaryCorrectedMetadynamics(Metadynamics):
                 self._padded_variables = init_vars
                 self.variables = list(variables)      # restore TRUE periodicity for deposition
         if self._mixed:
-            self.boundaryFactor = boundary_factor(
-                getattr(self, "_padded_variables", variables), self.bounds)
+            # boundary_factor must see the PADDED geometry but the TRUE periodicity. The
+            # padded copies are marked non-periodic only so OpenMM will build the table; a
+            # periodic axis has no edges, so correcting it amplifies hills at the seam (up to
+            # 1/0.125 = 8x here) and injects a force spike exactly where the walker wraps.
+            shim = [SimpleNamespace(periodic=v.periodic, gridWidth=pv.gridWidth,
+                                    minValue=pv.minValue, maxValue=pv.maxValue,
+                                    biasWidth=v.biasWidth)
+                    for v, pv in zip(variables, getattr(self, "_padded_variables", variables))]
+            self.boundaryFactor = boundary_factor(shim, self.bounds)
 
     def _init_composite(self, system, variables, temperature, biasFactor, height, frequency,
                         saveFrequency, biasDir):

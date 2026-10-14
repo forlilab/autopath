@@ -139,3 +139,33 @@ def test_free_energy_and_rct_use_the_unpadded_grid():
     _deposit(meta, [0.4, -1.2])
     assert meta.getFreeEnergy().shape == (ND, NP)
     assert np.isfinite(meta.rct())
+
+
+def test_periodic_axis_is_never_edge_corrected():
+    """A periodic axis has no edges, so the de Pablo factor must be exactly 1 along it.
+
+    The padded copies are marked non-periodic so OpenMM will build the table; if that leaks
+    into boundary_factor the axis is treated as bounded and hills are amplified at the seam,
+    which injects a force spike exactly where the walker wraps.
+    """
+    meta = _meta(True)
+    pad = meta._pad[0]
+    row = meta.boundaryFactor[ND // 2]
+    assert np.allclose(row, 1.0), f"periodic axis corrected: max {row.max():.3f}"
+    # the non-periodic axis must still be corrected at its own edges
+    col = meta.boundaryFactor[:, pad + NP // 2]
+    assert col.max() > 1.0
+
+
+def test_seam_bias_has_no_step_after_many_hills():
+    """The bias either side of the seam must agree: a step there is what blows a run up."""
+    meta = _meta(True)
+    rng = np.random.default_rng(3)
+    _deposit(meta, rng.uniform(-np.pi, np.pi, 40), rng.uniform(0.5, 1.5, 40))
+    pad = meta._pad[0]
+    row = meta._totalBias[ND // 2]
+    lo, hi = pad, pad + NP - 1
+    assert abs(row[lo] - row[hi]) < 1e-9
+    # and one grid step either side of the seam, which is what the spline actually sees
+    assert abs(row[lo - 1] - row[hi - 1]) < 1e-9
+    assert abs(row[lo + 1] - row[hi + 1]) < 1e-9
