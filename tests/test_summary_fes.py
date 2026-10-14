@@ -54,7 +54,7 @@ def test_pooled_weights_keep_relative_walker_weight(tmp_path):
     for w, off, xv in zip(run.walkers, (kt * np.log(4.0), 0.0), (0.0, 1.0)):
         w.bias = w.ct + off
         w.cvs["funnel_z"] = np.full(len(w.t), xv)
-    xc, F = fes_reweighted(run, "funnel_z", bins=2).pooled
+    xc, F = fes_reweighted(run, "funnel_z", bins=2, smooth_sigma=0).pooled
     assert F[1] - F[0] == pytest.approx(kt * np.log(4.0))
 
 

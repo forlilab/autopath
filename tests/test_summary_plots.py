@@ -423,7 +423,7 @@ def test_fig_fe_ct_panel(tmp_path):
 def test_fig_fe_maps_share_limits_and_levels(tmp_path):
     run = load_run(make_run(str(tmp_path / "r"), layout="isolated", n_walkers=3,
                             cvs=("funnel_z", "learned_sw"), monitors=()), funnel=FP)
-    _, axes, _, _ = fig_fe(run, bands(run), pair=("funnel_z", "learned_sw"), step_ns=0.5)
+    _, axes, _, _ = fig_fe(run, bands(run), pair=("funnel_z", "learned_sw"), step_ns=0.5, min_count=0, min_bin_ess=0)
     ms = axes["map"]
     assert len({m.get_xlim() for m in ms}) == 1 and len({m.get_ylim() for m in ms}) == 1
     lv = [np.asarray(m.collections[0].levels) for m in ms]

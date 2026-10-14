@@ -47,7 +47,7 @@ def _version():
 
 def report(run_dir, funnel=None, learned_cv=None, bands=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_dir=None,
            prefix="metad", min_points=12, min_count=5, min_bin_ess=3.0,
-           hill_mask_sigmas=2.0) -> dict:
+           hill_mask_sigmas=2.0, smooth_sigma=2.0, fmax=None) -> dict:
     """Write ``<prefix>_{cvs,bias,fe}.png`` and ``<prefix>_summary.json``; return the summary dict.
 
     Reports numbers only; convergence decisions are made by ``check_convergence``.
@@ -67,6 +67,10 @@ def report(run_dir, funnel=None, learned_cv=None, bands=None, burn=0.2, t_rej=0.
         Fewest ΔG°(t) points for a block analysis.
     min_count, min_bin_ess : float
         Display mask of the reweighted FES: bins with fewer frames or a lower per-bin Kish ESS are blank.
+    smooth_sigma : float
+        Gaussian smoothing (bins) of the reweighted FES histogram; 0 disables it.
+    fmax : float, optional
+        Colour cap (kcal/mol) of the reweighted maps; default the 99th percentile of the unmasked values.
     hill_mask_sigmas : float
         Display mask of bias-derived maps: points farther than this many hill widths from every hill are blank.
     out_dir : str, optional
@@ -88,7 +92,7 @@ def report(run_dir, funnel=None, learned_cv=None, bands=None, burn=0.2, t_rej=0.
     f2, _, s2 = fig_bias(run, out_path=p("bias.png"), hill_mask_sigmas=hill_mask_sigmas); plt.close(f2)
     numbers = fe_numbers(run, b, burn=burn, t_rej=t_rej, step_ns=step_ns, min_points=min_points)
     f3, _, s3, nums = fig_fe(run, b, burn=burn, t_rej=t_rej, step_ns=step_ns, out_path=p("fe.png"), numbers=numbers,
-                            min_count=min_count, min_bin_ess=min_bin_ess)
+                            min_count=min_count, min_bin_ess=min_bin_ess, smooth_sigma=smooth_sigma, fmax=fmax)
     plt.close(f3)
     walkers = {}
     for w in run.walkers:
@@ -105,9 +109,10 @@ def report(run_dir, funnel=None, learned_cv=None, bands=None, burn=0.2, t_rej=0.
         monitored=list(run.monitored),
         bands={k: dict(asdict(v), unit=length_unit(run, k) or "CV units") for k, v in b.items()},
         params=dict(burn=burn, t_rej=t_rej, step_ns=step_ns, prefix=prefix, min_points=min_points,
-                    min_count=min_count, min_bin_ess=min_bin_ess, hill_mask_sigmas=hill_mask_sigmas),
+                    min_count=min_count, min_bin_ess=min_bin_ess, hill_mask_sigmas=hill_mask_sigmas,
+                    smooth_sigma=smooth_sigma, fmax=fmax),
         walkers=walkers, clamp=clamp_fractions(run), binding=nums["binding"], series=nums["series"],
-        blocks=nums["blocks"], fes_ess=nums["fes_ess"], fes_masked=nums["fes_masked"],
+        blocks=nums["blocks"], fes_ess=nums["fes_ess"], fes_masked=nums["fes_masked"], fes_kept=nums["fes_kept"], fmax_kcal=nums["fmax"],
         bias_unsampled=_unsampled(run, hill_mask_sigmas), unit="kJ/mol",
         skipped_walkers=list(run.skipped), skipped_panels=s1 + s2 + s3,
         files=dict(cvs=p("cvs.png"), bias=p("bias.png"), fe=p("fe.png"), summary=p("summary.json")))

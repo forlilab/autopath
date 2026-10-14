@@ -135,6 +135,27 @@ def _fill(fig, ax, x, y, Z, label, vrange=None):
     return cf
 
 
+def _cap(maps, fmax=None):
+    """Colour cap (kcal/mol): ``fmax`` if given, else the 99th percentile of the finite values of ``maps``."""
+    if fmax is not None:
+        return float(fmax)
+    fin = np.concatenate([np.asarray(m, float)[np.isfinite(m)].ravel() for m in maps] + [np.zeros(0)])
+    return float(np.percentile(fin, 99)) if fin.size else 1.0
+
+
+def _fill_capped(fig, ax, x, y, Z, label, fmax):
+    """Filled map with 1-unit levels from 0 to ``fmax``; values above saturate at the top colour."""
+    lv = np.arange(0.0, fmax + 1e-9, 1.0)
+    if len(lv) < 2:
+        lv = np.array([0.0, max(fmax, 1e-6)])
+    cf = ax.contourf(x, y, np.asarray(Z, float), levels=lv, cmap="Spectral_r", alpha=0.78, extend="max")
+    cf.set_edgecolor("face")
+    ax.contour(x, y, np.asarray(Z, float), levels=lv, colors="0.25", linewidths=0.3, alpha=0.5)
+    fig.colorbar(cf, ax=ax, label=label)
+    _grid(ax)
+    return cf
+
+
 def _stars(ax, xs, ys):
     ax.plot(xs, ys, ls="none", marker="*", ms=14, mfc="w", mec="k", zorder=5)
 
@@ -397,7 +418,7 @@ def _ct_panel(a, ws, lab, iso, run):
 
 
 def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=None, axes=None, numbers=None,
-           min_points=12, min_count=5, min_bin_ess=3.0):
+           min_points=12, min_count=5, min_bin_ess=3.0, smooth_sigma=2.0, fmax=None):
     """c(t) and bias at the walker, reweighted map, W along the main CV and ΔG°(t) with block numbers (kcal/mol).
 
     Shared and single biases are pooled; isolated walkers get their own rows and curves and are never pooled.
@@ -420,7 +441,8 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
     skipped = list(numbers["skipped"])
     nums = {"binding": None if numbers["binding"] is None else asdict(numbers["binding"]),
             "series": None if numbers["series"] is None else asdict(numbers["series"]),
-            "blocks": numbers["blocks"], "fes_ess": None, "fes_masked": None}
+            "blocks": numbers["blocks"], "fes_ess": None, "fes_masked": None, "fes_kept": None,
+            "fmax": None}
     iso = run.layout == "isolated"
     groups = [(w.rid, [w]) for w in run.walkers] if iso else [("all", run.walkers)]
     shown = groups[:MAX_ROWS]
@@ -463,18 +485,24 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
         return fig, axes, skipped, nums
     rw = {w.rid for w in run.reweighted()}
     rgroups = [(lab, ws) for lab, ws in groups if not iso or lab in rw]
-    fr = fes_reweighted(run, x, y, burn=burn, min_count=min_count, min_bin_ess=min_bin_ess)
-    f1 = fes_reweighted(run, main, burn=burn, min_count=min_count, min_bin_ess=min_bin_ess)
+    fr = fes_reweighted(run, x, y, burn=burn, min_count=min_count, min_bin_ess=min_bin_ess,
+                         smooth_sigma=smooth_sigma)
+    f1 = fes_reweighted(run, main, burn=burn, min_count=min_count, min_bin_ess=min_bin_ess,
+                         smooth_sigma=smooth_sigma)
     nums["fes_ess"] = {"map": fr.ess, "w": f1.ess}
     nums["fes_masked"] = {k: (v.n_masked if isinstance(v.n_masked, dict) else {"pooled": v.n_masked})
                           for k, v in (("map", fr), ("w", f1))}
+    nums["fes_kept"] = {k: (v.kept_frac if isinstance(v.kept_frac, dict) else {"pooled": v.kept_frac})
+                        for k, v in (("map", fr), ("w", f1))}
+    smooth = f", smoothed σ={smooth_sigma:g} bins" if smooth_sigma > 0 else ""
     bd, ser = numbers["binding"], numbers["series"]
     b = bands_[main]
     mapped = [lab for lab, _ in shown if not iso or lab in rw]
     vrange = lims = None
     if y is not None and mapped:
         rs = [_pick(fr, lab) for lab in mapped]
-        vrange = _range([r[2] * KJ_TO_KCAL for r in rs])
+        vrange = _cap([r[2] * KJ_TO_KCAL for r in rs], fmax)
+        nums["fmax"] = vrange
         lims = ((min(r[0][0] for r in rs), max(r[0][-1] for r in rs)),
                 (min(r[1][0] for r in rs), max(r[1][-1] for r in rs)))
     for a, (lab, ws) in zip(ax_b, shown):
@@ -489,7 +517,7 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
         else:
             xc, yc, F2 = res
             if np.isfinite(F2).any():
-                _fill(fig, a, xc, yc, (F2 * KJ_TO_KCAL).T, "F (kcal/mol)", vrange)
+                _fill_capped(fig, a, xc, yc, (F2 * KJ_TO_KCAL).T, "F (kcal/mol)", vrange)
             else:
                 skipped.append(f"{lab}: reweighted map: no weight")
             a.set(xlabel=_label(run, x), ylabel=_label(run, y), xlim=lims[0], ylim=lims[1])
@@ -506,7 +534,7 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
                 _stars(a, pts[:, 0], pts[:, 1])
         if run.funnel is not None and y == _rxy(run) and x == FUNNEL_Z:
             a.plot(*_funnel_outline(run, ang_per_unit(run, x)), "k--", lw=1)
-        a.set_title(f"{lab}: reweighted F({x}{', ' + y if y else ''}), {_ess(_pick_ess(fr, lab))}",
+        a.set_title(f"{lab}: reweighted F({x}{', ' + y if y else ''}), {_ess(_pick_ess(fr, lab))}{smooth}",
                     fontsize=8, loc="left")
     ax_c.axvspan(*b.bound, color=_BOUND, alpha=0.6, lw=0)
     ax_c.axvspan(*b.unbound, color=_UNBOUND, alpha=0.6, lw=0)

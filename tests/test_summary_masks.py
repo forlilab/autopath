@@ -13,7 +13,7 @@ from autopath.metadynamics.summary.plots import fig_bias, fig_fe
 from autopath.metadynamics.summary.report import report
 from ._summary_fixtures import make_run
 
-OFF = dict(min_count=0, min_bin_ess=0, hill_mask_sigmas=np.inf)
+OFF = dict(min_count=0, min_bin_ess=0, hill_mask_sigmas=np.inf, smooth_sigma=0)
 
 
 @pytest.fixture(autouse=True)
@@ -24,7 +24,7 @@ def _close():
 
 def _strip(o):
     if isinstance(o, dict):
-        return {k: _strip(v) for k, v in o.items() if k not in ("files", "run_dir", "params", "fes_masked", "bias_unsampled")}
+        return {k: _strip(v) for k, v in o.items() if k not in ("files", "run_dir", "params", "fes_masked", "fes_kept", "fmax_kcal", "bias_unsampled")}
     if isinstance(o, list):
         return [_strip(v) for v in o]
     return o
@@ -35,6 +35,7 @@ def test_report_numbers_unchanged_by_masks(tmp_path):
     a = report(rd, out_dir=str(tmp_path / "a"))
     b = report(rd, out_dir=str(tmp_path / "b"), **OFF)
     assert json.dumps(_strip(a), sort_keys=True, default=str) == json.dumps(_strip(b), sort_keys=True, default=str)
+    assert a["params"]["smooth_sigma"] == 2.0 and a["fmax_kcal"] is not None and "pooled" in a["fes_kept"]["map"]
     assert a["params"]["min_count"] == 5 and a["params"]["min_bin_ess"] == 3.0
     assert a["params"]["hill_mask_sigmas"] == 2.0 and "pooled" in a["fes_masked"]["map"]
 
@@ -45,15 +46,16 @@ def test_sparse_bin_masked_and_colour_max_excludes_it(tmp_path):
     w.bias = w.ct.copy()
     w.cvs["funnel_z"] = np.concatenate([np.zeros(len(w.t) - 2), [2.3, 2.3]])
     w.cvs["learned_sw"] = np.concatenate([np.zeros(len(w.t) - 2), [3.9, 3.9]])
-    off = fes_reweighted(run, "funnel_z", "learned_sw", burn=0.0, **dict(min_count=0, min_bin_ess=0))
-    on = fes_reweighted(run, "funnel_z", "learned_sw", burn=0.0)
+    off = fes_reweighted(run, "funnel_z", "learned_sw", burn=0.0, min_count=0, min_bin_ess=0, smooth_sigma=0)
+    on = fes_reweighted(run, "funnel_z", "learned_sw", burn=0.0, smooth_sigma=0)
     assert np.isfinite(off.pooled[2]).sum() == 2 and np.isfinite(on.pooled[2]).sum() == 1
     assert on.n_masked == 1 and np.nanmin(on.pooled[2]) == 0.0
     _, axes, _, nums = fig_fe(run, bands(run), pair=("funnel_z", "learned_sw"), burn=0.0,
-                              out_path=str(tmp_path / "f.png"))
+                              smooth_sigma=0, out_path=str(tmp_path / "f.png"))
     assert nums["fes_masked"]["map"] == {"pooled": 1}
     cb = [a for a in axes["map"][0].figure.axes if a.get_label() == "<colorbar>"][0]
     assert np.nanmax(off.pooled[2]) / 4.184 > 1.5 and cb.get_ylim()[1] <= 1.0
+    assert nums["fmax"] == pytest.approx(0.0)
     assert np.nanmax(on.pooled[2]) == 0.0
 
 
@@ -61,7 +63,7 @@ def test_bin_ess_mask():
     from autopath.metadynamics.summary.analysis import _masked_hist
     x = np.array([[0.1]] * 10 + [[0.9]] * 10)
     w = np.array([1.0] * 10 + [100.0] + [1e-6] * 9)
-    _, F, nm = _masked_hist(x, w / w.sum(), [2], 2.5, 5, 3.0)
+    _, F, nm, kept = _masked_hist(x, w / w.sum(), [2], 2.5, 5, 3.0)
     assert np.isnan(F[1]) and np.isfinite(F[0]) and nm == 1
 
 
@@ -123,3 +125,50 @@ def test_bias_map_unmasked_with_outline(tmp_path):
     assert len(dashed) == 1
     cb = [x for x in axes[0, 1].figure.axes if x.get_label() == "<colorbar>"][0]
     assert cb.get_ylim()[0] == pytest.approx(0.0, abs=1e-6)
+
+
+def _spike(smooth, **kw):
+    from autopath.metadynamics.summary.analysis import _masked_hist
+    pts = np.full((1, 2), 0.5)
+    pts = np.vstack([pts, [[0.0, 0.0], [1.0, 1.0]]])
+    return _masked_hist(pts, np.ones(3) / 3, [11, 11], 2.5, 0, 0, smooth, **kw)
+
+
+def test_smoothing_spreads_single_spike():
+    _, F0, _, _ = _spike(0.0)
+    _, F2, _, _ = _spike(1.0)
+    assert np.isfinite(F0).sum() == 3 and np.isfinite(F2).sum() > 3 * 5
+    assert np.isfinite(F2[5, 4]) and np.isnan(F0[5, 4])
+
+
+def test_smooth_zero_reproduces_unsmoothed(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r"), cvs=("funnel_z", "learned_sw"), monitors=(), cross=True))
+    a = fes_reweighted(run, "funnel_z", "learned_sw", min_count=0, min_bin_ess=0, smooth_sigma=0).pooled[2]
+    b = fes_reweighted(run, "funnel_z", "learned_sw", min_count=0, min_bin_ess=0, smooth_sigma=1e-9).pooled[2]
+    np.testing.assert_allclose(a, b, atol=1e-6)
+    s = fes_reweighted(run, "funnel_z", "learned_sw", min_count=0, min_bin_ess=0, smooth_sigma=2).pooled[2]
+    assert np.isfinite(s).sum() > np.isfinite(a).sum()
+
+
+def test_neighbourhood_mask_and_kept_fraction():
+    from autopath.metadynamics.summary.analysis import _masked_hist
+    x = np.array([[0.1]] * 30 + [[0.9]] * 2)
+    w = np.ones(32) / 32
+    _, F, nm, kept = _masked_hist(x, w, [10], 2.5, 5, 3.0, 0.0)
+    assert np.isnan(F[9]) and kept == pytest.approx(0.5) and nm == 1
+
+
+def test_fmax_is_99th_percentile_and_override(tmp_path):
+    from autopath.metadynamics.summary.plots import _cap
+    F = np.arange(101, dtype=float).reshape(1, -1)
+    assert _cap([F]) == pytest.approx(np.percentile(F, 99))
+    assert _cap([F], 7.5) == 7.5
+    run = load_run(make_run(str(tmp_path / "r"), cvs=("funnel_z", "learned_sw"), monitors=(), cross=True))
+    pair = ("funnel_z", "learned_sw")
+    _, _, _, n1 = fig_fe(run, bands(run), pair=pair, out_path=str(tmp_path / "a.png"))
+    F2 = fes_reweighted(run, *pair).pooled[2] / 4.184
+    assert n1["fmax"] == pytest.approx(np.percentile(F2[np.isfinite(F2)], 99))
+    f, axes, _, n2 = fig_fe(run, bands(run), pair=pair, fmax=4.0, out_path=str(tmp_path / "b.png"))
+    assert n2["fmax"] == 4.0
+    cb = [a for a in f.axes if a.get_label() == "<colorbar>"][0]
+    assert cb.get_ylim()[1] == pytest.approx(4.0)
