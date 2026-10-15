@@ -48,7 +48,7 @@ def _version():
 def report(run_dir, funnel=None, learned_cv=None, bands=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_dir=None,
            prefix="metad", min_points=12, min_count=0, min_bin_ess=0.0,
            hill_mask_sigmas=2.0, smooth_sigma=2.0, fmax=None, bins=None, bins_per_hill=4, bins_fallback=60,
-           min_density=0.05) -> dict:
+           min_density=0.05, show_numbers=False) -> dict:
     """Write ``<prefix>_{cvs,bias,fe}.png`` and ``<prefix>_summary.json``; return the summary dict.
 
     Reports numbers only; convergence decisions are made by ``check_convergence``.
@@ -80,6 +80,8 @@ def report(run_dir, funnel=None, learned_cv=None, bands=None, burn=0.2, t_rej=0.
         Gaussian smoothing (bins) of the reweighted FES histogram; 0 disables it.
     fmax : float, optional
         Colour cap (kcal/mol) of the reweighted maps; default the 99th percentile of the unmasked values.
+    show_numbers : bool
+        Draw the ΔG° numbers as a text block on the FE figure (always written to the summary).
     hill_mask_sigmas : float
         Display mask of bias-derived maps: points farther than this many hill widths from every hill are blank.
     out_dir : str, optional
@@ -105,7 +107,7 @@ def report(run_dir, funnel=None, learned_cv=None, bands=None, burn=0.2, t_rej=0.
                          hill_mask_sigmas=hill_mask_sigmas)
     f3, _, s3, nums = fig_fe(run, b, burn=burn, t_rej=t_rej, step_ns=step_ns, out_path=p("fe.png"), numbers=numbers,
                             min_count=min_count, min_bin_ess=min_bin_ess, smooth_sigma=smooth_sigma, fmax=fmax,
-                            bins=bins, bins_per_hill=bins_per_hill, bins_fallback=bins_fallback,
+                            bins=bins, bins_per_hill=bins_per_hill, bins_fallback=bins_fallback, show_numbers=show_numbers,
                             min_density=min_density)
     plt.close(f3)
     walkers = {}

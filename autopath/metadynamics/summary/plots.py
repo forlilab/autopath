@@ -380,7 +380,7 @@ def _ess(v):
     return f"ESS {v:.0f}" if v is not None and np.isfinite(v) else "ESS n/a"
 
 
-def _fe_axes(axes, n, iso, skipped):
+def _fe_axes(axes, n, iso, skipped, want_text=False):
     """Validate a user ``axes`` dict for fig_fe; rows ``ct``/``map`` as lists of ``n`` axes."""
     miss = {"ct", "map", "w", "dg"} - set(axes)
     if miss:
@@ -394,7 +394,7 @@ def _fe_axes(axes, n, iso, skipped):
         out[k] = v
     out.setdefault("bars", None)
     out.setdefault("text", None)
-    if out["text"] is None:
+    if want_text and out["text"] is None:
         skipped.append("ΔG° numbers: no text axes given")
     if iso and out["bars"] is None:
         skipped.append("per-walker bars: no axes given")
@@ -436,7 +436,7 @@ def _ct_panel(a, ws, lab, iso, run):
 
 def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=None, axes=None, numbers=None,
            min_points=12, min_count=0, min_bin_ess=0.0, smooth_sigma=2.0, fmax=None,
-           bins=None, bins_per_hill=4, bins_fallback=60, min_density=0.05):
+           bins=None, bins_per_hill=4, bins_fallback=60, min_density=0.05, show_numbers=False):
     """c(t) and bias at the walker, reweighted map, W along the main CV and ΔG°(t) with block numbers (kcal/mol).
 
     Shared and single biases are pooled; isolated walkers get their own rows and curves and are never pooled.
@@ -449,6 +449,8 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
         ``fe_numbers`` output; computed with ``burn``, ``t_rej``, ``step_ns``, ``min_points`` if None.
     bins, bins_per_hill, bins_fallback, min_density, min_count, min_bin_ess, smooth_sigma
         Binning, smoothing and display masks of the reweighted FES; see ``fes_reweighted``.
+    show_numbers : bool
+        Draw the ΔG° numbers as a text block (they are always in ``numbers``).
 
     Returns
     -------
@@ -478,21 +480,29 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
         gs = fig.add_gridspec(n, 4)
         ax_a = [fig.add_subplot(gs[r, 0]) for r in range(n)]  # c(t)
         ax_b = [fig.add_subplot(gs[r, 1]) for r in range(n)]
+        ax_t = None
         if multi:
             sub = gs[:, 2:4].subgridspec(3, 2)
             ax_c, ax_d = fig.add_subplot(sub[0, :]), fig.add_subplot(sub[1, :])
-            ax_e, ax_t = fig.add_subplot(sub[2, 0]), fig.add_subplot(sub[2, 1])
+            if show_numbers:
+                ax_e, ax_t = fig.add_subplot(sub[2, 0]), fig.add_subplot(sub[2, 1])
+            else:
+                ax_e = fig.add_subplot(sub[2, :])
         else:
             ax_c = fig.add_subplot(gs[:, 2])
             if iso:
-                sub = gs[:, 3].subgridspec(3, 1, height_ratios=[3, 1.3, 2.6])
-                ax_d, ax_e, ax_t = (fig.add_subplot(sub[k]) for k in range(3))
-            else:
+                hr = [3, 1.3, 2.6] if show_numbers else [3, 1.3]
+                sub = gs[:, 3].subgridspec(len(hr), 1, height_ratios=hr)
+                ax_d, ax_e = fig.add_subplot(sub[0]), fig.add_subplot(sub[1])
+                ax_t = fig.add_subplot(sub[2]) if show_numbers else None
+            elif show_numbers:
                 sub = gs[:, 3].subgridspec(2, 1, height_ratios=[3, 1.4])
                 ax_d, ax_t, ax_e = fig.add_subplot(sub[0]), fig.add_subplot(sub[1]), None
+            else:
+                ax_d, ax_e = fig.add_subplot(gs[:, 3]), None
         axes = dict(ct=ax_a, map=ax_b, w=ax_c, dg=ax_d, bars=ax_e, text=ax_t)
     else:
-        axes = _fe_axes(axes, n, iso, skipped)
+        axes = _fe_axes(axes, n, iso, skipped, show_numbers)
         ax_a, ax_b, ax_c, ax_d, ax_e = (axes[k] for k in ("ct", "map", "w", "dg", "bars"))
         fig = ax_c.figure
     ax_t = axes["text"]
@@ -664,7 +674,7 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
         ax_e.set_xticks(range(len(bars)), [b[0] for b in bars], rotation=30, ha="right", fontsize=6)
         ax_e.set(ylabel=f"time mean {sym} (kcal/mol)")
         ax_e.set_title("per walker, mean ± SD of ΔG(t) after rejection", fontsize=8, loc="left")
-    if lines and ax_t is not None:
+    if show_numbers and lines and ax_t is not None:
         ax_t.axis("off")
         ax_t.text(0.0, 1.0, "\n".join(lines), transform=ax_t.transAxes, fontsize=6.5, va="top")
     fig.suptitle(f"free energy, {run.layout}; burn {burn:g}, rejection {t_rej:g}", fontsize=9)

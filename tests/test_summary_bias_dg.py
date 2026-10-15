@@ -171,7 +171,7 @@ def test_summary_json_has_t_aggregate_shared(tmp_path):
 @pytest.mark.parametrize("n", [2, 3])
 def test_fig_fe_isolated_layout(tmp_path, n):
     run = load_run(make_run(str(tmp_path / "r"), layout="isolated", n_walkers=n), funnel=FP)
-    fig, axes, _, _ = fig_fe(run, bands(run), step_ns=0.1)
+    fig, axes, _, _ = fig_fe(run, bands(run), step_ns=0.1, show_numbers=True)
     fig.canvas.draw()
     p = {k: axes[k].get_position() for k in ("w", "dg", "bars", "text")}
     assert p["w"].x0 == pytest.approx(p["dg"].x0) and p["w"].x1 == pytest.approx(p["dg"].x1)
@@ -215,7 +215,7 @@ def test_summary_json_records_estimators(tmp_path):
 
 def test_fig_fe_overlays_bias_curves(tmp_path):
     run = load_run(make_run(str(tmp_path / "r"), layout="isolated", n_walkers=2), funnel=FP)
-    _, axes, _, nums = fig_fe(run, bands(run), step_ns=0.1)
+    _, axes, _, nums = fig_fe(run, bands(run), step_ns=0.1, show_numbers=True)
     for key in ("w", "dg"):
         dashed = [ln for ln in axes[key].get_lines() if ln.get_linestyle() == "--"]
         assert len(dashed) == 2

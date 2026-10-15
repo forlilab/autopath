@@ -18,6 +18,7 @@ def main(argv=None):
     ap.add_argument("--hill-mask-sigmas", type=float, default=2.0)
     ap.add_argument("--smooth-sigma", type=float, default=2.0); ap.add_argument("--fmax", type=float)
     ap.add_argument("--bands"); ap.add_argument("--out"); ap.add_argument("--prefix", default="metad")
+    ap.add_argument("--show-numbers", action="store_true", help="draw the ΔG° numbers as text on the FE figure")
     a = ap.parse_args(argv)
     bands = None
     if a.bands:
@@ -27,7 +28,8 @@ def main(argv=None):
                step_ns=a.step_ns, out_dir=a.out, prefix=a.prefix,
                min_points=a.min_points, min_count=a.min_count, min_bin_ess=a.min_bin_ess,
                hill_mask_sigmas=a.hill_mask_sigmas, smooth_sigma=a.smooth_sigma, fmax=a.fmax,
-               bins=a.bins, bins_per_hill=a.bins_per_hill, bins_fallback=a.bins_fallback, min_density=a.min_density)
+               bins=a.bins, bins_per_hill=a.bins_per_hill, bins_fallback=a.bins_fallback, min_density=a.min_density,
+               show_numbers=a.show_numbers)
     print(f"layout: {s['layout']}")
     for k, v in s["files"].items():
         print(f"{k}: {v}")

@@ -228,7 +228,7 @@ def test_fig_fe_uses_given_numbers(tmp_path):
 
 def test_fig_fe_text_box_shows_ess(tmp_path):
     run = load_run(make_run(str(tmp_path / "r"), layout="isolated", n_walkers=2), funnel=FP)
-    _, axes, _, nums = fig_fe(run, bands(run), step_ns=0.1)
+    _, axes, _, nums = fig_fe(run, bands(run), step_ns=0.1, show_numbers=True)
     txt = " ".join(t.get_text() for t in axes["text"].texts)
     for rid, v in nums["binding"]["per_walker"].items():
         assert f"{rid}:" in txt and "final ΔG°" in txt and f"ESS {v['ess']:.0f}" in txt
@@ -450,7 +450,7 @@ def test_fig_fe_ct_linestyles_distinct_and_on_top(tmp_path):
 
 def test_fig_fe_dg_panel_plain_labels(tmp_path):
     run = load_run(make_run(str(tmp_path / "r")), funnel=FP)
-    _, axes, _, _ = fig_fe(run, bands(run), step_ns=0.1)
+    _, axes, _, _ = fig_fe(run, bands(run), step_ns=0.1, show_numbers=True)
     d = axes["dg"]
     leg = _legend_texts(d)
     assert "ΔG°(t): from all frames up to t" in leg and "start of statistics (t_rej)" in leg
@@ -466,14 +466,14 @@ def test_fig_fe_dg_panel_plain_labels(tmp_path):
 def test_fig_fe_numbers_outside_data_axes(tmp_path):
     for kw in (dict(), dict(layout="isolated", n_walkers=2)):
         run = load_run(make_run(str(tmp_path / f"r{len(kw)}"), **kw), funnel=FP)
-        _, axes, _, _ = fig_fe(run, bands(run), step_ns=0.1)
+        _, axes, _, _ = fig_fe(run, bands(run), step_ns=0.1, show_numbers=True)
         assert not axes["dg"].texts and not axes["w"].texts and axes["text"].texts
 
 
 def test_fig_fe_given_axes_without_text_skips(tmp_path):
     run = load_run(make_run(str(tmp_path / "r")), funnel=FP)
     fig, ax = plt.subplots(1, 4)
-    _, _, skipped, _ = fig_fe(run, bands(run), step_ns=0.5, axes=dict(ct=ax[0], map=ax[1], w=ax[2], dg=ax[3]))
+    _, _, skipped, _ = fig_fe(run, bands(run), step_ns=0.5, axes=dict(ct=ax[0], map=ax[1], w=ax[2], dg=ax[3]), show_numbers=True)
     assert "ΔG° numbers: no text axes given" in skipped and not ax[3].texts
 
 
@@ -488,3 +488,14 @@ def test_w_ylim_ignores_values_outside_bands():
     lo, hi = ax.get_ylim()
     inside = y[(x >= -0.2) & (x <= 2.3)].max()
     assert hi == pytest.approx(1.15 * inside + 0.2) and hi < 10 and lo < 0
+
+
+def test_fig_fe_no_numbers_by_default(tmp_path):
+    for kw in (dict(), dict(layout="isolated", n_walkers=2)):
+        run = load_run(make_run(str(tmp_path / f"n{len(kw)}"), **kw), funnel=FP)
+        fig, axes, skipped, nums = fig_fe(run, bands(run), step_ns=0.1)
+        assert axes["text"] is None and not any(a.texts for a in fig.axes if a.get_visible())
+        assert nums["blocks"] is not None and not any("numbers" in s for s in skipped)
+        if kw:                                            # bars take the whole bottom row
+            pb, pw = axes["bars"].get_position(), axes["w"].get_position()
+            assert pb.x0 == pytest.approx(pw.x0) and pb.x1 == pytest.approx(pw.x1)
