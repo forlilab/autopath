@@ -24,7 +24,8 @@ def _close():
 
 def _strip(o):
     if isinstance(o, dict):
-        return {k: _strip(v) for k, v in o.items() if k not in ("files", "run_dir", "params", "fes_masked", "fes_kept", "fmax_kcal", "bias_unsampled", "fes_bins")}
+        return {k: _strip(v) for k, v in o.items() if k not in ("files", "run_dir", "params", "fes_masked", "fes_kept", "fmax_kcal", "bias_unsampled", "fes_bins",
+                                                                  "binding_bias", "dg_bias_series", "estimator_gap")}
     if isinstance(o, list):
         return [_strip(v) for v in o]
     return o
