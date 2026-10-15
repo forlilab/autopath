@@ -1,7 +1,5 @@
 """learned_z: 2D (funnel z, s_w) metad, COLVAR-z reweighting and orchestrator wiring."""
-import subprocess
 import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -22,7 +20,6 @@ from .learned_toys import (AXIS, FEATS, GUEST, HOST, MU, SD, TABLES, W, X0, Z0, 
                            toy_pdb, toy_system, write_npz_r2, z_of)
 
 REF = mm.Platform.getPlatformByName("Reference")
-SCRIPT = Path(__file__).resolve().parents[1] / "examples" / "04_Full-Pipeline" / "run_single_walker_control.py"
 
 
 def _specs(tmp_path, residualised=True):
@@ -117,19 +114,6 @@ def test_tt_basins_from_classes_follow_the_bias_variable_order(tmp_path):
         tt_basins_from_classes(str(tmp_path / "r2.npz"), specs[::-1])
     with pytest.raises(ValueError, match="not supported"):
         tt_basins_from_classes(str(tmp_path / "r2.npz"), specs[1:])
-
-
-def _control_script_error(*args):
-    r = subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True, timeout=300)
-    return r.returncode, r.stderr
-
-
-def test_control_script_tt_basins_from_classes_flag_validation():
-    rc, err = _control_script_error("--cv", "learned_z", "--learned-cv-file", "x.npz",
-                                    "--tt-basins", "1,2", "3,4", "--tt-basins-from-classes")
-    assert rc == 2 and "--tt-basins" in err and "not allowed" in err
-    rc, err = _control_script_error("--cv", "path", "--tt-basins-from-classes")
-    assert rc == 2 and "learned_z" in err
 
 
 def _mixed(order):

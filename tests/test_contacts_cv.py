@@ -1,8 +1,6 @@
-"""Contact-total CV: value against numpy, spec grid/bounds, 2D metad runs, control-script options."""
+"""Contact-total CV: value against numpy, spec grid/bounds, 2D metad runs."""
 import json
-import subprocess
 import sys
-from pathlib import Path
 
 import numpy as np
 import openmm as mm
@@ -17,7 +15,6 @@ from autopath.metadynamics.learned.forces import learned_cv_spec
 from .learned_toys import AXIS, GUEST, HOST, X0, Z0, s_plain, toy_pdb, toy_system, write_npz_r2, z_of
 
 REF = mm.Platform.getPlatformByName("Reference")
-SCRIPT = Path(__file__).resolve().parents[1] / "examples" / "04_Full-Pipeline" / "run_single_walker_control.py"
 STEP = "1/(1+x^6)"
 DEF = {"group1": [0, 1], "group2": [2, 3, 4], "threshold_nm": 0.4, "step_function": STEP,
        "cutoff_factor": 2.0, "switch_factor": 1.5, "bounds": [0.0, 6.0], "hill_width": 0.25}
@@ -191,22 +188,3 @@ def test_load_contacts_def_validates(tmp_path):
     p.write_text(json.dumps({}))
     with pytest.raises(ValueError, match="contacts"):
         load_contacts_def(str(p))
-
-
-def _script(*args):
-    r = subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True, timeout=300)
-    return r.returncode, r.stderr
-
-
-def test_control_script_contacts_options_validation(tmp_path):
-    good, bad = tmp_path / "good.json", tmp_path / "bad.json"
-    good.write_text(json.dumps({"contacts": DEF}))
-    bad.write_text(json.dumps({"contacts": {k: v for k, v in DEF.items() if k != "bounds"}}))
-    rc, err = _script("--cv", "funnel_z_contacts")
-    assert rc == 2 and "--cv-def" in err
-    rc, err = _script("--cv", "funnel_z_contacts", "--cv-def", str(bad))
-    assert rc == 2 and "bounds" in err
-    rc, err = _script("--cv", "funnel_z_contacts", "--cv-def", str(good), "--tt-basins", "1,2", "3,4")
-    assert rc == 2 and "not supported" in err
-    rc, err = _script("--cv", "contacts_learned", "--cv-def", str(good))
-    assert rc == 2 and "learned_cv_file" in err

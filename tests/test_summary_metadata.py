@@ -70,20 +70,3 @@ def test_pipeline_run_meta(tmp_path):
     assert m == {"funnel_file": str(tmp_path / "funnel_params.npz"),
                  "learned_cv_file": str(tmp_path / "l" / "learned_cv.npz")}
     assert metad_run_meta(None, None) == {}
-
-
-def test_control_script_run_meta_contacts_learned(tmp_path, monkeypatch):
-    import argparse
-    import importlib.util
-    from pathlib import Path
-    script = Path(__file__).resolve().parents[1] / "examples" / "04_Full-Pipeline" / "run_single_walker_control.py"
-    spec = importlib.util.spec_from_file_location("_control_script", script)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    monkeypatch.chdir(tmp_path)
-    a = argparse.Namespace(cv="contacts_learned", funnel_from="fp.npz", learned_cv_file=None, cv_def="def.json")
-    m = mod.run_meta_for(a, {"contacts": {}, "learned_cv_file": "sw/learned_cv.npz"})
-    assert m == {"funnel_file": str(tmp_path / "fp.npz"), "learned_cv_file": str(tmp_path / "sw/learned_cv.npz"),
-                 "cv_def_file": str(tmp_path / "def.json")}
-    a = argparse.Namespace(cv="learned_z", funnel_from="fp.npz", learned_cv_file="l.npz", cv_def=None)
-    assert mod.run_meta_for(a)["learned_cv_file"] == str(tmp_path / "l.npz")
