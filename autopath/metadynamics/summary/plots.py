@@ -9,8 +9,8 @@ import matplotlib.pyplot as plt
 from openmm import unit
 
 from ..Hills import bias_from_hills
-from .analysis import (FUNNEL_Z, KT_PER_K, _ang, ang_per_unit, bias_fes_scale, fe_numbers, fes_marginal,
-                       fes_reweighted, funnel_z_low, hill_mask, length_unit, recrossings, tt_basins)
+from .analysis import (FUNNEL_Z, KT_PER_K, _ang, aggregate_time, ang_per_unit, bias_fes_scale, fe_numbers,
+                       fes_marginal, fes_reweighted, funnel_z_low, hill_mask, length_unit, recrossings, tt_basins)
 
 KJ_TO_KCAL = 1 / 4.184
 
@@ -473,17 +473,23 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
         skipped.append(f"map rows: {len(groups) - len(shown)} of {len(groups)} isolated walkers not drawn")
     n = len(shown)
     if axes is None:
-        fig = plt.figure(figsize=(21, 3.8 * n + 0.8), constrained_layout=True)
+        multi = iso and n >= 2
+        fig = plt.figure(figsize=(21, max(3.8 * n, 10.0 if multi else 0.0) + 0.8), constrained_layout=True)
         gs = fig.add_gridspec(n, 4)
         ax_a = [fig.add_subplot(gs[r, 0]) for r in range(n)]  # c(t)
         ax_b = [fig.add_subplot(gs[r, 1]) for r in range(n)]
-        ax_c = fig.add_subplot(gs[:, 2])
-        if iso:
-            sub = gs[:, 3].subgridspec(3, 1, height_ratios=[3, 1.3, 2.6])
-            ax_d, ax_e, ax_t = (fig.add_subplot(sub[k]) for k in range(3))
+        if multi:
+            sub = gs[:, 2:4].subgridspec(3, 2)
+            ax_c, ax_d = fig.add_subplot(sub[0, :]), fig.add_subplot(sub[1, :])
+            ax_e, ax_t = fig.add_subplot(sub[2, 0]), fig.add_subplot(sub[2, 1])
         else:
-            sub = gs[:, 3].subgridspec(2, 1, height_ratios=[3, 1.4])
-            ax_d, ax_t, ax_e = fig.add_subplot(sub[0]), fig.add_subplot(sub[1]), None
+            ax_c = fig.add_subplot(gs[:, 2])
+            if iso:
+                sub = gs[:, 3].subgridspec(3, 1, height_ratios=[3, 1.3, 2.6])
+                ax_d, ax_e, ax_t = (fig.add_subplot(sub[k]) for k in range(3))
+            else:
+                sub = gs[:, 3].subgridspec(2, 1, height_ratios=[3, 1.4])
+                ax_d, ax_t, ax_e = fig.add_subplot(sub[0]), fig.add_subplot(sub[1]), None
         axes = dict(ct=ax_a, map=ax_b, w=ax_c, dg=ax_d, bars=ax_e, text=ax_t)
     else:
         axes = _fe_axes(axes, n, iso, skipped)
@@ -574,6 +580,10 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
     elif not (x == FUNNEL_Z and y is not None and y == _rxy(run)):
         skipped.append("funnel outline: needs the (funnel_z, r_xy) pair")
     bars, bias_curves = [], []
+    rws = run.reweighted()
+
+    def _agg(t):
+        return t if iso else aggregate_time(rws, t)
     bb, bser, gap = numbers.get("binding_bias"), numbers.get("dg_bias_series"), numbers.get("estimator_gap")
     for r, (lab, ws) in enumerate(rgroups):
         col = f"C{r % 10}" if iso else "k"
@@ -588,7 +598,7 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
             bias_curves.append((vb, col))
         if bser is not None:
             sb = _pick(bser, lab)
-            ax_d.plot(sb["t"], sb["dg"] * KJ_TO_KCAL, color=col, lw=1, ls="--",
+            ax_d.plot(sb.get("t_aggregate", sb["t"]), sb["dg"] * KJ_TO_KCAL, color=col, lw=1, ls="--",
                       label=(f"{lab}: bias-derived {sym}(t)" if iso else f"bias-derived {sym}(t)"))
         extra = []
         if vb is not None:
@@ -596,11 +606,12 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
             g = gap["per_walker"].get(lab) if gap and gap["pooled"] is None else (gap or {}).get("pooled")
             extra.append(f"estimator gap (rw - bias) {_num(g) if g is not None else 'n/a'}")
         s = _pick(ser, lab)
-        ax_d.plot(s["t"], s["dg"] * KJ_TO_KCAL, color=col, lw=1,
+        tx = s.get("t_aggregate", s["t"])
+        ax_d.plot(tx, s["dg"] * KJ_TO_KCAL, color=col, lw=1,
                   label=f"{lab}: {sym}(t): from all frames up to t" if iso else f"{sym}(t): from all frames up to t")
         blk = numbers["blocks"].get(lab) if iso else numbers["blocks"]
         if len(s["t"]):
-            ax_d.axvline(t_rej * s["t"][-1], color=col, ls=":", lw=0.8,
+            ax_d.axvline(_agg(t_rej * s["t"][-1]), color=col, ls=":", lw=0.8,
                          label="start of statistics (t_rej)" if r == 0 else None)
         pre = [f"{lab}:"] if iso else []
         if blk is None:
@@ -618,7 +629,7 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
         if iso:
             bars.append((lab, col, blk["time_mean"], blk["time_sd"]))
         else:
-            ed = np.linspace(t_rej * s["t"][-1], s["t"][-1], nb + 1)
+            ed = _agg(np.linspace(t_rej * s["t"][-1], s["t"][-1], nb + 1))
             first = True
             for k, bv in enumerate(blk["block_dg"]):
                 if np.isfinite(bv):
@@ -639,7 +650,9 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
     _w_ylim(ax_c, bands_.get(main))
     ax_c.set_title(ttl, fontsize=8, loc="left")
     _legend(ax_c, fontsize=7, frameon=False)
-    ax_d.set(xlabel="walker time (ns)", ylabel=f"{sym} (kcal/mol)")
+    ax_d.set(xlabel="walker time (ns)" if iso else "aggregate walker time (ns, summed over walkers)", ylabel=f"{sym} (kcal/mol)")
+    if not iso:
+        ax_d.xaxis.label.set_fontsize(8)
     ax_d.set_title(f"{sym} vs simulation time", fontsize=8, loc="left")
     lo, hi = ax_d.get_ylim()
     ax_d.set_ylim(lo, hi + 0.4 * (hi - lo))                 # headroom keeps the legend off the curves

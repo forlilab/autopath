@@ -558,12 +558,19 @@ def binding(run, bands_, cv=FUNNEL_Z, burn=0.2) -> Combined:
                  scalar=lambda r: r["value"], reweighted=True)
 
 
+def aggregate_time(ws, t):
+    """Summed walker time sampled when each walker has reached ``t``: sum over walkers of min(t, T_w)."""
+    t = np.asarray(t, float)
+    return sum(np.minimum(t, float(w.t[-1])) for w in ws)
+
+
 def dg_series(run, bands_, cv=FUNNEL_Z, burn=0.2, step_ns=1.0) -> Combined:
     """ΔG°(t): each point from every walker's frames with walker time <= t, first ``burn`` of each walker's
     truncated span dropped; ``ess`` per point.
 
     The grid ends exactly at T, the longest pooled walker's end time; shorter walkers contribute all their
-    frames, so the last point equals ``binding``.
+    frames, so the last point equals ``binding``. Shared and single runs also return ``t_aggregate``, the
+    walker time summed over walkers at each point.
     """
     if not run.has_reweight:
         raise ValueError("no REWEIGHT data: ΔG°(t) not supported")
@@ -574,7 +581,10 @@ def dg_series(run, bands_, cv=FUNNEL_Z, burn=0.2, step_ns=1.0) -> Combined:
         if len(t) == 0 or abs(t[-1] - T) > 1e-9:
             t = np.append(t, T)
         v = [_value(run, bands_, cv, *_frames(ws, run, cv, burn, t_max=ti)) for ti in t]
-        return dict(t=t, dg=np.array([x["value"] for x in v]), ess=np.array([x["ess"] for x in v]), unit="kJ/mol")
+        out = dict(t=t, dg=np.array([x["value"] for x in v]), ess=np.array([x["ess"] for x in v]), unit="kJ/mol")
+        if run.layout != "isolated":
+            out["t_aggregate"] = aggregate_time(ws, t)
+        return out
     return apply(run, f, reweighted=True)
 
 
@@ -639,20 +649,29 @@ def binding_bias(run, bands_, cv=FUNNEL_Z, hill_mask_sigmas=2.0) -> Combined:
 
 
 def dg_bias_series(run, bands_, cv=FUNNEL_Z, n=20, hill_mask_sigmas=2.0) -> Combined:
-    """ΔG°(t) from the bias at ``n`` equally spaced wall-clock cuts through the deposition, per bias.
+    """ΔG°(t) from the bias at ``n`` cuts through the deposition, per bias. The last point equals ``binding_bias``.
 
-    Time is walker time: the time reached at each cut by the walker itself (isolated) or by the furthest
-    walker (shared). The last point equals ``binding_bias``.
+    Isolated: equally spaced wall-clock cuts, ``t`` the walker's own time. Shared and single: cuts after
+    ``k N / n`` of the ``N`` hills in deposition order; ``t`` (also ``t_aggregate``) is the walker time reached
+    at the cut, summed over walkers.
     """
+    shared = run.layout != "isolated"
+
     def f(ws):
         raw = [r for w in ws for r in w.hills_raw]
-        hist = fes_history(raw, n=n)
+        wall_all = np.sort(np.concatenate([r["wall_s"] for r in raw]))
+        cuts = None
+        if shared:
+            idx = np.ceil(np.arange(1, n + 1) * len(wall_all) / n).astype(int) - 1
+            cuts = wall_all[idx]
+        hist = fes_history(raw, n=n, cuts=cuts)
         if len(hist) != 1:
             raise ValueError("bias snapshots of one bias expected: not supported")
         r0 = raw[0]
         grids = [np.linspace(float(a), float(b), int(m)) for a, b, m in
                  zip(np.atleast_1d(r0["grid_min"]), np.atleast_1d(r0["grid_max"]), np.atleast_1d(r0["grid_points"]))]
         wall = [(w, np.concatenate([r["wall_s"] for r in w.hills_raw])) for w in ws]
+        agg = sum if shared else max
         dg, t = [], []
         for c, F in zip(hist[0]["wall_s"], hist[0]["fes"]):
             until = {r["run_id"]: (float(np.max(r["time_ns"][r["wall_s"] <= c])) if np.any(r["wall_s"] <= c)
@@ -661,8 +680,11 @@ def dg_bias_series(run, bands_, cv=FUNNEL_Z, n=20, hill_mask_sigmas=2.0) -> Comb
             ok = np.isfinite(Fm).any()
             dg.append(_bias_value(run, bands_, cv, *_bias_curve(run, cv, grids, Fm - np.nanmin(Fm)))["value"]
                       if ok else float("nan"))
-            t.append(max((float(w.hill_t[ww <= c].max()) if np.any(ww <= c) else 0.0) for w, ww in wall))
-        return dict(t=np.array(t), dg=np.array(dg), unit="kJ/mol")
+            t.append(agg((float(w.hill_t[ww <= c].max()) if np.any(ww <= c) else 0.0) for w, ww in wall))
+        out = dict(t=np.array(t), dg=np.array(dg), unit="kJ/mol")
+        if shared:
+            out["t_aggregate"] = out["t"]
+        return out
     return apply(run, f)
 
 

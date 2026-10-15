@@ -161,12 +161,13 @@ def fes_scale(walker) -> float:
     return g / (g - 1.0)
 
 
-def fes_history(walkers, n=60) -> list:
+def fes_history(walkers, n=60, cuts=None) -> list:
     """FES snapshots per bias (walkers grouped by ``bias_dir``).
 
     Cuts are wall-clock times, so concurrent, sequential and staggered shared
     walkers are all handled in deposition order; x is the summed walker time
-    reached at each cut (one walker: its own time). Returns one dict per bias:
+    reached at each cut (one walker: its own time). ``cuts`` (wall-clock times)
+    replaces the ``n`` evenly spaced cuts; use with a single bias. Returns one dict per bias:
     ``run_ids``, ``bias_dir``, ``wall_s``, ``t_ns`` (n,) and ``fes`` (n, *grid).
     """
     groups = {}
@@ -184,14 +185,15 @@ def fes_history(walkers, n=60) -> list:
         height = np.concatenate([w["height_kj"] for w in ws])
         order = np.argsort(wall, kind="stable")
         wall, cv, height = wall[order], cv[order], height[order]
-        cuts = np.linspace(wall[0], wall[-1], n + 1)[1:]
-        cuts[-1] = wall[-1]
+        cs = np.linspace(wall[0], wall[-1], n + 1)[1:] if cuts is None else np.asarray(cuts, float)
+        if cuts is None:
+            cs[-1] = wall[-1]
         bf = boundary_factor(axes, _bounds(ws[0]))
         pre = _preseed(ws)
         scale = fes_scale(ws[0])
         acc = np.zeros(tuple(v.gridWidth for v in reversed(axes)))
         fes, t_ns, start = [], [], 0
-        for c in cuts:
+        for c in cs:
             stop = int(np.searchsorted(wall, c, side="right"))
             if stop > start:
                 acc += _sum_hills(axes, cv[start:stop], height[start:stop])
@@ -199,6 +201,6 @@ def fes_history(walkers, n=60) -> list:
             fes.append(-scale * (acc * bf + pre))
             t_ns.append(sum(float(w["time_ns"][w["wall_s"] <= c][-1]) if np.any(w["wall_s"] <= c) else 0.0
                             for w in ws))
-        out.append(dict(bias_dir=key, run_ids=[w["run_id"] for w in ws], wall_s=cuts,
+        out.append(dict(bias_dir=key, run_ids=[w["run_id"] for w in ws], wall_s=cs,
                         t_ns=np.array(t_ns), fes=np.array(fes)))
     return out

@@ -8,7 +8,7 @@ from openmm import unit
 from autopath.metadynamics.Hills import bias_from_hills
 from autopath.metadynamics.summary import check_convergence, estimators_agree, report
 from autopath.metadynamics.summary.analysis import (C0_PER_A3, KT_PER_K, _bias_curve, _bias_value, bands,
-                                                    bias_fes_scale, binding, binding_bias, dg_bias_series,
+                                                    bias_fes_scale, binding, binding_bias, dg_bias_series, dg_series,
                                                     fes_bias, fe_numbers)
 from autopath.metadynamics.summary.data import load_run
 from autopath.metadynamics.summary.plots import fig_fe
@@ -123,7 +123,64 @@ def test_series_ends_at_binding_bias(tmp_path, layout):
         assert len(ser["t"]) == 8 and np.all(np.diff(ser["t"]) >= 0)
         assert ser["dg"][-1] == pytest.approx(fin["value"])
         assert ser["unit"] == "kJ/mol"
-        assert ser["t"][-1] == pytest.approx(run.walkers[0].hill_t.max())
+        ends = [w.hill_t.max() for w in run.walkers]
+        assert ser["t"][-1] == pytest.approx(sum(ends) if layout == "shared" else ends[0])
+
+
+def _sequential(tmp_path):
+    path = make_run(str(tmp_path / "r"), layout="shared", n_walkers=2)
+    f = np.load(f"{path}/HILLS_w1.npz")
+    d = dict(f)
+    d["wall_s"] = d["wall_s"] + 1e5                  # walker 1 deposits after walker 0 has finished
+    np.savez(f"{path}/HILLS_w1.npz", **d)
+    return load_run(path, funnel=FP)
+
+
+def test_shared_bias_series_x_is_aggregate_time(tmp_path):
+    run = _sequential(tmp_path)
+    b = bands(run)
+    s = dg_bias_series(run, b, n=8, hill_mask_sigmas=ALL).pooled
+    assert np.all(np.diff(s["t"]) > 0) and len(set(s["t"])) == 8
+    np.testing.assert_array_equal(s["t"], s["t_aggregate"])
+    assert s["t"][-1] == pytest.approx(sum(w.hill_t.max() for w in run.walkers))
+    assert s["dg"][-1] == pytest.approx(binding_bias(run, b, hill_mask_sigmas=ALL).pooled["value"])
+
+
+def test_reweighted_t_aggregate_monotonic(tmp_path):
+    run = _sequential(tmp_path)
+    for w in run.walkers[1:]:
+        w.t = w.t[: len(w.t) // 2]; w.bias = w.bias[: len(w.t)]; w.ct = w.ct[: len(w.t)]
+        w.cvs = {k: v[: len(w.t)] for k, v in w.cvs.items()}
+    s = dg_series(run, bands(run), step_ns=0.25).pooled
+    assert np.all(np.diff(s["t_aggregate"]) > 0)
+    assert s["t_aggregate"][-1] == pytest.approx(sum(w.t[-1] for w in run.walkers))
+    assert s["t_aggregate"][0] == pytest.approx(2 * 0.25)
+    iso = load_run(make_run(str(tmp_path / "i"), layout="isolated", n_walkers=2), funnel=FP)
+    assert "t_aggregate" not in dg_series(iso, bands(iso)).per_walker["w0"]
+
+
+def test_summary_json_has_t_aggregate_shared(tmp_path):
+    s = report(make_run(str(tmp_path / "r"), layout="shared", n_walkers=2), funnel=FP,
+               out_dir=str(tmp_path / "o"), step_ns=0.1, hill_mask_sigmas=ALL)
+    d = json.load(open(s["files"]["summary"]))
+    assert len(d["dg_bias_series"]["pooled"]["t_aggregate"]) == len(d["dg_bias_series"]["pooled"]["t"])
+    ta = d["series"]["pooled"]["t_aggregate"]
+    assert len(ta) == len(d["series"]["pooled"]["t"]) and np.all(np.diff(ta) > 0)
+
+
+@pytest.mark.parametrize("n", [2, 3])
+def test_fig_fe_isolated_layout(tmp_path, n):
+    run = load_run(make_run(str(tmp_path / "r"), layout="isolated", n_walkers=n), funnel=FP)
+    fig, axes, _, _ = fig_fe(run, bands(run), step_ns=0.1)
+    fig.canvas.draw()
+    p = {k: axes[k].get_position() for k in ("w", "dg", "bars", "text")}
+    assert p["w"].x0 == pytest.approx(p["dg"].x0) and p["w"].x1 == pytest.approx(p["dg"].x1)
+    assert p["w"].y0 > p["dg"].y1 - 1e-9 and p["dg"].y0 > p["bars"].y1 - 1e-9
+    assert p["bars"].y0 == pytest.approx(p["text"].y0) and p["bars"].y1 == pytest.approx(p["text"].y1)
+    assert p["text"].x0 >= p["bars"].x1 - 1e-9
+    assert p["bars"].x0 == pytest.approx(p["w"].x0) and p["text"].x1 == pytest.approx(p["w"].x1)
+    assert axes["ct"][0].get_position().x1 <= p["w"].x0 + 1e-9
+    assert p["w"].height == pytest.approx(p["dg"].height, rel=0.05)
 
 
 def test_hill_mask_applies_to_series(tmp_path):
