@@ -6,6 +6,7 @@ from dataclasses import asdict
 
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm
 from openmm import unit
 
 from ..Hills import bias_from_hills
@@ -589,7 +590,7 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
         skipped.append("funnel outline: no funnel")
     elif not (x == FUNNEL_Z and y is not None and y == _rxy(run)):
         skipped.append("funnel outline: needs the (funnel_z, r_xy) pair")
-    bars, bias_curves = [], []
+    bars, bias_curves, segs, first_undef = [], [], [], [True]
     rws = run.reweighted()
 
     def _agg(t):
@@ -638,14 +639,48 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
             _ess(v["ess"]) + (f" (min block {_ess(min(be))})" if be else "")] + extra))
         if iso:
             bars.append((lab, col, blk["time_mean"], blk["time_sd"]))
-        else:
-            ed = _agg(np.linspace(t_rej * s["t"][-1], s["t"][-1], nb + 1))
+        ed = _agg(np.linspace(t_rej * s["t"][-1], s["t"][-1], nb + 1))
+        segs.append((lab, col, blk, ed))
+    mins = [np.minimum(b["block_ess_site"], b["block_ess_bulk"]) for _, _, b, _ in segs if "block_ess_site" in b]
+    pos = np.concatenate(mins)[np.concatenate(mins) > 0] if mins else np.zeros(0)
+    if pos.size:
+        norm = LogNorm(vmin=pos.min(), vmax=max(pos.max(), pos.min() * 1.01))
+        cmap = plt.get_cmap("viridis")
+        for lab, col, blk, ed in segs:
+            if "block_ess_site" not in blk:
+                continue
+            mn = np.minimum(blk["block_ess_site"], blk["block_ess_bulk"])
             first = True
             for k, bv in enumerate(blk["block_dg"]):
+                xm = 0.5 * (ed[k] + ed[k + 1])
                 if np.isfinite(bv):
-                    ax_d.hlines(bv * KJ_TO_KCAL, ed[k], ed[k + 1], color="C3", lw=2.5,
-                                label=f"block {sym} (each block alone)" if first else None)
+                    c = cmap(norm(max(mn[k], norm.vmin)))
+                    y = bv * KJ_TO_KCAL
+                    ax_d.hlines(y, ed[k], ed[k + 1], color=c, lw=1.2 if iso else 2.5,
+                                label=f"block {sym} (each block alone)" if first and not iso else None)
                     first = False
+                    ax_d.annotate(str(blk["block_recross"][k]), (xm, y), xytext=(0, 1.5), textcoords="offset points",
+                                  ha="center", va="bottom", fontsize=6, color="0.25" if not iso else col)
+                else:
+                    ax_d.plot([xm], [0], marker="o", mfc="none", mec=col if iso else "k", ms=5, ls="none",
+                              transform=ax_d.get_xaxis_transform(), clip_on=False,
+                              label="block undefined" if first_undef[0] else None)
+                    first_undef[0] = False
+        sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+        cb = fig.colorbar(sm, ax=ax_d, pad=0.1, fraction=0.04, shrink=0.7)
+        cb.set_label("block min(site, bulk) ESS", fontsize=7)
+        cb.ax.tick_params(labelsize=6)
+        axes["cbar"] = cb.ax
+    ax_r = ax_d.twinx()
+    for lab, col, blk, ed in segs:
+        s = _pick(ser, lab)
+        if "ess_frac" in s:
+            ax_r.plot(s.get("t_aggregate", s["t"]), s["ess_frac"], color=col if iso else "0.5",
+                      lw=0.6, alpha=0.5 if iso else 0.8)
+    ax_r.set_yscale("log")
+    ax_r.set_ylabel("ESS/N", fontsize=7, color="0.4")
+    ax_r.tick_params(labelsize=6, colors="0.4")
+    axes["ess"] = ax_r
     ttl = f"W along {main}; {sym} (kcal/mol)"
     if iso and bd.mean is not None:
         ttl += (f"\nmean {_num(bd.mean)} ± {_num(bd.sd)}, spread {_num(bd.spread)}; "

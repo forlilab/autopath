@@ -456,7 +456,7 @@ def test_fig_fe_dg_panel_plain_labels(tmp_path):
     assert "ΔG°(t): from all frames up to t" in leg and "start of statistics (t_rej)" in leg
     assert "block ΔG° (each block alone)" in leg
     assert d.get_title("left") == "ΔG° vs simulation time"
-    assert not d.texts                                       # numbers live outside the data axes
+    assert all(t.get_text().isdigit() for t in d.texts)      # only round-trip counts; numbers live outside
     txt = axes["text"].texts[0].get_text().split("\n")
     for k in ("final ΔG°", "mean ± SD after t_rej", "block bootstrap SD", "last two blocks differ by",
               "valid blocks", "ESS"):
@@ -467,7 +467,7 @@ def test_fig_fe_numbers_outside_data_axes(tmp_path):
     for kw in (dict(), dict(layout="isolated", n_walkers=2)):
         run = load_run(make_run(str(tmp_path / f"r{len(kw)}"), **kw), funnel=FP)
         _, axes, _, _ = fig_fe(run, bands(run), step_ns=0.1, show_numbers=True)
-        assert not axes["dg"].texts and not axes["w"].texts and axes["text"].texts
+        assert all(t.get_text().isdigit() for t in axes["dg"].texts) and not axes["w"].texts and axes["text"].texts
 
 
 def test_fig_fe_given_axes_without_text_skips(tmp_path):
@@ -494,8 +494,19 @@ def test_fig_fe_no_numbers_by_default(tmp_path):
     for kw in (dict(), dict(layout="isolated", n_walkers=2)):
         run = load_run(make_run(str(tmp_path / f"n{len(kw)}"), **kw), funnel=FP)
         fig, axes, skipped, nums = fig_fe(run, bands(run), step_ns=0.1)
-        assert axes["text"] is None and not any(a.texts for a in fig.axes if a.get_visible())
+        assert axes["text"] is None and not any(not t.get_text().isdigit() for a in fig.axes if a.get_visible() for t in a.texts)
         assert nums["blocks"] is not None and not any("numbers" in s for s in skipped)
         if kw:                                            # bars take the whole bottom row
             pb, pw = axes["bars"].get_position(), axes["w"].get_position()
             assert pb.x0 == pytest.approx(pw.x0) and pb.x1 == pytest.approx(pw.x1)
+
+
+@pytest.mark.parametrize("layout", ["shared", "isolated"])
+def test_fig_fe_dg_panel_has_colorbar_and_ess_axis(tmp_path, layout):
+    run = load_run(make_run(str(tmp_path / "r"), layout=layout, n_walkers=2), funnel=FP)
+    fig, axes, _, nums = fig_fe(run, bands(run), step_ns=0.1)
+    assert axes["cbar"].get_ylabel() == "block min(site, bulk) ESS"
+    assert axes["ess"].get_ylabel() == "ESS/N" and axes["ess"].get_yscale() == "log"
+    assert axes["ess"] in fig.axes and axes["ess"].get_lines()
+    blk = nums["blocks"] if layout == "shared" else nums["blocks"]["w0"]
+    assert len(blk["block_recross"]) == 10

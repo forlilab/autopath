@@ -352,3 +352,70 @@ def test_isolated_different_walkers_not_pooled(tmp_path):
     pooled = _value(run, b, "funnel_z", *_frames(run.walkers, run, "funnel_z", 0.0))["value"]
     assert min(abs(pooled - v0), abs(pooled - v1)) > 0.1
     assert c.mean == pytest.approx((v0 + v1) / 2) and c.spread == pytest.approx(abs(v0 - v1))
+
+
+def _flat(run, z_by_walker):
+    for w, z in zip(run.walkers, z_by_walker):
+        w.bias = np.zeros_like(w.bias); w.ct = np.zeros_like(w.ct)
+        w.cvs["funnel_z"] = z
+
+
+def test_block_ess_all_bulk_and_uniform(tmp_path):
+    from autopath.metadynamics.summary.analysis import block_band_stats
+    run = load_run(make_run(str(tmp_path / "r"), n_walkers=1), funnel=FP)
+    w = run.walkers[0]; n = len(w.t)
+    z = np.full(n, 1.8); z[:50] = 0.1
+    _flat(run, [z])
+    b = bands(run)
+    st = block_band_stats(run.walkers, run, b, "funnel_z", w.t[100], w.t[200])
+    assert st["ess_site"] == 0.0 and min(st["ess_site"], st["ess_bulk"]) == 0.0
+    assert st["ess_bulk"] == pytest.approx(100)
+    st = block_band_stats(run.walkers, run, b, "funnel_z", w.t[0], w.t[100])
+    assert st["ess_site"] == pytest.approx(50) and st["ess_bulk"] == pytest.approx(50)
+
+
+def test_block_ess_shared_single_normalisation(tmp_path):
+    from autopath.metadynamics.summary.analysis import block_band_stats
+    run = load_run(make_run(str(tmp_path / "r")), funnel=FP)
+    kt = KT_PER_K * run.temperature
+    a, b_ = run.walkers
+    n = len(a.t)
+    _flat(run, [np.full(n, 0.1), np.full(len(b_.t), 0.1)])
+    b_.bias = np.full_like(b_.bias, kt * np.log(4.0))
+    st = block_band_stats(run.walkers, run, bands(run), "funnel_z", 0.0, 1e9)
+    # weights 1 (n frames) and 4 (n frames): (5n)^2 / (17n)
+    assert st["ess_site"] == pytest.approx(25 * n / 17)
+    assert st["ess_bulk"] == 0.0
+
+
+def test_block_recross_scripted_windows(tmp_path):
+    from autopath.metadynamics.summary.analysis import block_band_stats
+    run = load_run(make_run(str(tmp_path / "r")), funnel=FP)
+    zs = []
+    for w in run.walkers:
+        z = np.full(len(w.t), 0.1)
+        z[(w.t >= 1.0) & (w.t < 1.5)] = 1.8
+        z[(w.t >= 2.0) & (w.t < 2.5)] = 1.8
+        zs.append(z)
+    _flat(run, zs)
+    b = bands(run)
+    rc = lambda lo, hi: block_band_stats(run.walkers, run, b, "funnel_z", lo, hi)["recross"]
+    assert rc(0.0, 1.6) == 2          # one cycle per walker
+    assert rc(1.6, 3.1) == 2
+    assert rc(0.0, 3.1) == 4
+    assert rc(1.0, 1.4) == 0 and rc(2.6, 3.9) == 0
+
+
+def test_fe_numbers_block_fields_and_ess_frac(tmp_path):
+    from autopath.metadynamics.summary.analysis import fe_numbers
+    run = load_run(make_run(str(tmp_path / "r")), funnel=FP)
+    out = fe_numbers(run, bands(run), step_ns=0.1, n_boot=20)
+    blk = out["blocks"]
+    for k in ("block_ess_site", "block_ess_bulk", "block_recross"):
+        assert len(blk[k]) == 10
+    assert all(0 <= s <= e + 1e-9 for s, e in zip(blk["block_ess_site"], blk["block_ess"]))
+    f = out["series"].pooled["ess_frac"]
+    assert np.all((f > 0) & (f <= 1 + 1e-12))
+    _flat(run, [w.cvs["funnel_z"] for w in run.walkers])
+    f = dg_series(run, bands(run), step_ns=0.1).pooled["ess_frac"]
+    assert np.allclose(f, 1.0)

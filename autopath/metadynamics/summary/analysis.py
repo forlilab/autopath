@@ -1,5 +1,6 @@
 """Bands, recrossings, reweighting, the shared/isolated combination rule, free energies and ΔG°."""
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Callable, Optional
 
 import numpy as np
@@ -530,6 +531,20 @@ def _frames_in_windows(ws, run, cv, windows, cache=None):
     return _pool(vs, lws)
 
 
+def block_band_stats(ws, run, bands_, cv, lo, hi) -> dict:
+    """Site and bulk Kish ESS and round trips of the frames with lo <= t < hi.
+
+    Weights are pooled over ``ws`` with one normalisation; round trips are summed over walkers.
+    """
+    b = bands_[cv]
+    vs, lws = _window_raw(ws, run, cv, lo, hi)
+    v, w = _pool(vs, lws)
+    ins = (v >= b.bound[0]) & (v <= b.bound[1])
+    inu = (v >= b.unbound[0]) & (v <= b.unbound[1])
+    n = sum(recrossings(SimpleNamespace(cvs={cv: x}), cv, b)["n_cycles"] for x in vs if len(x))
+    return dict(ess_site=kish_ess(w[ins]), ess_bulk=kish_ess(w[inu]), recross=int(n))
+
+
 def _value(run, bands_, cv, values, weights):
     """ΔG° or band ΔF of weighted frames, with the Kish ESS and frame count."""
     b = bands_[cv]
@@ -566,7 +581,7 @@ def aggregate_time(ws, t):
 
 def dg_series(run, bands_, cv=FUNNEL_Z, burn=0.2, step_ns=1.0) -> Combined:
     """ΔG°(t): each point from every walker's frames with walker time <= t, first ``burn`` of each walker's
-    truncated span dropped; ``ess`` per point.
+    truncated span dropped; ``ess`` and ``ess_frac`` (ESS over frame count) per point.
 
     The grid ends exactly at T, the longest pooled walker's end time; shorter walkers contribute all their
     frames, so the last point equals ``binding``. Shared and single runs also return ``t_aggregate``, the
@@ -581,7 +596,10 @@ def dg_series(run, bands_, cv=FUNNEL_Z, burn=0.2, step_ns=1.0) -> Combined:
         if len(t) == 0 or abs(t[-1] - T) > 1e-9:
             t = np.append(t, T)
         v = [_value(run, bands_, cv, *_frames(ws, run, cv, burn, t_max=ti)) for ti in t]
-        out = dict(t=t, dg=np.array([x["value"] for x in v]), ess=np.array([x["ess"] for x in v]), unit="kJ/mol")
+        ess = np.array([x["ess"] for x in v])
+        nf = np.array([x["n_frames"] for x in v], float)
+        out = dict(t=t, dg=np.array([x["value"] for x in v]), ess=ess,
+                   ess_frac=np.divide(ess, nf, out=np.full(len(t), np.nan), where=nf > 0), unit="kJ/mol")
         if run.layout != "isolated":
             out["t_aggregate"] = aggregate_time(ws, t)
         return out
@@ -689,7 +707,7 @@ def dg_bias_series(run, bands_, cv=FUNNEL_Z, n=20, hill_mask_sigmas=2.0) -> Comb
 
 
 def block_analysis(t, dg, block_value, t_rej=0.2, n_blocks=10, n_boot=2000, seed=0, windows_value=None,
-                   block_ess=None) -> dict:
+                   block_ess=None, block_stats=None) -> dict:
     """Convergence numbers after the rejection time ``t_rej`` (fraction of the run).
 
     Blocks are contiguous half-open windows [lo, hi) of walker time between ``t_rej * t[-1]`` and ``t[-1]``;
@@ -707,6 +725,9 @@ def block_analysis(t, dg, block_value, t_rej=0.2, n_blocks=10, n_boot=2000, seed
         multiplicity (NaN if undefined). Required.
     block_ess : callable, optional
         ``block_ess(lo, hi)`` returns the Kish ESS of the block's frames; adds ``block_ess``.
+    block_stats : callable, optional
+        ``block_stats(lo, hi)`` returns a dict with ``ess_site``, ``ess_bulk``, ``recross``; adds
+        ``block_ess_site``, ``block_ess_bulk``, ``block_recross``.
 
     Returns
     -------
@@ -740,6 +761,11 @@ def block_analysis(t, dg, block_value, t_rej=0.2, n_blocks=10, n_boot=2000, seed
                 unit="kJ/mol")
     if block_ess is not None:
         out["block_ess"] = [float(block_ess(lo, hi)) for lo, hi in wins]
+    if block_stats is not None:
+        st = [block_stats(lo, hi) for lo, hi in wins]
+        out["block_ess_site"] = [float(x["ess_site"]) for x in st]
+        out["block_ess_bulk"] = [float(x["ess_bulk"]) for x in st]
+        out["block_recross"] = [int(x["recross"]) for x in st]
     return out
 
 
@@ -808,7 +834,9 @@ def fe_numbers(run, bands_, cv=None, burn=0.2, t_rej=0.2, step_ns=1.0, min_point
 
         def be(lo, hi, ws=ws):
             return kish_ess(_frames_in_window(ws, run, main, lo, hi)[1])
+        def bs(lo, hi, ws=ws):
+            return block_band_stats(ws, run, bands_, main, lo, hi)
         blocks[lab] = block_analysis(s["t"], s["dg"], bv, t_rej=t_rej, n_blocks=n_blocks, n_boot=n_boot,
-                                     seed=seed, windows_value=wv, block_ess=be)
+                                     seed=seed, windows_value=wv, block_ess=be, block_stats=bs)
     out["blocks"] = blocks if iso else blocks["all"]
     return out
