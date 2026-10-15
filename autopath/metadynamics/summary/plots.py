@@ -30,6 +30,23 @@ def _legend(ax, **kw):
         ax.legend(**kw)
 
 
+def _w_ylim(ax, band, pad=0.15):
+    """y-range from the curves between the bound and unbound bands; values outside are clipped."""
+    if band is None:
+        return
+    edges = list(band.bound) + list(band.unbound)
+    lo, hi = min(edges), max(edges)
+    top = []
+    for ln in ax.get_lines():
+        x, y = np.asarray(ln.get_xdata(), float), np.asarray(ln.get_ydata(), float)
+        m = (x >= lo) & (x <= hi) & np.isfinite(y)
+        if m.any():
+            top.append(y[m].max())
+    if top:
+        t = max(top)
+        ax.set_ylim(-0.05 * t - 0.2, (1 + pad) * t + 0.2)
+
+
 def _names(run):
     return [c.name for c in run.cvs] + list(run.monitored)
 
@@ -619,6 +636,7 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
     for vb, col in bias_curves:
         ax_c.plot(vb["z"], np.asarray(vb["W"]) * KJ_TO_KCAL, color=col, lw=1, ls="--")
     ax_c.set(xlabel=_label(run, main), ylabel="W (kcal/mol)")
+    _w_ylim(ax_c, bands_.get(main))
     ax_c.set_title(ttl, fontsize=8, loc="left")
     _legend(ax_c, fontsize=7, frameon=False)
     ax_d.set(xlabel="walker time (ns)", ylabel=f"{sym} (kcal/mol)")

@@ -475,3 +475,16 @@ def test_fig_fe_given_axes_without_text_skips(tmp_path):
     fig, ax = plt.subplots(1, 4)
     _, _, skipped, _ = fig_fe(run, bands(run), step_ns=0.5, axes=dict(ct=ax[0], map=ax[1], w=ax[2], dg=ax[3]))
     assert "ΔG° numbers: no text axes given" in skipped and not ax[3].texts
+
+
+def test_w_ylim_ignores_values_outside_bands():
+    from autopath.metadynamics.summary.plots import _w_ylim
+    from autopath.metadynamics.summary.analysis import Band
+    fig, ax = plt.subplots()
+    x = np.linspace(-1.0, 3.0, 81)
+    y = np.where(x < -0.5, 60.0, np.sin(x) + 2.0)        # wall far outside the bands
+    ax.plot(x, y)
+    _w_ylim(ax, Band(bound=(-0.2, 0.5), unbound=(1.2, 2.3), bound_end="low", source="test"))
+    lo, hi = ax.get_ylim()
+    inside = y[(x >= -0.2) & (x <= 2.3)].max()
+    assert hi == pytest.approx(1.15 * inside + 0.2) and hi < 10 and lo < 0
