@@ -9,7 +9,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from .analysis import bands as _bands, clamp_fractions, fe_numbers, hill_mask, length_unit, recrossings
+from .analysis import bands as _bands, bias_fes_scale, clamp_fractions, fe_numbers, hill_mask, length_unit, recrossings
 from .data import load_run
 from .plots import fig_bias, fig_cvs, fig_fe
 
@@ -90,7 +90,9 @@ def report(run_dir, funnel=None, learned_cv=None, bands=None, burn=0.2, t_rej=0.
     dict
         Same content as the JSON file; non-finite numbers stay NaN here and are null in the file.
         Reweighted numbers carry their Kish ESS: ``binding`` (per value), ``series["ess"]`` (per point),
-        ``blocks["block_ess"]`` and ``fes_ess``.
+        ``blocks["block_ess"]`` and ``fes_ess``. Bias-derived (final bias, F = -fes_scale·V; ``fes_scale`` is
+        recorded with ``tempering``): ``binding_bias``, ``dg_bias_series`` and ``estimator_gap`` (reweighted
+        minus bias-derived ΔG°, pooled or per walker).
     """
     run = load_run(run_dir, funnel=funnel, learned_cv=learned_cv)
     out_dir = out_dir or run_dir
@@ -99,7 +101,8 @@ def report(run_dir, funnel=None, learned_cv=None, bands=None, burn=0.2, t_rej=0.
     p = lambda k: os.path.join(out_dir, f"{prefix}_{k}")
     f1, _, s1 = fig_cvs(run, b, out_path=p("cvs.png")); plt.close(f1)
     f2, _, s2 = fig_bias(run, out_path=p("bias.png"), hill_mask_sigmas=hill_mask_sigmas); plt.close(f2)
-    numbers = fe_numbers(run, b, burn=burn, t_rej=t_rej, step_ns=step_ns, min_points=min_points)
+    numbers = fe_numbers(run, b, burn=burn, t_rej=t_rej, step_ns=step_ns, min_points=min_points,
+                         hill_mask_sigmas=hill_mask_sigmas)
     f3, _, s3, nums = fig_fe(run, b, burn=burn, t_rej=t_rej, step_ns=step_ns, out_path=p("fe.png"), numbers=numbers,
                             min_count=min_count, min_bin_ess=min_bin_ess, smooth_sigma=smooth_sigma, fmax=fmax,
                             bins=bins, bins_per_hill=bins_per_hill, bins_fallback=bins_fallback,
@@ -124,7 +127,8 @@ def report(run_dir, funnel=None, learned_cv=None, bands=None, burn=0.2, t_rej=0.
                     smooth_sigma=smooth_sigma, fmax=fmax, bins=bins, bins_per_hill=bins_per_hill,
                     bins_fallback=bins_fallback, min_density=min_density),
         walkers=walkers, clamp=clamp_fractions(run), binding=nums["binding"], series=nums["series"],
-        blocks=nums["blocks"], fes_ess=nums["fes_ess"], fes_masked=nums["fes_masked"], fes_kept=nums["fes_kept"], fes_bins=nums["fes_bins"], fmax_kcal=nums["fmax"],
+        blocks=nums["blocks"], binding_bias=nums["binding_bias"], dg_bias_series=nums["dg_bias_series"],
+        estimator_gap=nums["estimator_gap"], fes_scale=bias_fes_scale(run), fes_ess=nums["fes_ess"], fes_masked=nums["fes_masked"], fes_kept=nums["fes_kept"], fes_bins=nums["fes_bins"], fmax_kcal=nums["fmax"],
         bias_unsampled=_unsampled(run, hill_mask_sigmas), unit="kJ/mol",
         skipped_walkers=list(run.skipped), skipped_panels=s1 + s2 + s3,
         files=dict(cvs=p("cvs.png"), bias=p("bias.png"), fe=p("fe.png"), summary=p("summary.json")))

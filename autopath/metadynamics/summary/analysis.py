@@ -7,7 +7,7 @@ from scipy.ndimage import gaussian_filter
 from scipy.spatial import cKDTree
 from openmm import unit
 
-from ..Hills import bias_from_hills, fes_scale
+from ..Hills import bias_from_hills, fes_history, fes_scale
 
 FUNNEL_Z = "funnel_z"
 SITE_FRAC = 0.2
@@ -238,20 +238,23 @@ def apply(run, fn: Callable, scalar: Optional[Callable] = None, reweighted=False
     return c
 
 
+def _fes_bias_group(ws, hill_mask_sigmas):
+    """(grids, F) of one bias from the hills of ``ws``; F in kJ/mol, min 0, NaN outside the hill mask."""
+    raw = [h for w in ws for h in w.hills_raw]
+    V = np.asarray(bias_from_hills(raw))
+    h0 = raw[0]
+    grids = [np.linspace(float(a), float(b), int(n)) for a, b, n in
+             zip(np.atleast_1d(h0["grid_min"]), np.atleast_1d(h0["grid_max"]), np.atleast_1d(h0["grid_points"]))]
+    F = np.where(hill_mask(raw, hill_mask_sigmas), -fes_scale(h0) * V, np.nan)
+    return grids, F - np.nanmin(F)
+
+
 def fes_bias(run, hill_mask_sigmas=2.0) -> Combined:
     """Bias-derived FES (kJ/mol, min 0): -γ/(γ-1)·V for well tempering, -V for transition tempering alone.
 
     Grid points farther than ``hill_mask_sigmas`` hill widths from every deposited hill are NaN.
     """
-    def f(ws):
-        raw = [h for w in ws for h in w.hills_raw]
-        V = np.asarray(bias_from_hills(raw))
-        h0 = raw[0]
-        grids = [np.linspace(float(a), float(b), int(n)) for a, b, n in
-                 zip(np.atleast_1d(h0["grid_min"]), np.atleast_1d(h0["grid_max"]), np.atleast_1d(h0["grid_points"]))]
-        F = np.where(hill_mask(raw, hill_mask_sigmas), -fes_scale(h0) * V, np.nan)
-        return grids, F - np.nanmin(F)
-    return apply(run, f)
+    return apply(run, lambda ws: _fes_bias_group(ws, hill_mask_sigmas))
 
 
 def fes_marginal(F, axis, kt):
@@ -575,6 +578,94 @@ def dg_series(run, bands_, cv=FUNNEL_Z, burn=0.2, step_ns=1.0) -> Combined:
     return apply(run, f, reweighted=True)
 
 
+def _bias_curve(run, cv, grids, F):
+    """W along ``cv`` (kJ/mol, min 0) from a bias FES: every other CV is Boltzmann-integrated out.
+
+    The grid is stored (last CV, ..., first CV), so the axis of CV ``j`` is ``ncv - 1 - j``.
+    """
+    names = [c.name for c in run.cvs]
+    if cv not in names:
+        raise ValueError(f"{cv} is not a biased CV: bias-derived W not supported")
+    n, j = len(names), names.index(cv)
+    F = np.asarray(F, float)
+    if F.shape != tuple(len(g) for g in reversed(grids)):
+        raise ValueError(f"bias grid shape {F.shape} does not match the CV grids: not supported")
+    kt = KT_PER_K * run.temperature
+    for ax in range(n - 1, -1, -1):
+        if ax != n - 1 - j:
+            F = fes_marginal(F, ax, kt)
+    return np.asarray(grids[j], float), F
+
+
+def _bias_value(run, bands_, cv, z, W):
+    """ΔG° (funnel) or band ΔF (kJ/mol) from W(z) on a grid; same bands and formula as ``_value``.
+
+    The bulk density is the mean of exp(-W/kT) over the bulk band; grid sums stand for the integrals.
+    """
+    b, a, kt = bands_[cv], ang_per_unit(run, cv), KT_PER_K * run.temperature
+    z, W = np.asarray(z, float), np.asarray(W, float)
+    fin = np.isfinite(W)
+    site = fin & (z >= b.bound[0]) & (z <= b.bound[1])
+    oth = fin & (z >= b.unbound[0]) & (z <= b.unbound[1])
+    funnel = cv == FUNNEL_Z and run.funnel is not None
+    out = dict(value=float("nan"), unit="kJ/mol", kind="dG0" if funnel else "band_dF", z=z, W=W)
+    if funnel and "R_cylinder" not in run.funnel:
+        raise ValueError("funnel without R_cylinder: ΔG° not supported")
+    if not site.any() or not oth.any():
+        out["reason"] = "no bias-derived W in bound or " + ("bulk" if funnel else "unbound") + " band"
+        return out
+    boltz = np.exp(-(W - W[fin].min()) / kt)
+    if funnel:
+        dz = float(np.median(np.diff(z))) * a
+        v = -kt * np.log(C0_PER_A3 * np.pi * _ang(run.funnel, "R_cylinder") ** 2 * boltz[site].sum() * dz
+                         / boltz[oth].mean())
+    else:
+        v = -kt * np.log(boltz[site].sum() / boltz[oth].sum())
+    out.update(value=float(v), reason=None)
+    return out
+
+
+def binding_bias(run, bands_, cv=FUNNEL_Z, hill_mask_sigmas=2.0) -> Combined:
+    """ΔG° (kind "dG0") or band ΔF (kind "band_dF") from the final bias: F = -fes_scale·V.
+
+    Other CVs are Boltzmann-integrated out. Shared and single runs use one bias (all hills pooled); isolated
+    runs one bias per walker, never pooled. Each value dict carries the curve ``z`` (CV units) and ``W``
+    (kJ/mol, min 0, NaN outside the hill mask).
+    """
+    def f(ws):
+        grids, F = _fes_bias_group(ws, hill_mask_sigmas)
+        return _bias_value(run, bands_, cv, *_bias_curve(run, cv, grids, F))
+    return apply(run, f, scalar=lambda r: r["value"])
+
+
+def dg_bias_series(run, bands_, cv=FUNNEL_Z, n=20, hill_mask_sigmas=2.0) -> Combined:
+    """ΔG°(t) from the bias at ``n`` equally spaced wall-clock cuts through the deposition, per bias.
+
+    Time is walker time: the time reached at each cut by the walker itself (isolated) or by the furthest
+    walker (shared). The last point equals ``binding_bias``.
+    """
+    def f(ws):
+        raw = [r for w in ws for r in w.hills_raw]
+        hist = fes_history(raw, n=n)
+        if len(hist) != 1:
+            raise ValueError("bias snapshots of one bias expected: not supported")
+        r0 = raw[0]
+        grids = [np.linspace(float(a), float(b), int(m)) for a, b, m in
+                 zip(np.atleast_1d(r0["grid_min"]), np.atleast_1d(r0["grid_max"]), np.atleast_1d(r0["grid_points"]))]
+        wall = [(w, np.concatenate([r["wall_s"] for r in w.hills_raw])) for w in ws]
+        dg, t = [], []
+        for c, F in zip(hist[0]["wall_s"], hist[0]["fes"]):
+            until = {r["run_id"]: (float(np.max(r["time_ns"][r["wall_s"] <= c])) if np.any(r["wall_s"] <= c)
+                                   else -np.inf) for r in raw}
+            Fm = np.where(hill_mask(raw, hill_mask_sigmas, until=until), F, np.nan)
+            ok = np.isfinite(Fm).any()
+            dg.append(_bias_value(run, bands_, cv, *_bias_curve(run, cv, grids, Fm - np.nanmin(Fm)))["value"]
+                      if ok else float("nan"))
+            t.append(max((float(w.hill_t[ww <= c].max()) if np.any(ww <= c) else 0.0) for w, ww in wall))
+        return dict(t=np.array(t), dg=np.array(dg), unit="kJ/mol")
+    return apply(run, f)
+
+
 def block_analysis(t, dg, block_value, t_rej=0.2, n_blocks=10, n_boot=2000, seed=0, windows_value=None,
                    block_ess=None) -> dict:
     """Convergence numbers after the rejection time ``t_rej`` (fraction of the run).
@@ -630,8 +721,18 @@ def block_analysis(t, dg, block_value, t_rej=0.2, n_blocks=10, n_boot=2000, seed
     return out
 
 
+def estimator_gap(rw, bias) -> dict:
+    """Reweighted minus bias-derived binding value (kJ/mol): ``pooled`` (or None) and ``per_walker``."""
+    def d(a, b):
+        return float(a["value"] - b["value"])
+    if rw.pooled is not None:
+        return dict(pooled=d(rw.pooled, bias.pooled), per_walker={}, unit="kJ/mol")
+    return dict(pooled=None, unit="kJ/mol",
+                per_walker={k: d(v, bias.per_walker[k]) for k, v in rw.per_walker.items() if k in bias.per_walker})
+
+
 def fe_numbers(run, bands_, cv=None, burn=0.2, t_rej=0.2, step_ns=1.0, min_points=12, n_blocks=10, n_boot=2000,
-               seed=0) -> dict:
+               seed=0, hill_mask_sigmas=2.0, bias_n=20) -> dict:
     """Binding free energy, ΔG°(t) and block analysis along one CV (per walker if isolated).
 
     Parameters
@@ -640,19 +741,31 @@ def fe_numbers(run, bands_, cv=None, burn=0.2, t_rej=0.2, step_ns=1.0, min_point
         Default funnel z when it has a band, else the first biased CV.
     min_points : int
         Fewest ΔG°(t) points for a block analysis; shorter series give ``None`` blocks and a skip note.
+    hill_mask_sigmas, bias_n
+        Hill mask radius and number of snapshots of the bias-derived estimator.
 
     Returns
     -------
     dict
         ``cv``; ``binding`` and ``series`` (``Combined`` or None without REWEIGHT data); ``blocks`` (dict,
-        ``{rid: dict or None}`` if isolated, or None); ``skipped`` (list of str). Free energies in kJ/mol.
+        ``{rid: dict or None}`` if isolated, or None); ``binding_bias`` and ``dg_bias_series`` (bias-derived
+        ``Combined``, or None if not supported); ``estimator_gap`` (reweighted - bias-derived, see
+        ``estimator_gap``, None without both); ``skipped`` (list of str). Free energies in kJ/mol.
     """
     main = cv or (FUNNEL_Z if FUNNEL_Z in bands_ else run.cvs[0].name)
-    out = dict(cv=main, binding=None, series=None, blocks=None, skipped=[])
+    out = dict(cv=main, binding=None, series=None, blocks=None, binding_bias=None, dg_bias_series=None,
+               estimator_gap=None, skipped=[])
+    try:
+        out["binding_bias"] = binding_bias(run, bands_, cv=main, hill_mask_sigmas=hill_mask_sigmas)
+        out["dg_bias_series"] = dg_bias_series(run, bands_, cv=main, n=bias_n, hill_mask_sigmas=hill_mask_sigmas)
+    except ValueError as e:
+        out["skipped"].append(f"bias-derived ΔG°: {e}")
     if not run.has_reweight:
         out["skipped"].append("reweighted FES, ΔG° and blocks: no REWEIGHT data")
         return out
     out["binding"] = binding(run, bands_, cv=main, burn=burn)
+    if out["binding_bias"] is not None:
+        out["estimator_gap"] = estimator_gap(out["binding"], out["binding_bias"])
     ser = out["series"] = dg_series(run, bands_, cv=main, burn=burn, step_ns=step_ns)
     iso = run.layout == "isolated"
     groups = [(w.rid, [w]) for w in run.reweighted()] if iso else [("all", run.reweighted())]

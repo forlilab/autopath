@@ -183,3 +183,23 @@ def min_ess(n):
                 bad.append(f"{k}: ESS {e:.0f}")
         return (False, f"ESS below {n}: " + "; ".join(bad)) if bad else (True, f"ESS >= {n}")
     return _named(f"min_ess({n})", f)
+
+
+def estimators_agree(tol_kcal):
+    """|reweighted - bias-derived binding value| <= tol_kcal (kcal/mol): pooled if shared, every walker if
+    isolated; an undefined gap fails."""
+    def f(s):
+        g = s.get("estimator_gap") or {}
+        vals = {"all": g.get("pooled")} if s["layout"] != "isolated" else \
+            {r: (g.get("per_walker") or {}).get(r) for r in s["walkers"]}
+        bad = []
+        for k, v in vals.items():
+            x = _kcal(v)
+            if not math.isfinite(x):
+                bad.append(f"{k}: undefined")
+            elif abs(x) > tol_kcal:
+                bad.append(f"{k}: gap {x:.2f} kcal/mol")
+        if bad:
+            return False, f"estimator gap not within {tol_kcal} kcal/mol: " + "; ".join(bad)
+        return True, f"estimator gap within {tol_kcal} kcal/mol"
+    return _named(f"estimators_agree({tol_kcal})", f)

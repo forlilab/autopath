@@ -444,7 +444,10 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
     skipped = list(numbers["skipped"])
     nums = {"binding": None if numbers["binding"] is None else asdict(numbers["binding"]),
             "series": None if numbers["series"] is None else asdict(numbers["series"]),
-            "blocks": numbers["blocks"], "fes_ess": None, "fes_masked": None, "fes_kept": None,
+            "blocks": numbers["blocks"],
+            "binding_bias": None if numbers.get("binding_bias") is None else asdict(numbers["binding_bias"]),
+            "dg_bias_series": None if numbers.get("dg_bias_series") is None else asdict(numbers["dg_bias_series"]),
+            "estimator_gap": numbers.get("estimator_gap"), "fes_ess": None, "fes_masked": None, "fes_kept": None,
             "fes_bins": None, "fmax": None}
     iso = run.layout == "isolated"
     groups = [(w.rid, [w]) for w in run.walkers] if iso else [("all", run.walkers)]
@@ -553,13 +556,28 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
         skipped.append("funnel outline: no funnel")
     elif not (x == FUNNEL_Z and y is not None and y == _rxy(run)):
         skipped.append("funnel outline: needs the (funnel_z, r_xy) pair")
-    bars = []
+    bars, bias_curves = [], []
+    bb, bser, gap = numbers.get("binding_bias"), numbers.get("dg_bias_series"), numbers.get("estimator_gap")
     for r, (lab, ws) in enumerate(rgroups):
         col = f"C{r % 10}" if iso else "k"
         c1 = _pick(f1, lab)
         v = _pick(bd, lab)
         val = f"{v['value'] * KJ_TO_KCAL:.2f}" if np.isfinite(v["value"]) else f"n/a ({v['reason']})"
-        ax_c.plot(c1[0], c1[1] * KJ_TO_KCAL, color=col, lw=1, label=f"{lab}: {sym} {val}, {_ess(v['ess'])}")
+        vb = None if bb is None else _pick(bb, lab)
+        bval = "n/a" if vb is None else _num(vb["value"])
+        ax_c.plot(c1[0], c1[1] * KJ_TO_KCAL, color=col, lw=1,
+                  label=f"{lab}: {sym} {val} rw / {bval} bias (kcal/mol), {_ess(v['ess'])}")
+        if vb is not None:
+            bias_curves.append((vb, col))
+        if bser is not None:
+            sb = _pick(bser, lab)
+            ax_d.plot(sb["t"], sb["dg"] * KJ_TO_KCAL, color=col, lw=1, ls="--",
+                      label=(f"{lab}: bias-derived {sym}(t)" if iso else f"bias-derived {sym}(t)"))
+        extra = []
+        if vb is not None:
+            extra.append(f"bias-derived {sym} {_num(vb['value'])}")
+            g = gap["per_walker"].get(lab) if gap and gap["pooled"] is None else (gap or {}).get("pooled")
+            extra.append(f"estimator gap (rw - bias) {_num(g) if g is not None else 'n/a'}")
         s = _pick(ser, lab)
         ax_d.plot(s["t"], s["dg"] * KJ_TO_KCAL, color=col, lw=1,
                   label=f"{lab}: {sym}(t): from all frames up to t" if iso else f"{sym}(t): from all frames up to t")
@@ -569,7 +587,7 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
                          label="start of statistics (t_rej)" if r == 0 else None)
         pre = [f"{lab}:"] if iso else []
         if blk is None:
-            lines.append("\n".join(pre + [f"final {sym} {_num(v['value'])}", "blocks n/a", _ess(v["ess"])]))
+            lines.append("\n".join(pre + [f"final {sym} {_num(v['value'])}", "blocks n/a", _ess(v["ess"])] + extra))
             continue
         nb = len(blk["block_dg"])
         be = blk.get("block_ess")
@@ -579,7 +597,7 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
             f"block bootstrap SD {_num(blk['boot_sd'])}",
             f"last two blocks differ by {_num(blk['last_blocks_diff'])}",
             f"valid blocks {blk['n_valid_blocks']}/{nb}",
-            _ess(v["ess"]) + (f" (min block {_ess(min(be))})" if be else "")]))
+            _ess(v["ess"]) + (f" (min block {_ess(min(be))})" if be else "")] + extra))
         if iso:
             bars.append((lab, col, blk["time_mean"], blk["time_sd"]))
         else:
@@ -598,6 +616,8 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
     if wpts is not None:
         for line in [ln for ln in ax_c.get_lines() if ln.get_marker() in (None, "None")][:len(rgroups)]:
             _stars(ax_c, wpts[:, 0], np.interp(wpts[:, 0], line.get_xdata(), line.get_ydata()))
+    for vb, col in bias_curves:
+        ax_c.plot(vb["z"], np.asarray(vb["W"]) * KJ_TO_KCAL, color=col, lw=1, ls="--")
     ax_c.set(xlabel=_label(run, main), ylabel="W (kcal/mol)")
     ax_c.set_title(ttl, fontsize=8, loc="left")
     _legend(ax_c, fontsize=7, frameon=False)
