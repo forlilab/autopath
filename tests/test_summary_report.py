@@ -17,8 +17,11 @@ KJ = 4.184
 def test_report_writes_figures_and_json(tmp_path):
     d = make_run(str(tmp_path / "r"))
     s = report(d, out_dir=str(tmp_path / "o"), step_ns=0.5)
-    for f in ("metad_cvs.png", "metad_bias.png", "metad_fe.png", "metad_summary.json"):
+    for f in ("metad_cvs.png", "metad_bias.png", "metad_fe.png", "metad_estimators.png", "metad_blocks.png",
+              "metad_summary.json"):
         assert os.path.getsize(tmp_path / "o" / f) > 100
+    assert s["files"]["blocks"] == str(tmp_path / "o" / "metad_blocks.png")
+    assert {"cvs", "bias", "fe", "estimators", "blocks", "summary"} <= set(s["files"])
     j = json.load(open(tmp_path / "o" / "metad_summary.json"))
     assert s["layout"] == j["layout"] == "shared"
     for k in ("walkers", "bands", "skipped_panels", "skipped_walkers", "clamp", "binding", "blocks", "params",

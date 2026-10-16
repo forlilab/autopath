@@ -173,30 +173,20 @@ def test_fig_fe_isolated_layout(tmp_path, n):
     run = load_run(make_run(str(tmp_path / "r"), layout="isolated", n_walkers=n), funnel=FP)
     fig, axes, _, _ = fig_fe(run, bands(run), step_ns=0.1)
     fig.canvas.draw()
-    p = {k: axes[k].get_position() for k in ("w", "dg", "ess")}
-    ct = [a.get_position() for a in axes["ct"]]
-    assert len(ct) == n and all(c.x1 <= p["w"].x0 + 1e-9 for c in ct)          # c(t) rows in column 1
-    for k in ("w", "dg", "ess"):                                               # all span columns 2-3
-        top = axes[k].get_subplotspec().get_topmost_subplotspec()
-        assert top.colspan == range(1, 3) and top.rowspan == range(0, n)
-    assert p["dg"].x0 >= p["w"].x0 - 1e-9
-    assert p["dg"].x1 == pytest.approx(p["ess"].x1, abs=1e-3) and p["dg"].x1 <= p["w"].x1 + 1e-9
-    assert p["w"].y0 > p["dg"].y1 - 1e-9 and p["dg"].y0 > p["ess"].y1 - 1e-9   # W above dG above ESS/N
-    wg = axes["w"].get_subplotspec()
-    assert list(wg.get_gridspec().get_height_ratios()) == [1, 1] and wg.rowspan == range(0, 1)   # equal slots
-    dgs = axes["dg"].get_subplotspec()
-    assert list(dgs.get_gridspec().get_height_ratios()) == [3, 1]                               # ESS strip = 1/4
-    assert axes["ess"].get_subplotspec().rowspan == range(1, 2) and p["ess"].height < p["dg"].height
-    assert min(c.y0 for c in ct) == pytest.approx(p["ess"].y0, abs=0.05) and max(c.y1 for c in ct) >= p["w"].y1 - 0.05
+    ct, w = [a.get_position() for a in axes["ct"]], [a.get_position() for a in axes["w"]]
+    assert len(ct) == len(w) == n
+    for r in range(n):                                          # c(t) left of W, same row
+        assert ct[r].x1 <= w[r].x0 + 1e-9 and ct[r].y0 == pytest.approx(w[r].y0, abs=1e-3)
+    assert all(w[r].y0 > w[r + 1].y1 - 1e-9 for r in range(n - 1))
+    assert [a.get_title("left").split(":")[0] for a in axes["w"]] == [f"w{i}" for i in range(n)]
 
 
-def test_fig_fe_shared_one_row_three_columns(tmp_path):
+def test_fig_fe_shared_one_row_two_columns(tmp_path):
     run = load_run(make_run(str(tmp_path / "r")), funnel=FP)
     fig, axes, _, _ = fig_fe(run, bands(run), step_ns=0.1)
     fig.canvas.draw()
-    ct, w, d = axes["ct"][0].get_position(), axes["w"].get_position(), axes["dg"].get_position()
-    assert ct.x1 <= w.x0 and w.x1 <= d.x0 and ct.y0 == pytest.approx(w.y0, abs=1e-3)
-    assert axes["ess"].get_position().y1 <= d.y0 + 1e-6 and axes["ess"].get_position().height < d.height
+    ct, w = axes["ct"][0].get_position(), axes["w"][0].get_position()
+    assert len(axes["w"]) == 1 and ct.x1 <= w.x0 and ct.y0 == pytest.approx(w.y0, abs=1e-3)
 
 
 def test_hill_mask_applies_to_series(tmp_path):
@@ -232,11 +222,10 @@ def test_summary_json_records_estimators(tmp_path):
 def test_fig_fe_overlays_bias_curves(tmp_path):
     run = load_run(make_run(str(tmp_path / "r"), layout="isolated", n_walkers=2), funnel=FP)
     _, axes, _, nums = fig_fe(run, bands(run), step_ns=0.1, show_numbers=True)
-    for key in ("w", "dg"):
-        dashed = [ln for ln in axes[key].get_lines() if ln.get_linestyle() == "--"]
-        assert len(dashed) == 2
-    leg = [t.get_text() for t in axes["w"].get_legend().get_texts()]
-    assert all(" rw / " in t and " bias (kcal/mol)" in t for t in leg)
+    for a in axes["w"]:                                         # bias-derived W is a solid estimator line
+        assert not [ln for ln in a.get_lines() if ln.get_linestyle() == "--"]
+        leg = [t.get_text() for t in a.get_legend().get_texts()]
+        assert any(t.startswith("final bias:") for t in leg) and len(leg) == 4
     txt = axes["text"].texts[0].get_text()
     assert txt.count("bias-derived ΔG°") == 2 and txt.count("estimator gap") == 2
     assert nums["estimator_gap"]["pooled"] is None

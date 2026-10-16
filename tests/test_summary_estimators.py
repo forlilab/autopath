@@ -14,7 +14,9 @@ from autopath.metadynamics.summary.analysis import (ESTIMATORS, KT_PER_K, LABELS
                                                     balanced_offsets, bands, binding, binding_bias, fe_numbers,
                                                     fes_reweighted, hill_volumes, log_weights)
 from autopath.metadynamics.summary.data import load_run
-from autopath.metadynamics.summary.plots import fig_estimators, fig_fes2d
+from matplotlib.colors import to_hex
+
+from autopath.metadynamics.summary.plots import ESTIMATOR_COLORS, fig_estimators, fig_fes2d
 from ._summary_fixtures import TOY_BANDS, TOY_GRID, make_run, make_wt_toy, toy_potential, write_walker
 
 A = unit.angstrom
@@ -308,9 +310,18 @@ def test_fig_estimators_axes(tmp_path, layout, n):
     for r in range(rows):
         left, right = axes[r]
         assert [t.get_text() for t in left.get_legend().get_texts()] == [LABELS[m] for m in ESTIMATORS]
-        assert [ln.get_linestyle() for ln in left.get_lines()][:4] == ["-", ":", "-.", "--"]
+        est_lines = [ln for ln in left.get_lines() if ln.get_linewidth() > 2.0]
+        assert [ln.get_linestyle() for ln in est_lines] == ["-"] * 4
+        assert [to_hex(ln.get_color()).upper() for ln in est_lines] == [ESTIMATOR_COLORS[m].upper() for m in ESTIMATORS]
         assert [t.get_text() for t in right.get_yticklabels()] == [LABELS[m] for m in ESTIMATORS]
+        stems = [c_.get_segments()[0] for c_ in right.collections]     # lollipop stems from 0 to each value
+        heads = [ln for ln in right.get_lines() if ln.get_marker() == "o"]
+        assert len(stems) == len(heads) >= 1 and all(float(sg[0][0]) == 0.0 for sg in stems)
+        assert {to_hex(ln.get_color()).upper() for ln in heads} <= {c_.upper() for c_ in ESTIMATOR_COLORS.values()}
+        assert [float(sg[1][0]) for sg in stems] == pytest.approx([float(h.get_xdata()[0]) for h in heads])
+        assert len(right.texts) == 4                          # values or "undefined"
         assert "spread" in right.get_title("left")
+    assert len({tuple(axes[r, 1].get_xlim()) for r in range(rows)}) == 1       # one x-scale across rows
     want = "aggregate walker time" if layout == "shared" else "walker time (ns)"
     assert want in axes[0, 0].get_xlabel()
     if layout == "isolated":
