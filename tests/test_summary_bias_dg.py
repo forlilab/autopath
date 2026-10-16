@@ -173,14 +173,15 @@ def test_fig_fe_isolated_layout(tmp_path, n):
     run = load_run(make_run(str(tmp_path / "r"), layout="isolated", n_walkers=n), funnel=FP)
     fig, axes, _, _ = fig_fe(run, bands(run), step_ns=0.1, show_numbers=True)
     fig.canvas.draw()
-    p = {k: axes[k].get_position() for k in ("w", "dg", "bars", "text")}
-    assert p["w"].x0 == pytest.approx(p["dg"].x0) and p["w"].x1 == pytest.approx(p["dg"].x1)
-    assert p["w"].y0 > p["dg"].y1 - 1e-9 and p["dg"].y0 > p["bars"].y1 - 1e-9
+    p = {k: axes[k].get_position() for k in ("w", "dg", "ess", "bars", "text")}
+    assert p["dg"].x0 == pytest.approx(p["ess"].x0, abs=1e-3) and p["dg"].x1 == pytest.approx(p["ess"].x1, abs=1e-3)
+    assert p["dg"].x0 >= p["w"].x0 - 1e-9 and p["dg"].x1 <= p["w"].x1 + 1e-9    # colorbar narrows it
+    assert p["w"].y0 > p["dg"].y1 - 1e-9 and p["dg"].y0 > p["ess"].y1 - 1e-9 and p["ess"].y0 > p["bars"].y1 - 1e-9
     assert p["bars"].y0 == pytest.approx(p["text"].y0) and p["bars"].y1 == pytest.approx(p["text"].y1)
     assert p["text"].x0 >= p["bars"].x1 - 1e-9
     assert p["bars"].x0 == pytest.approx(p["w"].x0) and p["text"].x1 == pytest.approx(p["w"].x1)
     assert axes["ct"][0].get_position().x1 <= p["w"].x0 + 1e-9
-    assert p["w"].height == pytest.approx(p["dg"].height, rel=0.05)
+    assert p["ess"].height < p["dg"].height and p["dg"].height + p["ess"].height > p["w"].height
 
 
 def test_hill_mask_applies_to_series(tmp_path):

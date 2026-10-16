@@ -453,8 +453,8 @@ def test_fig_fe_dg_panel_plain_labels(tmp_path):
     _, axes, _, _ = fig_fe(run, bands(run), step_ns=0.1, show_numbers=True)
     d = axes["dg"]
     leg = _legend_texts(d)
-    assert "ΔG°(t): from all frames up to t" in leg and "start of statistics (t_rej)" in leg
-    assert "block ΔG° (each block alone)" in leg
+    assert "reweighted ΔG°(t) from all frames up to t" in leg and "start of statistics (t_rej)" in leg
+    assert "block ΔG° (colour = min(site, bulk) ESS)" in leg and "block undefined" in leg
     assert d.get_title("left") == "ΔG° vs simulation time"
     assert all(t.get_text().isdigit() for t in d.texts)      # only round-trip counts; numbers live outside
     txt = axes["text"].texts[0].get_text().split("\n")
@@ -508,5 +508,10 @@ def test_fig_fe_dg_panel_has_colorbar_and_ess_axis(tmp_path, layout):
     assert axes["cbar"].get_ylabel() == "block min(site, bulk) ESS"
     assert axes["ess"].get_ylabel() == "ESS/N" and axes["ess"].get_yscale() == "log"
     assert axes["ess"] in fig.axes and axes["ess"].get_lines()
+    d, e = axes["dg"], axes["ess"]
+    assert d.get_shared_x_axes().joined(d, e)
+    assert e.get_position().y1 <= d.get_position().y0 + 1e-6
+    assert e.get_position().height < d.get_position().height
+    assert len(fig.axes) == len(set(fig.axes)) and not any(a is not d and a.bbox.bounds == d.bbox.bounds for a in fig.axes)
     blk = nums["blocks"] if layout == "shared" else nums["blocks"]["w0"]
     assert len(blk["block_recross"]) == 10

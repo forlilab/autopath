@@ -7,6 +7,7 @@ from dataclasses import asdict
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
+from matplotlib.lines import Line2D
 from openmm import unit
 
 from ..Hills import bias_from_hills
@@ -381,6 +382,15 @@ def _ess(v):
     return f"ESS {v:.0f}" if v is not None and np.isfinite(v) else "ESS n/a"
 
 
+def _dg_pair(fig, spec):
+    """ΔG°(t) axes (top 3/4 of ``spec``) and an ESS/N strip below sharing its x axis."""
+    sub = spec.subgridspec(2, 1, height_ratios=[3, 1], hspace=0.1)
+    d = fig.add_subplot(sub[0])
+    e = fig.add_subplot(sub[1], sharex=d)
+    d.tick_params(labelbottom=False)
+    return d, e
+
+
 def _fe_axes(axes, n, iso, skipped, want_text=False):
     """Validate a user ``axes`` dict for fig_fe; rows ``ct``/``map`` as lists of ``n`` axes."""
     miss = {"ct", "map", "w", "dg"} - set(axes)
@@ -395,6 +405,7 @@ def _fe_axes(axes, n, iso, skipped, want_text=False):
         out[k] = v
     out.setdefault("bars", None)
     out.setdefault("text", None)
+    out.setdefault("ess", None)
     if want_text and out["text"] is None:
         skipped.append("ΔG° numbers: no text axes given")
     if iso and out["bars"] is None:
@@ -483,8 +494,9 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
         ax_b = [fig.add_subplot(gs[r, 1]) for r in range(n)]
         ax_t = None
         if multi:
-            sub = gs[:, 2:4].subgridspec(3, 2)
-            ax_c, ax_d = fig.add_subplot(sub[0, :]), fig.add_subplot(sub[1, :])
+            sub = gs[:, 2:4].subgridspec(3, 2, height_ratios=[2, 3.2, 1.3])
+            ax_c = fig.add_subplot(sub[0, :])
+            ax_d, ax_r = _dg_pair(fig, sub[1, :])
             if show_numbers:
                 ax_e, ax_t = fig.add_subplot(sub[2, 0]), fig.add_subplot(sub[2, 1])
             else:
@@ -494,17 +506,20 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
             if iso:
                 hr = [3, 1.3, 2.6] if show_numbers else [3, 1.3]
                 sub = gs[:, 3].subgridspec(len(hr), 1, height_ratios=hr)
-                ax_d, ax_e = fig.add_subplot(sub[0]), fig.add_subplot(sub[1])
+                ax_d, ax_r = _dg_pair(fig, sub[0])
+                ax_e = fig.add_subplot(sub[1])
                 ax_t = fig.add_subplot(sub[2]) if show_numbers else None
             elif show_numbers:
                 sub = gs[:, 3].subgridspec(2, 1, height_ratios=[3, 1.4])
-                ax_d, ax_t, ax_e = fig.add_subplot(sub[0]), fig.add_subplot(sub[1]), None
+                ax_d, ax_r = _dg_pair(fig, sub[0])
+                ax_t, ax_e = fig.add_subplot(sub[1]), None
             else:
-                ax_d, ax_e = fig.add_subplot(gs[:, 3]), None
-        axes = dict(ct=ax_a, map=ax_b, w=ax_c, dg=ax_d, bars=ax_e, text=ax_t)
+                ax_d, ax_r = _dg_pair(fig, gs[:, 3])
+                ax_e = None
+        axes = dict(ct=ax_a, map=ax_b, w=ax_c, dg=ax_d, ess=ax_r, bars=ax_e, text=ax_t)
     else:
         axes = _fe_axes(axes, n, iso, skipped, show_numbers)
-        ax_a, ax_b, ax_c, ax_d, ax_e = (axes[k] for k in ("ct", "map", "w", "dg", "bars"))
+        ax_a, ax_b, ax_c, ax_d, ax_e, ax_r = (axes[k] for k in ("ct", "map", "w", "dg", "bars", "ess"))
         fig = ax_c.figure
     ax_t = axes["text"]
     main = numbers["cv"]
@@ -590,7 +605,7 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
         skipped.append("funnel outline: no funnel")
     elif not (x == FUNNEL_Z and y is not None and y == _rxy(run)):
         skipped.append("funnel outline: needs the (funnel_z, r_xy) pair")
-    bars, bias_curves, segs, first_undef = [], [], [], [True]
+    bars, bias_curves, segs, ycur, xrej = [], [], [], [], []
     rws = run.reweighted()
 
     def _agg(t):
@@ -609,8 +624,8 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
             bias_curves.append((vb, col))
         if bser is not None:
             sb = _pick(bser, lab)
-            ax_d.plot(sb.get("t_aggregate", sb["t"]), sb["dg"] * KJ_TO_KCAL, color=col, lw=1, ls="--",
-                      label=(f"{lab}: bias-derived {sym}(t)" if iso else f"bias-derived {sym}(t)"))
+            ax_d.plot(sb.get("t_aggregate", sb["t"]), sb["dg"] * KJ_TO_KCAL, color=col, lw=1, ls="--")
+            ycur.append((lab, sb.get("t_aggregate", sb["t"]), sb["dg"] * KJ_TO_KCAL))
         extra = []
         if vb is not None:
             extra.append(f"bias-derived {sym} {_num(vb['value'])}")
@@ -618,12 +633,12 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
             extra.append(f"estimator gap (rw - bias) {_num(g) if g is not None else 'n/a'}")
         s = _pick(ser, lab)
         tx = s.get("t_aggregate", s["t"])
-        ax_d.plot(tx, s["dg"] * KJ_TO_KCAL, color=col, lw=1,
-                  label=f"{lab}: {sym}(t): from all frames up to t" if iso else f"{sym}(t): from all frames up to t")
+        ax_d.plot(tx, s["dg"] * KJ_TO_KCAL, color=col, lw=1)
+        ycur.append((lab, tx, s["dg"] * KJ_TO_KCAL))
         blk = numbers["blocks"].get(lab) if iso else numbers["blocks"]
         if len(s["t"]):
-            ax_d.axvline(_agg(t_rej * s["t"][-1]), color=col, ls=":", lw=0.8,
-                         label="start of statistics (t_rej)" if r == 0 else None)
+            ax_d.axvline(_agg(t_rej * s["t"][-1]), color=col, ls=":", lw=0.8)
+            xrej.append(_agg(t_rej * s["t"][-1]))
         pre = [f"{lab}:"] if iso else []
         if blk is None:
             lines.append("\n".join(pre + [f"final {sym} {_num(v['value'])}", "blocks n/a", _ess(v["ess"])] + extra))
@@ -656,30 +671,27 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
                 if np.isfinite(bv):
                     c = cmap(norm(max(mn[k], norm.vmin)))
                     y = bv * KJ_TO_KCAL
-                    ax_d.hlines(y, ed[k], ed[k + 1], color=c, lw=1.2 if iso else 2.5,
-                                label=f"block {sym} (each block alone)" if first and not iso else None)
+                    ax_d.hlines(y, ed[k], ed[k + 1], color=c, lw=1.2 if iso else 2.5)
                     first = False
                     ax_d.annotate(str(blk["block_recross"][k]), (xm, y), xytext=(0, 1.5), textcoords="offset points",
                                   ha="center", va="bottom", fontsize=6, color="0.25" if not iso else col)
                 else:
                     ax_d.plot([xm], [0], marker="o", mfc="none", mec=col if iso else "k", ms=5, ls="none",
-                              transform=ax_d.get_xaxis_transform(), clip_on=False,
-                              label="block undefined" if first_undef[0] else None)
-                    first_undef[0] = False
+                              transform=ax_d.get_xaxis_transform(), clip_on=False)
         sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
-        cb = fig.colorbar(sm, ax=ax_d, pad=0.1, fraction=0.04, shrink=0.7)
+        cb = fig.colorbar(sm, ax=ax_d, pad=0.01, fraction=0.04)
         cb.set_label("block min(site, bulk) ESS", fontsize=7)
         cb.ax.tick_params(labelsize=6)
         axes["cbar"] = cb.ax
-    ax_r = ax_d.twinx()
-    for lab, col, blk, ed in segs:
-        s = _pick(ser, lab)
-        if "ess_frac" in s:
-            ax_r.plot(s.get("t_aggregate", s["t"]), s["ess_frac"], color=col if iso else "0.5",
-                      lw=0.6, alpha=0.5 if iso else 0.8)
-    ax_r.set_yscale("log")
-    ax_r.set_ylabel("ESS/N", fontsize=7, color="0.4")
-    ax_r.tick_params(labelsize=6, colors="0.4")
+    if ax_r is not None:
+        for lab, col, blk, ed in segs:
+            s_ = _pick(ser, lab)
+            if "ess_frac" in s_:
+                ax_r.plot(s_.get("t_aggregate", s_["t"]), s_["ess_frac"], color=col if iso else "0.4", lw=0.8)
+        ax_r.set_yscale("log")
+        ax_r.set_ylabel("ESS/N", fontsize=7)
+        ax_r.tick_params(labelsize=6)
+        _grid(ax_r)
     axes["ess"] = ax_r
     ttl = f"W along {main}; {sym} (kcal/mol)"
     if iso and bd.mean is not None:
@@ -695,13 +707,27 @@ def fig_fe(run, bands_, pair=None, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=No
     _w_ylim(ax_c, bands_.get(main))
     ax_c.set_title(ttl, fontsize=8, loc="left")
     _legend(ax_c, fontsize=7, frameon=False)
-    ax_d.set(xlabel="walker time (ns)" if iso else "aggregate walker time (ns, summed over walkers)", ylabel=f"{sym} (kcal/mol)")
+    ax_x = ax_r if ax_r is not None else ax_d
+    ax_x.set_xlabel("walker time (ns)" if iso else "aggregate walker time (ns, summed over walkers)")
+    ax_d.set_ylabel(f"{sym} (kcal/mol)")
     if not iso:
-        ax_d.xaxis.label.set_fontsize(8)
+        ax_x.xaxis.label.set_fontsize(8)
     ax_d.set_title(f"{sym} vs simulation time", fontsize=8, loc="left")
-    lo, hi = ax_d.get_ylim()
-    ax_d.set_ylim(lo, hi + 0.4 * (hi - lo))                 # headroom keeps the legend off the curves
-    _legend(ax_d, fontsize=7, frameon=False, loc="upper right")
+    if xrej:
+        x0 = min(xrej)
+        ys = [y[(x >= x0) & np.isfinite(y)] for _, x, y in ycur]
+        ys += [np.array([b * KJ_TO_KCAL for b in blk["block_dg"] if np.isfinite(b)]) for _, _, blk, _ in segs]
+        ys = np.concatenate(ys) if ys else np.zeros(0)
+        if ys.size:
+            lo, hi = ys.min(), ys.max()
+            pad = 0.15 * (hi - lo) if hi > lo else 1.0
+            ax_d.set_ylim(lo - pad, hi + pad + 0.5 * (hi - lo + 2 * pad))   # headroom for the legend
+    keys = [(Line2D([], [], color="0.2", lw=1), f"reweighted {sym}(t) from all frames up to t"),
+            (Line2D([], [], color="0.2", lw=1, ls="--"), f"bias-derived {sym}(t)"),
+            (Line2D([], [], color="0.2", lw=0.8, ls=":"), "start of statistics (t_rej)"),
+            (Line2D([], [], color="0.2", lw=2.5), f"block {sym} (colour = min(site, bulk) ESS)"),
+            (Line2D([], [], color="0.2", marker="o", mfc="none", ls="none"), "block undefined")]
+    ax_d.legend(*zip(*keys), fontsize=6, frameon=False, loc="upper right")
     if iso and ax_e is not None:
         for i, (lab, col, m, sd) in enumerate(bars):
             if np.isfinite(m):
