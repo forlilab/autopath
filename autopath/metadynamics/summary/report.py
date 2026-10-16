@@ -11,7 +11,7 @@ import numpy as np
 
 from .analysis import bands as _bands, bias_fes_scale, clamp_fractions, fe_numbers, hill_mask, length_unit, recrossings
 from .data import load_run
-from .plots import fig_bias, fig_cvs, fig_fe
+from .plots import fig_bias, fig_cvs, fig_fe, fig_fes2d
 
 
 def _plain(o):
@@ -49,7 +49,7 @@ def report(run_dir, funnel=None, learned_cv=None, bands=None, burn=0.2, t_rej=0.
            prefix="metad", min_points=12, min_count=0, min_bin_ess=0.0,
            hill_mask_sigmas=2.0, smooth_sigma=2.0, fmax=None, bins=None, bins_per_hill=4, bins_fallback=60,
            min_density=0.05, show_numbers=False) -> dict:
-    """Write ``<prefix>_{cvs,bias,fe}.png`` and ``<prefix>_summary.json``; return the summary dict.
+    """Write ``<prefix>_{cvs,bias,fe,fes-2d}.png`` and ``<prefix>_summary.json``; return the summary dict.
 
     Reports numbers only; convergence decisions are made by ``check_convergence``.
 
@@ -79,7 +79,7 @@ def report(run_dir, funnel=None, learned_cv=None, bands=None, burn=0.2, t_rej=0.
     smooth_sigma : float
         Gaussian smoothing (bins) of the reweighted FES histogram; 0 disables it.
     fmax : float, optional
-        Colour cap (kcal/mol) of the reweighted maps; default the 99th percentile of the unmasked values.
+        Colour cap (kcal/mol) of the 2D maps; default the 99th percentile of the unmasked values.
     show_numbers : bool
         Draw the ΔG° numbers as a text block on the FE figure (always written to the summary).
     hill_mask_sigmas : float
@@ -105,11 +105,18 @@ def report(run_dir, funnel=None, learned_cv=None, bands=None, burn=0.2, t_rej=0.
     f2, _, s2 = fig_bias(run, out_path=p("bias.png"), hill_mask_sigmas=hill_mask_sigmas); plt.close(f2)
     numbers = fe_numbers(run, b, burn=burn, t_rej=t_rej, step_ns=step_ns, min_points=min_points,
                          hill_mask_sigmas=hill_mask_sigmas)
+    kw = dict(min_count=min_count, min_bin_ess=min_bin_ess, smooth_sigma=smooth_sigma, bins=bins,
+              bins_per_hill=bins_per_hill, bins_fallback=bins_fallback, min_density=min_density)
     f3, _, s3, nums = fig_fe(run, b, burn=burn, t_rej=t_rej, step_ns=step_ns, out_path=p("fe.png"), numbers=numbers,
-                            min_count=min_count, min_bin_ess=min_bin_ess, smooth_sigma=smooth_sigma, fmax=fmax,
-                            bins=bins, bins_per_hill=bins_per_hill, bins_fallback=bins_fallback, show_numbers=show_numbers,
-                            min_density=min_density)
+                             show_numbers=show_numbers, **kw)
     plt.close(f3)
+    f4, _, s4, n2 = fig_fes2d(run, b, burn=burn, out_path=p("fes-2d.png"), fmax=fmax,
+                              hill_mask_sigmas=hill_mask_sigmas, **kw)
+    if f4 is not None:
+        plt.close(f4)
+    for k in ("fes_ess", "fes_masked", "fes_kept", "fes_bins"):
+        if n2[k] is not None:
+            nums[k] = {**n2[k], **(nums[k] or {})}
     walkers = {}
     for w in run.walkers:
         rc = {nm: recrossings(w, nm, b[nm]) for nm in b}
@@ -130,10 +137,12 @@ def report(run_dir, funnel=None, learned_cv=None, bands=None, burn=0.2, t_rej=0.
                     bins_fallback=bins_fallback, min_density=min_density),
         walkers=walkers, clamp=clamp_fractions(run), binding=nums["binding"], series=nums["series"],
         blocks=nums["blocks"], binding_bias=nums["binding_bias"], dg_bias_series=nums["dg_bias_series"],
-        estimator_gap=nums["estimator_gap"], fes_scale=bias_fes_scale(run), fes_ess=nums["fes_ess"], fes_masked=nums["fes_masked"], fes_kept=nums["fes_kept"], fes_bins=nums["fes_bins"], fmax_kcal=nums["fmax"],
+        estimator_gap=nums["estimator_gap"], fes_scale=bias_fes_scale(run), fes_ess=nums["fes_ess"],
+        fes_masked=nums["fes_masked"], fes_kept=nums["fes_kept"], fes_bins=nums["fes_bins"], fmax_kcal=n2["fmax"],
         bias_unsampled=_unsampled(run, hill_mask_sigmas), unit="kJ/mol",
-        skipped_walkers=list(run.skipped), skipped_panels=s1 + s2 + s3,
-        files=dict(cvs=p("cvs.png"), bias=p("bias.png"), fe=p("fe.png"), summary=p("summary.json")))
+        skipped_walkers=list(run.skipped), skipped_panels=list(dict.fromkeys(s1 + s2 + s3 + s4)),
+        files=dict(cvs=p("cvs.png"), bias=p("bias.png"), fe=p("fe.png"),
+                   fes2d=p("fes-2d.png") if f4 is not None else None, summary=p("summary.json")))
     with open(p("summary.json"), "w") as fh:
         json.dump(_plain(summary), fh, indent=1, allow_nan=False)
     return summary

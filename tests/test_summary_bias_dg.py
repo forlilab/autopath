@@ -171,17 +171,32 @@ def test_summary_json_has_t_aggregate_shared(tmp_path):
 @pytest.mark.parametrize("n", [2, 3])
 def test_fig_fe_isolated_layout(tmp_path, n):
     run = load_run(make_run(str(tmp_path / "r"), layout="isolated", n_walkers=n), funnel=FP)
-    fig, axes, _, _ = fig_fe(run, bands(run), step_ns=0.1, show_numbers=True)
+    fig, axes, _, _ = fig_fe(run, bands(run), step_ns=0.1)
     fig.canvas.draw()
-    p = {k: axes[k].get_position() for k in ("w", "dg", "ess", "bars", "text")}
-    assert p["dg"].x0 == pytest.approx(p["ess"].x0, abs=1e-3) and p["dg"].x1 == pytest.approx(p["ess"].x1, abs=1e-3)
-    assert p["dg"].x0 >= p["w"].x0 - 1e-9 and p["dg"].x1 <= p["w"].x1 + 1e-9    # colorbar narrows it
-    assert p["w"].y0 > p["dg"].y1 - 1e-9 and p["dg"].y0 > p["ess"].y1 - 1e-9 and p["ess"].y0 > p["bars"].y1 - 1e-9
-    assert p["bars"].y0 == pytest.approx(p["text"].y0) and p["bars"].y1 == pytest.approx(p["text"].y1)
-    assert p["text"].x0 >= p["bars"].x1 - 1e-9
-    assert p["bars"].x0 == pytest.approx(p["w"].x0) and p["text"].x1 == pytest.approx(p["w"].x1)
-    assert axes["ct"][0].get_position().x1 <= p["w"].x0 + 1e-9
-    assert p["ess"].height < p["dg"].height and p["dg"].height + p["ess"].height > p["w"].height
+    p = {k: axes[k].get_position() for k in ("w", "dg", "ess")}
+    ct = [a.get_position() for a in axes["ct"]]
+    assert len(ct) == n and all(c.x1 <= p["w"].x0 + 1e-9 for c in ct)          # c(t) rows in column 1
+    for k in ("w", "dg", "ess"):                                               # all span columns 2-3
+        top = axes[k].get_subplotspec().get_topmost_subplotspec()
+        assert top.colspan == range(1, 3) and top.rowspan == range(0, n)
+    assert p["dg"].x0 >= p["w"].x0 - 1e-9
+    assert p["dg"].x1 == pytest.approx(p["ess"].x1, abs=1e-3) and p["dg"].x1 <= p["w"].x1 + 1e-9
+    assert p["w"].y0 > p["dg"].y1 - 1e-9 and p["dg"].y0 > p["ess"].y1 - 1e-9   # W above dG above ESS/N
+    wg = axes["w"].get_subplotspec()
+    assert list(wg.get_gridspec().get_height_ratios()) == [1, 1] and wg.rowspan == range(0, 1)   # equal slots
+    dgs = axes["dg"].get_subplotspec()
+    assert list(dgs.get_gridspec().get_height_ratios()) == [3, 1]                               # ESS strip = 1/4
+    assert axes["ess"].get_subplotspec().rowspan == range(1, 2) and p["ess"].height < p["dg"].height
+    assert min(c.y0 for c in ct) == pytest.approx(p["ess"].y0, abs=0.05) and max(c.y1 for c in ct) >= p["w"].y1 - 0.05
+
+
+def test_fig_fe_shared_one_row_three_columns(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r")), funnel=FP)
+    fig, axes, _, _ = fig_fe(run, bands(run), step_ns=0.1)
+    fig.canvas.draw()
+    ct, w, d = axes["ct"][0].get_position(), axes["w"].get_position(), axes["dg"].get_position()
+    assert ct.x1 <= w.x0 and w.x1 <= d.x0 and ct.y0 == pytest.approx(w.y0, abs=1e-3)
+    assert axes["ess"].get_position().y1 <= d.y0 + 1e-6 and axes["ess"].get_position().height < d.height
 
 
 def test_hill_mask_applies_to_series(tmp_path):

@@ -7,9 +7,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pytest
 
-from autopath.metadynamics.summary.analysis import bands, fes_reweighted, hill_mask, fes_marginal
+from autopath.metadynamics.summary.analysis import bands, fes_bias, fes_reweighted, hill_mask, fes_marginal
 from autopath.metadynamics.summary.data import load_run
-from autopath.metadynamics.summary.plots import fig_bias, fig_fe
+from autopath.metadynamics.summary.plots import fig_bias, fig_fes2d
 from autopath.metadynamics.summary.report import report
 from ._summary_fixtures import make_run
 
@@ -52,13 +52,13 @@ def test_sparse_bin_masked_and_colour_max_excludes_it(tmp_path):
     on = fes_reweighted(run, "funnel_z", "learned_sw", burn=0.0, smooth_sigma=0, min_count=5, min_bin_ess=3.0)
     assert np.isfinite(off.pooled[2]).sum() == 2 and np.isfinite(on.pooled[2]).sum() == 1
     assert on.n_masked == 1 and np.nanmin(on.pooled[2]) == 0.0
-    _, axes, _, nums = fig_fe(run, bands(run), pair=("funnel_z", "learned_sw"), burn=0.0,
-                              smooth_sigma=0, min_count=5, min_bin_ess=3.0, out_path=str(tmp_path / "f.png"))
+    _, axes, _, nums = fig_fes2d(run, bands(run), pair=("funnel_z", "learned_sw"), burn=0.0,
+                                 smooth_sigma=0, min_count=5, min_bin_ess=3.0, out_path=str(tmp_path / "f.png"))
     assert nums["fes_masked"]["map"] == {"pooled": 1}
-    cb = [a for a in axes["map"][0].figure.axes if a.get_label() == "<colorbar>"][0]
-    assert np.nanmax(off.pooled[2]) / 4.184 > 1.5 and cb.get_ylim()[1] <= 1.0
-    assert nums["fmax"] == pytest.approx(0.0)
-    assert np.nanmax(on.pooled[2]) == 0.0
+    fb = fes_bias(run).pooled[1] / 4.184
+    both = np.concatenate([on.pooled[2][np.isfinite(on.pooled[2])] / 4.184, fb[np.isfinite(fb)]])
+    assert nums["fmax"] == pytest.approx(np.percentile(both, 99))
+    assert np.nanmax(off.pooled[2]) / 4.184 > 1.5 and np.nanmax(on.pooled[2]) == 0.0     # masked bin leaves the map
 
 
 def test_bin_ess_mask():
@@ -167,10 +167,12 @@ def test_fmax_is_99th_percentile_and_override(tmp_path):
     assert _cap([F], 7.5) == 7.5
     run = load_run(make_run(str(tmp_path / "r"), cvs=("funnel_z", "learned_sw"), monitors=(), cross=True))
     pair = ("funnel_z", "learned_sw")
-    _, _, _, n1 = fig_fe(run, bands(run), pair=pair, out_path=str(tmp_path / "a.png"))
+    _, _, _, n1 = fig_fes2d(run, bands(run), pair=pair, out_path=str(tmp_path / "a.png"))
     F2 = fes_reweighted(run, *pair).pooled[2] / 4.184
-    assert n1["fmax"] == pytest.approx(np.percentile(F2[np.isfinite(F2)], 99))
-    f, axes, _, n2 = fig_fe(run, bands(run), pair=pair, fmax=4.0, out_path=str(tmp_path / "b.png"))
+    Fb = fes_bias(run).pooled[1] / 4.184
+    both = np.concatenate([F2[np.isfinite(F2)], Fb[np.isfinite(Fb)]])
+    assert n1["fmax"] == pytest.approx(np.percentile(both, 99))
+    f, axes, _, n2 = fig_fes2d(run, bands(run), pair=pair, fmax=4.0, out_path=str(tmp_path / "b.png"))
     assert n2["fmax"] == 4.0
     cb = [a for a in f.axes if a.get_label() == "<colorbar>"][0]
     assert cb.get_ylim()[1] == pytest.approx(4.0)

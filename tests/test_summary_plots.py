@@ -10,7 +10,7 @@ from openmm import unit
 from autopath.metadynamics.Hills import bias_from_hills
 from autopath.metadynamics.summary.analysis import bands
 from autopath.metadynamics.summary.data import load_run
-from autopath.metadynamics.summary.plots import fig_cvs, fig_bias, fig_fe, _until
+from autopath.metadynamics.summary.plots import fig_cvs, fig_bias, fig_fe, fig_fes2d, _until
 from ._summary_fixtures import make_run
 
 @pytest.fixture(autouse=True)
@@ -178,7 +178,7 @@ def test_fig_fe_no_funnel_says_band_dF(tmp_path):
     assert nums["binding"]["pooled"]["kind"] == "band_dF"
     txt = " ".join(_legend_texts(axes["w"]) + [axes["dg"].get_ylabel(), axes["w"].get_title()])
     assert "band ΔF" in txt and "ΔG°" not in txt
-    assert "funnel outline: no funnel" in skipped
+    assert not any("funnel outline" in s for s in skipped)
 
 
 def test_fig_fe_shown_value_equals_binding(tmp_path):
@@ -190,22 +190,23 @@ def test_fig_fe_shown_value_equals_binding(tmp_path):
         np.testing.assert_equal(nums["binding"]["per_walker"][rid]["value"], v["value"])
         want = f"{v['value'] / 4.184:.2f}" if np.isfinite(v["value"]) else "n/a"
         assert any(s.startswith(f"{rid}: ΔG° {want}") for s in _legend_texts(axes["w"]))
-    np.testing.assert_equal(nums["binding"]["mean"], bd.mean) and axes["bars"] is not None
+    np.testing.assert_equal(nums["binding"]["mean"], bd.mean)
 
 
-def test_fig_fe_2d_without_rxy_records_outline_skip(tmp_path):
+def test_fig_fes2d_without_rxy_records_outline_skip(tmp_path):
     run = load_run(make_run(str(tmp_path / "r"), cvs=("funnel_z", "learned_sw"), monitors=()), funnel=FP)
-    _, _, skipped, _ = fig_fe(run, bands(run), step_ns=0.5)
+    _, _, skipped, _ = fig_fes2d(run, bands(run))
     assert "funnel outline: needs the (funnel_z, r_xy) pair" in skipped
     assert "default pair: r_xy not logged" in skipped
 
 
-def test_fig_fe_rxy_monitor_default_pair_draws_outline(tmp_path):
-    run = load_run(make_run(str(tmp_path / "r"), monitors=("funnel_z", "r_xy")), funnel=FP)
-    _, axes, skipped, _ = fig_fe(run, bands(run), step_ns=0.5)
+def test_fig_fes2d_rxy_default_pair_draws_outline(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r"), cvs=("funnel_z", "r_xy"), monitors=()), funnel=FP)
+    _, axes, skipped, _ = fig_fes2d(run, bands(run))
     assert not any("funnel outline" in s or "default pair" in s for s in skipped)
-    assert "funnel_z" in axes["map"][0].get_xlabel() and "r_xy" in axes["map"][0].get_ylabel()
-    assert any(l.get_linestyle() == "--" for l in axes["map"][0].get_lines())
+    for a in axes[0]:
+        assert "funnel_z" in a.get_xlabel() and "r_xy" in a.get_ylabel()
+        assert any(l.get_linestyle() == "--" for l in a.get_lines())
 
 
 def test_fig_fe_wt_tt_numbers(tmp_path):
@@ -232,25 +233,34 @@ def test_fig_fe_text_box_shows_ess(tmp_path):
     txt = " ".join(t.get_text() for t in axes["text"].texts)
     for rid, v in nums["binding"]["per_walker"].items():
         assert f"{rid}:" in txt and "final ΔG°" in txt and f"ESS {v['ess']:.0f}" in txt
-    assert "min block ESS" in txt and set(nums["fes_ess"]["map"]) == {"w0", "w1"}
+    assert "min block ESS" in txt and set(nums["fes_ess"]["w"]) == {"w0", "w1"} and "map" not in nums["fes_ess"]
 
 
 def test_fig_fe_accepts_axes(tmp_path):
     run = load_run(make_run(str(tmp_path / "r")), funnel=FP)
-    fig, ax = plt.subplots(1, 4)
-    given = dict(ct=ax[0], map=ax[1], w=ax[2], dg=ax[3])
+    fig, ax = plt.subplots(1, 3)
+    given = dict(ct=ax[0], w=ax[1], dg=ax[2])
     f, axes, _, _ = fig_fe(run, bands(run), step_ns=0.5, axes=given)
-    assert f is fig and axes["w"] is ax[2] and ax[2].lines and ax[3].lines
+    assert f is fig and axes["w"] is ax[1] and ax[1].lines and ax[2].lines
     with pytest.raises(ValueError, match="not supported"):
-        fig_fe(run, bands(run), step_ns=0.5, axes=dict(ct=ax[0], map=ax[1], w=ax[2]))
+        fig_fe(run, bands(run), step_ns=0.5, axes=dict(ct=ax[0], w=ax[1]))
 
 
-def test_fig_fe_isolated_axes_without_bars(tmp_path):
+def test_fig_fe_has_no_map_or_bars_axes(tmp_path):
+    for kw, n in ((dict(), 4), (dict(layout="isolated", n_walkers=3), 6)):
+        run = load_run(make_run(str(tmp_path / f"r{len(kw)}"), cvs=("funnel_z", "learned_sw"), monitors=(), **kw), funnel=FP)
+        fig, axes, skipped, _ = fig_fe(run, bands(run), step_ns=0.5)
+        assert "map" not in axes and "bars" not in axes
+        assert len([a for a in fig.axes if a.get_label() != "<colorbar>"]) == n    # c(t) rows, W, dG, ESS/N
+        assert not any("bars" in s or "map rows" in s for s in skipped)
+
+
+def test_fig_fe_given_axes_ignores_map_and_bars_keys(tmp_path):
     run = load_run(make_run(str(tmp_path / "r"), layout="isolated", n_walkers=2), funnel=FP)
-    fig, ax = plt.subplots(2, 4)
-    _, _, skipped, _ = fig_fe(run, bands(run), step_ns=0.5,
-                              axes=dict(ct=list(ax[:, 0]), map=list(ax[:, 1]), w=ax[0, 2], dg=ax[0, 3]))
-    assert "per-walker bars: no axes given" in skipped
+    fig, ax = plt.subplots(2, 3)
+    _, _, skipped, _ = fig_fe(run, bands(run), step_ns=0.5, axes=dict(ct=list(ax[:, 0]), map=list(ax[:, 1]),
+                              bars=ax[1, 2], w=ax[0, 1], dg=ax[0, 2]))
+    assert not any("bars" in s for s in skipped) and not ax[:, 1][1].lines and ax[0, 2].lines
 
 
 def test_fig_fe_all_nan_no_warnings(tmp_path):
@@ -375,29 +385,28 @@ def test_non_tt_has_no_stars_or_skip(tmp_path):
     _, axes, skipped = fig_bias(run, out_path=str(tmp_path / "b.png"))
     assert not _stars_on(axes[0, 1]) and not any("TT basins" in s for s in skipped)
     _, axes, skipped, _ = fig_fe(run, bands(run), step_ns=0.5)
-    assert not _stars_on(axes["map"][0]) and not _stars_on(axes["w"]) and not any("TT basins" in s for s in skipped)
+    assert not _stars_on(axes["w"]) and not any("TT basins" in s for s in skipped)
+    _, axes, skipped, _ = fig_fes2d(run, bands(run))
+    assert not any(_stars_on(a) for a in axes.flat) and not any("TT basins" in s for s in skipped)
 
 
-def test_fig_fe_stars_and_no_band_spans(tmp_path):
+def test_fig_fe_stars_on_w(tmp_path):
     rd = make_run(str(tmp_path / "r"), tempering="wt+tt", monitors=("funnel_z", "r_xy"))
     _tt_basins(rd, [[0.2], [1.5]])
     run = load_run(rd, funnel=FP)
     _, axes, skipped, _ = fig_fe(run, bands(run), step_ns=0.5)
-    m = axes["map"][0]
-    assert not any(isinstance(p, plt.Polygon) for p in m.patches)    # axvspan/axhspan make Polygons
-    assert not m.patches
-    assert len(_stars_on(m)) == 0 and any("TT basins" in s for s in skipped)   # r_xy is not a biased CV
     assert len(_stars_on(axes["w"])) == 1 and len(_stars_on(axes["w"])[0].get_xdata()) == 2
 
 
-def test_fig_fe_map_stars_biased_pair(tmp_path):
+def test_fig_fes2d_stars_biased_pair(tmp_path):
     rd = make_run(str(tmp_path / "r"), cvs=("funnel_z", "learned_sw"), monitors=(), tempering="wt+tt")
     _tt_basins(rd, [[0.2, 0.0], [1.5, 3.0]])
     run = load_run(rd, funnel=FP)
-    _, axes, skipped, _ = fig_fe(run, bands(run), pair=("funnel_z", "learned_sw"), step_ns=0.5)
-    st = _stars_on(axes["map"][0])
-    assert len(st) == 1 and list(st[0].get_ydata()) == [0.0, 3.0]
-    assert not axes["map"][0].patches
+    _, axes, skipped, _ = fig_fes2d(run, bands(run), pair=("funnel_z", "learned_sw"))
+    for a in axes[0]:
+        st = _stars_on(a)
+        assert len(st) == 1 and list(st[0].get_ydata()) == [0.0, 3.0]
+        assert not a.patches
 
 
 def test_fig_fe_basins_not_recorded(tmp_path):
@@ -418,16 +427,6 @@ def test_fig_fe_ct_panel(tmp_path):
     iso = load_run(make_run(str(tmp_path / "i"), layout="isolated", n_walkers=2), funnel=FP)
     _, axes, _, _ = fig_fe(iso, bands(iso), step_ns=0.5)
     assert len(axes["ct"]) == 2 and all(len(a.lines) >= 2 for a in axes["ct"])
-
-
-def test_fig_fe_maps_share_limits_and_levels(tmp_path):
-    run = load_run(make_run(str(tmp_path / "r"), layout="isolated", n_walkers=3,
-                            cvs=("funnel_z", "learned_sw"), monitors=()), funnel=FP)
-    _, axes, _, _ = fig_fe(run, bands(run), pair=("funnel_z", "learned_sw"), step_ns=0.5, min_count=0, min_bin_ess=0)
-    ms = axes["map"]
-    assert len({m.get_xlim() for m in ms}) == 1 and len({m.get_ylim() for m in ms}) == 1
-    lv = [np.asarray(m.collections[0].levels) for m in ms]
-    assert all(np.array_equal(lv[0], l) for l in lv[1:])
 
 
 def test_fig_bias_maps_share_levels(tmp_path):
@@ -472,9 +471,9 @@ def test_fig_fe_numbers_outside_data_axes(tmp_path):
 
 def test_fig_fe_given_axes_without_text_skips(tmp_path):
     run = load_run(make_run(str(tmp_path / "r")), funnel=FP)
-    fig, ax = plt.subplots(1, 4)
-    _, _, skipped, _ = fig_fe(run, bands(run), step_ns=0.5, axes=dict(ct=ax[0], map=ax[1], w=ax[2], dg=ax[3]), show_numbers=True)
-    assert "ΔG° numbers: no text axes given" in skipped and not ax[3].texts
+    fig, ax = plt.subplots(1, 3)
+    _, _, skipped, _ = fig_fe(run, bands(run), step_ns=0.5, axes=dict(ct=ax[0], w=ax[1], dg=ax[2]), show_numbers=True)
+    assert "ΔG° numbers: no text axes given" in skipped and not ax[2].texts
 
 
 def test_w_ylim_ignores_values_outside_bands():
@@ -496,9 +495,6 @@ def test_fig_fe_no_numbers_by_default(tmp_path):
         fig, axes, skipped, nums = fig_fe(run, bands(run), step_ns=0.1)
         assert axes["text"] is None and not any(not t.get_text().isdigit() for a in fig.axes if a.get_visible() for t in a.texts)
         assert nums["blocks"] is not None and not any("numbers" in s for s in skipped)
-        if kw:                                            # bars take the whole bottom row
-            pb, pw = axes["bars"].get_position(), axes["w"].get_position()
-            assert pb.x0 == pytest.approx(pw.x0) and pb.x1 == pytest.approx(pw.x1)
 
 
 @pytest.mark.parametrize("layout", ["shared", "isolated"])

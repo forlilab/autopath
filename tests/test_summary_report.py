@@ -240,7 +240,7 @@ def test_min_ess_end_to_end(tmp_path, layout):
         assert all(len(b["block_ess"]) == 10 for b in blk)
         ser = [s["series"]["pooled"]] if layout == "shared" else list(s["series"]["per_walker"].values())
         assert all(len(x["ess"]) == len(x["t"]) for x in ser)
-        assert s["fes_ess"]["map"] is not None
+        assert s["fes_ess"]["w"] is not None
 
 
 def test_bands_carry_unit(tmp_path):
