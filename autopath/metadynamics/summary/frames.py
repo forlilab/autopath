@@ -323,8 +323,8 @@ def _pdb_model(top, pos, keep):
 
 
 def write_aligned_pdb(frames, out_path, topology=None, align_sel="protein and name CA", keep_sel="all",
-                      ref=None, lig_resname="UNK", water_resnames=WATER_RESNAMES, dcd=True):
-    """Multi-model PDB of frames imaged and superposed onto the reference, plus a DCD and its topology.
+                      ref=None, lig_resname="UNK", water_resnames=WATER_RESNAMES, dcd=False):
+    """Multi-model PDB of frames imaged and superposed onto the reference (optionally also a DCD).
 
     Per frame: protein and ligand are made whole with the topology's bonds, the complex is centred in the
     box, other residues are moved to their minimum image around it, and every atom is moved by the
@@ -340,6 +340,8 @@ def write_aligned_pdb(frames, out_path, topology=None, align_sel="protein and na
         With ``dcd``, ``frame`` and (when ``topology``/``ref`` are None) ``pdb``, ``ref_pdb``.
     out_path : str
         ``.pdb``; with ``dcd``, also ``<stem>.dcd`` and ``<stem>_top.pdb`` (first model).
+    dcd : bool
+        Also write the DCD and its topology PDB.
     topology : str, optional
         Topology for every frame; default each frame's ``pdb``.
     ref : str, optional
@@ -517,7 +519,7 @@ def _write_csv(path, rows, cols):
 
 def extract_fe_frames(run, bands_, out_dir, estimators=None, pair=None, n_frames=10, radius_hills=1.0,
                       max_minima=6, f_cut_kcal=6.0, depth_kcal=0.5, seed=0, at=None, burn=0.2,
-                      hill_mask_sigmas=2.0, lig_resname="UNK", keep_sel="all", fmax=None, **fes_kw):
+                      hill_mask_sigmas=2.0, lig_resname="UNK", keep_sel="all", fmax=None, ref=None, **fes_kw):
     """Minima of each estimator's map, their basin frames and one aligned PDB per minimum.
 
     Maps are built as in ``fig_fes2d``: reweighted maps with ``fes_reweighted`` (same binning, smoothing and
@@ -525,8 +527,9 @@ def extract_fe_frames(run, bands_, out_dir, estimators=None, pair=None, n_frames
     (odd, at least 3 bins) and minima closer than one hill width merge (see ``fes_minima``); a CV without a
     hill width uses ``bins_per_hill`` bins. ``at`` gives CV points instead of detected minima (``pt`` files).
     Writes ``out_dir/fe_frames/<estimator>/[<rid>/]`` (rid only for isolated runs) with one multi-model PDB
-    per minimum (plus its ``.dcd`` and ``_top.pdb``, see ``write_aligned_pdb``; ``keep_sel`` as there),
-    ``minima.csv``, ``frames.csv``, and ``out_dir/fe_frames/<estimator>/minima.png``.
+    per minimum (see ``write_aligned_pdb``; ``keep_sel`` as there), ``minima.csv``, ``frames.csv``, and
+    ``out_dir/fe_frames/<estimator>/minima.png``. Every PDB is aligned onto the same reference ``ref``
+    (default ``system.pdb`` in the run directory's parent).
 
     Returns
     -------
@@ -535,6 +538,10 @@ def extract_fe_frames(run, bands_, out_dir, estimators=None, pair=None, n_frames
         ``skipped`` (list of str).
     """
     fes_kw = {**FES_DEFAULTS, **fes_kw}
+    if ref is None:
+        ref = os.path.join(os.path.dirname(os.path.abspath(run.run_dir)), "system.pdb")
+        if not os.path.exists(ref):
+            raise ValueError(f"no reference {ref}: pass ref (system PDB) — not supported without one")
     names = _pair(run, pair)
     units = [length_unit(run, n) for n in names]
     iso = run.layout == "isolated"
@@ -582,7 +589,7 @@ def extract_fe_frames(run, bands_, out_dir, estimators=None, pair=None, n_frames
                            **{n: c for n, c in zip(names, mn["coords"])})
                 if bf["frames"]:
                     pdb = os.path.join(d, _stem(prefix, k, names, mn["coords"], units, bf["mean_F"]) + ".pdb")
-                    res = write_aligned_pdb(bf["frames"], pdb, keep_sel=keep_sel, lig_resname=lig_resname)
+                    res = write_aligned_pdb(bf["frames"], pdb, keep_sel=keep_sel, lig_resname=lig_resname, ref=ref)
                     row.update(pdb=os.path.basename(pdb), n_atoms=res["n_atoms"], fit_rmsd_max=max(res["rmsd_fit"]),
                                nofit_rmsd_max=max(res["rmsd_nofit"]), lig_bond_max=res["lig_bond_max"])
                     for j, fr in enumerate(bf["frames"], 1):
@@ -621,6 +628,7 @@ def main(argv=None):
     ap.add_argument("--hill-mask-sigmas", type=float, default=2.0)
     ap.add_argument("--smooth-sigma", type=float, default=2.0); ap.add_argument("--min-density", type=float, default=0.05)
     ap.add_argument("--bins-per-hill", type=float, default=4)
+    ap.add_argument("--ref", help="reference PDB every file is aligned onto (default <run_dir>/../system.pdb)")
     ap.add_argument("--out")
     a = ap.parse_args(argv)
     ov = None
@@ -635,7 +643,7 @@ def main(argv=None):
                           depth_kcal=a.depth, seed=a.seed, at=at, burn=a.burn, hill_mask_sigmas=a.hill_mask_sigmas,
                           lig_resname=a.lig_resname, keep_sel=SHELL_SEL if a.keep == "shell" else a.keep,
                           smooth_sigma=a.smooth_sigma, min_density=a.min_density,
-                          bins_per_hill=a.bins_per_hill)
+                          bins_per_hill=a.bins_per_hill, ref=a.ref)
     names = s["pair"]
     for m, est in s["estimators"].items():
         for key, e in est.items():

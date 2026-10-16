@@ -171,7 +171,7 @@ def test_write_aligned_pdb_full_system(tiny, tmp_path):
     import MDAnalysis as mda
     pdb, fr = tiny
     out = str(tmp_path / "o.pdb")
-    res = write_aligned_pdb(fr, out)
+    res = write_aligned_pdb(fr, out, dcd=True)
     src = _atoms(pdb)
     assert res["n_models"] == 6 and res["n_atoms"] == len(src) and res["lig_bonds"] == 2
     assert max(res["rmsd_nofit"]) < 1e-3 and res["lig_bond_max"] < 2.0
@@ -195,6 +195,34 @@ def test_write_aligned_pdb_full_system(tiny, tmp_path):
     assert len(t.atoms) == len(src) and len(t.trajectory) == 6
     for ts, _ in zip(t.trajectory, u.trajectory):
         assert np.allclose(t.atoms.positions, u.atoms.positions, atol=2e-3)
+
+
+def test_write_aligned_pdb_pdb_only_by_default(tiny, tmp_path):
+    _, fr = tiny
+    out = str(tmp_path / "p.pdb")
+    res = write_aligned_pdb(fr, out)
+    assert res["files"] == [out] and sorted(os.listdir(tmp_path)) == sorted(set(os.listdir(tmp_path)) - {"p.dcd", "p_top.pdb"})
+    assert not (tmp_path / "p.dcd").exists() and not (tmp_path / "p_top.pdb").exists()
+
+
+def _system_pdb(run, tmp_path):
+    """Reference next to the run directory, as extract_fe_frames expects."""
+    import shutil
+    src = run.walkers[0].dcd_files[0][:-4] + ".pdb"
+    dst = os.path.join(os.path.dirname(os.path.abspath(run.run_dir)), "system.pdb")
+    shutil.copy(src, dst)
+    return dst
+
+
+def _nofit_rmsd_all(d, ref):
+    import MDAnalysis as mda
+    rca = mda.Universe(ref).select_atoms("protein and name CA").positions
+    out = []
+    for p in sorted(x for x in os.listdir(d) if x.endswith(".pdb")):
+        u = mda.Universe(os.path.join(d, p))
+        ca = u.select_atoms("protein and name CA")
+        out += [float(np.sqrt(np.mean(np.sum((ca.positions - rca) ** 2, 1)))) for _ in u.trajectory]
+    return out
 
 
 def test_write_aligned_pdb_shell_fixed_atoms(tiny, tmp_path):
@@ -225,6 +253,7 @@ def _csv(path):
 
 def test_extract_shared_with_segments(tmp_path):
     run = load_run(make_run(str(tmp_path / "r"), cvs=CVS, monitors=(), extend=True, dcd=True))
+    ref = _system_pdb(run, tmp_path)
     s = extract_fe_frames(run, bands(run), str(tmp_path / "out"), n_frames=6)
     assert s["pair"] == list(CVS)
     segs = set()
@@ -237,7 +266,8 @@ def test_extract_shared_with_segments(tmp_path):
         assert mins and len(mins) <= 6
         pdbs = sorted(p for p in os.listdir(d) if p.endswith(".pdb") and not p.endswith("_top.pdb"))
         assert pdbs and all(PAT.match(p) for p in pdbs)
-        assert all((d / (p[:-4] + ".dcd")).exists() and (d / (p[:-4] + "_top.pdb")).exists() for p in pdbs)
+        assert not any(x.endswith(".dcd") or x.endswith("_top.pdb") for x in os.listdir(d))
+        assert max(_nofit_rmsd_all(d, ref)) < 0.05       # every file in the same reference frame
         for r in mins:
             if r["pdb"]:
                 assert len(_models(d / r["pdb"])) == int(r["n_frames"])
@@ -252,6 +282,7 @@ def test_extract_shared_with_segments(tmp_path):
 
 def test_extract_isolated_and_1d_and_points(tmp_path):
     run = load_run(make_run(str(tmp_path / "r"), layout="isolated", cvs=CVS, monitors=(), dcd=True))
+    _system_pdb(run, tmp_path)
     s = extract_fe_frames(run, bands(run), str(tmp_path / "out"), estimators=["rw_ct", "bias"], n_frames=3)
     for m in ("rw_ct", "bias"):
         assert set(s["estimators"][m]) == {"w0", "w1", "png"}
@@ -261,6 +292,7 @@ def test_extract_isolated_and_1d_and_points(tmp_path):
             assert {f["rid"] for f in _csv(d / "frames.csv")} == {rid}
         assert not any(p.endswith(".pdb") for p in os.listdir(tmp_path / "out" / "fe_frames" / m))
     r1 = load_run(make_run(str(tmp_path / "r1"), cvs=("funnel_z",), monitors=(), dcd=True))
+    _system_pdb(r1, tmp_path)
     extract_fe_frames(r1, bands(r1), str(tmp_path / "o1"), estimators=["rw_ct", "bias"], n_frames=2)
     for m in ("rw_ct", "bias"):
         p = [x for x in os.listdir(tmp_path / "o1" / "fe_frames" / m) if x.endswith(".pdb") and "_top" not in x]
@@ -269,3 +301,9 @@ def test_extract_isolated_and_1d_and_points(tmp_path):
     rows = s["estimators"]["rw_ct"]["pooled"]["minima"]
     assert [r["label"] for r in rows] == ["pt", "pt"] and rows[0]["coords"] == (0.5,)
     assert all(x.startswith("pt") for x in os.listdir(tmp_path / "o2" / "fe_frames" / "rw_ct") if x.endswith(".pdb"))
+
+
+def test_extract_needs_reference(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r"), cvs=CVS, monitors=(), dcd=True))
+    with pytest.raises(ValueError, match="no reference"):
+        extract_fe_frames(run, bands(run), str(tmp_path / "out"), estimators=["rw_ct"], n_frames=2)
