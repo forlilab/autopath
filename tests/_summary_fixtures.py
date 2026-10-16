@@ -16,7 +16,8 @@ def _traj(rng, lo, hi, n):
 
 
 def make_run(path, layout="shared", n_walkers=2, cvs=("funnel_z",), tempering="wt", n_rows=400, extend=False,
-             truncate=None, reweight=True, monitors=("funnel_z",), seed=0, extra_meta=None, cross=False, bounds=None):
+             truncate=None, reweight=True, monitors=("funnel_z",), seed=0, extra_meta=None, cross=False, bounds=None,
+             dcd=False):
     rng = np.random.default_rng(seed)
     os.makedirs(path, exist_ok=True)
     dt, dcd = 0.01, 0.05
@@ -59,6 +60,9 @@ def make_run(path, layout="shared", n_walkers=2, cvs=("funnel_z",), tempering="w
                 rec.update(vstar_kj=np.linspace(0, 10, nh), tt_basins=np.zeros((2, len(cvs))), tt_threshold=0.0,
                            tt_bias_factor=20.0)
             np.savez(os.path.join(path, f"HILLS_{s}.npz"), **rec)
+            if dcd:
+                write_tiny_md(os.path.join(path, f"WTMetaD_{s}.pdb"), os.path.join(path, f"WTMetaD_{s}.dcd"),
+                              int(round(n_rows * dt / 0.05)), seed=int(rng.integers(1 << 30)))
     if truncate is not None:
         rid, kind = truncate                          # e.g. ("w1", "reweight-empty") or ("w1", "length")
         if kind == "reweight-empty":
@@ -66,6 +70,59 @@ def make_run(path, layout="shared", n_walkers=2, cvs=("funnel_z",), tempering="w
         elif kind == "length":
             c = np.load(os.path.join(path, f"COLVAR_{rid}.npy")); np.save(os.path.join(path, f"COLVAR_{rid}.npy"), c[:-7])
     return path
+
+
+TINY_BOX = 24.0
+
+
+def tiny_system():
+    """Universe of a 4-residue backbone chain (ALA), a 3-atom ligand (UNK) and 12 waters in a 24 Å cube."""
+    import MDAnalysis as mda
+    pos, names, el, resn, resid = [], [], [], [], []
+    for i in range(12):                                # N-CA-C zig-zag, O off each C along z
+        pos.append((2.0 + 1.4 * i, 6.0 + 0.5 * (-1) ** i, 6.0))
+        names.append("N CA C".split()[i % 3]); el.append("N" if i % 3 == 0 else "C")
+        resn.append("ALA"); resid.append(i // 3 + 1)
+        if i % 3 == 2:
+            pos.append((pos[-1][0], pos[-1][1], 7.2)); names.append("O"); el.append("O")
+            resn.append("ALA"); resid.append(i // 3 + 1)
+    for k in range(3):
+        pos.append((7.0 + 1.4 * k, 10.0 + 0.4 * (-1) ** k, 6.0)); names.append(f"C{k + 1}"); el.append("C")
+        resn.append("UNK"); resid.append(5)
+    for k in range(12):
+        o = np.array([2.0 + 4.0 * (k % 4), 14.0 + 3.5 * (k // 4), 6.0 + 3.0 * (k % 2)])
+        for nm, d in (("O", (0, 0, 0)), ("H1", (0.96, 0, 0)), ("H2", (-0.24, 0.93, 0))):
+            pos.append(tuple(o + d)); names.append(nm); el.append(nm[0]); resn.append("HOH"); resid.append(6 + k)
+    n = len(pos)
+    rix = np.unique(resid, return_inverse=True)[1]
+    u = mda.Universe.empty(n, n_residues=rix.max() + 1, atom_resindex=rix, trajectory=True)
+    u.add_TopologyAttr("name", names); u.add_TopologyAttr("type", el); u.add_TopologyAttr("element", el)
+    u.add_TopologyAttr("resname", [resn[list(rix).index(r)] for r in range(rix.max() + 1)])
+    u.add_TopologyAttr("resid", np.arange(1, rix.max() + 2)); u.add_TopologyAttr("segid", ["A"])
+    u.add_TopologyAttr("chainID", ["A"] * n)
+    u.atoms.positions = np.array(pos, float)
+    u.dimensions = [TINY_BOX] * 3 + [90.0] * 3
+    return u
+
+
+def write_tiny_md(pdb, dcd, n_frames, seed=0):
+    """Topology PDB of ``tiny_system`` and a DCD of rigidly rotated, translated copies wrapped atom by atom
+    into the box (molecules split across the boundary)."""
+    import MDAnalysis as mda
+    from scipy.spatial.transform import Rotation
+    u = tiny_system()
+    u.atoms.write(pdb)
+    rng = np.random.default_rng(seed)
+    x0 = u.atoms.positions.copy()
+    c = x0.mean(0)
+    with mda.Writer(dcd, n_atoms=len(x0)) as W:
+        for _ in range(n_frames):
+            R = Rotation.random(random_state=int(rng.integers(1 << 30))).as_matrix()
+            x = (x0 - c) @ R.T + c + rng.uniform(-TINY_BOX, TINY_BOX, 3)
+            u.atoms.positions = np.mod(x, TINY_BOX)
+            u.dimensions = [TINY_BOX] * 3 + [90.0] * 3
+            W.write(u.atoms)
+    return pdb, dcd
 
 
 def add_fresh(path, rid, n_hills=0, n_rows=1, like="w0", bias_dir=None):
