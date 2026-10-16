@@ -130,35 +130,87 @@ def test_basin_frames_few_and_none(run2):
 
 # ---------------------------------------------------------------- write_aligned_pdb
 
-def test_write_aligned_pdb_images_and_fits(tmp_path):
+def _atoms(path):
+    """(record name, serial, atom name, resname, chain, resid, element) of each atom line of a single-model PDB."""
+    out = []
+    for ln in open(path):
+        if ln.startswith(("ATOM", "HETATM")):
+            out.append((ln[:6], ln[6:11], ln[12:16], ln[17:20], ln[21], ln[22:26], ln[76:78].strip()))
+    return out
+
+
+@pytest.fixture
+def tiny(tmp_path):
     pdb, dcd = write_tiny_md(str(tmp_path / "t.pdb"), str(tmp_path / "t.dcd"), 6, seed=1)
     import MDAnalysis as mda
     raw = mda.Universe(pdb, dcd)
     lig = raw.select_atoms("resname UNK")
-    broken = 0
-    for ts in raw.trajectory:
-        broken += np.max(np.linalg.norm(np.diff(lig.positions, axis=0), axis=1)) > 3.0
-        broken += np.ptp(raw.select_atoms("protein").positions, axis=0).max() > 20.0
+    broken = sum(np.max(np.linalg.norm(np.diff(lig.positions, axis=0), axis=1)) > 3.0
+                 or np.ptp(raw.select_atoms("protein").positions, axis=0).max() > 20.0 for _ in raw.trajectory)
     assert broken > 0                                   # the DCD really is split across images
-    fr = [dict(dcd=dcd, frame=i, pdb=pdb, ref_pdb=pdb) for i in range(6)]
+    return pdb, [dict(dcd=dcd, frame=i, pdb=pdb, ref_pdb=pdb) for i in range(6)]
+
+
+def _lig_bonds_ok(path, n_models, n_bonds):
+    """Read back with MDAnalysis (CONECT) and OpenMM: ligand bond count and lengths in every model."""
+    import MDAnalysis as mda
+    from openmm.app import PDBFile
+    u = mda.Universe(path)
+    assert len(u.trajectory) == n_models
+    lig = u.select_atoms("resname UNK")
+    bonds = [b for b in u.bonds if set(b.indices) <= set(lig.indices)]
+    assert len(bonds) == n_bonds
+    for _ in u.trajectory:
+        assert max(b.length() for b in bonds) < 2.0
+    top = PDBFile(path).topology
+    assert sum(1 for b in top.bonds() if b[0].residue.name == "UNK" and b[1].residue.name == "UNK") == n_bonds
+    return u
+
+
+def test_write_aligned_pdb_full_system(tiny, tmp_path):
+    import MDAnalysis as mda
+    pdb, fr = tiny
     out = str(tmp_path / "o.pdb")
     res = write_aligned_pdb(fr, out)
-    assert res["n_models"] == 6 and max(res["rmsd"]) < 1e-3
-    from MDAnalysis.analysis.rms import rmsd
-    rca = tiny_system().select_atoms("name CA").positions
+    src = _atoms(pdb)
+    assert res["n_models"] == 6 and res["n_atoms"] == len(src) and res["lig_bonds"] == 2
+    assert max(res["rmsd_nofit"]) < 1e-3 and res["lig_bond_max"] < 2.0
     ms = _models(out)
-    assert len(ms) == 6
-    ca0 = np.array([a[2:] for a in ms[0] if a[1] == "CA"])
-    for m in ms:
-        ca = np.array([a[2:] for a in m if a[1] == "CA"])
-        assert rmsd(ca, rca, center=True, superposition=True) < 0.01
-        assert np.abs(ca - ca0).max() < 0.01                # every model in one frame
-        lg = np.array([a[2:] for a in m if a[0] == "UNK"])
-        assert len(lg) == 3 and np.max(np.linalg.norm(np.diff(lg, axis=0), axis=1)) < 1.7
-        wat = np.array([a[2:] for a in m if a[0] == "HOH"])
-        assert len(wat) % 3 == 0 and len(wat)
-        d = np.linalg.norm(wat[::3, None] - lg[None], axis=2).min(1)
-        assert d.min() < 5.0 + 1.0
+    assert len(ms) == 6 and all(len(m) == len(src) for m in ms)
+    lines = [ln for ln in open(out) if ln.startswith(("ATOM", "HETATM"))]
+    for k in range(6):                                  # same records as the topology in every model
+        blk = lines[k * len(src):(k + 1) * len(src)]
+        assert [(ln[:6], ln[6:11], ln[12:16], ln[17:20], ln[21], ln[22:26], ln[76:78].strip()) for ln in blk] == src
+    assert sum(ln.startswith("CONECT") for ln in open(out)) == 3   # ligand only
+    ref = mda.Universe(pdb)
+    rca = ref.select_atoms("protein and name CA").positions
+    u = _lig_bonds_ok(out, 6, 2)
+    for _ in u.trajectory:                              # no fit: already in the reference frame
+        ca = u.select_atoms("protein and name CA").positions
+        assert np.sqrt(np.mean(np.sum((ca - rca) ** 2, 1))) < 0.01
+        lg = u.select_atoms("resname UNK")
+        wo = u.select_atoms("resname HOH and name O").positions
+        assert np.linalg.norm(wo[:, None] - lg.positions[None], axis=2).min() < 5.0
+    t = mda.Universe(res["files"][2], res["files"][1])
+    assert len(t.atoms) == len(src) and len(t.trajectory) == 6
+    for ts, _ in zip(t.trajectory, u.trajectory):
+        assert np.allclose(t.atoms.positions, u.atoms.positions, atol=2e-3)
+
+
+def test_write_aligned_pdb_shell_fixed_atoms(tiny, tmp_path):
+    from autopath.metadynamics.summary.frames import SHELL_SEL
+    pdb, fr = tiny
+    out = str(tmp_path / "s.pdb")
+    res = write_aligned_pdb(fr, out, keep_sel=SHELL_SEL)
+    full = _atoms(pdb)
+    ms = _models(out)
+    assert len(ms) == 6 and len({len(m) for m in ms}) == 1 and len(ms[0]) == res["n_atoms"] < len(full)
+    names = [[(a[0], a[1]) for a in m] for m in ms]
+    assert all(n == names[0] for n in names)
+    assert sum(a[0] == "ALA" for a in ms[0]) == 16 and sum(a[0] == "UNK" for a in ms[0]) == 3
+    assert sum(a[0] == "HOH" for a in ms[0]) % 3 == 0 and sum(a[0] == "HOH" for a in ms[0]) > 0
+    _lig_bonds_ok(out, 6, 2)
+    assert max(res["rmsd_nofit"]) < 1e-3
 
 
 # ---------------------------------------------------------------- extract_fe_frames
@@ -183,8 +235,9 @@ def test_extract_shared_with_segments(tmp_path):
         assert (d / "minima.png").exists() and (d / "minima.csv").exists()
         mins, frs = _csv(d / "minima.csv"), _csv(d / "frames.csv")
         assert mins and len(mins) <= 6
-        pdbs = sorted(p for p in os.listdir(d) if p.endswith(".pdb"))
+        pdbs = sorted(p for p in os.listdir(d) if p.endswith(".pdb") and not p.endswith("_top.pdb"))
         assert pdbs and all(PAT.match(p) for p in pdbs)
+        assert all((d / (p[:-4] + ".dcd")).exists() and (d / (p[:-4] + "_top.pdb")).exists() for p in pdbs)
         for r in mins:
             if r["pdb"]:
                 assert len(_models(d / r["pdb"])) == int(r["n_frames"])
@@ -210,7 +263,7 @@ def test_extract_isolated_and_1d_and_points(tmp_path):
     r1 = load_run(make_run(str(tmp_path / "r1"), cvs=("funnel_z",), monitors=(), dcd=True))
     extract_fe_frames(r1, bands(r1), str(tmp_path / "o1"), estimators=["rw_ct", "bias"], n_frames=2)
     for m in ("rw_ct", "bias"):
-        p = [x for x in os.listdir(tmp_path / "o1" / "fe_frames" / m) if x.endswith(".pdb")]
+        p = [x for x in os.listdir(tmp_path / "o1" / "fe_frames" / m) if x.endswith(".pdb") and "_top" not in x]
         assert p and all(re.match(r"^min\d{2}_funnel_z-?\d+\.\d{2}nm_F", x) and "learned" not in x for x in p)
     s = extract_fe_frames(r1, bands(r1), str(tmp_path / "o2"), estimators=["rw_ct"], at=[[0.5], [1.5]], n_frames=2)
     rows = s["estimators"]["rw_ct"]["pooled"]["minima"]

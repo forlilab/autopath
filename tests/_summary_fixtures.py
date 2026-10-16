@@ -76,7 +76,7 @@ TINY_BOX = 24.0
 
 
 def tiny_system():
-    """Universe of a 4-residue backbone chain (ALA), a 3-atom ligand (UNK) and 12 waters in a 24 Å cube."""
+    """Universe of a 4-residue backbone chain (ALA), a 3-atom bonded ligand (UNK) and 12 waters in a 24 Å cube."""
     import MDAnalysis as mda
     pos, names, el, resn, resid = [], [], [], [], []
     for i in range(12):                                # N-CA-C zig-zag, O off each C along z
@@ -100,6 +100,9 @@ def tiny_system():
     u.add_TopologyAttr("resname", [resn[list(rix).index(r)] for r in range(rix.max() + 1)])
     u.add_TopologyAttr("resid", np.arange(1, rix.max() + 2)); u.add_TopologyAttr("segid", ["A"])
     u.add_TopologyAttr("chainID", ["A"] * n)
+    u.add_TopologyAttr("record_type", ["HETATM" if r in ("UNK", "HOH") else "ATOM" for r in resn])
+    lig = [i for i, r in enumerate(resn) if r == "UNK"]
+    u.add_TopologyAttr("bonds", [(lig[0], lig[1]), (lig[1], lig[2])])   # written as CONECT
     u.atoms.positions = np.array(pos, float)
     u.dimensions = [TINY_BOX] * 3 + [90.0] * 3
     return u
