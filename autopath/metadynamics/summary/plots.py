@@ -1,6 +1,8 @@
-"""Summary figures: CVs (fig_cvs), bias deposition (fig_bias), free energy (fig_fe) and 2D maps (fig_fes2d).
+"""Summary figures: CVs (fig_cvs), bias deposition (fig_bias), free energy (fig_fe), estimators
+(fig_estimators) and 2D maps (fig_fes2d).
 
-fig_cvs and fig_bias return (fig, axes, skipped); fig_fe and fig_fes2d return (fig, axes, skipped, numbers).
+fig_cvs, fig_bias and fig_estimators return (fig, axes, skipped); fig_fe and fig_fes2d return
+(fig, axes, skipped, numbers).
 """
 from dataclasses import asdict
 
@@ -11,13 +13,16 @@ from matplotlib.lines import Line2D
 from openmm import unit
 
 from ..Hills import bias_from_hills
-from .analysis import (FUNNEL_Z, KT_PER_K, _ang, aggregate_time, ang_per_unit, bias_fes_scale, fe_numbers,
-                       fes_bias, fes_marginal, fes_reweighted, funnel_z_low, hill_mask, length_unit, recrossings, tt_basins)
+from .analysis import (ESTIMATORS, FUNNEL_Z, KT_PER_K, LABELS, PRIMARY, RW_METHODS, _ang, aggregate_time,
+                       ang_per_unit, bias_fes_scale, fe_numbers, fes_bias, fes_marginal, fes_reweighted, final_bias,
+                       funnel_z_low, hill_mask, length_unit, recrossings, tt_basins)
 
 KJ_TO_KCAL = 1 / 4.184
 
 MAX_ROWS = 6
 _BOUND, _UNBOUND = "#9ecae1", "#fdd0a2"
+EST_LS = {"rw_ct": "-", "rw_final": ":", "rw_balanced": "-.", "bias": "--"}
+EST_COLOR = {"rw_ct": "C0", "rw_final": "C1", "rw_balanced": "C2", "bias": "C3"}
 
 
 def _label(run, name):
@@ -253,7 +258,7 @@ def fig_bias(run, out_path=None, axes=None, n_snap=5, hill_mask_sigmas=2.0):
         skipped.append("TT basins: not recorded")
     vrange = None
     if nrow == 2:
-        vrange = _range([np.asarray(bias_from_hills([h for w in g for h in w.hills_raw])) for g in groups])
+        vrange = _range([final_bias([h for w in g for h in w.hills_raw]) for g in groups])
     for gi, g in enumerate(groups):
         raw = [h for w in g for h in w.hills_raw]
         h0 = raw[0]
@@ -273,7 +278,7 @@ def fig_bias(run, out_path=None, axes=None, n_snap=5, hill_mask_sigmas=2.0):
             a = axes[gi, 1]
             xs = [np.linspace(float(gmin[k]), float(gmax[k]), int(np.atleast_1d(h0["grid_points"])[k]))
                   for k in range(2)]
-            _fill(fig, a, xs[0], xs[1], np.asarray(bias_from_hills(raw)), "V (kJ/mol)", vrange)
+            _fill(fig, a, xs[0], xs[1], final_bias(raw), "V (kJ/mol)", vrange)
             sampled = hill_mask(raw, hill_mask_sigmas)
             if sampled.any() and not sampled.all():
                 a.contour(xs[0], xs[1], sampled.astype(float), levels=[0.5], colors="k", linestyles="--",
@@ -454,6 +459,8 @@ def fig_fe(run, bands_, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=None, axes=No
            bins=None, bins_per_hill=4, bins_fallback=60, min_density=0.05, show_numbers=False):
     """c(t) and bias at the walker, W along the main CV and ΔG°(t) with block numbers (kcal/mol).
 
+    W is drawn for every estimator in ``numbers["estimators"]`` (line style = estimator, colour = walker);
+    ΔG°(t) shows the primary estimator with its blocks and ESS strip, and the bias-derived ΔG°(t) dashed.
     Shared and single biases are pooled; isolated walkers get their own c(t) rows and curves and are never
     pooled. The 2D maps are drawn by ``fig_fes2d``.
 
@@ -537,7 +544,11 @@ def fig_fe(run, bands_, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=None, axes=No
     nums["fes_ess"] = {"w": f1.ess}
     nums["fes_masked"] = {"w": f1.n_masked if isinstance(f1.n_masked, dict) else {"pooled": f1.n_masked}}
     nums["fes_kept"] = {"w": f1.kept_frac if isinstance(f1.kept_frac, dict) else {"pooled": f1.kept_frac}}
-    bd, ser = numbers["binding"], numbers["series"]
+    est = numbers.get("estimators") or {}
+    prim = numbers.get("primary", PRIMARY)
+    pe = est.get(prim) or dict(binding=numbers["binding"], series=numbers["series"], blocks=numbers["blocks"])
+    fx = {m: fes_reweighted(run, main, method=m, **kw) for m in RW_METHODS if m != "rw_ct" and m in est}
+    bd, ser, pb = numbers["binding"], pe["series"], pe["binding"]
     b = bands_[main]
     ax_c.axvspan(*b.bound, color=_BOUND, alpha=0.6, lw=0)
     ax_c.axvspan(*b.unbound, color=_UNBOUND, alpha=0.6, lw=0)
@@ -546,7 +557,7 @@ def fig_fe(run, bands_, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=None, axes=No
     kind = _pick(bd, rgroups[0][0])["kind"]
     sym = "ΔG°" if kind == "dG0" else "band ΔF"
     lines = []
-    bias_curves, segs, ycur, xrej = [], [], [], []
+    bias_curves, segs, ycur, xrej, ct_lines = [], [], [], [], []
     rws = run.reweighted()
 
     def _agg(t):
@@ -559,8 +570,12 @@ def fig_fe(run, bands_, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=None, axes=No
         val = f"{v['value'] * KJ_TO_KCAL:.2f}" if np.isfinite(v["value"]) else f"n/a ({v['reason']})"
         vb = None if bb is None else _pick(bb, lab)
         bval = "n/a" if vb is None else _num(vb["value"])
-        ax_c.plot(c1[0], c1[1] * KJ_TO_KCAL, color=col, lw=1,
-                  label=f"{lab}: {sym} {val} rw / {bval} bias (kcal/mol), {_ess(v['ess'])}")
+        ct_lines += ax_c.plot(c1[0], c1[1] * KJ_TO_KCAL, color=col, lw=1,
+                              label=f"{lab}: {sym} {val} rw / {bval} bias (kcal/mol), {_ess(v['ess'])}")
+        for m, fm in fx.items():
+            if fm.pooled is not None or lab in fm.per_walker:
+                cm = _pick(fm, lab)
+                ax_c.plot(cm[0], cm[1] * KJ_TO_KCAL, color=col, lw=1, ls=EST_LS[m])
         if vb is not None:
             bias_curves.append((vb, col))
         if bser is not None:
@@ -576,7 +591,8 @@ def fig_fe(run, bands_, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=None, axes=No
         tx = s.get("t_aggregate", s["t"])
         ax_d.plot(tx, s["dg"] * KJ_TO_KCAL, color=col, lw=1)
         ycur.append((lab, tx, s["dg"] * KJ_TO_KCAL))
-        blk = numbers["blocks"].get(lab) if iso else numbers["blocks"]
+        blk = pe["blocks"].get(lab) if iso else pe["blocks"]
+        v = _pick(pb, lab)
         if len(s["t"]):
             ax_d.axvline(_agg(t_rej * s["t"][-1]), color=col, ls=":", lw=0.8)
             xrej.append(_agg(t_rej * s["t"][-1]))
@@ -638,13 +654,18 @@ def fig_fe(run, bands_, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=None, axes=No
                 f"{bd.n_defined}/{bd.n_walkers} walkers defined")
     wpts = _basin_coords(run, [main], skipped)
     if wpts is not None:
-        for line in [ln for ln in ax_c.get_lines() if ln.get_marker() in (None, "None")][:len(rgroups)]:
+        for line in ct_lines:
             _stars(ax_c, wpts[:, 0], np.interp(wpts[:, 0], line.get_xdata(), line.get_ydata()))
     for vb, col in bias_curves:
         ax_c.plot(vb["z"], np.asarray(vb["W"]) * KJ_TO_KCAL, color=col, lw=1, ls="--")
     ax_c.set(xlabel=_label(run, main), ylabel="W (kcal/mol)")
     _w_ylim(ax_c, bands_.get(main))
     ax_c.set_title(ttl, fontsize=8, loc="left")
+    shown_m = [m for m in ESTIMATORS if m in est or (m == "rw_ct") or (m == "bias" and bias_curves)]
+    key = ax_c.legend([Line2D([], [], color="0.2", lw=1, ls=EST_LS[m]) for m in shown_m],
+                      [LABELS[m] for m in shown_m], fontsize=6.5, frameon=False, loc="lower right", title="line style",
+                      title_fontsize=6.5)
+    ax_c.add_artist(key)
     _legend(ax_c, fontsize=7, frameon=False)
     ax_x = ax_r if ax_r is not None else ax_d
     ax_x.set_xlabel("walker time (ns)" if iso else "aggregate walker time (ns, summed over walkers)")
@@ -661,7 +682,8 @@ def fig_fe(run, bands_, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=None, axes=No
             lo, hi = ys.min(), ys.max()
             pad = 0.15 * (hi - lo) if hi > lo else 1.0
             ax_d.set_ylim(lo - pad, hi + pad + 0.5 * (hi - lo + 2 * pad))   # headroom for the legend
-    keys = [(Line2D([], [], color="0.2", lw=1), f"reweighted {sym}(t) from all frames up to t"),
+    keys = [(Line2D([], [], color="0.2", lw=1), f"reweighted {sym}(t) from all frames up to t"
+             + ("" if prim == "rw_ct" else f" ({LABELS[prim]})")),
             (Line2D([], [], color="0.2", lw=1, ls="--"), f"bias-derived {sym}(t)"),
             (Line2D([], [], color="0.2", lw=0.8, ls=":"), "start of statistics (t_rej)"),
             (Line2D([], [], color="0.2", lw=2.5), f"block {sym} (colour = min(site, bulk) ESS)"),
@@ -674,6 +696,106 @@ def fig_fe(run, bands_, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=None, axes=No
     if out_path:
         fig.savefig(out_path, dpi=110)
     return fig, axes, skipped, nums
+
+
+def _get(c, lab):
+    """Pooled value of a Combined, or walker ``lab``'s (None if absent)."""
+    if c is None:
+        return None
+    return c.pooled if c.pooled is not None else c.per_walker.get(lab)
+
+
+def fig_estimators(run, numbers, out_path=None, axes=None, t_rej=0.2):
+    """ΔG°(t) of every estimator and their final values (kcal/mol), pooled or per isolated walker.
+
+    One row per bias: shared and single pooled; isolated per walker (up to ``MAX_ROWS``), never pooled.
+    Left: ΔG°(t) of each estimator in ``numbers["estimators"]`` (colour and line style = estimator); the
+    y-range covers the points after ``t_rej`` of the run. Right: final values with the estimator spread.
+
+    Parameters
+    ----------
+    numbers : dict
+        ``fe_numbers`` output.
+    axes : ndarray of Axes, optional
+        Shape (rows, 2).
+
+    Returns
+    -------
+    fig, axes, skipped
+    """
+    skipped = []
+    est = numbers.get("estimators") or {}
+    iso = run.layout == "isolated"
+    groups = [w.rid for w in run.walkers] if iso else ["all"]
+    if len(groups) > MAX_ROWS:
+        skipped.append(f"estimator rows: {len(groups) - MAX_ROWS} of {len(groups)} isolated walkers not drawn")
+        groups = groups[:MAX_ROWS]
+    n = len(groups)
+    if axes is None:
+        fig, axes = plt.subplots(n, 2, figsize=(13, 3.3 * n + 0.6), squeeze=False, constrained_layout=True,
+                                 gridspec_kw=dict(width_ratios=[3, 1.2]))
+    else:
+        axes = np.asarray(axes)
+        if axes.shape != (n, 2):
+            raise ValueError(f"fig_estimators axes shape {axes.shape} != {(n, 2)}: not supported")
+        fig = axes.flat[0].figure
+    sp = numbers.get("estimator_spread") or {}
+    kinds = {(_get(e["binding"], g) or {}).get("kind") for e in est.values() for g in groups} - {None}
+    sym = "ΔG°" if kinds <= {"dG0"} else "band ΔF"
+    for r, lab in enumerate(groups):
+        a, b = axes[r]
+        finals, ys, x_all = [], [], []
+        for m in ESTIMATORS:
+            e = est.get(m)
+            s, v = (_get(e["series"], lab), _get(e["binding"], lab)) if e is not None else (None, None)
+            if s is None or v is None:
+                continue
+            x, y = np.asarray(s.get("t_aggregate", s["t"]), float), np.asarray(s["dg"], float) * KJ_TO_KCAL
+            a.plot(x, y, color=EST_COLOR[m], ls=EST_LS[m], lw=1.2, label=LABELS[m])
+            ys.append((x, y))
+            x_all.append(x)
+            finals.append((m, v["value"]))
+        if not finals:
+            a.text(0.5, 0.5, "no estimator", ha="center", va="center", transform=a.transAxes)
+            a.set_axis_off(); b.set_axis_off()
+            skipped.append(f"{lab}: estimators: none defined")
+            continue
+        x0 = t_rej * max(float(x.max()) for x in x_all if len(x))
+        late = np.concatenate([y[(x >= x0) & np.isfinite(y)] for x, y in ys])
+        if late.size:
+            lo, hi = late.min(), late.max()
+            pad = 0.15 * (hi - lo) if hi > lo else 1.0
+            a.set_ylim(lo - pad, hi + pad)
+        a.axvline(x0, color="0.3", ls=":", lw=0.8)
+        a.set(xlabel="walker time (ns)" if iso else "aggregate walker time (ns, summed over walkers)",
+              ylabel=f"{sym} (kcal/mol)")
+        a.set_title(f"{lab}: {sym}(t) per estimator (dotted: t_rej)", fontsize=8, loc="left")
+        _grid(a)
+        _legend(a, fontsize=7, frameon=False, loc="upper right")
+        for i, (m, v) in enumerate(finals):
+            if np.isfinite(v):
+                b.plot([v * KJ_TO_KCAL], [i], marker="o", ms=7, color=EST_COLOR[m], ls="none")
+                b.annotate(f"{v * KJ_TO_KCAL:.2f}", (v * KJ_TO_KCAL, i), xytext=(0, 6), textcoords="offset points",
+                           ha="center", fontsize=7)
+            else:
+                b.text(0.5, i, "undefined", transform=b.get_yaxis_transform(), ha="center", va="center", fontsize=7)
+        b.set_yticks(range(len(finals)))
+        b.set_yticklabels([LABELS[m] for m, _ in finals], fontsize=7)
+        b.set_ylim(-0.6, len(finals) - 0.4)
+        b.invert_yaxis()
+        fin = [v * KJ_TO_KCAL for _, v in finals if np.isfinite(v)]
+        if fin:
+            pad = max(0.5, 0.2 * (max(fin) - min(fin)))
+            b.set_xlim(min(fin) - pad, max(fin) + pad)
+        spr = sp.get("pooled") if not iso else (sp.get("per_walker") or {}).get(lab)
+        b.set_title(f"final {sym} (kcal/mol); spread {_num(spr) if spr is not None else 'n/a'}", fontsize=8,
+                    loc="left")
+        b.set_xlabel(f"{sym} (kcal/mol)")
+        _grid(b)
+    fig.suptitle(f"{sym} estimators, {run.layout}", fontsize=9)
+    if out_path:
+        fig.savefig(out_path, dpi=110)
+    return fig, axes, skipped
 
 
 def _bias_map(run, pair, hill_mask_sigmas):
@@ -692,24 +814,30 @@ def _bias_map(run, pair, hill_mask_sigmas):
     return out, None
 
 
+MAP_COLUMNS = ("rw_ct", "rw_final", "rw_balanced", "bias")
+
+
 def fig_fes2d(run, bands_, pair=None, burn=0.2, out_path=None, axes=None, min_count=0, min_bin_ess=0.0,
               smooth_sigma=2.0, fmax=None, bins=None, bins_per_hill=4, bins_fallback=60, min_density=0.05,
-              hill_mask_sigmas=2.0):
-    """Reweighted F map (left) and bias-derived F map from the final bias (right), kcal/mol.
+              hill_mask_sigmas=2.0, primary=PRIMARY):
+    """F maps (kcal/mol) of every estimator: reweighted with c(t), with the final bias, balanced, and the
+    bias-derived map from the final bias, in that column order.
 
     One row for shared and single biases (pooled); one row per walker, up to ``MAX_ROWS``, for isolated
-    biases (never pooled). Both panels of every row share limits, contour levels and one colourbar. The
-    bias-derived map needs ``pair`` to be the two biased CVs (either order) and is skipped otherwise; with
-    other than two biased CVs the whole figure is skipped (``fig`` is None).
+    biases (never pooled). All panels share limits, contour levels and one colourbar. The bias-derived map
+    needs ``pair`` to be the two biased CVs (either order) and is skipped otherwise; a reweighting method
+    that is not supported leaves its column blank (noted in ``skipped``); with other than two biased CVs the
+    whole figure is skipped (``fig`` is None).
 
     Parameters
     ----------
     pair : tuple of str, optional
         (x, y) CV names; default the funnel (z, r_xy) pair, else the first two CVs.
     axes : ndarray of Axes, optional
-        Shape (rows, 2).
+        Shape (rows, 4).
     fmax : float, optional
-        Colour cap (kcal/mol); default the 99th percentile of the unmasked values of both estimators.
+        Colour cap (kcal/mol); default the 99th percentile of the unmasked values of the ``primary``
+        estimator's maps (of the bias-derived maps without REWEIGHT data). Other maps saturate above it.
     hill_mask_sigmas : float
         Bias-derived map is blank farther than this many hill widths from every hill.
     burn, min_count, min_bin_ess, smooth_sigma, bins, bins_per_hill, bins_fallback, min_density
@@ -718,8 +846,8 @@ def fig_fes2d(run, bands_, pair=None, burn=0.2, out_path=None, axes=None, min_co
     Returns
     -------
     fig, axes, skipped, numbers
-        ``numbers``: ``fmax``, ``fes_bins``, ``fes_ess``, ``fes_masked``, ``fes_kept`` (key ``map``) in the
-        layout of ``fig_fe``; None when the figure is skipped.
+        ``numbers``: ``fmax``, ``fes_bins``, ``fes_ess``, ``fes_masked``, ``fes_kept`` (key ``map``, the
+        ``rw_ct`` map) in the layout of ``fig_fe``; None when the figure is skipped.
     """
     skipped = []
     nums = {"fes_ess": None, "fes_masked": None, "fes_kept": None, "fes_bins": None, "fmax": None}
@@ -743,11 +871,19 @@ def fig_fes2d(run, bands_, pair=None, burn=0.2, out_path=None, axes=None, min_co
     bm, why = _bias_map(run, pair, hill_mask_sigmas)
     if why:
         skipped.append(why)
-    fr = None
+    frs = {}
     if run.has_reweight:
-        fr = fes_reweighted(run, x, y, bins=bins, burn=burn, min_count=min_count, min_bin_ess=min_bin_ess,
-                            smooth_sigma=smooth_sigma, bins_per_hill=bins_per_hill, bins_fallback=bins_fallback,
-                            min_density=min_density)
+        for m in RW_METHODS:
+            try:
+                frs[m] = fes_reweighted(run, x, y, bins=bins, burn=burn, min_count=min_count,
+                                        min_bin_ess=min_bin_ess, smooth_sigma=smooth_sigma,
+                                        bins_per_hill=bins_per_hill, bins_fallback=bins_fallback,
+                                        min_density=min_density, method=m)
+            except ValueError as e:
+                if m == "rw_ct":
+                    raise
+                skipped.append(f"{LABELS[m]} map: {e}")
+        fr = frs["rw_ct"]
         nums["fes_bins"] = {"map": fr.bin_info}
         nums["fes_ess"] = {"map": fr.ess}
         nums["fes_masked"] = {"map": fr.n_masked if isinstance(fr.n_masked, dict) else {"pooled": fr.n_masked}}
@@ -756,20 +892,28 @@ def fig_fes2d(run, bands_, pair=None, burn=0.2, out_path=None, axes=None, min_co
         skipped.append("reweighted map: no REWEIGHT data")
     rw = {w.rid for w in run.reweighted()}
     key = lambda lab: lab if iso else "pooled"
-    rres = {lab: _pick(fr, key(lab)) for lab in groups if fr is not None and (not iso or lab in rw)}
-    bres = {lab: bm[key(lab)] for lab in groups} if bm else {}
-    vals = [r[2] * KJ_TO_KCAL for r in rres.values()] + [b[2] for b in bres.values()]
-    cap = _cap(vals, fmax)
+    res = {m: {} for m in MAP_COLUMNS}
+    for m, fr_ in frs.items():
+        for lab in groups:
+            if not iso or lab in rw:
+                xc, yc, F = _pick(fr_, key(lab))
+                res[m][lab] = (xc, yc, (np.asarray(F, float) * KJ_TO_KCAL).T)
+    if bm:
+        res["bias"] = {lab: bm[key(lab)] for lab in groups}
+    base = primary if res.get(primary) else "bias"
+    cap = _cap([r[2] for r in res[base].values()], fmax)
     nums["fmax"] = cap
-    ext = [(r[0], r[1]) for r in rres.values()] or [(b[0], b[1]) for b in bres.values()]
+    ext = [(r[0], r[1]) for r in res["rw_ct"].values()] or [(b[0], b[1]) for b in res["bias"].values()]
     lims = ((min(e[0][0] for e in ext), max(e[0][-1] for e in ext)),
             (min(e[1][0] for e in ext), max(e[1][-1] for e in ext)))
+    nc = len(MAP_COLUMNS)
     if axes is None:
-        fig, axes = plt.subplots(n, 2, figsize=(11.5, 4.2 * n + 0.6), squeeze=False, constrained_layout=True)
+        fig, axes = plt.subplots(n, nc, figsize=(5.0 * nc + 1.0, 4.2 * n + 0.6), squeeze=False,
+                                 constrained_layout=True)
     else:
         axes = np.asarray(axes)
-        if axes.shape != (n, 2):
-            raise ValueError(f"fig_fes2d axes shape {axes.shape} != {(n, 2)}: not supported")
+        if axes.shape != (n, nc):
+            raise ValueError(f"fig_fes2d axes shape {axes.shape} != {(n, nc)}: not supported")
         fig = axes.flat[0].figure
     smooth = f", smoothed σ={smooth_sigma:g} bins" if smooth_sigma > 0 else ""
     scale = bias_fes_scale(run)
@@ -781,21 +925,20 @@ def fig_fes2d(run, bands_, pair=None, burn=0.2, out_path=None, axes=None, min_co
         skipped.append("funnel outline: needs the (funnel_z, r_xy) pair")
     drawn, used = None, []
     for r, lab in enumerate(groups):
-        for c in range(2):
+        for c, m in enumerate(MAP_COLUMNS):
             a = axes[r, c]
-            res = rres.get(lab) if c == 0 else bres.get(lab)
-            if res is None:
-                if c == 0:
+            got = res[m].get(lab)
+            if got is None:
+                if m == "rw_ct":
                     a.text(0.5, 0.5, "no REWEIGHT data", ha="center", va="center", transform=a.transAxes)
                 a.set_axis_off()
                 continue
-            xc, yc, F = res
-            Z = (F * KJ_TO_KCAL).T if c == 0 else F
+            xc, yc, Z = got
             if np.isfinite(Z).any():
                 drawn = _fill_capped(fig, a, xc, yc, Z, None, cap)
                 used.append(a)
-            elif c == 0:
-                skipped.append(f"{lab}: reweighted map: no weight")
+            elif m != "bias":
+                skipped.append(f"{lab}: {LABELS[m]} map: no weight")
             a.set(xlabel=_label(run, x), ylabel=_label(run, y), xlim=lims[0], ylim=lims[1])
             for v, kind in ((x, "v"), (y, "h")):
                 if v in bands_:
@@ -805,13 +948,15 @@ def fig_fes2d(run, bands_, pair=None, burn=0.2, out_path=None, axes=None, min_co
                 _stars(a, pts[:, 0], pts[:, 1])
             if outline:
                 a.plot(*_funnel_outline(run, ang_per_unit(run, x)), "k--", lw=1)
-            if c == 0:
-                a.set_title(f"{lab}: reweighted F ({_ess(_pick_ess(fr, key(lab)))}{smooth})", fontsize=8, loc="left")
-            else:
+            if m == "bias":
                 a.set_title(f"{lab}: bias-derived F = −{scale:.3g}·V (final bias)", fontsize=8, loc="left")
+            else:
+                name = "reweighted F" if m == "rw_ct" else f"{LABELS[m]} F"
+                a.set_title(f"{lab}: {name} ({_ess(_pick_ess(frs[m], key(lab)))}{smooth})", fontsize=8,
+                            loc="left")
     if drawn is not None:
         fig.colorbar(drawn, ax=used, label="F (kcal/mol)")
-    fig.suptitle(f"free energy maps, {run.layout}; burn {burn:g}", fontsize=9)
+    fig.suptitle(f"free energy maps, {run.layout}; burn {burn:g}; colour cap from {LABELS[base]}", fontsize=9)
     if out_path:
         fig.savefig(out_path, dpi=110)
     return fig, axes, skipped, nums

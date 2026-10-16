@@ -1,4 +1,4 @@
-"""python -m autopath.metadynamics.summary RUN_DIR [--funnel F] [--learned-cv L] [--burn 0.2] [--t-rej 0.2] [--step-ns 1] [--min-points 12] [--min-count 0] [--min-bin-ess 0] [--min-density 0.05] [--bins N] [--bins-per-hill 4] [--bins-fallback 60] [--hill-mask-sigmas 2] [--smooth-sigma 2] [--fmax KCAL] [--bands bands.json] [--out DIR]"""
+"""python -m autopath.metadynamics.summary RUN_DIR [--funnel F] [--learned-cv L] [--burn 0.2] [--t-rej 0.2] [--step-ns 1] [--min-points 12] [--min-count 0] [--min-bin-ess 0] [--min-density 0.05] [--bins N] [--bins-per-hill 4] [--bins-fallback 60] [--hill-mask-sigmas 2] [--smooth-sigma 2] [--fmax KCAL] [--primary rw_ct|rw_final|rw_balanced] [--bands bands.json] [--out DIR]"""
 import argparse
 import json
 
@@ -18,6 +18,8 @@ def main(argv=None):
     ap.add_argument("--hill-mask-sigmas", type=float, default=2.0)
     ap.add_argument("--smooth-sigma", type=float, default=2.0); ap.add_argument("--fmax", type=float)
     ap.add_argument("--bands"); ap.add_argument("--out"); ap.add_argument("--prefix", default="metad")
+    ap.add_argument("--primary", default="rw_ct", choices=("rw_ct", "rw_final", "rw_balanced"),
+                    help="reweighting estimator for the ΔG°(t) blocks, 2D colour cap and convergence")
     ap.add_argument("--show-numbers", action="store_true", help="draw the ΔG° numbers as text on the FE figure")
     a = ap.parse_args(argv)
     bands = None
@@ -29,7 +31,7 @@ def main(argv=None):
                min_points=a.min_points, min_count=a.min_count, min_bin_ess=a.min_bin_ess,
                hill_mask_sigmas=a.hill_mask_sigmas, smooth_sigma=a.smooth_sigma, fmax=a.fmax,
                bins=a.bins, bins_per_hill=a.bins_per_hill, bins_fallback=a.bins_fallback, min_density=a.min_density,
-               show_numbers=a.show_numbers)
+               show_numbers=a.show_numbers, primary=a.primary)
     print(f"layout: {s['layout']}")
     for k, v in s["files"].items():
         print(f"{k}: {v}")
