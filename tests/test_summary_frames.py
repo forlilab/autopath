@@ -307,3 +307,11 @@ def test_extract_needs_reference(tmp_path):
     run = load_run(make_run(str(tmp_path / "r"), cvs=CVS, monitors=(), dcd=True))
     with pytest.raises(ValueError, match="no reference"):
         extract_fe_frames(run, bands(run), str(tmp_path / "out"), estimators=["rw_ct"], n_frames=2)
+
+
+def test_extract_align_sel_passed(tmp_path):
+    run = load_run(make_run(str(tmp_path / "r"), cvs=CVS, monitors=(), dcd=True))
+    _system_pdb(run, tmp_path)
+    with pytest.raises(ValueError, match="no reference atoms"):
+        extract_fe_frames(run, bands(run), str(tmp_path / "out"), estimators=["rw_ct"], n_frames=2,
+                          align_sel="name XX99")
