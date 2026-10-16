@@ -2,7 +2,8 @@
 
 python -m autopath.metadynamics.summary.frames RUN_DIR [--funnel F] [--learned-cv L] [--bands B]
     [--estimators rw_ct rw_final ...] [--pair x,y] [--at "x,y" ...] [--n-frames 10] [--radius-hills 1]
-    [--max-minima 6] [--f-cut 6] [--depth 0.5] [--burn 0.2] [--seed 0] [--lig-resname UNK] [--out DIR]
+    [--max-minima 6] [--f-cut 6] [--depth 0.5] [--burn 0.2] [--seed 0] [--lig-resname UNK] [--keep all|shell|SEL]
+    [--out DIR]
 """
 import argparse
 import csv
@@ -18,7 +19,7 @@ from .data import load_run
 
 KJ_TO_KCAL = 1 / 4.184
 WATER_RESNAMES = ("HOH", "WAT", "TIP3")
-KEEP_SEL = "protein or resname {lig} or byres (resname {water} and around 5 resname {lig})"
+SHELL_SEL = "protein or resname {lig} or byres (resname {water} and around 5 resname {lig})"
 FES_DEFAULTS = dict(min_count=0, min_bin_ess=0.0, smooth_sigma=2.0, bins=None, bins_per_hill=4,
                     bins_fallback=60, min_density=0.05)
 
@@ -211,119 +212,209 @@ def basin_frames(run, ws, method, minimum, radius_hills=1.0, n_frames=10, seed=0
 
 # ---------------------------------------------------------------- aligned PDBs
 
-def _universe(top, traj=None, lig_resname="UNK"):
-    """Universe with protein and ligand bonds guessed (PBC-aware) on the topology coordinates."""
+class _Top:
+    """Atom records, TER positions and bonds (OpenMM templates + CONECT) of a topology PDB."""
+
+    def __init__(self, path):
+        from openmm.app import PDBFile
+        self.path = path
+        self.lines, self.ter_after, last = [], {}, -1
+        with open(path) as fh:
+            for ln in fh:
+                if ln.startswith(("ATOM", "HETATM")):
+                    self.lines.append(ln.rstrip("\n").ljust(80))
+                    last = len(self.lines) - 1
+                elif ln.startswith("TER") and last >= 0:
+                    self.ter_after[last] = ln.rstrip("\n")
+        top = PDBFile(path).topology
+        if top.getNumAtoms() != len(self.lines):
+            raise ValueError(f"{path}: OpenMM reads {top.getNumAtoms()} atoms, file has {len(self.lines)}: "
+                             "not supported")
+        self.bonds = np.array([(b[0].index, b[1].index) for b in top.bonds()], int).reshape(-1, 2)
+        self.ids = [ln[12:27] for ln in self.lines]                # name, altloc, resname, chain, resid
+        self.serial = [ln[6:11] for ln in self.lines]
+
+    def check_same(self, other):
+        if self.ids != other.ids:
+            raise ValueError(f"{other.path}: atoms differ from {self.path}: not supported")
+
+
+def _universe(top, traj=None):
+    """MDAnalysis Universe of ``top`` (+ ``traj``) carrying the topology's bonds only."""
     import MDAnalysis as mda
-    from MDAnalysis.guesser.default_guesser import DefaultGuesser
-    u = mda.Universe(top, traj) if traj else mda.Universe(top)
-    t = mda.Universe(top) if traj else u
-    pos, box = t.atoms.positions.copy(), t.dimensions
-    sel = u.select_atoms(f"protein or resname {lig_resname}")
-    pairs = [(int(a), int(b)) for a, b in DefaultGuesser(u, box=box).guess_bonds(sel, coords=pos[sel.indices])]
+    u = mda.Universe(top.path, traj) if traj else mda.Universe(top.path)
+    if len(u.atoms) != len(top.lines):
+        raise ValueError(f"{top.path}: MDAnalysis reads {len(u.atoms)} atoms, file has {len(top.lines)}")
     if hasattr(u, "bonds"):
-        u.add_bonds(pairs)
+        u.delete_bonds(u.bonds)
+        u.add_bonds([tuple(b) for b in top.bonds])
     else:
-        u.add_TopologyAttr("bonds", pairs)
+        u.add_TopologyAttr("bonds", [tuple(b) for b in top.bonds])
     return u
 
 
-def _image(u, lig_resname):
-    """Make protein and ligand whole, centre the protein in the box, wrap the rest by residue around it."""
-    from MDAnalysis.lib.distances import minimize_vectors
-    from MDAnalysis.lib.mdamath import make_whole, triclinic_vectors
-    box = u.dimensions
-    if box is None or not np.all(box[:3] > 0):
-        raise ValueError("frame without a unit cell: imaging not supported")
-    prot = u.select_atoms("protein")
-    lig = u.select_atoms(f"resname {lig_resname}")
-    if not len(prot):
-        raise ValueError("no protein atoms: imaging not supported")
-    frags = sorted((prot + lig).fragments, key=len, reverse=True)
+def _whole(u, groups):
+    """Make each fragment of ``groups`` whole (bond-based)."""
+    from MDAnalysis.lib.mdamath import make_whole
+    frags = sorted(groups.fragments, key=len, reverse=True)
     for f in frags:
         if len(f) > 1:
             make_whole(f)
+    return frags
+
+
+def _image(u, lig_resname):
+    """Make protein and ligand whole, centre the complex in the box, wrap the rest by residue around it."""
+    from MDAnalysis.lib.distances import minimize_vectors
+    from MDAnalysis.lib.mdamath import triclinic_vectors
+    box = u.dimensions
+    if box is None or not np.all(box[:3] > 0):
+        raise ValueError("frame without a unit cell: imaging not supported")
+    cx = u.select_atoms(f"protein or resname {lig_resname}")
+    if not len(u.select_atoms("protein")):
+        raise ValueError("no protein atoms: imaging not supported")
+    frags = _whole(u, cx)
     pos = u.atoms.positions
     anchor = frags[0].center_of_geometry()
     for f in frags[1:]:
         d = f.center_of_geometry() - anchor
         pos[f.indices] += minimize_vectors(d[None], box)[0] - d
-    u.atoms.positions = pos
+    inc = np.unique(np.concatenate([f.indices for f in frags]))
     centre = triclinic_vectors(box).sum(0) / 2
-    pos = u.atoms.positions + (centre - prot.center_of_geometry())
-    rest = u.atoms - (prot + lig)
-    for f in frags:
-        rest = rest - f
+    pos += centre - pos[inc].mean(0)
+    rest = np.setdiff1d(np.arange(len(pos)), inc)
     if len(rest):
-        first = np.array([r.atoms.indices[0] for r in rest.residues])
-        ri = rest.resindices
-        lead = first[np.searchsorted(rest.residues.resindices, ri)]
-        d = pos[rest.indices] - pos[lead]
-        pos[rest.indices] = pos[lead] + minimize_vectors(d, box)
-        d = pos[first] - centre
-        shift = minimize_vectors(d, box) - d
-        pos[rest.indices] += shift[np.searchsorted(rest.residues.resindices, ri)]
+        ri = u.atoms.resindices[rest]
+        first = {}
+        for i, r in zip(rest, ri):
+            first.setdefault(r, i)
+        lead = np.array([first[r] for r in ri])
+        pos[rest] = pos[lead] + minimize_vectors(pos[rest] - pos[lead], box)
+        d = pos[lead] - centre
+        pos[rest] += minimize_vectors(d, box) - d
     u.atoms.positions = pos
 
 
-def write_aligned_pdb(frames, out_path, topology=None, align_sel="protein and name CA", keep_sel=KEEP_SEL,
-                      ref=None, lig_resname="UNK", water_resnames=WATER_RESNAMES):
-    """Multi-model PDB, one model per frame: imaged, then superposed on ``align_sel`` onto the reference.
+def _conect(top, keep, lig_resname):
+    """CONECT records of the ligand's topology bonds whose atoms are both written."""
+    lig = {i for i, s in enumerate(top.ids) if s[5:8].strip() == lig_resname}
+    nb = {}
+    for a, b in top.bonds:
+        if a in lig and b in lig and keep[a] and keep[b]:
+            nb.setdefault(a, []).append(b); nb.setdefault(b, []).append(a)
+    out = []
+    for a in sorted(nb):
+        p = sorted(nb[a])
+        for k in range(0, len(p), 4):
+            out.append("CONECT" + top.serial[a] + "".join(top.serial[x] for x in p[k:k + 4]))
+    return out
 
-    Per frame: the protein and ligand are made whole, the protein is centred in the box and the other
-    residues are moved to their minimum image around it; then the frame is fitted on ``align_sel`` and
-    ``keep_sel`` (evaluated after imaging, without PBC) is written. Models may differ in atom count.
+
+def _pdb_model(top, pos, keep):
+    """ATOM/HETATM (and TER) records of the kept atoms of ``top`` with coordinates ``pos``."""
+    out = []
+    for i in np.flatnonzero(keep):
+        ln = top.lines[i]
+        x, y, z = pos[i]
+        out.append(f"{ln[:30]}{x:8.3f}{y:8.3f}{z:8.3f}{ln[54:]}".rstrip())
+        if i in top.ter_after:
+            out.append(top.ter_after[i])
+    return out
+
+
+def write_aligned_pdb(frames, out_path, topology=None, align_sel="protein and name CA", keep_sel="all",
+                      ref=None, lig_resname="UNK", water_resnames=WATER_RESNAMES, dcd=True):
+    """Multi-model PDB of frames imaged and superposed onto the reference, plus a DCD and its topology.
+
+    Per frame: protein and ligand are made whole with the topology's bonds, the complex is centred in the
+    box, other residues are moved to their minimum image around it, and every atom is moved by the
+    rotation and translation that fit ``align_sel`` onto the reference coordinates. Atom records (names,
+    residues, chains, serials, elements) are those of the topology. Every model holds the same atoms:
+    ``keep_sel`` (evaluated after alignment, without PBC; ``{lig}``/``{water}`` filled from ``lig_resname``,
+    ``water_resnames``) selects the union over all frames, so an atom shell keeps its atoms in every model
+    at their own positions. CONECT records: the topology's ligand bonds.
 
     Parameters
     ----------
     frames : list of dict
         With ``dcd``, ``frame`` and (when ``topology``/``ref`` are None) ``pdb``, ``ref_pdb``.
     out_path : str
+        ``.pdb``; with ``dcd``, also ``<stem>.dcd`` and ``<stem>_top.pdb`` (first model).
     topology : str, optional
         Topology for every frame; default each frame's ``pdb``.
-    keep_sel : str
-        MDAnalysis selection; ``{lig}`` and ``{water}`` are filled from ``lig_resname``, ``water_resnames``.
     ref : str, optional
-        Reference structure, imaged the same way; default the first frame's ``ref_pdb``.
+        Reference PDB (made whole with its bonds, not moved); default the first frame's ``ref_pdb``.
 
     Returns
     -------
     dict
-        ``n_models``, ``rmsd`` (fit RMSD per model, Å), ``n_atoms`` per model, ``ref``.
+        ``n_models``, ``n_atoms``, ``rmsd_fit`` and ``rmsd_nofit`` (Å, ``align_sel`` vs the reference per
+        model), ``lig_bonds``, ``lig_bond_max`` (Å, over models), ``ref``, ``files``.
     """
     import MDAnalysis as mda
     from MDAnalysis.analysis.align import rotation_matrix
     if not frames:
         raise ValueError("no frames to write")
-    keep_sel = keep_sel.format(lig=lig_resname, water=" ".join(water_resnames))
+    sel_s = keep_sel.format(lig=lig_resname, water=" ".join(water_resnames))
     ref = ref or frames[0]["ref_pdb"]
-    ru = _universe(ref, lig_resname=lig_resname)
-    _image(ru, lig_resname)
-    rsel = ru.select_atoms(align_sel)
-    rpos = rsel.positions.astype(float)
+    rt = _Top(ref)
+    ru = _universe(rt)
+    _whole(ru, ru.select_atoms(f"protein or resname {lig_resname}"))
+    ridx = ru.select_atoms(align_sel).indices
+    if not len(ridx):
+        raise ValueError(f"no reference atoms in {align_sel!r}: not supported")
+    rpos = ru.atoms.positions[ridx].astype(float)
     rc = rpos.mean(0)
-    cache, rms, nat = {}, [], []
-    with mda.Writer(out_path, multiframe=True) as W:
-        for fr in frames:
-            top = topology or fr["pdb"]
-            key = (top, fr["dcd"])
-            if key not in cache:
-                cache[key] = _universe(top, fr["dcd"], lig_resname)
-            u = cache[key]
-            if not 0 <= fr["frame"] < len(u.trajectory):
-                raise ValueError(f"{fr['dcd']}: frame {fr['frame']} not in {len(u.trajectory)} frames: not supported")
-            u.trajectory[fr["frame"]]
-            _image(u, lig_resname)
-            sel = u.select_atoms(align_sel)
-            if len(sel) != len(rsel):
-                raise ValueError(f"{len(sel)} vs {len(rsel)} reference atoms in {align_sel!r}: not supported")
-            mob = sel.positions.astype(float)
-            mc = mob.mean(0)
-            R, r = rotation_matrix(mob - mc, rpos - rc)
-            u.atoms.positions = (u.atoms.positions - mc) @ np.asarray(R).T + rc
-            ag = u.select_atoms(keep_sel, periodic=False)
-            W.write(ag)
-            rms.append(float(r)); nat.append(len(ag))
-    return dict(n_models=len(frames), rmsd=rms, n_atoms=nat, ref=ref)
+    tops, unis, coords, rfit = {}, {}, [], []
+    for fr in frames:
+        tp = topology or fr["pdb"]
+        if tp not in tops:
+            tops[tp] = _Top(tp)
+            rt.check_same(tops[tp])
+        key = (tp, fr["dcd"])
+        if key not in unis:
+            unis[key] = _universe(tops[tp], fr["dcd"])
+        u = unis[key]
+        if not 0 <= fr["frame"] < len(u.trajectory):
+            raise ValueError(f"{fr['dcd']}: frame {fr['frame']} not in {len(u.trajectory)} frames: not supported")
+        u.trajectory[fr["frame"]]
+        _image(u, lig_resname)
+        mob = u.atoms.positions[ridx].astype(float)
+        mc = mob.mean(0)
+        R, r = rotation_matrix(mob - mc, rpos - rc)
+        coords.append((u.atoms.positions - mc) @ np.asarray(R).T + rc)
+        rfit.append(float(r))
+    keep = np.zeros(len(rt.lines), bool)
+    u = next(iter(unis.values()))
+    for p in coords:
+        u.atoms.positions = p
+        keep[u.select_atoms(sel_s, periodic=False).indices] = True
+    if not keep.any():
+        raise ValueError(f"{sel_s!r} selects no atoms")
+    lig = np.array([s[5:8].strip() == lig_resname for s in rt.ids])
+    lb = np.array([(a, b) for a, b in rt.bonds if lig[a] and lig[b] and keep[a] and keep[b]], int).reshape(-1, 2)
+    nofit = [float(np.sqrt(np.mean(np.sum((p[ridx] - rpos) ** 2, 1)))) for p in coords]
+    bmax = float(max(np.linalg.norm(p[lb[:, 0]] - p[lb[:, 1]], axis=1).max() for p in coords)) if len(lb) else float("nan")
+    con = _conect(rt, keep, lig_resname)
+    with open(out_path, "w") as fh:
+        fh.write(f"REMARK   1 {len(coords)} frames aligned on {align_sel} to {os.path.basename(ref)}\n")
+        for k, p in enumerate(coords, 1):
+            fh.write(f"MODEL     {k:4d}\n" + "\n".join(_pdb_model(rt, p, keep)) + "\nENDMDL\n")
+        fh.write("\n".join(con + ["END"]) + "\n")
+    files = [out_path]
+    if dcd:
+        stem = out_path[:-4] if out_path.endswith(".pdb") else out_path
+        with open(stem + "_top.pdb", "w") as fh:
+            fh.write("\n".join(_pdb_model(rt, coords[0], keep) + con + ["END"]) + "\n")
+        with mda.Writer(stem + ".dcd", n_atoms=int(keep.sum())) as W:
+            sub = mda.Universe(stem + "_top.pdb")
+            for p in coords:
+                sub.atoms.positions = p[keep]
+                sub.dimensions = None
+                W.write(sub.atoms)
+        files += [stem + ".dcd", stem + "_top.pdb"]
+    return dict(n_models=len(coords), n_atoms=int(keep.sum()), rmsd_fit=rfit, rmsd_nofit=nofit,
+                lig_bonds=int(len(lb)), lig_bond_max=bmax, ref=ref, files=files)
 
 
 # ---------------------------------------------------------------- driver
@@ -426,14 +517,15 @@ def _write_csv(path, rows, cols):
 
 def extract_fe_frames(run, bands_, out_dir, estimators=None, pair=None, n_frames=10, radius_hills=1.0,
                       max_minima=6, f_cut_kcal=6.0, depth_kcal=0.5, seed=0, at=None, burn=0.2,
-                      hill_mask_sigmas=2.0, lig_resname="UNK", fmax=None, **fes_kw):
+                      hill_mask_sigmas=2.0, lig_resname="UNK", keep_sel="all", fmax=None, **fes_kw):
     """Minima of each estimator's map, their basin frames and one aligned PDB per minimum.
 
     Maps are built as in ``fig_fes2d``: reweighted maps with ``fes_reweighted`` (same binning, smoothing and
     masks, ``fes_kw``), the bias map as hill-masked -scale·V. The minimum filter spans about one hill width
     (odd, at least 3 bins) and minima closer than one hill width merge (see ``fes_minima``); a CV without a
     hill width uses ``bins_per_hill`` bins. ``at`` gives CV points instead of detected minima (``pt`` files).
-    Writes ``out_dir/fe_frames/<estimator>/[<rid>/]`` (rid only for isolated runs) with one PDB per minimum,
+    Writes ``out_dir/fe_frames/<estimator>/[<rid>/]`` (rid only for isolated runs) with one multi-model PDB
+    per minimum (plus its ``.dcd`` and ``_top.pdb``, see ``write_aligned_pdb``; ``keep_sel`` as there),
     ``minima.csv``, ``frames.csv``, and ``out_dir/fe_frames/<estimator>/minima.png``.
 
     Returns
@@ -490,8 +582,9 @@ def extract_fe_frames(run, bands_, out_dir, estimators=None, pair=None, n_frames
                            **{n: c for n, c in zip(names, mn["coords"])})
                 if bf["frames"]:
                     pdb = os.path.join(d, _stem(prefix, k, names, mn["coords"], units, bf["mean_F"]) + ".pdb")
-                    res = write_aligned_pdb(bf["frames"], pdb, lig_resname=lig_resname)
-                    row["pdb"], row["fit_rmsd_max"] = os.path.basename(pdb), max(res["rmsd"])
+                    res = write_aligned_pdb(bf["frames"], pdb, keep_sel=keep_sel, lig_resname=lig_resname)
+                    row.update(pdb=os.path.basename(pdb), n_atoms=res["n_atoms"], fit_rmsd_max=max(res["rmsd_fit"]),
+                               nofit_rmsd_max=max(res["rmsd_nofit"]), lig_bond_max=res["lig_bond_max"])
                     for j, fr in enumerate(bf["frames"], 1):
                         frows.append(dict(k=k, model=j, rid=fr["rid"], segment=fr["segment"],
                                           segment_rid=fr["segment_rid"], dcd=os.path.basename(fr["dcd"]),
@@ -499,7 +592,7 @@ def extract_fe_frames(run, bands_, out_dir, estimators=None, pair=None, n_frames
                                           **fr["cvs"]))
                 rows.append(row)
             cols = ["k", "label"] + names + ["F_min", "mean_F", "n_frames", "n_available", "ess", "weights",
-                                             "fit_rmsd_max", "pdb", "reason"]
+                                             "n_atoms", "fit_rmsd_max", "nofit_rmsd_max", "lig_bond_max", "pdb", "reason"]
             _write_csv(os.path.join(d, "minima.csv"), rows, cols)
             _write_csv(os.path.join(d, "frames.csv"), frows,
                        ["k", "model", "rid", "segment", "segment_rid", "dcd", "frame", "time_ns"] + names + ["weight"])
@@ -523,6 +616,8 @@ def main(argv=None):
     ap.add_argument("--max-minima", type=int, default=6); ap.add_argument("--f-cut", type=float, default=6.0)
     ap.add_argument("--depth", type=float, default=0.5); ap.add_argument("--burn", type=float, default=0.2)
     ap.add_argument("--seed", type=int, default=0); ap.add_argument("--lig-resname", default="UNK")
+    ap.add_argument("--keep", default="all", help="MDAnalysis selection written ('all'; 'shell' = protein, "
+                    "ligand and waters within 5 Å of it in any frame)")
     ap.add_argument("--hill-mask-sigmas", type=float, default=2.0)
     ap.add_argument("--smooth-sigma", type=float, default=2.0); ap.add_argument("--min-density", type=float, default=0.05)
     ap.add_argument("--bins-per-hill", type=float, default=4)
@@ -538,7 +633,8 @@ def main(argv=None):
                           pair=a.pair.split(",") if a.pair else None, n_frames=a.n_frames,
                           radius_hills=a.radius_hills, max_minima=a.max_minima, f_cut_kcal=a.f_cut,
                           depth_kcal=a.depth, seed=a.seed, at=at, burn=a.burn, hill_mask_sigmas=a.hill_mask_sigmas,
-                          lig_resname=a.lig_resname, smooth_sigma=a.smooth_sigma, min_density=a.min_density,
+                          lig_resname=a.lig_resname, keep_sel=SHELL_SEL if a.keep == "shell" else a.keep,
+                          smooth_sigma=a.smooth_sigma, min_density=a.min_density,
                           bins_per_hill=a.bins_per_hill)
     names = s["pair"]
     for m, est in s["estimators"].items():
