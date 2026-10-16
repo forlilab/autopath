@@ -12,7 +12,7 @@ import numpy as np
 from .analysis import (LABELS, PRIMARY, bands as _bands, bias_fes_scale, clamp_fractions, fe_numbers, hill_mask,
                        length_unit, recrossings)
 from .data import load_run
-from .plots import fig_bias, fig_cvs, fig_estimators, fig_fe, fig_fes2d
+from .plots import fig_bias, fig_blocks, fig_cvs, fig_estimators, fig_fe, fig_fes2d
 
 
 def _plain(o):
@@ -50,7 +50,7 @@ def report(run_dir, funnel=None, learned_cv=None, bands=None, burn=0.2, t_rej=0.
            prefix="metad", min_points=12, min_count=0, min_bin_ess=0.0,
            hill_mask_sigmas=2.0, smooth_sigma=2.0, fmax=None, bins=None, bins_per_hill=4, bins_fallback=60,
            min_density=0.05, show_numbers=False, primary=PRIMARY) -> dict:
-    """Write ``<prefix>_{cvs,bias,fe,estimators,fes-2d}.png`` and ``<prefix>_summary.json``; return the summary.
+    """Write ``<prefix>_{cvs,bias,fe,fes-2d,estimators,blocks}.png`` and ``<prefix>_summary.json``; return the summary.
 
     Reports numbers only; convergence decisions are made by ``check_convergence``.
 
@@ -119,6 +119,8 @@ def report(run_dir, funnel=None, learned_cv=None, bands=None, burn=0.2, t_rej=0.
     plt.close(f3)
     f5, _, s5 = fig_estimators(run, numbers, out_path=p("estimators.png"), t_rej=t_rej)
     plt.close(f5)
+    f6, _, s6 = fig_blocks(run, numbers, out_path=p("blocks.png"), t_rej=t_rej)
+    plt.close(f6)
     f4, _, s4, n2 = fig_fes2d(run, b, burn=burn, out_path=p("fes-2d.png"), fmax=fmax,
                               hill_mask_sigmas=hill_mask_sigmas, primary=primary, **kw)
     if f4 is not None:
@@ -152,8 +154,9 @@ def report(run_dir, funnel=None, learned_cv=None, bands=None, burn=0.2, t_rej=0.
         estimator_spread=numbers["estimator_spread"], estimator_gaps=numbers["estimator_gaps"], fes_scale=bias_fes_scale(run), fes_ess=nums["fes_ess"],
         fes_masked=nums["fes_masked"], fes_kept=nums["fes_kept"], fes_bins=nums["fes_bins"], fmax_kcal=n2["fmax"],
         bias_unsampled=_unsampled(run, hill_mask_sigmas), unit="kJ/mol",
-        skipped_walkers=list(run.skipped), skipped_panels=list(dict.fromkeys(s1 + s2 + s3 + s5 + s4)),
+        skipped_walkers=list(run.skipped), skipped_panels=list(dict.fromkeys(s1 + s2 + s3 + s5 + s6 + s4)),
         files=dict(cvs=p("cvs.png"), bias=p("bias.png"), fe=p("fe.png"), estimators=p("estimators.png"),
+                   blocks=p("blocks.png"),
                    fes2d=p("fes-2d.png") if f4 is not None else None, summary=p("summary.json")))
     with open(p("summary.json"), "w") as fh:
         json.dump(_plain(summary), fh, indent=1, allow_nan=False)

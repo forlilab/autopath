@@ -1,7 +1,7 @@
 """Summary figures: CVs (fig_cvs), bias deposition (fig_bias), free energy (fig_fe), estimators
-(fig_estimators) and 2D maps (fig_fes2d).
+(fig_estimators), block analysis (fig_blocks) and 2D maps (fig_fes2d).
 
-fig_cvs, fig_bias and fig_estimators return (fig, axes, skipped); fig_fe and fig_fes2d return
+fig_cvs, fig_bias, fig_estimators and fig_blocks return (fig, axes, skipped); fig_fe and fig_fes2d return
 (fig, axes, skipped, numbers).
 """
 from dataclasses import asdict
@@ -21,8 +21,8 @@ KJ_TO_KCAL = 1 / 4.184
 
 MAX_ROWS = 6
 _BOUND, _UNBOUND = "#9ecae1", "#fdd0a2"
-EST_LS = {"rw_ct": "-", "rw_final": ":", "rw_balanced": "-.", "bias": "--"}
-EST_COLOR = {"rw_ct": "C0", "rw_final": "C1", "rw_balanced": "C2", "bias": "C3"}
+ESTIMATOR_COLORS = {"rw_ct": "#6A3D9A", "rw_final": "#1B9E77", "rw_balanced": "#E7298A", "bias": "#4D4D4D"}
+ESTIMATOR_LABELS = dict(LABELS)
 
 
 def _label(run, name):
@@ -217,11 +217,12 @@ def _note(skipped, msg):
 
 
 def fig_bias(run, out_path=None, axes=None, n_snap=5, hill_mask_sigmas=2.0):
-    """Hill heights, bias growth and, for transition tempering, V*(t).
+    """Hill heights, bias growth and, for transition tempering, V*(t), one row per bias group.
 
-    Isolated biases are drawn per walker, never summed. Bias growth is shown for one CV as ``n_snap``
+    Shared and single biases are one row (all walkers' hills, coloured per walker); isolated biases get one
+    row per walker (up to ``MAX_ROWS``), never summed. Bias growth is shown for one CV as ``n_snap``
     snapshots. For two CVs the final bias map and the Boltzmann marginals of the bias-derived FES at
-    ``n_snap`` times are drawn, per walker if isolated (up to ``MAX_ROWS``). Recorded transition-tempering
+    ``n_snap`` times are drawn. Recorded transition-tempering
     basins are marked with stars on the map and the marginals. The bias map is drawn unmasked with a dashed
     outline around grid points within ``hill_mask_sigmas`` hill widths of a hill; the marginals leave out
     points farther than that from every hill deposited by then (NaN).
@@ -234,23 +235,18 @@ def fig_bias(run, out_path=None, axes=None, n_snap=5, hill_mask_sigmas=2.0):
     nrow = len(run.cvs)
     isolated = run.layout == "isolated"
     groups = [[w] for w in run.walkers] if isolated else [run.walkers]
-    if nrow > 1 and len(groups) > MAX_ROWS:
-        skipped.append(f"bias maps: {len(groups) - MAX_ROWS} of {len(groups)} isolated walkers not drawn")
+    if len(groups) > MAX_ROWS:
+        skipped.append(f"bias rows: {len(groups) - MAX_ROWS} of {len(groups)} isolated walkers not drawn")
         groups = groups[:MAX_ROWS]
-    nr = len(groups) if nrow == 2 else 1
+    nr = len(groups)
     has_tt = "tt" in run.tempering
     nc = 2 + (2 if nrow == 2 else 0) + int(has_tt)
     vcol = nc - 1
     if axes is None:
-        fig, axes = plt.subplots(nr, nc, figsize=(4.4 * nc, 3.6 * nr), squeeze=False, constrained_layout=True)
+        fig, axes = plt.subplots(nr, nc, figsize=(4.4 * nc, 3.3 * nr + 0.6), squeeze=False, constrained_layout=True)
     else:
         fig = axes.flat[0].figure
     cols = {w.rid: f"C{i % 10}" for i, w in enumerate(run.walkers)}
-    for w in run.walkers:
-        axes[0, 0].plot(w.hill_t, w.hill_h, lw=0.6, alpha=0.6, color=cols[w.rid], label=w.rid)
-    axes[0, 0].set(yscale="log", xlabel="walker time (ns)", ylabel="hill height (kJ/mol)")
-    axes[0, 0].set_title("hill heights", fontsize=8, loc="left")
-    _legend(axes[0, 0], fontsize=7, ncol=2, frameon=False, loc="upper right")
     kt = KT_PER_K * run.temperature
     scale = bias_fes_scale(run)
     basins = _basin_coords(run, [c.name for c in run.cvs], skipped) if nrow == 2 else None
@@ -259,6 +255,14 @@ def fig_bias(run, out_path=None, axes=None, n_snap=5, hill_mask_sigmas=2.0):
     vrange = None
     if nrow == 2:
         vrange = _range([final_bias([h for w in g for h in w.hills_raw]) for g in groups])
+    if nrow > 2:
+        skipped.append(f"bias growth: {nrow} biased CVs not supported")
+    vstar_rows = set()
+    if has_tt:
+        if not any("vstar_kj" in h for w in run.walkers for h in w.hills_raw):
+            skipped.append("V*(t): not logged in HILLS")
+    else:
+        skipped.append("V*(t): not a transition-tempered run")
     for gi, g in enumerate(groups):
         raw = [h for w in g for h in w.hills_raw]
         h0 = raw[0]
@@ -266,14 +270,21 @@ def fig_bias(run, out_path=None, axes=None, n_snap=5, hill_mask_sigmas=2.0):
         tmax = max(float(w.hill_t[-1]) for w in g)
         tag = g[0].rid if isolated else ""
         times = np.linspace(tmax / n_snap, tmax, n_snap)
+        ah = axes[gi, 0]
+        for w in g:
+            ah.plot(w.hill_t, w.hill_h, lw=0.6, alpha=0.6, color=cols[w.rid], label=w.rid)
+        ah.set(yscale="log", xlabel="walker time (ns)", ylabel="hill height (kJ/mol)")
+        ah.set_title(f"hill heights {tag}".strip(), fontsize=8, loc="left")
+        if not isolated:
+            _legend(ah, fontsize=7, ncol=2, frameon=False, loc="upper right")
         if nrow == 1:
             x = np.linspace(float(gmin[0]), float(gmax[0]), int(np.atleast_1d(h0["grid_points"])[0]))
             for tt in times:
                 V = np.asarray(bias_from_hills(raw, until=_until(g, tt))).ravel()
-                axes[0, 1].plot(x, V, lw=1, label=f"{tag} t<={tt:.1f}".strip())
-            axes[0, 1].set(xlabel=_label(run, run.cvs[0].name), ylabel="V (kJ/mol)")
-            axes[0, 1].set_title("bias growth", fontsize=8, loc="left")
-            _grid(axes[0, 1])
+                axes[gi, 1].plot(x, V, lw=1, label=f"{tag} t<={tt:.1f}".strip())
+            axes[gi, 1].set(xlabel=_label(run, run.cvs[0].name), ylabel="V (kJ/mol)")
+            axes[gi, 1].set_title(f"bias growth {tag}".strip(), fontsize=8, loc="left")
+            _legend(axes[gi, 1], fontsize=7, ncol=2, frameon=False)
         elif nrow == 2:
             a = axes[gi, 1]
             xs = [np.linspace(float(gmin[k]), float(gmax[k]), int(np.atleast_1d(h0["grid_points"])[k]))
@@ -301,36 +312,24 @@ def fig_bias(run, out_path=None, axes=None, n_snap=5, hill_mask_sigmas=2.0):
                     ln = b.lines[-1]
                     _stars(b, basins[:, k], np.interp(basins[:, k], ln.get_xdata(), ln.get_ydata()))
             _legend(axes[gi, 2], fontsize=7, frameon=False)
-        else:
-            skipped.append(f"bias growth: {nrow} biased CVs not supported")
-            break
-    if nrow == 1:
-        _legend(axes[0, 1], fontsize=7, ncol=2, frameon=False)
-    vstar = False
-    if has_tt:
-        have = [w for w in run.walkers if any("vstar_kj" in h for h in w.hills_raw)]
-        for w in have:
-            v = np.concatenate([np.asarray(h["vstar_kj"]) for h in w.hills_raw if "vstar_kj" in h])
-            if len(v) != len(w.hill_t):
+        if has_tt:
+            have = [w for w in g if any("vstar_kj" in h for h in w.hills_raw)]
+            vs = [np.concatenate([np.asarray(h["vstar_kj"]) for h in w.hills_raw if "vstar_kj" in h]) for w in have]
+            if any(len(v) != len(w.hill_t) for v, w in zip(vs, have)):
                 skipped.append("V* length != hill count: not supported")
-                vstar = False
-                axes[0, vcol].cla()
-                break
-            axes[0, vcol].plot(w.hill_t, v, lw=0.8, color=cols[w.rid], label=w.rid)
-            vstar = True
-        if vstar:
-            axes[0, vcol].set(xlabel="walker time (ns)", ylabel="V* (kJ/mol)")
-            axes[0, vcol].set_title("TT tempering level", fontsize=8, loc="left")
-            _legend(axes[0, vcol], fontsize=7, ncol=2, frameon=False)
-        elif not have:
-            skipped.append("V*(t): not logged in HILLS")
-    else:
-        skipped.append("V*(t): not a transition-tempered run")
-    used = {(0, 0)} | ({(0, vcol)} if vstar else set())
-    n_g = len(groups) if nrow == 2 else 1
-    used |= {(g, 1) for g in range(n_g)}
+                continue
+            for w, v in zip(have, vs):
+                axes[gi, vcol].plot(w.hill_t, v, lw=0.8, color=cols[w.rid], label=w.rid)
+            if have:
+                vstar_rows.add(gi)
+                axes[gi, vcol].set(xlabel="walker time (ns)", ylabel="V* (kJ/mol)")
+                axes[gi, vcol].set_title(f"TT tempering level {tag}".strip(), fontsize=8, loc="left")
+                if not isolated:
+                    _legend(axes[gi, vcol], fontsize=7, ncol=2, frameon=False)
+    used = {(g, k) for g in range(nr) for k in range(2)}
     if nrow == 2:
-        used |= {(g, k) for g in range(n_g) for k in (2, 3)}
+        used |= {(g, k) for g in range(nr) for k in (2, 3)}
+    used |= {(g, vcol) for g in vstar_rows}
     for r in range(nr):
         for k in range(nc):
             if (r, k) not in used:
@@ -391,21 +390,12 @@ def _ess(v):
     return f"ESS {v:.0f}" if v is not None and np.isfinite(v) else "ESS n/a"
 
 
-def _dg_pair(fig, spec):
-    """ΔG°(t) axes (top 3/4 of ``spec``) and an ESS/N strip below sharing its x axis."""
-    sub = spec.subgridspec(2, 1, height_ratios=[3, 1], hspace=0.1)
-    d = fig.add_subplot(sub[0])
-    e = fig.add_subplot(sub[1], sharex=d)
-    d.tick_params(labelbottom=False)
-    return d, e
-
-
 def _fe_axes(axes, n, iso, skipped, want_text=False):
-    """Validate a user ``axes`` dict for fig_fe: ``ct`` (``n`` axes), ``w``, ``dg``; optional ``ess``, ``text``.
+    """Validate a user ``axes`` dict for fig_fe: ``ct`` and ``w`` (``n`` axes each); optional ``text``.
 
-    Other keys (e.g. the former ``map`` and ``bars``) are ignored.
+    Other keys are ignored.
     """
-    miss = {"ct", "w", "dg"} - set(axes)
+    miss = {"ct", "w"} - set(axes)
     if miss:
         raise ValueError(f"fig_fe axes missing {sorted(miss)}: not supported")
     out = dict(axes)
@@ -414,8 +404,12 @@ def _fe_axes(axes, n, iso, skipped, want_text=False):
     if len(v) != n:
         raise ValueError(f"fig_fe axes['ct'] has {len(v)} axes for {n} rows: not supported")
     out["ct"] = v
+    w = out["w"]
+    w = [w] if not isinstance(w, (list, tuple, np.ndarray)) else list(np.ravel(w))
+    if len(w) != n:
+        raise ValueError(f"fig_fe axes['w'] has {len(w)} axes for {n} rows: not supported")
+    out["w"] = w
     out.setdefault("text", None)
-    out.setdefault("ess", None)
     if want_text and out["text"] is None:
         skipped.append("ΔG° numbers: no text axes given")
     return out
@@ -444,7 +438,7 @@ def _ct_panel(a, ws, lab, iso, run):
         i = run.walkers.index(w)
         col = f"C{i % 10}"
         a.plot(w.t, w.bias, lw=0.4, color=col, alpha=0.35, zorder=1)
-        a.plot(w.t, w.ct, lw=1.3, color=col, ls=_LS[i % len(_LS)], label=f"{w.rid} c(t)", zorder=3)
+        a.plot(w.t, w.ct, lw=2.2, color=col, ls=_LS[i % len(_LS)], label=f"{w.rid} c(t)", zorder=3)
         for s_ in w.segments:
             a.axvline(s_, color="k", lw=0.9, ls=":", alpha=0.7)
     a.set(xlabel="walker time (ns)", ylabel="kJ/mol")
@@ -457,17 +451,18 @@ def _ct_panel(a, ws, lab, iso, run):
 def fig_fe(run, bands_, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=None, axes=None, numbers=None,
            min_points=12, min_count=0, min_bin_ess=0.0, smooth_sigma=2.0,
            bins=None, bins_per_hill=4, bins_fallback=60, min_density=0.05, show_numbers=False):
-    """c(t) and bias at the walker, W along the main CV and ΔG°(t) with block numbers (kcal/mol).
+    """c(t) with the bias at the walker, and W along the main CV for every estimator (kcal/mol).
 
-    W is drawn for every estimator in ``numbers["estimators"]`` (line style = estimator, colour = walker);
-    ΔG°(t) shows the primary estimator with its blocks and ESS strip, and the bias-derived ΔG°(t) dashed.
-    Shared and single biases are pooled; isolated walkers get their own c(t) rows and curves and are never
-    pooled. The 2D maps are drawn by ``fig_fes2d``.
+    One row per bias group: shared and single biases pooled; isolated walkers get their own row and curve
+    (up to ``MAX_ROWS``), never pooled. Left: c(t). Right: W of each estimator in
+    ``numbers["estimators"]`` (colour = ``ESTIMATOR_COLORS``), site and bulk bands, and a legend of the
+    estimator final values. ΔG°(t) and the blocks are drawn by ``fig_estimators`` and ``fig_blocks``; the
+    2D maps by ``fig_fes2d``.
 
     Parameters
     ----------
     axes : dict, optional
-        ``ct`` (one axis per drawn row), ``w``, ``dg``; optional ``ess`` and ``text``.
+        ``ct`` and ``w`` (one axis per drawn row each); optional ``text``.
     numbers : dict, optional
         ``fe_numbers`` output; computed with ``burn``, ``t_rej``, ``step_ns``, ``min_points`` if None.
     bins, bins_per_hill, bins_fallback, min_density, min_count, min_bin_ess, smooth_sigma
@@ -499,36 +494,20 @@ def fig_fe(run, bands_, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=None, axes=No
         skipped.append(f"map rows: {len(groups) - len(shown)} of {len(groups)} isolated walkers not drawn")
     n = len(shown)
     if axes is None:
-        multi = iso and n >= 2
-        fig = plt.figure(figsize=(17, max(3.2 * n, 8.0) + 0.8) if multi else (17, 4.8), constrained_layout=True)
-        gs = fig.add_gridspec(n, 3)
-        ax_a = [fig.add_subplot(gs[r, 0]) for r in range(n)]  # c(t)
-        ax_t = None
-        if multi:
-            hr = [1, 1, 0.5] if show_numbers else [1, 1]
-            sub = gs[:, 1:3].subgridspec(len(hr), 1, height_ratios=hr)
-            ax_c = fig.add_subplot(sub[0])
-            ax_d, ax_r = _dg_pair(fig, sub[1])
-            ax_t = fig.add_subplot(sub[2]) if show_numbers else None
-        else:
-            ax_c = fig.add_subplot(gs[:, 1])
-            if show_numbers:
-                sub = gs[:, 2].subgridspec(2, 1, height_ratios=[3, 1.4])
-                ax_d, ax_r = _dg_pair(fig, sub[0])
-                ax_t = fig.add_subplot(sub[1])
-            else:
-                ax_d, ax_r = _dg_pair(fig, gs[:, 2])
-        axes = dict(ct=ax_a, w=ax_c, dg=ax_d, ess=ax_r, text=ax_t)
+        fig = plt.figure(figsize=(15 if show_numbers else 12, 3.4 * n + 0.8), constrained_layout=True)
+        gs = fig.add_gridspec(n, 3 if show_numbers else 2, width_ratios=[1, 1, 0.7] if show_numbers else [1, 1])
+        axes = dict(ct=[fig.add_subplot(gs[r, 0]) for r in range(n)],
+                    w=[fig.add_subplot(gs[r, 1]) for r in range(n)],
+                    text=fig.add_subplot(gs[:, 2]) if show_numbers else None)
     else:
         axes = _fe_axes(axes, n, iso, skipped, show_numbers)
-        ax_a, ax_c, ax_d, ax_r = (axes[k] for k in ("ct", "w", "dg", "ess"))
-        fig = ax_c.figure
-    ax_t = axes["text"]
+        fig = axes["w"][0].figure
+    ax_a, ax_w, ax_t = axes["ct"], axes["w"], axes["text"]
     main = numbers["cv"]
     for a, (lab, ws) in zip(ax_a, shown):
         _ct_panel(a, ws, lab, iso, run)
     if numbers["binding"] is None:
-        for a in [ax_c, ax_d]:
+        for a in ax_w:
             a.text(0.5, 0.5, "no REWEIGHT data", ha="center", va="center", transform=a.transAxes)
             a.set_axis_off()
         fig.suptitle(f"free energy, {run.layout}", fontsize=9)
@@ -536,7 +515,6 @@ def fig_fe(run, bands_, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=None, axes=No
             fig.savefig(out_path, dpi=110)
         return fig, axes, skipped, nums
     rw = {w.rid for w in run.reweighted()}
-    rgroups = [(lab, ws) for lab, ws in groups if not iso or lab in rw]
     kw = dict(bins=bins, burn=burn, min_count=min_count, min_bin_ess=min_bin_ess, smooth_sigma=smooth_sigma,
               bins_per_hill=bins_per_hill, bins_fallback=bins_fallback, min_density=min_density)
     f1 = fes_reweighted(run, main, **kw)
@@ -548,60 +526,65 @@ def fig_fe(run, bands_, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=None, axes=No
     prim = numbers.get("primary", PRIMARY)
     pe = est.get(prim) or dict(binding=numbers["binding"], series=numbers["series"], blocks=numbers["blocks"])
     fx = {m: fes_reweighted(run, main, method=m, **kw) for m in RW_METHODS if m != "rw_ct" and m in est}
-    bd, ser, pb = numbers["binding"], pe["series"], pe["binding"]
+    fx["rw_ct"] = f1
+    bd, pb = numbers["binding"], pe["binding"]
     b = bands_[main]
-    ax_c.axvspan(*b.bound, color=_BOUND, alpha=0.6, lw=0)
-    ax_c.axvspan(*b.unbound, color=_UNBOUND, alpha=0.6, lw=0)
-    for a_ in (ax_c, ax_d):
-        _grid(a_)
-    kind = _pick(bd, rgroups[0][0])["kind"]
+    kind = _pick(bd, next(lab for lab, _ in shown if not iso or lab in rw))["kind"]
     sym = "ΔG°" if kind == "dG0" else "band ΔF"
+    bb = numbers.get("binding_bias")
+    gap = numbers.get("estimator_gap")
+    wpts = _basin_coords(run, [main], skipped)
     lines = []
-    bias_curves, segs, ycur, xrej, ct_lines = [], [], [], [], []
-    rws = run.reweighted()
-
-    def _agg(t):
-        return t if iso else aggregate_time(rws, t)
-    bb, bser, gap = numbers.get("binding_bias"), numbers.get("dg_bias_series"), numbers.get("estimator_gap")
-    for r, (lab, ws) in enumerate(rgroups):
-        col = f"C{r % 10}" if iso else "k"
-        c1 = _pick(f1, lab)
-        v = _pick(bd, lab)
-        val = f"{v['value'] * KJ_TO_KCAL:.2f}" if np.isfinite(v["value"]) else f"n/a ({v['reason']})"
-        vb = None if bb is None else _pick(bb, lab)
-        bval = "n/a" if vb is None else _num(vb["value"])
-        ct_lines += ax_c.plot(c1[0], c1[1] * KJ_TO_KCAL, color=col, lw=1,
-                              label=f"{lab}: {sym} {val} rw / {bval} bias (kcal/mol), {_ess(v['ess'])}")
+    for r, (lab, ws) in enumerate(shown):
+        a = ax_w[r]
+        if iso and lab not in rw:
+            a.text(0.5, 0.5, "no REWEIGHT data", ha="center", va="center", transform=a.transAxes)
+            a.set_axis_off()
+            continue
+        a.axvspan(*b.bound, color=_BOUND, alpha=0.6, lw=0)
+        a.axvspan(*b.unbound, color=_UNBOUND, alpha=0.6, lw=0)
+        _grid(a)
+        curves = {}
         for m, fm in fx.items():
             if fm.pooled is not None or lab in fm.per_walker:
                 cm = _pick(fm, lab)
-                ax_c.plot(cm[0], cm[1] * KJ_TO_KCAL, color=col, lw=1, ls=EST_LS[m])
+                curves[m] = (cm[0], cm[1] * KJ_TO_KCAL)
+        vb = None if bb is None else _pick(bb, lab)
         if vb is not None:
-            bias_curves.append((vb, col))
-        if bser is not None:
-            sb = _pick(bser, lab)
-            ax_d.plot(sb.get("t_aggregate", sb["t"]), sb["dg"] * KJ_TO_KCAL, color=col, lw=1, ls="--")
-            ycur.append((lab, sb.get("t_aggregate", sb["t"]), sb["dg"] * KJ_TO_KCAL))
+            curves["bias"] = (vb["z"], np.asarray(vb["W"]) * KJ_TO_KCAL)
+        for m in ESTIMATORS:
+            if m not in curves:
+                continue
+            v = _get(est[m]["binding"], lab) if m in est else None
+            val = "n/a" if v is None else (f"{v['value'] * KJ_TO_KCAL:.2f}" if np.isfinite(v["value"])
+                                           else f"n/a ({v['reason']})")
+            ln, = a.plot(*curves[m], color=ESTIMATOR_COLORS[m], ls="-", lw=2.0,
+                         label=f"{ESTIMATOR_LABELS[m]}: {sym} {val}")
+            if m == "rw_ct" and wpts is not None:
+                _stars(a, wpts[:, 0], np.interp(wpts[:, 0], ln.get_xdata(), ln.get_ydata()))
+        ttl = f"{lab}: W along {main}; {sym} (kcal/mol)" if iso else f"W along {main}; {sym} (kcal/mol)"
+        if iso and r == 0 and bd.mean is not None:
+            ttl += (f"\nmean {_num(bd.mean)} ± {_num(bd.sd)}, spread {_num(bd.spread)}; "
+                    f"{bd.n_defined}/{bd.n_walkers} walkers defined")
+        a.set(xlabel=_label(run, main), ylabel="W (kcal/mol)")
+        _w_ylim(a, bands_.get(main))
+        lo, hi = a.get_ylim()
+        a.set_ylim(lo, hi + 0.4 * (hi - lo))                       # headroom for the legend
+        a.set_title(ttl, fontsize=8, loc="left")
+        _legend(a, fontsize=7.5, frameon=False, loc="upper left")
+        blk = pe["blocks"].get(lab) if iso else pe["blocks"]
+        v = _pick(pb, lab)
+        pre = [f"{lab}:"] if iso else []
+        if blk is None:
+            lines.append("\n".join(pre + [f"final {sym} {_num(v['value'])}", "blocks n/a", _ess(v["ess"])]))
+            continue
+        nb = len(blk["block_dg"])
+        be = blk.get("block_ess")
         extra = []
         if vb is not None:
             extra.append(f"bias-derived {sym} {_num(vb['value'])}")
             g = gap["per_walker"].get(lab) if gap and gap["pooled"] is None else (gap or {}).get("pooled")
             extra.append(f"estimator gap (rw - bias) {_num(g) if g is not None else 'n/a'}")
-        s = _pick(ser, lab)
-        tx = s.get("t_aggregate", s["t"])
-        ax_d.plot(tx, s["dg"] * KJ_TO_KCAL, color=col, lw=1)
-        ycur.append((lab, tx, s["dg"] * KJ_TO_KCAL))
-        blk = pe["blocks"].get(lab) if iso else pe["blocks"]
-        v = _pick(pb, lab)
-        if len(s["t"]):
-            ax_d.axvline(_agg(t_rej * s["t"][-1]), color=col, ls=":", lw=0.8)
-            xrej.append(_agg(t_rej * s["t"][-1]))
-        pre = [f"{lab}:"] if iso else []
-        if blk is None:
-            lines.append("\n".join(pre + [f"final {sym} {_num(v['value'])}", "blocks n/a", _ess(v["ess"])] + extra))
-            continue
-        nb = len(blk["block_dg"])
-        be = blk.get("block_ess")
         lines.append("\n".join(pre + [
             f"final {sym} {_num(v['value'])}",
             f"mean ± SD after t_rej {_num(blk['time_mean'])} ± {_num(blk['time_sd'])}",
@@ -609,90 +592,10 @@ def fig_fe(run, bands_, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=None, axes=No
             f"last two blocks differ by {_num(blk['last_blocks_diff'])}",
             f"valid blocks {blk['n_valid_blocks']}/{nb}",
             _ess(v["ess"]) + (f" (min block {_ess(min(be))})" if be else "")] + extra))
-        ed = _agg(np.linspace(t_rej * s["t"][-1], s["t"][-1], nb + 1))
-        segs.append((lab, col, blk, ed))
-    mins = [np.minimum(b["block_ess_site"], b["block_ess_bulk"]) for _, _, b, _ in segs if "block_ess_site" in b]
-    pos = np.concatenate(mins)[np.concatenate(mins) > 0] if mins else np.zeros(0)
-    if pos.size:
-        norm = LogNorm(vmin=pos.min(), vmax=max(pos.max(), pos.min() * 1.01))
-        cmap = plt.get_cmap("viridis")
-        for lab, col, blk, ed in segs:
-            if "block_ess_site" not in blk:
-                continue
-            mn = np.minimum(blk["block_ess_site"], blk["block_ess_bulk"])
-            first = True
-            for k, bv in enumerate(blk["block_dg"]):
-                xm = 0.5 * (ed[k] + ed[k + 1])
-                if np.isfinite(bv):
-                    c = cmap(norm(max(mn[k], norm.vmin)))
-                    y = bv * KJ_TO_KCAL
-                    ax_d.hlines(y, ed[k], ed[k + 1], color=c, lw=1.2 if iso else 2.5)
-                    first = False
-                    ax_d.annotate(str(blk["block_recross"][k]), (xm, y), xytext=(0, 1.5), textcoords="offset points",
-                                  ha="center", va="bottom", fontsize=6, color="0.25" if not iso else col)
-                else:
-                    ax_d.plot([xm], [0], marker="o", mfc="none", mec=col if iso else "k", ms=5, ls="none",
-                              transform=ax_d.get_xaxis_transform(), clip_on=False)
-        sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
-        cb = fig.colorbar(sm, ax=ax_d, pad=0.01, fraction=0.04)
-        cb.set_label("block min(site, bulk) ESS", fontsize=7)
-        cb.ax.tick_params(labelsize=6)
-        axes["cbar"] = cb.ax
-    if ax_r is not None:
-        for lab, col, blk, ed in segs:
-            s_ = _pick(ser, lab)
-            if "ess_frac" in s_:
-                ax_r.plot(s_.get("t_aggregate", s_["t"]), s_["ess_frac"], color=col if iso else "0.4", lw=0.8)
-        ax_r.set_yscale("log")
-        ax_r.set_ylabel("ESS/N", fontsize=7)
-        ax_r.tick_params(labelsize=6)
-        _grid(ax_r)
-    axes["ess"] = ax_r
-    ttl = f"W along {main}; {sym} (kcal/mol)"
-    if iso and bd.mean is not None:
-        ttl += (f"\nmean {_num(bd.mean)} ± {_num(bd.sd)}, spread {_num(bd.spread)}; "
-                f"{bd.n_defined}/{bd.n_walkers} walkers defined")
-    wpts = _basin_coords(run, [main], skipped)
-    if wpts is not None:
-        for line in ct_lines:
-            _stars(ax_c, wpts[:, 0], np.interp(wpts[:, 0], line.get_xdata(), line.get_ydata()))
-    for vb, col in bias_curves:
-        ax_c.plot(vb["z"], np.asarray(vb["W"]) * KJ_TO_KCAL, color=col, lw=1, ls="--")
-    ax_c.set(xlabel=_label(run, main), ylabel="W (kcal/mol)")
-    _w_ylim(ax_c, bands_.get(main))
-    ax_c.set_title(ttl, fontsize=8, loc="left")
-    shown_m = [m for m in ESTIMATORS if m in est or (m == "rw_ct") or (m == "bias" and bias_curves)]
-    key = ax_c.legend([Line2D([], [], color="0.2", lw=1, ls=EST_LS[m]) for m in shown_m],
-                      [LABELS[m] for m in shown_m], fontsize=6.5, frameon=False, loc="lower right", title="line style",
-                      title_fontsize=6.5)
-    ax_c.add_artist(key)
-    _legend(ax_c, fontsize=7, frameon=False)
-    ax_x = ax_r if ax_r is not None else ax_d
-    ax_x.set_xlabel("walker time (ns)" if iso else "aggregate walker time (ns, summed over walkers)")
-    ax_d.set_ylabel(f"{sym} (kcal/mol)")
-    if not iso:
-        ax_x.xaxis.label.set_fontsize(8)
-    ax_d.set_title(f"{sym} vs simulation time", fontsize=8, loc="left")
-    if xrej:
-        x0 = min(xrej)
-        ys = [y[(x >= x0) & np.isfinite(y)] for _, x, y in ycur]
-        ys += [np.array([b * KJ_TO_KCAL for b in blk["block_dg"] if np.isfinite(b)]) for _, _, blk, _ in segs]
-        ys = np.concatenate(ys) if ys else np.zeros(0)
-        if ys.size:
-            lo, hi = ys.min(), ys.max()
-            pad = 0.15 * (hi - lo) if hi > lo else 1.0
-            ax_d.set_ylim(lo - pad, hi + pad + 0.5 * (hi - lo + 2 * pad))   # headroom for the legend
-    keys = [(Line2D([], [], color="0.2", lw=1), f"reweighted {sym}(t) from all frames up to t"
-             + ("" if prim == "rw_ct" else f" ({LABELS[prim]})")),
-            (Line2D([], [], color="0.2", lw=1, ls="--"), f"bias-derived {sym}(t)"),
-            (Line2D([], [], color="0.2", lw=0.8, ls=":"), "start of statistics (t_rej)"),
-            (Line2D([], [], color="0.2", lw=2.5), f"block {sym} (colour = min(site, bulk) ESS)"),
-            (Line2D([], [], color="0.2", marker="o", mfc="none", ls="none"), "block undefined")]
-    ax_d.legend(*zip(*keys), fontsize=6, frameon=False, loc="upper right")
     if show_numbers and lines and ax_t is not None:
         ax_t.axis("off")
-        ax_t.text(0.0, 1.0, "\n".join(lines), transform=ax_t.transAxes, fontsize=6.5, va="top")
-    fig.suptitle(f"free energy, {run.layout}; burn {burn:g}, rejection {t_rej:g}", fontsize=9)
+        ax_t.text(0.0, 1.0, "\n\n".join(lines), transform=ax_t.transAxes, fontsize=7, va="top")
+    fig.suptitle(f"free energy, {run.layout}; burn {burn:g}", fontsize=9)
     if out_path:
         fig.savefig(out_path, dpi=110)
     return fig, axes, skipped, nums
@@ -709,8 +612,8 @@ def fig_estimators(run, numbers, out_path=None, axes=None, t_rej=0.2):
     """ΔG°(t) of every estimator and their final values (kcal/mol), pooled or per isolated walker.
 
     One row per bias: shared and single pooled; isolated per walker (up to ``MAX_ROWS``), never pooled.
-    Left: ΔG°(t) of each estimator in ``numbers["estimators"]`` (colour and line style = estimator); the
-    y-range covers the points after ``t_rej`` of the run. Right: final values with the estimator spread.
+    Left: ΔG°(t) of each estimator in ``numbers["estimators"]`` (colour = estimator, solid); the
+    y-range covers the points after ``t_rej`` of the run. Right: lollipop of the final values with the estimator spread in the title.
 
     Parameters
     ----------
@@ -742,6 +645,11 @@ def fig_estimators(run, numbers, out_path=None, axes=None, t_rej=0.2):
     sp = numbers.get("estimator_spread") or {}
     kinds = {(_get(e["binding"], g) or {}).get("kind") for e in est.values() for g in groups} - {None}
     sym = "ΔG°" if kinds <= {"dG0"} else "band ΔF"
+    allv = [v["value"] * KJ_TO_KCAL for e in est.values() for g in groups
+            for v in [_get(e["binding"], g)] if v is not None and np.isfinite(v["value"])]
+    lo, hi = min(allv + [0.0]), max(allv + [0.0])
+    pad = 0.3 * (hi - lo) if hi > lo else 1.0
+    xlim = (lo - (pad if lo < 0 else 0.05 * pad), hi + (pad if hi > 0 else 0.05 * pad))   # shared by all rows
     for r, lab in enumerate(groups):
         a, b = axes[r]
         finals, ys, x_all = [], [], []
@@ -751,7 +659,7 @@ def fig_estimators(run, numbers, out_path=None, axes=None, t_rej=0.2):
             if s is None or v is None:
                 continue
             x, y = np.asarray(s.get("t_aggregate", s["t"]), float), np.asarray(s["dg"], float) * KJ_TO_KCAL
-            a.plot(x, y, color=EST_COLOR[m], ls=EST_LS[m], lw=1.2, label=LABELS[m])
+            a.plot(x, y, color=ESTIMATOR_COLORS[m], ls="-", lw=2.2, label=ESTIMATOR_LABELS[m])
             ys.append((x, y))
             x_all.append(x)
             finals.append((m, v["value"]))
@@ -766,33 +674,194 @@ def fig_estimators(run, numbers, out_path=None, axes=None, t_rej=0.2):
             lo, hi = late.min(), late.max()
             pad = 0.15 * (hi - lo) if hi > lo else 1.0
             a.set_ylim(lo - pad, hi + pad)
-        a.axvline(x0, color="0.3", ls=":", lw=0.8)
+        a.axvline(x0, color="0.5", ls=":", lw=0.8, zorder=0)
         a.set(xlabel="walker time (ns)" if iso else "aggregate walker time (ns, summed over walkers)",
               ylabel=f"{sym} (kcal/mol)")
         a.set_title(f"{lab}: {sym}(t) per estimator (dotted: t_rej)", fontsize=8, loc="left")
         _grid(a)
         _legend(a, fontsize=7, frameon=False, loc="upper right")
+        b.set_xlim(*xlim)
         for i, (m, v) in enumerate(finals):
             if np.isfinite(v):
-                b.plot([v * KJ_TO_KCAL], [i], marker="o", ms=7, color=EST_COLOR[m], ls="none")
-                b.annotate(f"{v * KJ_TO_KCAL:.2f}", (v * KJ_TO_KCAL, i), xytext=(0, 6), textcoords="offset points",
-                           ha="center", fontsize=7)
+                y = v * KJ_TO_KCAL
+                b.hlines(i, 0.0, y, color=ESTIMATOR_COLORS[m], lw=2.2)
+                b.plot([y], [i], marker="o", ms=8, color=ESTIMATOR_COLORS[m], ls="none")
+                b.annotate(f"{y:.2f}", (y, i), xytext=(8 if y >= 0 else -8, 0), textcoords="offset points",
+                           ha="left" if y >= 0 else "right", va="center", fontsize=8)
             else:
-                b.text(0.5, i, "undefined", transform=b.get_yaxis_transform(), ha="center", va="center", fontsize=7)
+                b.text(0.5, i, "undefined", transform=b.get_yaxis_transform(), ha="center", va="center", fontsize=8)
+        b.axvline(0.0, color="0.4", lw=0.8)
         b.set_yticks(range(len(finals)))
-        b.set_yticklabels([LABELS[m] for m, _ in finals], fontsize=7)
+        b.set_yticklabels([ESTIMATOR_LABELS[m] for m, _ in finals], fontsize=8)
         b.set_ylim(-0.6, len(finals) - 0.4)
         b.invert_yaxis()
-        fin = [v * KJ_TO_KCAL for _, v in finals if np.isfinite(v)]
-        if fin:
-            pad = max(0.5, 0.2 * (max(fin) - min(fin)))
-            b.set_xlim(min(fin) - pad, max(fin) + pad)
         spr = sp.get("pooled") if not iso else (sp.get("per_walker") or {}).get(lab)
         b.set_title(f"final {sym} (kcal/mol); spread {_num(spr) if spr is not None else 'n/a'}", fontsize=8,
                     loc="left")
         b.set_xlabel(f"{sym} (kcal/mol)")
         _grid(b)
     fig.suptitle(f"{sym} estimators, {run.layout}", fontsize=9)
+    if out_path:
+        fig.savefig(out_path, dpi=110)
+    return fig, axes, skipped
+
+
+def _est_blocks(est, m, lab, iso):
+    """Block dict of estimator ``m`` for group ``lab`` (None if absent)."""
+    e = est.get(m)
+    if e is None or e["blocks"] is None:
+        return None
+    return e["blocks"].get(lab) if iso else e["blocks"]
+
+
+def fig_blocks(run, numbers, out_path=None, axes=None, t_rej=0.2):
+    """Block analysis, one row per bias group, three stacked panels sharing walker time.
+
+    Rows are shared and single biases pooled (aggregate walker time) and isolated walkers (up to
+    ``MAX_ROWS``), never pooled. (a) ΔG° of each block for every reweighting estimator in
+    ``numbers["estimators"]`` (short segments in ``ESTIMATOR_COLORS``, offset in x per estimator; hollow
+    markers on the bottom edge for undefined blocks; round-trip count of the block on top; dashed lines are
+    the final ΔG° of every estimator, including ``bias``, which has no frame blocks). (b) min(site, bulk)
+    ESS per block of the primary estimator as bars (log y) with the site and bulk ESS as markers. (c) ESS/N(t)
+    of the primary estimator.
+
+    Parameters
+    ----------
+    numbers : dict
+        ``fe_numbers`` output.
+    axes : ndarray of Axes, optional
+        Shape (rows, 3).
+
+    Returns
+    -------
+    fig, axes, skipped
+    """
+    skipped = []
+    est = numbers.get("estimators") or {}
+    prim = numbers.get("primary", PRIMARY)
+    iso = run.layout == "isolated"
+    groups = [w.rid for w in run.walkers] if iso else ["all"]
+    if len(groups) > MAX_ROWS:
+        skipped.append(f"block rows: {len(groups) - MAX_ROWS} of {len(groups)} isolated walkers not drawn")
+        groups = groups[:MAX_ROWS]
+    n = len(groups)
+    leg_ax = [None] * n
+    leg_b = [None] * n
+    if axes is None:
+        fig = plt.figure(figsize=(12, 6.2 * n + 0.6), constrained_layout=True)
+        gs = fig.add_gridspec(3 * n, 2, height_ratios=[3, 1.6, 1.3] * n, width_ratios=[1, 0.2])
+        axes = np.empty((n, 3), object)
+        for r in range(n):
+            axes[r, 0] = fig.add_subplot(gs[3 * r, 0])
+            for k in (1, 2):
+                axes[r, k] = fig.add_subplot(gs[3 * r + k, 0], sharex=axes[r, 0])
+            leg_ax[r] = fig.add_subplot(gs[3 * r, 1])
+            leg_ax[r].axis("off")
+            leg_b[r] = fig.add_subplot(gs[3 * r + 1, 1])
+            leg_b[r].axis("off")
+    else:
+        axes = np.asarray(axes)
+        if axes.shape != (n, 3):
+            raise ValueError(f"fig_blocks axes shape {axes.shape} != {(n, 3)}: not supported")
+        fig = axes.flat[0].figure
+    rws = run.reweighted()
+    sp = est.get(prim)
+    kinds = {(_get(e["binding"], g) or {}).get("kind") for e in est.values() for g in groups} - {None}
+    sym = "ΔG°" if kinds <= {"dG0"} else "band ΔF"
+    rwm = [m for m in RW_METHODS if m in est]
+    for r, lab in enumerate(groups):
+        a, b, c = axes[r]
+        for x in (a, b):
+            x.tick_params(labelbottom=False)
+        pb = _est_blocks(est, prim, lab, iso)
+        ser = None if sp is None else _get(sp["series"], lab)
+        if pb is None or ser is None:
+            a.text(0.5, 0.5, "blocks n/a", ha="center", va="center", transform=a.transAxes)
+            for x in (a, b, c):
+                x.set_axis_off()
+            a.set_title(f"{lab}: block analysis (t_rej {t_rej:g}, blocks n/a)", fontsize=8, loc="left")
+            continue
+        nb = len(pb["block_dg"])
+        t_end = float(ser["t"][-1])
+
+        def agg(t):
+            return np.asarray(t, float) if iso else aggregate_time(rws, np.asarray(t, float))
+        ed = agg(np.linspace(t_rej * t_end, t_end, nb + 1))
+        xm, bw = 0.5 * (ed[:-1] + ed[1:]), np.diff(ed)
+        off = {m: (j - (len(rwm) - 1) / 2) * 0.24 for j, m in enumerate(rwm)}
+        ys = []
+        for m in ESTIMATORS:
+            e = est.get(m)
+            v = None if e is None else _get(e["binding"], lab)
+            if v is not None and np.isfinite(v["value"]):
+                y = v["value"] * KJ_TO_KCAL
+                a.axhline(y, color=ESTIMATOR_COLORS[m], ls="--", lw=1.0, alpha=0.9, zorder=1)
+                ys.append(y)
+        for m in rwm:
+            blk = _est_blocks(est, m, lab, iso)
+            if blk is None or len(blk["block_dg"]) != nb:
+                continue
+            for k, bv in enumerate(blk["block_dg"]):
+                xc = xm[k] + off[m] * bw[k]
+                if np.isfinite(bv):
+                    y = bv * KJ_TO_KCAL
+                    a.hlines(y, xc - 0.1 * bw[k], xc + 0.1 * bw[k], color=ESTIMATOR_COLORS[m], lw=3.0, zorder=3)
+                    ys.append(y)
+                else:
+                    a.plot([xc], [0.03], marker="o", mfc="none", mec=ESTIMATOR_COLORS[m], ms=6, ls="none",
+                           transform=a.get_xaxis_transform(), clip_on=False, zorder=3)
+        if ys:
+            lo, hi = min(ys), max(ys)
+            pad = 0.12 * (hi - lo) if hi > lo else 1.0
+            a.set_ylim(lo - pad, hi + pad + 0.18 * (hi - lo + 2 * pad))
+        for k, rc in enumerate(pb.get("block_recross", [])):
+            a.annotate(str(rc), (xm[k], 0.97), xycoords=a.get_xaxis_transform(), ha="center", va="top",
+                       fontsize=8, color="0.2")
+        a.set_ylabel(f"{sym} (kcal/mol)")
+        a.set_title(f"{lab}: block analysis (t_rej {t_rej:g}, n blocks {nb})", fontsize=8, loc="left")
+        handles = [Line2D([], [], color=ESTIMATOR_COLORS[m], lw=3.0) for m in ESTIMATORS if m in est]
+        labels = [ESTIMATOR_LABELS[m] for m in ESTIMATORS if m in est]
+        handles += [Line2D([], [], color="0.3", ls="--", lw=1.0),
+                    Line2D([], [], color="0.3", marker="o", mfc="none", ls="none"),
+                    Line2D([], [], color="0.2", marker="$n$", ls="none")]
+        labels += [f"final {sym}(t)", "block undefined", "round trips"]
+        if leg_ax[r] is not None:
+            leg_ax[r].legend(handles, labels, fontsize=7, frameon=False, loc="upper left", borderaxespad=0)
+        else:
+            a.legend(handles, labels, fontsize=6.5, frameon=False, loc="lower right", ncol=2)
+        _grid(a)
+        pc = ESTIMATOR_COLORS[prim]
+        if "block_ess_site" in pb:
+            si, bu = np.asarray(pb["block_ess_site"], float), np.asarray(pb["block_ess_bulk"], float)
+            mn = np.minimum(si, bu)
+            ok = mn > 0
+            b.bar(xm[ok], mn[ok], width=0.8 * bw[ok], color=pc, alpha=0.45, label="min(site, bulk)")
+            b.plot(xm[si > 0], si[si > 0], ls="none", marker="^", ms=5, mfc="w", mec="k", mew=0.9,
+                   label=f"primary ({prim}) site ESS")
+            b.plot(xm[bu > 0], bu[bu > 0], ls="none", marker="v", ms=5, color="k",
+                   label=f"primary ({prim}) bulk ESS")
+            b.set_yscale("log")
+            b.set_ylabel("block ESS")
+            hb, lb = b.get_legend_handles_labels()
+            if leg_b[r] is not None:
+                leg_b[r].legend(hb, lb, fontsize=7, frameon=False, loc="upper left", borderaxespad=0)
+            else:
+                b.legend(hb, lb, fontsize=6.5, frameon=False, loc="lower right", ncol=3)
+            allv = np.r_[si, bu]
+            if (allv > 0).any():
+                b.set_ylim(top=float(allv[allv > 0].max()) * 2.0)
+        else:
+            b.text(0.5, 0.5, "no site/bulk ESS", ha="center", va="center", transform=b.transAxes)
+        _grid(b)
+        if "ess_frac" in ser:
+            c.plot(np.asarray(ser.get("t_aggregate", ser["t"]), float), ser["ess_frac"], color=pc, lw=1.6)
+            c.set_yscale("log")
+        c.set_ylabel("ESS/N")
+        c.set_xlabel("walker time (ns)" if iso else "aggregate walker time (ns, summed over walkers)")
+        _grid(c)
+        for x in (a, b, c):
+            x.axvline(ed[0], color="0.5", ls=":", lw=0.8, zorder=0)
+    fig.suptitle(f"{sym} block analysis, {run.layout}", fontsize=9)
     if out_path:
         fig.savefig(out_path, dpi=110)
     return fig, axes, skipped
