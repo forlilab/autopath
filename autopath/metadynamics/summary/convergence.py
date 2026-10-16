@@ -3,6 +3,7 @@ import math
 from dataclasses import dataclass, field
 
 KJ_PER_KCAL = 4.184
+ESTIMATORS = ("rw_ct", "rw_final", "rw_balanced", "bias")
 
 
 @dataclass
@@ -66,9 +67,16 @@ def min_recrossings(n, cv=None):
     return _named(f"min_recrossings({_arg(n, cv)})", f)
 
 
+def _primary(s, key):
+    """``key`` ("binding" or "blocks") of the primary estimator: ``estimators[primary]`` when the summary
+    records one, else the top-level entry."""
+    e = (s.get("estimators") or {}).get(s.get("primary"))
+    return e.get(key) if e is not None else s.get(key)
+
+
 def _blocks(s):
     """{unit: block dict or None}; one unit per walker if isolated, else "all"."""
-    b = s.get("blocks")
+    b = _primary(s, "blocks")
     if s["layout"] == "isolated":
         return {rid: (b or {}).get(rid) for rid in s["walkers"]}
     return {"all": b}
@@ -76,7 +84,7 @@ def _blocks(s):
 
 def _kinds(s):
     """Kinds of the binding values in a summary ("dG0", "band_dF")."""
-    b = s.get("binding") or {}
+    b = _primary(s, "binding") or {}
     vals = [b["pooled"]] if b.get("pooled") else list((b.get("per_walker") or {}).values())
     return {v.get("kind") for v in vals if v}
 
@@ -135,7 +143,7 @@ def walker_spread_within(tol_kcal, allow_band=False):
         why = _band_fail(s, allow_band)
         if why:
             return False, f"walker spread: {why}"
-        b = s.get("binding") or {}
+        b = _primary(s, "binding") or {}
         n, k = b.get("n_walkers"), b.get("n_defined")
         if n is not None and k is not None and k < n:
             return False, f"walker spread: {n - k} of {n} walkers undefined"
@@ -168,7 +176,7 @@ def clamp_fraction_below(frac):
 def min_ess(n):
     """Kish ESS of the binding estimate >= n: pooled, or every walker if isolated; undefined fails."""
     def f(s):
-        b = s.get("binding") or {}
+        b = _primary(s, "binding") or {}
         vals = {"all": b["pooled"]} if b.get("pooled") else dict(b.get("per_walker") or {})
         if s["layout"] == "isolated":
             vals.update({r: None for r in s["walkers"] if r not in vals})
@@ -185,21 +193,35 @@ def min_ess(n):
     return _named(f"min_ess({n})", f)
 
 
-def estimators_agree(tol_kcal):
-    """|reweighted - bias-derived binding value| <= tol_kcal (kcal/mol): pooled if shared, every walker if
-    isolated; an undefined gap fails."""
+def estimators_agree(tol_kcal, methods=None):
+    """Spread (max - min) of the binding values of ``methods`` <= tol_kcal (kcal/mol): pooled if shared,
+    every walker if isolated.
+
+    ``methods`` defaults to all four estimators (``rw_ct``, ``rw_final``, ``rw_balanced``, ``bias``); a method
+    missing from the summary or undefined fails, as do fewer than two methods.
+    """
+    ms = tuple(methods) if methods is not None else ESTIMATORS
+
     def f(s):
-        g = s.get("estimator_gap") or {}
-        vals = {"all": g.get("pooled")} if s["layout"] != "isolated" else \
-            {r: (g.get("per_walker") or {}).get(r) for r in s["walkers"]}
+        if len(ms) < 2:
+            return False, "estimator spread undefined (fewer than 2 estimators)"
+        est = s.get("estimators") or {}
+        iso = s["layout"] == "isolated"
         bad = []
-        for k, v in vals.items():
-            x = _kcal(v)
-            if not math.isfinite(x):
-                bad.append(f"{k}: undefined")
-            elif abs(x) > tol_kcal:
-                bad.append(f"{k}: gap {x:.2f} kcal/mol")
+        for u in (list(s["walkers"]) if iso else ["all"]):
+            vals = {}
+            for m in ms:
+                b = (est.get(m) or {}).get("binding") or {}
+                v = (b.get("per_walker") or {}).get(u) if iso else b.get("pooled")
+                vals[m] = _kcal((v or {}).get("value"))
+            und = [m for m, x in vals.items() if not math.isfinite(x)]
+            if und:
+                bad.append(f"{u}: {', '.join(und)} undefined")
+                continue
+            hi, lo = max(vals, key=vals.get), min(vals, key=vals.get)
+            if vals[hi] - vals[lo] > tol_kcal:
+                bad.append(f"{u}: spread {vals[hi] - vals[lo]:.2f} kcal/mol ({hi} - {lo})")
         if bad:
-            return False, f"estimator gap not within {tol_kcal} kcal/mol: " + "; ".join(bad)
-        return True, f"estimator gap within {tol_kcal} kcal/mol"
-    return _named(f"estimators_agree({tol_kcal})", f)
+            return False, f"estimator spread not within {tol_kcal} kcal/mol: " + "; ".join(bad)
+        return True, f"estimator spread within {tol_kcal} kcal/mol"
+    return _named(f"estimators_agree({_arg(tol_kcal, ','.join(methods) if methods is not None else None)})", f)

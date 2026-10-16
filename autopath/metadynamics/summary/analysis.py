@@ -1,20 +1,28 @@
 """Bands, recrossings, reweighting, the shared/isolated combination rule, free energies and ΔG°."""
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Callable, Optional
 
 import numpy as np
+from scipy.interpolate import RegularGridInterpolator
 from scipy.ndimage import gaussian_filter
 from scipy.spatial import cKDTree
 from openmm import unit
 
-from ..Hills import bias_from_hills, fes_history, fes_scale
+from ..BoundaryCorrection import boundary_factor
+from ..Hills import _axes, _axis_gaussians, _bounds, bias_from_hills, fes_history, fes_scale
 
 FUNNEL_Z = "funnel_z"
 SITE_FRAC = 0.2
 BULK_MARGIN_ANG = 1.5
 EDGE_FRAC = 0.1
 HIGH_BOUND_PREFIX = "contacts"
+
+ESTIMATORS = ("rw_ct", "rw_final", "rw_balanced", "bias")
+LABELS = {"rw_ct": "reweight c(t)", "rw_final": "reweight final bias", "rw_balanced": "reweight balanced",
+          "bias": "final bias"}
+PRIMARY = "rw_ct"
 
 
 @dataclass
@@ -206,6 +214,227 @@ def weights(walker, temperature, burn=0.2):
     return _weights_arrays(walker.bias, walker.ct, temperature, burn)
 
 
+def _grids(h):
+    """Grid coordinates of every CV of a HILLS record (first CV first)."""
+    return [np.linspace(float(a), float(b), int(n)) for a, b, n in
+            zip(np.atleast_1d(h["grid_min"]), np.atleast_1d(h["grid_max"]), np.atleast_1d(h["grid_points"]))]
+
+
+_BIAS_CACHE = OrderedDict()
+_BIAS_CACHE_MAX = 8
+
+
+def _raw_key(raw):
+    return tuple((id(h), id(h["cv"]), id(h["height_kj"]), id(h["time_ns"]), id(h["wall_s"])) for h in raw)
+
+
+def final_bias(raw):
+    """Final bias (kJ/mol) of one bias from its HILLS records, as ``bias_from_hills``; cached per record set.
+
+    The cache keeps the records alive, so their ids identify them; do not modify records in place.
+    """
+    key = _raw_key(raw)
+    hit = _BIAS_CACHE.get(key)
+    if hit is None:
+        hit = _BIAS_CACHE[key] = (list(raw), np.asarray(bias_from_hills(raw)))
+        while len(_BIAS_CACHE) > _BIAS_CACHE_MAX:
+            _BIAS_CACHE.popitem(last=False)
+    else:
+        _BIAS_CACHE.move_to_end(key)
+    return hit[1]
+
+
+def _bias_group(run, w):
+    """Walkers sharing ``w``'s bias: ``[w]`` if isolated, else every loaded walker."""
+    return [w] if run.layout == "isolated" else list(run.walkers)
+
+
+def _group_raw(group):
+    return [h for x in group for h in x.hills_raw]
+
+
+def _final_at_frames(run, w):
+    """Final bias of ``w``'s bias (kJ/mol) at each frame's logged CVs, linearly interpolated on the grid.
+
+    Frames outside the grid are clipped to it on a CV with clamp bounds; on any other CV they raise.
+    Periodic CVs are wrapped into one period.
+    """
+    raw = _group_raw(_bias_group(run, w))
+    V = final_bias(raw)
+    grids = _grids(raw[0])
+    if V.shape != tuple(len(g) for g in reversed(grids)):
+        raise ValueError(f"bias grid shape {V.shape} is not (last CV, ..., first CV): not supported")
+    pts = []
+    for c, g in zip(run.cvs, grids):
+        x, lo, hi = np.asarray(w.cvs[c.name], float), g[0], g[-1]
+        if c.periodic:
+            x = lo + np.mod(x - lo, hi - lo)
+        else:
+            tol = 1e-9 * (hi - lo)
+            if c.bounds is None and np.any((x < lo - tol) | (x > hi + tol)):
+                raise ValueError(f"frame CV {c.name} outside the bias grid: not supported")
+            x = np.clip(x, lo, hi)
+        pts.append(x)
+    return RegularGridInterpolator(tuple(reversed(grids)), V)(np.stack(pts[::-1], 1))
+
+
+def _omega_weights(c, g):
+    """Integration weights over Ω of a function linear between the grid points ``g``, and the length of Ω.
+
+    Ω is the clamp range where recorded (finite edges, within the grid), else the grid; a periodic CV
+    spans one period (its last grid point repeats the first).
+    """
+    n = len(g)
+    if c.periodic:
+        w = np.full(n, (g[-1] - g[0]) / (n - 1))
+        w[-1] = 0.0
+        return w, float(g[-1] - g[0])
+    lo, hi = float(g[0]), float(g[-1])
+    if c.bounds is not None:
+        lo = max(lo, c.bounds[0]) if np.isfinite(c.bounds[0]) else lo
+        hi = min(hi, c.bounds[1]) if np.isfinite(c.bounds[1]) else hi
+    x0, x1 = g[:-1], g[1:]
+    d = x1 - x0
+    a, b = np.clip(lo, x0, x1), np.clip(hi, x0, x1)
+    w = np.zeros(n)
+    w[:-1] += ((x1 - a) ** 2 - (x1 - b) ** 2) / (2 * d)
+    w[1:] += ((b - x0) ** 2 - (a - x0) ** 2) / (2 * d)
+    return w, hi - lo
+
+
+def hill_volumes(run, raw, chunk=4096):
+    """Per-hill average over Ω of each deposited hill (boundary factor included), unit height.
+
+    Times the hill height, this is the hill's contribution to the CV-space average of the bias.
+
+    Returns
+    -------
+    ndarray
+        One value per hill, records in order.
+    """
+    h0 = raw[0]
+    axes, grids = _axes(h0), _grids(h0)
+    n = len(axes)
+    if n > 3:
+        raise ValueError(f"{n} biased CVs: balanced reweighting not supported")
+    B = np.asarray(boundary_factor(axes, _bounds(h0)), float)
+    vol = 1.0
+    for j, (c, g) in enumerate(zip(run.cvs, grids)):
+        w, L = _omega_weights(c, g)
+        shape = [1] * n
+        shape[n - 1 - j] = len(w)
+        B = B * w.reshape(shape)
+        vol *= L
+    out = []
+    for h in raw:
+        cv = np.asarray(h["cv"], float).reshape(len(h["height_kj"]), n)
+        for i in range(0, len(cv), chunk):
+            g = [_axis_gaussians(v, cv[i:i + chunk, k]) for k, v in enumerate(axes)]
+            if n == 1:
+                out.append(g[0] @ B)
+            elif n == 2:
+                out.append(np.einsum("ky,ky->k", g[1] @ B, g[0]))
+            else:
+                out.append(np.einsum("kz,ky,kx,zyx->k", g[2], g[1], g[0], B, optimize=True))
+    return np.concatenate(out) / vol if out else np.zeros(0)
+
+
+def _frame_wall(w, wall):
+    """Wall-clock time of every frame of ``w``: walker time interpolated on its own (hill time, wall_s) pairs,
+    segment by segment; linear extrapolation (segment mean rate) before the first and after the last hill."""
+    if len(w.segment_of_record) != len(w.t):
+        raise ValueError(f"{w.rid}: segment_of_record does not match the frames: not supported")
+    ends = np.cumsum([len(np.atleast_1d(h["height_kj"])) for h in w.hills_raw])
+    out = np.empty(len(w.t))
+    for k, (s, e) in enumerate(zip(np.r_[0, ends[:-1]], ends)):
+        m = w.segment_of_record == k
+        ht, hw, t = w.hill_t[s:e], wall[s:e], w.t[m]
+        rate = (hw[-1] - hw[0]) / (ht[-1] - ht[0]) if e - s > 1 and ht[-1] > ht[0] else 0.0
+        # strictly before the first hill: never at or after it
+        out[m] = np.where(t < ht[0], np.minimum(hw[0] + (t - ht[0]) * rate, np.nextafter(hw[0], -np.inf)),
+                          np.where(t > ht[-1], hw[-1] + (t - ht[-1]) * rate, np.interp(t, ht, hw)))
+    return out
+
+
+def balanced_offsets(run, group):
+    """CV-space average of the bias of ``group`` (one bias), ⟨V(·,t)⟩_Ω in kJ/mol, at every frame.
+
+    Sum over hills deposited up to the frame of height · ``hill_volumes``. One walker: hills up to the frame's
+    walker time. Several walkers: hills ordered by wall-clock time; a frame's wall time is interpolated on its
+    walker's (hill time, wall_s) pairs, segment by segment. Constant terms (preseed) are left out.
+
+    Returns
+    -------
+    dict
+        ``{rid: ndarray}`` for every walker of ``group``.
+    """
+    raw = _group_raw(group)
+    key = ("balanced",) + _raw_key(raw)
+    cache = run.__dict__.setdefault("_rw_cache", {})
+    hit = cache.get(key)
+    if hit is not None and all(hit[1].get(w.rid, (None,))[0] is w.t for w in group):
+        return {r: v[1] for r, v in hit[1].items()}
+    contrib = np.concatenate([np.asarray(h["height_kj"], float) for h in raw]) * hill_volumes(run, raw)
+    out = {}
+    if len(group) == 1:
+        w = group[0]
+        o = np.argsort(w.hill_t, kind="stable")
+        cum = np.cumsum(contrib[o])
+        idx = np.searchsorted(w.hill_t[o], w.t, side="right")
+        out[w.rid] = np.where(idx > 0, cum[np.maximum(idx - 1, 0)], 0.0)
+    else:
+        walls = [np.concatenate([np.atleast_1d(np.asarray(h["wall_s"], float)) for h in w.hills_raw]) for w in group]
+        if any(np.any(np.diff(x) < 0) for x in walls):
+            raise ValueError("non-monotonic hill wall times: not supported")
+        allw = np.concatenate(walls)
+        o = np.argsort(allw, kind="stable")
+        cum, sw = np.cumsum(contrib[o]), allw[o]
+        for w, wall in zip(group, walls):
+            idx = np.searchsorted(sw, _frame_wall(w, wall), side="right")
+            out[w.rid] = np.where(idx > 0, cum[np.maximum(idx - 1, 0)], 0.0)
+    cache[key] = (raw, {w.rid: (w.t, out[w.rid]) for w in group})
+    return out
+
+
+def _lw_ct(run, w):
+    return (w.bias - w.ct) / (KT_PER_K * run.temperature)
+
+
+def _lw_final(run, w):
+    return _final_at_frames(run, w) / (KT_PER_K * run.temperature)
+
+
+def _lw_balanced(run, w):
+    return (w.bias - balanced_offsets(run, _bias_group(run, w))[w.rid]) / (KT_PER_K * run.temperature)
+
+
+# per-frame log-weights over all frames of one walker (unnormalised)
+RW_METHODS = {"rw_ct": _lw_ct, "rw_final": _lw_final, "rw_balanced": _lw_balanced}
+
+
+def log_weights(run, w, method="rw_ct"):
+    """Unnormalised per-frame log-weights of every frame of walker ``w``.
+
+    ``rw_ct``: β(V(s,t) - c(t)) from the recorded V and c(t). ``rw_final``: βV(s, t_f), the final bias of the
+    walker's bias at the logged CVs. ``rw_balanced``: β(V(s,t) - ⟨V(·,t)⟩_Ω), recorded V minus the CV-space
+    average of the bias at the frame (see ``balanced_offsets``). Shared and single biases use all walkers'
+    hills, isolated ones the walker's own.
+    """
+    if method not in RW_METHODS:
+        raise ValueError(f"unknown reweighting method {method!r}: not supported")
+    if w.bias is None:
+        raise ValueError("no REWEIGHT data: reweighting not supported")
+    if method == "rw_ct":
+        return _lw_ct(run, w)
+    cache = run.__dict__.setdefault("_rw_cache", {})
+    deps = (w.t, w.bias) + tuple(w.cvs[c.name] for c in run.cvs)
+    rk = _raw_key(_group_raw(_bias_group(run, w)))
+    hit = cache.get((method, w.rid))
+    if hit is None or hit[1] != rk or len(hit[0]) != len(deps) or any(a is not b for a, b in zip(hit[0], deps)):
+        hit = cache[(method, w.rid)] = (deps, rk, RW_METHODS[method](run, w))
+    return hit[2]
+
+
 def _free_energy(p, kt):
     """-kT ln p with empty bins as NaN, shifted to min 0."""
     with np.errstate(divide="ignore"):
@@ -242,10 +471,9 @@ def apply(run, fn: Callable, scalar: Optional[Callable] = None, reweighted=False
 def _fes_bias_group(ws, hill_mask_sigmas):
     """(grids, F) of one bias from the hills of ``ws``; F in kJ/mol, min 0, NaN outside the hill mask."""
     raw = [h for w in ws for h in w.hills_raw]
-    V = np.asarray(bias_from_hills(raw))
+    V = final_bias(raw)
     h0 = raw[0]
-    grids = [np.linspace(float(a), float(b), int(n)) for a, b, n in
-             zip(np.atleast_1d(h0["grid_min"]), np.atleast_1d(h0["grid_max"]), np.atleast_1d(h0["grid_points"]))]
+    grids = _grids(h0)
     F = np.where(hill_mask(raw, hill_mask_sigmas), -fes_scale(h0) * V, np.nan)
     return grids, F - np.nanmin(F)
 
@@ -399,8 +627,10 @@ def _edges(vals, info, bins, per_hill, fallback):
 
 
 def fes_reweighted(run, x, y=None, bins=None, burn=0.2, min_count=0, min_bin_ess=0.0, smooth_sigma=2.0,
-                   bins_per_hill=4, bins_fallback=60, min_density=0.05) -> Combined:
+                   bins_per_hill=4, bins_fallback=60, min_density=0.05, method="rw_ct") -> Combined:
     """Reweighted FES (kJ/mol, min 0) on one or two logged CVs (biased or monitored).
+
+    ``method`` is a key of ``RW_METHODS`` (frame weights, see ``log_weights``).
 
     Bin width of a biased CV is its hill width / ``bins_per_hill`` over the sampled range padded by one hill
     width and clipped to the CV grid. A CV without a hill width uses ``bins_fallback`` equal bins over its
@@ -422,10 +652,11 @@ def fes_reweighted(run, x, y=None, bins=None, burn=0.2, min_count=0, min_bin_ess
     def f(ws):
         cols, lws = {k: [] for k in names}, []
         for w in ws:
-            m, lw = _weights_arrays(w.bias, w.ct, run.temperature, burn, normalise=False)
+            lw = log_weights(run, w, method)
+            m = np.arange(len(lw)) >= int(burn * len(lw))
             for k in names:
                 cols[k].append(w.cvs[k][m])
-            lws.append(lw)
+            lws.append(lw[m])
         _, Wt = _pool(cols[x], lws)
         X = [np.concatenate(cols[k]) for k in names]
         ed, info = [], {}
@@ -489,32 +720,32 @@ def _pool(vals, lws):
     return v, w / w.sum()
 
 
-def _frames(ws, run, cv, burn, t_max=None):
+def _frames(ws, run, cv, burn, t_max=None, method="rw_ct"):
     """Pooled (values, weights) after truncating at ``t_max`` and dropping the first ``burn`` fraction."""
     vs, lws = [], []
     for w in ws:
         keep = np.ones(len(w.t), bool) if t_max is None else (w.t <= t_max)
-        m, lw = _weights_arrays(w.bias[keep], w.ct[keep], run.temperature, burn, normalise=False)
-        vs.append(w.cvs[cv][keep][m]); lws.append(lw)
+        lw = log_weights(run, w, method)[keep]
+        m = np.arange(len(lw)) >= int(burn * len(lw))
+        vs.append(w.cvs[cv][keep][m]); lws.append(lw[m])
     return _pool(vs, lws)
 
 
-def _window_raw(ws, run, cv, lo, hi):
+def _window_raw(ws, run, cv, lo, hi, method="rw_ct"):
     """Per-walker values and raw log-weights of frames with lo <= t < hi."""
     vs, lws = [], []
     for w in ws:
         k = (w.t >= lo) & (w.t < hi)
-        _, lw = _weights_arrays(w.bias[k], w.ct[k], run.temperature, 0.0, normalise=False)
-        vs.append(w.cvs[cv][k]); lws.append(lw)
+        vs.append(w.cvs[cv][k]); lws.append(log_weights(run, w, method)[k])
     return vs, lws
 
 
-def _frames_in_window(ws, run, cv, lo, hi):
+def _frames_in_window(ws, run, cv, lo, hi, method="rw_ct"):
     """Pooled (values, weights) of frames with lo <= t < hi, no burn-in."""
-    return _pool(*_window_raw(ws, run, cv, lo, hi))
+    return _pool(*_window_raw(ws, run, cv, lo, hi, method))
 
 
-def _frames_in_windows(ws, run, cv, windows, cache=None):
+def _frames_in_windows(ws, run, cv, windows, cache=None, method="rw_ct"):
     """Pooled (values, weights) of the frames of every (lo, hi) window, repeated windows counted repeatedly.
 
     ``cache`` is an optional dict reused across calls to avoid recomputing per-window raw weights.
@@ -522,22 +753,22 @@ def _frames_in_windows(ws, run, cv, windows, cache=None):
     vs, lws = [], []
     for lo, hi in windows:
         if cache is None:
-            raw = _window_raw(ws, run, cv, lo, hi)
+            raw = _window_raw(ws, run, cv, lo, hi, method)
         else:
             raw = cache.get((lo, hi))
             if raw is None:
-                raw = cache[(lo, hi)] = _window_raw(ws, run, cv, lo, hi)
+                raw = cache[(lo, hi)] = _window_raw(ws, run, cv, lo, hi, method)
         vs += raw[0]; lws += raw[1]
     return _pool(vs, lws)
 
 
-def block_band_stats(ws, run, bands_, cv, lo, hi) -> dict:
+def block_band_stats(ws, run, bands_, cv, lo, hi, method="rw_ct") -> dict:
     """Site and bulk Kish ESS and round trips of the frames with lo <= t < hi.
 
     Weights are pooled over ``ws`` with one normalisation; round trips are summed over walkers.
     """
     b = bands_[cv]
-    vs, lws = _window_raw(ws, run, cv, lo, hi)
+    vs, lws = _window_raw(ws, run, cv, lo, hi, method)
     v, w = _pool(vs, lws)
     ins = (v >= b.bound[0]) & (v <= b.bound[1])
     inu = (v >= b.unbound[0]) & (v <= b.unbound[1])
@@ -562,14 +793,15 @@ def _value(run, bands_, cv, values, weights):
                 reason=None if np.isfinite(v) else "no weight in bound or unbound band", **n)
 
 
-def binding(run, bands_, cv=FUNNEL_Z, burn=0.2) -> Combined:
+def binding(run, bands_, cv=FUNNEL_Z, burn=0.2, method="rw_ct") -> Combined:
     """ΔG° from the funnel (kind "dG0") or the bound-unbound band difference (kind "band_dF").
 
-    Each value dict carries ``ess`` (Kish) and ``n_frames`` of the frames used.
+    Each value dict carries ``ess`` (Kish) and ``n_frames`` of the frames used. ``method`` is a key of
+    ``RW_METHODS``.
     """
     if not run.has_reweight:
         raise ValueError("no REWEIGHT data: ΔG° not supported")
-    return apply(run, lambda ws: _value(run, bands_, cv, *_frames(ws, run, cv, burn)),
+    return apply(run, lambda ws: _value(run, bands_, cv, *_frames(ws, run, cv, burn, method=method)),
                  scalar=lambda r: r["value"], reweighted=True)
 
 
@@ -579,9 +811,10 @@ def aggregate_time(ws, t):
     return sum(np.minimum(t, float(w.t[-1])) for w in ws)
 
 
-def dg_series(run, bands_, cv=FUNNEL_Z, burn=0.2, step_ns=1.0) -> Combined:
+def dg_series(run, bands_, cv=FUNNEL_Z, burn=0.2, step_ns=1.0, method="rw_ct") -> Combined:
     """ΔG°(t): each point from every walker's frames with walker time <= t, first ``burn`` of each walker's
-    truncated span dropped; ``ess`` and ``ess_frac`` (ESS over frame count) per point.
+    truncated span dropped; ``ess`` and ``ess_frac`` (ESS over frame count) per point. ``method`` is a key of
+    ``RW_METHODS``.
 
     The grid ends exactly at T, the longest pooled walker's end time; shorter walkers contribute all their
     frames, so the last point equals ``binding``. Shared and single runs also return ``t_aggregate``, the
@@ -595,7 +828,7 @@ def dg_series(run, bands_, cv=FUNNEL_Z, burn=0.2, step_ns=1.0) -> Combined:
         t = np.arange(step_ns, T + 1e-12, step_ns)
         if len(t) == 0 or abs(t[-1] - T) > 1e-9:
             t = np.append(t, T)
-        v = [_value(run, bands_, cv, *_frames(ws, run, cv, burn, t_max=ti)) for ti in t]
+        v = [_value(run, bands_, cv, *_frames(ws, run, cv, burn, t_max=ti, method=method)) for ti in t]
         ess = np.array([x["ess"] for x in v])
         nf = np.array([x["n_frames"] for x in v], float)
         out = dict(t=t, dg=np.array([x["value"] for x in v]), ess=ess,
@@ -779,9 +1012,80 @@ def estimator_gap(rw, bias) -> dict:
                 per_walker={k: d(v, bias.per_walker[k]) for k, v in rw.per_walker.items() if k in bias.per_walker})
 
 
+def _values(c, keys):
+    """Binding value (kJ/mol, NaN if undefined) of a Combined (or None) for each key ("pooled" or a walker id)."""
+    out = {}
+    for k in keys:
+        v = None if c is None else (c.pooled if k == "pooled" else c.per_walker.get(k))
+        out[k] = float(v["value"]) if v is not None and v.get("value") is not None else float("nan")
+    return out
+
+
+def estimator_spread(estimators, keys, methods=ESTIMATORS) -> dict:
+    """Max - min binding value (kJ/mol) over ``methods``, per key ("pooled" or walker ids).
+
+    ``estimators`` maps a method to ``{"binding": Combined or None, ...}``. A key is NaN when any method is
+    missing or undefined there.
+
+    Returns
+    -------
+    dict
+        ``pooled`` (float or None), ``per_walker`` ({rid: float}), ``methods``, ``unit``.
+    """
+    vals = {m: _values((estimators.get(m) or {}).get("binding"), keys) for m in methods}
+    sp = {}
+    for k in keys:
+        v = np.array([vals[m][k] for m in methods], float)
+        sp[k] = float(v.max() - v.min()) if len(v) and np.all(np.isfinite(v)) else float("nan")
+    return dict(pooled=sp.get("pooled"), per_walker={k: x for k, x in sp.items() if k != "pooled"},
+                methods=list(methods), unit="kJ/mol")
+
+
+def estimator_gaps(estimators, keys, methods=ESTIMATORS) -> dict:
+    """Pairwise binding-value differences ``"a-b"`` (kJ/mol), each ``{"pooled", "per_walker"}`` like
+    ``estimator_spread``."""
+    vals = {m: _values((estimators.get(m) or {}).get("binding"), keys) for m in methods}
+    out = {}
+    for i, a in enumerate(methods):
+        for b in methods[i + 1:]:
+            d = {k: vals[a][k] - vals[b][k] for k in keys}
+            out[f"{a}-{b}"] = dict(pooled=d.get("pooled"), per_walker={k: x for k, x in d.items() if k != "pooled"})
+    return out
+
+
+def _blocks(run, bands_, main, ser, method, t_rej, n_blocks, n_boot, seed, min_points, skipped):
+    """Block analysis of one reweighting method: dict (pooled) or ``{rid: dict or None}`` (isolated)."""
+    iso = run.layout == "isolated"
+    groups = [(w.rid, [w]) for w in run.reweighted()] if iso else [("all", run.reweighted())]
+    blocks = {}
+    for lab, ws in groups:
+        s = ser.per_walker[lab] if iso else ser.pooled
+        if len(s["t"]) < min_points:
+            skipped.append(f"{lab}: blocks ({LABELS[method]}): ΔG°(t) has {len(s['t'])} < {min_points} points"
+                           if method != "rw_ct" else f"{lab}: blocks: ΔG°(t) has {len(s['t'])} < {min_points} points")
+            blocks[lab] = None
+            continue
+        cache = {}
+
+        def bv(lo, hi, ws=ws):
+            return _value(run, bands_, main, *_frames_in_window(ws, run, main, lo, hi, method))["value"]
+
+        def wv(wins, ws=ws, cache=cache):
+            return _value(run, bands_, main, *_frames_in_windows(ws, run, main, wins, cache, method))["value"]
+
+        def be(lo, hi, ws=ws):
+            return kish_ess(_frames_in_window(ws, run, main, lo, hi, method)[1])
+
+        def bs(lo, hi, ws=ws):
+            return block_band_stats(ws, run, bands_, main, lo, hi, method)
+        blocks[lab] = block_analysis(s["t"], s["dg"], bv, t_rej=t_rej, n_blocks=n_blocks, n_boot=n_boot,
+                                     seed=seed, windows_value=wv, block_ess=be, block_stats=bs)
+    return blocks if iso else blocks["all"]
+
+
 def fe_numbers(run, bands_, cv=None, burn=0.2, t_rej=0.2, step_ns=1.0, min_points=12, n_blocks=10, n_boot=2000,
-               seed=0, hill_mask_sigmas=2.0, bias_n=20) -> dict:
-    """Binding free energy, ΔG°(t) and block analysis along one CV (per walker if isolated).
+               seed=0, hill_mask_sigmas=2.0, bias_n=20, primary=PRIMARY, methods=ESTIMATORS) -> dict:
+    """Binding free energy, ΔG°(t) and block analysis along one CV (per walker if isolated), per estimator.
 
     Parameters
     ----------
@@ -791,52 +1095,60 @@ def fe_numbers(run, bands_, cv=None, burn=0.2, t_rej=0.2, step_ns=1.0, min_point
         Fewest ΔG°(t) points for a block analysis; shorter series give ``None`` blocks and a skip note.
     hill_mask_sigmas, bias_n
         Hill mask radius and number of snapshots of the bias-derived estimator.
+    primary : str
+        Reweighting estimator that drives the block colouring and the convergence checks.
+    methods : sequence of str
+        Estimators to compute (keys of ``ESTIMATORS``); ``rw_ct`` and ``bias`` are always computed.
 
     Returns
     -------
     dict
-        ``cv``; ``binding`` and ``series`` (``Combined`` or None without REWEIGHT data); ``blocks`` (dict,
-        ``{rid: dict or None}`` if isolated, or None); ``binding_bias`` and ``dg_bias_series`` (bias-derived
-        ``Combined``, or None if not supported); ``estimator_gap`` (reweighted - bias-derived, see
-        ``estimator_gap``, None without both); ``skipped`` (list of str). Free energies in kJ/mol.
+        ``cv``; ``primary``; ``estimators`` (``{method: {"binding", "series", "blocks"}}``; Combined values,
+        ``blocks`` None for ``bias``; a method that is not supported is absent and noted in ``skipped``);
+        ``estimator_spread`` and ``estimator_gaps`` (see ``estimator_spread``, ``estimator_gaps``);
+        ``binding``, ``series``, ``blocks`` (``rw_ct``; None without REWEIGHT data), ``binding_bias``,
+        ``dg_bias_series`` (``bias``; None if not supported), ``estimator_gap`` (``rw_ct`` - ``bias``, see
+        ``estimator_gap``); ``skipped`` (list of str). Free energies in kJ/mol.
     """
+    if primary not in RW_METHODS:
+        raise ValueError(f"primary estimator {primary!r} is not a reweighting method: not supported")
+    unknown = set(methods) - set(ESTIMATORS)
+    if unknown:
+        raise ValueError(f"unknown estimators {sorted(unknown)}: not supported")
+    methods = [m for m in ESTIMATORS if m in set(methods) | {"rw_ct", "bias", primary}]
     main = cv or (FUNNEL_Z if FUNNEL_Z in bands_ else run.cvs[0].name)
-    out = dict(cv=main, binding=None, series=None, blocks=None, binding_bias=None, dg_bias_series=None,
-               estimator_gap=None, skipped=[])
+    est = {}
+    out = dict(cv=main, primary=primary, estimators=est, estimator_spread=None, estimator_gaps=None, binding=None,
+               series=None, blocks=None, binding_bias=None, dg_bias_series=None, estimator_gap=None, skipped=[])
     try:
-        out["binding_bias"] = binding_bias(run, bands_, cv=main, hill_mask_sigmas=hill_mask_sigmas)
-        out["dg_bias_series"] = dg_bias_series(run, bands_, cv=main, n=bias_n, hill_mask_sigmas=hill_mask_sigmas)
+        bb = binding_bias(run, bands_, cv=main, hill_mask_sigmas=hill_mask_sigmas)
+        bs = dg_bias_series(run, bands_, cv=main, n=bias_n, hill_mask_sigmas=hill_mask_sigmas)
+        est["bias"] = dict(binding=bb, series=bs, blocks=None)
+        out["binding_bias"], out["dg_bias_series"] = bb, bs
     except ValueError as e:
         out["skipped"].append(f"bias-derived ΔG°: {e}")
+    keys = [w.rid for w in run.walkers] if run.layout == "isolated" else ["pooled"]
     if not run.has_reweight:
         out["skipped"].append("reweighted FES, ΔG° and blocks: no REWEIGHT data")
-        return out
-    out["binding"] = binding(run, bands_, cv=main, burn=burn)
-    if out["binding_bias"] is not None:
-        out["estimator_gap"] = estimator_gap(out["binding"], out["binding_bias"])
-    ser = out["series"] = dg_series(run, bands_, cv=main, burn=burn, step_ns=step_ns)
-    iso = run.layout == "isolated"
-    groups = [(w.rid, [w]) for w in run.reweighted()] if iso else [("all", run.reweighted())]
-    blocks = {}
-    for lab, ws in groups:
-        s = ser.per_walker[lab] if iso else ser.pooled
-        if len(s["t"]) < min_points:
-            out["skipped"].append(f"{lab}: blocks: ΔG°(t) has {len(s['t'])} < {min_points} points")
-            blocks[lab] = None
-            continue
-        cache = {}
-
-        def bv(lo, hi, ws=ws):
-            return _value(run, bands_, main, *_frames_in_window(ws, run, main, lo, hi))["value"]
-
-        def wv(wins, ws=ws, cache=cache):
-            return _value(run, bands_, main, *_frames_in_windows(ws, run, main, wins, cache))["value"]
-
-        def be(lo, hi, ws=ws):
-            return kish_ess(_frames_in_window(ws, run, main, lo, hi)[1])
-        def bs(lo, hi, ws=ws):
-            return block_band_stats(ws, run, bands_, main, lo, hi)
-        blocks[lab] = block_analysis(s["t"], s["dg"], bv, t_rej=t_rej, n_blocks=n_blocks, n_boot=n_boot,
-                                     seed=seed, windows_value=wv, block_ess=be, block_stats=bs)
-    out["blocks"] = blocks if iso else blocks["all"]
+    else:
+        for m in [m for m in methods if m in RW_METHODS]:
+            try:
+                b = binding(run, bands_, cv=main, burn=burn, method=m)
+                ser = dg_series(run, bands_, cv=main, burn=burn, step_ns=step_ns, method=m)
+            except ValueError as e:
+                if m == "rw_ct":
+                    raise
+                out["skipped"].append(f"{LABELS[m]} ΔG°: {e}")
+                continue
+            blk = _blocks(run, bands_, main, ser, m, t_rej, n_blocks, n_boot, seed, min_points, out["skipped"])
+            est[m] = dict(binding=b, series=ser, blocks=blk)
+        if primary not in est:
+            raise ValueError(f"primary estimator {primary} could not be computed: not supported")
+        r = est["rw_ct"]
+        out["binding"], out["series"], out["blocks"] = r["binding"], r["series"], r["blocks"]
+        if out["binding_bias"] is not None:
+            out["estimator_gap"] = estimator_gap(out["binding"], out["binding_bias"])
+    order = [m for m in ESTIMATORS if m in methods]
+    out["estimator_spread"] = estimator_spread(est, keys, order)
+    out["estimator_gaps"] = estimator_gaps(est, keys, order)
     return out
