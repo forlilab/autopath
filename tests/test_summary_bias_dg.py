@@ -242,24 +242,30 @@ def test_fig_fe_overlays_bias_curves(tmp_path):
     assert nums["estimator_gap"]["pooled"] is None
 
 
-def _gap_summary(layout, gap, rids=("w0", "w1")):
-    return dict(layout=layout, walkers={r: {} for r in rids}, estimator_gap=gap)
+def _pair_summary(layout, rw, bias, rids=("w0", "w1")):
+    """Summary with rw_ct and bias binding values (kJ/mol): floats (pooled) or {rid: float}."""
+    def b(v):
+        if isinstance(v, dict):
+            return dict(pooled=None, per_walker={k: dict(value=x) for k, x in v.items()})
+        return dict(pooled=dict(value=v), per_walker={})
+    return dict(layout=layout, walkers={r: {} for r in rids},
+                estimators=dict(rw_ct=dict(binding=b(rw)), bias=dict(binding=b(bias))))
 
 
 def test_estimators_agree_unit():
-    c = estimators_agree(1.0)
-    assert c.__name__ == "estimators_agree(1.0)"
-    ok, _ = c(_gap_summary("shared", dict(pooled=4.0, per_walker={}, unit="kJ/mol")))        # 0.96 kcal
+    c = estimators_agree(1.0, methods=("rw_ct", "bias"))
+    assert c.__name__ == "estimators_agree(1.0, rw_ct,bias)"
+    ok, _ = c(_pair_summary("shared", 4.0, 0.0))                                             # 0.96 kcal
     assert ok
-    ok, why = c(_gap_summary("shared", dict(pooled=-5.0, per_walker={}, unit="kJ/mol")))
-    assert not ok and "all: gap -1.20" in why
-    ok, why = c(_gap_summary("shared", dict(pooled=None, per_walker={}, unit="kJ/mol")))
+    ok, why = c(_pair_summary("shared", -5.0, 0.0))
+    assert not ok and "all: spread 1.20" in why
+    ok, why = c(_pair_summary("shared", None, 0.0))
     assert not ok and "undefined" in why
-    ok, why = c(_gap_summary("isolated", dict(pooled=None, per_walker=dict(w0=1.0, w1=-9.0), unit="kJ/mol")))
+    ok, why = c(_pair_summary("isolated", dict(w0=1.0, w1=-9.0), dict(w0=0.0, w1=0.0)))
     assert not ok and "w1" in why and "w0" not in why
-    ok, why = c(_gap_summary("isolated", dict(pooled=None, per_walker=dict(w0=1.0), unit="kJ/mol")))
-    assert not ok and "w1: undefined" in why
-    ok, _ = c(_gap_summary("shared", None))
+    ok, why = c(_pair_summary("isolated", dict(w0=1.0), dict(w0=0.0, w1=0.0)))
+    assert not ok and "w1: rw_ct undefined" in why
+    ok, _ = c(dict(layout="shared", walkers={"w0": {}}))
     assert not ok
 
 
@@ -270,10 +276,11 @@ def test_estimators_agree_end_to_end(tmp_path, layout):
     g = s["estimator_gap"]
     gaps = [g["pooled"]] if layout == "shared" else list(g["per_walker"].values())
     big = max(abs(x) for x in gaps) / 4.184
-    assert not check_convergence(s, [estimators_agree(big + 0.5)]).needs_more_sampling
-    v = check_convergence(s, [estimators_agree(big / 2)])
-    assert v.needs_more_sampling and not v.passed[f"estimators_agree({big / 2})"]
-    s["estimator_gap"] = None
+    pair = ("rw_ct", "bias")
+    assert not check_convergence(s, [estimators_agree(big + 0.5, methods=pair)]).needs_more_sampling
+    v = check_convergence(s, [estimators_agree(big / 2, methods=pair)])
+    assert v.needs_more_sampling and not v.passed[f"estimators_agree({big / 2}, rw_ct,bias)"]
+    s["estimators"] = None
     v = check_convergence(s, [estimators_agree(100.0)])
     assert v.needs_more_sampling and "undefined" in v.reasons[0]
 

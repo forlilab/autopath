@@ -35,11 +35,11 @@ def _cbars(fig):
     return [a for a in fig.axes if a.get_label() == "<colorbar>"]
 
 
-def test_shared_two_panels_share_limits_levels_colourbar(tmp_path):
+def test_shared_panels_share_limits_levels_colourbar(tmp_path):
     run = _run(tmp_path)
     fig, axes, skipped, nums = fig_fes2d(run, bands(run), out_path=str(tmp_path / "m.png"))
-    assert axes.shape == (1, 2) and os.path.getsize(str(tmp_path / "m.png")) > 1000
-    l, r = axes[0]
+    assert axes.shape == (1, 4) and os.path.getsize(str(tmp_path / "m.png")) > 1000
+    l, r = axes[0, 0], axes[0, 3]
     assert l.get_xlim() == r.get_xlim() and l.get_ylim() == r.get_ylim()
     assert np.array_equal(_levels(l), _levels(r)) and _levels(l)[-1] == pytest.approx(nums["fmax"], abs=1.0)
     assert len(_cbars(fig)) == 1
@@ -48,30 +48,30 @@ def test_shared_two_panels_share_limits_levels_colourbar(tmp_path):
     assert not any("bias-derived" in s for s in skipped) and "funnel outline: no funnel" in skipped
 
 
-def test_isolated_two_panels_per_walker(tmp_path):
+def test_isolated_panels_per_walker(tmp_path):
     run = _run(tmp_path, layout="isolated", n_walkers=3)
     fig, axes, _, nums = fig_fes2d(run, bands(run))
-    assert axes.shape == (3, 2)
+    assert axes.shape == (3, 4)
     lv = [_levels(a) for a in axes.flat]
     assert all(np.array_equal(lv[0], x) for x in lv[1:])
     assert len({a.get_xlim() for a in axes.flat}) == 1 and len({a.get_ylim() for a in axes.flat}) == 1
     for i, rid in enumerate(("w0", "w1", "w2")):
         assert axes[i, 0].get_title("left").startswith(f"{rid}: reweighted F")
-        assert axes[i, 1].get_title("left").startswith(f"{rid}: bias-derived F")
+        assert axes[i, 3].get_title("left").startswith(f"{rid}: bias-derived F")
     assert set(nums["fes_ess"]["map"]) == {"w0", "w1", "w2"} and len(_cbars(fig)) == 1
 
 
 def test_isolated_rows_capped(tmp_path):
     run = _run(tmp_path, layout="isolated", n_walkers=MAX_ROWS + 1)
     _, axes, skipped, _ = fig_fes2d(run, bands(run))
-    assert axes.shape == (MAX_ROWS, 2) and any("1 of 7 isolated walkers not drawn" in s for s in skipped)
+    assert axes.shape == (MAX_ROWS, 4) and any("1 of 7 isolated walkers not drawn" in s for s in skipped)
 
 
 def test_non_biased_pair_skips_bias_panel(tmp_path):
     run = _run(tmp_path, monitors=("r_xy",))
     _, axes, skipped, nums = fig_fes2d(run, bands(run), pair=("funnel_z", "r_xy"))
     assert "bias-derived map: pair is not the biased CVs" in skipped
-    assert not axes[0, 1].axison and not axes[0, 1].collections and axes[0, 0].collections
+    assert not axes[0, 3].axison and not axes[0, 3].collections and axes[0, 0].collections
     assert nums["fmax"] is not None
 
 
@@ -97,7 +97,7 @@ def test_bias_map_orientation_off_centre_hill(tmp_path, pair):
     assert np.nanmin(F) == pytest.approx(0.0)
     # drawn contours: lowest band is centred on the hill
     _, axes, _, _ = fig_fes2d(run, bands(run), pair=pair)
-    v = axes[0, 1].collections[0].get_paths()[0].vertices
+    v = axes[0, 3].collections[0].get_paths()[0].vertices
     assert v[:, 0].mean() == pytest.approx(want[0], abs=0.1) and v[:, 1].mean() == pytest.approx(want[1], abs=0.15)
 
 

@@ -7,7 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pytest
 
-from autopath.metadynamics.summary.analysis import bands, fes_bias, fes_reweighted, hill_mask, fes_marginal
+from autopath.metadynamics.summary.analysis import bands, fes_reweighted, hill_mask, fes_marginal
 from autopath.metadynamics.summary.data import load_run
 from autopath.metadynamics.summary.plots import fig_bias, fig_fes2d
 from autopath.metadynamics.summary.report import report
@@ -25,7 +25,8 @@ def _close():
 def _strip(o):
     if isinstance(o, dict):
         return {k: _strip(v) for k, v in o.items() if k not in ("files", "run_dir", "params", "fes_masked", "fes_kept", "fmax_kcal", "bias_unsampled", "fes_bins",
-                                                                  "binding_bias", "dg_bias_series", "estimator_gap")}
+                                                                  "binding_bias", "dg_bias_series", "estimator_gap",
+                                                                  "bias", "estimator_spread", "estimator_gaps")}
     if isinstance(o, list):
         return [_strip(v) for v in o]
     return o
@@ -55,9 +56,8 @@ def test_sparse_bin_masked_and_colour_max_excludes_it(tmp_path):
     _, axes, _, nums = fig_fes2d(run, bands(run), pair=("funnel_z", "learned_sw"), burn=0.0,
                                  smooth_sigma=0, min_count=5, min_bin_ess=3.0, out_path=str(tmp_path / "f.png"))
     assert nums["fes_masked"]["map"] == {"pooled": 1}
-    fb = fes_bias(run).pooled[1] / 4.184
-    both = np.concatenate([on.pooled[2][np.isfinite(on.pooled[2])] / 4.184, fb[np.isfinite(fb)]])
-    assert nums["fmax"] == pytest.approx(np.percentile(both, 99))
+    prim = on.pooled[2][np.isfinite(on.pooled[2])] / 4.184               # cap from the c(t) map only
+    assert nums["fmax"] == pytest.approx(np.percentile(prim, 99))
     assert np.nanmax(off.pooled[2]) / 4.184 > 1.5 and np.nanmax(on.pooled[2]) == 0.0     # masked bin leaves the map
 
 
@@ -169,9 +169,7 @@ def test_fmax_is_99th_percentile_and_override(tmp_path):
     pair = ("funnel_z", "learned_sw")
     _, _, _, n1 = fig_fes2d(run, bands(run), pair=pair, out_path=str(tmp_path / "a.png"))
     F2 = fes_reweighted(run, *pair).pooled[2] / 4.184
-    Fb = fes_bias(run).pooled[1] / 4.184
-    both = np.concatenate([F2[np.isfinite(F2)], Fb[np.isfinite(Fb)]])
-    assert n1["fmax"] == pytest.approx(np.percentile(both, 99))
+    assert n1["fmax"] == pytest.approx(np.percentile(F2[np.isfinite(F2)], 99))
     f, axes, _, n2 = fig_fes2d(run, bands(run), pair=pair, fmax=4.0, out_path=str(tmp_path / "b.png"))
     assert n2["fmax"] == 4.0
     cb = [a for a in f.axes if a.get_label() == "<colorbar>"][0]
