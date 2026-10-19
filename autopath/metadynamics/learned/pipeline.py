@@ -167,7 +167,8 @@ def _funnel_geometry(funnel):
 def _funnel_z_nm(X, funnel, masses):
     """Funnel z (nm) per frame of X (n, N, 3) nm, as the run-time funnel z computes it.
 
-    An orientation frame measures each frame in its own core orientation (exact at θ = 0).
+    An orientation frame measures each frame in its own core orientation; this equals the
+    run-time value only at θ = 0 (training frames are not aligned to ``orient_ref``).
     """
     return np.array([funnel_z_ang(x, funnel["host"], funnel["guest"], masses, funnel["axis"],
                                   frame=funnel["frame"]) for x in X]) / 10.0

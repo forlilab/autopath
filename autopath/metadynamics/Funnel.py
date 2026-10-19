@@ -128,18 +128,22 @@ def funnel_z_bounds_nm(params) -> tuple:
     return (-np.inf, float(params["z_max"].value_in_unit(openmmunit.nanometer)))
 
 
-def funnel_z_ang(positions_nm, host_idx, guest_idx, masses, axis, frame=None) -> float:
+def funnel_z_ang(positions_nm, host_idx, guest_idx, masses, axis, frame=None, runtime=False) -> float:
     """Guest position on the funnel axis (Å): n·(COM_guest − origin), mass-weighted.
 
     ``frame`` (from :func:`funnel_frame`): a protein frame rebuilds n at these positions with origin
-    COM_host; an orientation frame uses origin COM_core + Rᵀv and n = Rᵀ``axis``, R the unweighted
-    Kabsch fit of the core onto ``orient_ref`` (``host_idx`` unused). None: literal ``axis``, COM_host.
+    COM_host; None uses the literal ``axis`` and COM_host. For an orientation frame (``host_idx``
+    unused): ``runtime=True`` is the run-time force value, origin COM_core + v and n = ``axis``
+    (lab constants); ``runtime=False`` measures in the configuration's own core orientation,
+    origin COM_core + Rᵀv and n = Rᵀ``axis`` with R the unweighted Kabsch fit of the core onto
+    ``orient_ref``. The two agree only at θ = 0; at residual θ the run-time origin is off by
+    about |v × n|·θ.
     """
     pos = np.asarray(positions_nm, dtype=float)
     m = np.asarray(masses, dtype=float)
     guest = np.average(pos[guest_idx], axis=0, weights=m[guest_idx])
     if is_orient_frame(frame):
-        origin, n = _orient_origin_axis(pos, m, frame, axis)
+        origin, n = (_orient_runtime_origin_axis if runtime else _orient_origin_axis)(pos, m, frame, axis)
         return float(np.dot(guest - origin, n)) * 10.0
     host = np.average(pos[host_idx], axis=0, weights=m[host_idx])
     if frame is None:
@@ -206,20 +210,27 @@ def funnel_axis_at(params, positions_nm, masses) -> np.ndarray:
     return _frame_axis(pos, m, [int(i) for i in params["host_index"]], frame)
 
 
-def funnel_origin_axis_at(params, positions_nm, masses):
-    """(origin nm, unit axis) of the funnel at these positions, as :func:`funnel_z_ang` measures them."""
+def funnel_origin_axis_at(params, positions_nm, masses, runtime=False):
+    """(origin nm, unit axis) of the funnel at these positions, as :func:`funnel_z_ang` measures them.
+
+    ``runtime`` selects the run-time (lab-constant) orientation frame, see :func:`funnel_z_ang`.
+    """
     pos, m = np.asarray(positions_nm, float), np.asarray(masses, float)
     frame = funnel_frame(params)
     if is_orient_frame(frame):
-        return _orient_origin_axis(pos, m, frame, params["unbinding_axis"])
+        f = _orient_runtime_origin_axis if runtime else _orient_origin_axis
+        return f(pos, m, frame, params["unbinding_axis"])
     host = [int(i) for i in params["host_index"]]
     return np.average(pos[host], axis=0, weights=m[host]), funnel_axis_at(params, pos, m)
 
 
-def funnel_coords_ang(params, positions_nm, masses):
-    """(z, r_xy) of the guest in Å, the coordinates of the funnel restraint (mass-weighted centroids)."""
+def funnel_coords_ang(params, positions_nm, masses, runtime=False):
+    """(z, r_xy) of the guest in Å, the coordinates of the funnel restraint (mass-weighted centroids).
+
+    ``runtime`` selects the run-time (lab-constant) orientation frame, see :func:`funnel_z_ang`.
+    """
     pos, m = np.asarray(positions_nm, float), np.asarray(masses, float)
-    origin, n = funnel_origin_axis_at(params, pos, m)
+    origin, n = funnel_origin_axis_at(params, pos, m, runtime=runtime)
     g = [int(i) for i in params["guest_index"]]
     r = np.average(pos[g], axis=0, weights=m[g]) - origin
     return float(n @ r) * 10.0, float(np.linalg.norm(np.cross(n, r))) * 10.0
@@ -231,7 +242,7 @@ def funnel_coords_ang(params, positions_nm, masses):
 
 ORIENT_KEYS = ("orient_index", "orient_k", "orient_ref", "orient_offset")
 PROTEIN_FRAME_KEYS = ("axis_coeffs", "frame_b_index", "frame_c_index")
-ORIENT_K_DEFAULT = 1.0e5                  # kJ/mol
+ORIENT_K_DEFAULT = 1.0e6                  # kJ/mol
 ORIENT_CORE_GUEST_CUTOFF_NM = 1.0
 ORIENT_MAX_START_DEG = 2.0
 # a whole core fits its reference far below this; a core split across the box does not
@@ -295,13 +306,35 @@ def _orient_origin_axis(pos, m, frame, axis):
     return np.average(pos[core], axis=0, weights=m[core]) + R.T @ frame["offset"], R.T @ n
 
 
+def _orient_runtime_origin_axis(pos, m, frame, axis):
+    core = frame["orient"]
+    n = np.asarray(axis, dtype=float)
+    return np.average(pos[core], axis=0, weights=m[core]) + frame["offset"], n / np.linalg.norm(n)
+
+
 def orient_theta_deg(params, positions_nm) -> float:
     """Rotation angle (deg) of the orientation core at these positions relative to ``orient_ref``."""
     return rotation_angle_deg(_orient_fit(np.asarray(positions_nm, float), funnel_frame(params))[0])
 
 
 def check_orient_start(params, positions_nm) -> float:
-    """θ (deg) of the start positions; raises ValueError above ``ORIENT_MAX_START_DEG``."""
+    """Refuse a start whose orientation core is far from ``orient_ref``.
+
+    Parameters
+    ----------
+    params : orientation-restrained funnel params
+    positions_nm : (N, 3) start positions (nm)
+
+    Returns
+    -------
+    float
+        Core rotation θ (deg) relative to ``orient_ref``.
+
+    Raises
+    ------
+    ValueError
+        θ above ``ORIENT_MAX_START_DEG``, or a core split across the periodic box.
+    """
     th = orient_theta_deg(params, positions_nm)
     if th > ORIENT_MAX_START_DEG:
         raise ValueError(f"orientation core is {th:.2f} deg from orient_ref (> {ORIENT_MAX_START_DEG} deg): "
@@ -377,20 +410,33 @@ def orientation_restrained_params(params, reference_positions, topology, masses,
     z0, r0 = funnel_coords_ang(params, pos, m)
     z1, r1 = funnel_coords_ang(out, pos, m)
     if abs(z1 - z0) > 1e-5 or abs(r1 - r0) > 1e-5:                 # 1e-6 nm
-        raise RuntimeError(f"orientation frame moved the reference: z {z0} -> {z1} A, r_xy {r0} -> {r1} A")
+        raise ValueError(f"not supported: the orientation frame moves the reference (z {z0} -> {z1} A, "
+                         f"r_xy {r0} -> {r1} A)")
     logger.info("Orientation-restrained funnel: %d core atoms, k %.3g kJ/mol, |v| %.3f nm",
                 len(core), k, float(np.linalg.norm(v)))
     return out
 
 
 def orient_params_for_state(params, positions) -> Dict:
-    """Orientation-restrained params carried rigidly into the core orientation of ``positions`` (nm).
+    """Orientation-restrained params carried rigidly into the core orientation of a state.
 
-    The unweighted Kabsch fit R of the state's core onto ``orient_ref`` gives the new
-    ``orient_ref`` = Rᵀ(ref − r̄) + x̄, ``unbinding_axis`` = Rᵀn and ``orient_offset`` = Rᵀv, so the
-    state's core is at θ = 0. ``master_axis``/``master_offset`` are kept; ``orient_rotation`` Q
-    (``unbinding_axis`` = Q ``master_axis``) and ``orient_theta_deg`` (angle of Q) record the rotation.
-    Raises ValueError for a core split across the box.
+    Parameters
+    ----------
+    params : orientation-restrained funnel params
+    positions : (N, 3) state positions (nm)
+
+    Returns
+    -------
+    dict
+        ``params`` with, for R the unweighted Kabsch fit of the state's core onto ``orient_ref``,
+        ``orient_ref`` = Rᵀ(ref − r̄) + x̄, ``unbinding_axis`` = Rᵀn and ``orient_offset`` = Rᵀv, so
+        the state's core is at θ = 0; ``master_axis``/``master_offset`` kept; ``orient_rotation`` Q
+        (``unbinding_axis`` = Q ``master_axis``) and ``orient_theta_deg`` (angle of Q).
+
+    Raises
+    ------
+    ValueError
+        Params not orientation-restrained, or a core split across the periodic box.
     """
     if funnel_mode(params) != "orient":
         raise ValueError("orient_params_for_state needs orientation-restrained params: not supported")
@@ -1009,8 +1055,9 @@ def create_funnel_force_from_trajectory_analysis(
     from the centroids of the host and the frame groups; the protein must stay whole
     (one molecule), as the centroids are taken without periodic images.
     Orientation-restrained params (:func:`orientation_restrained_params`) measure from
-    COM(core) + v along the lab axis; with ``system`` the OrientationRestraintForce
-    (:func:`orientation_restraint_force`) is added too.
+    COM(core) + v along the lab axis. ``system`` gets only the funnel force: the
+    OrientationRestraintForce is added by ``MetadynamicsMD.add_orientation_restraint``,
+    which checks the start orientation first.
     """
 
     host_index = params_dict["host_index"]
@@ -1096,10 +1143,6 @@ def create_funnel_force_from_trajectory_analysis(
     if system is not None:
         system.addForce(funnel)
         logger.info(f"Added funnel force '{force_name}' to system")
-        if orient:
-            system.addForce(orientation_restraint_force(params_dict, system.getNumParticles()))
-            logger.info("Added the orientation restraint (k %.3g kJ/mol, %d core atoms)",
-                        float(params_dict["orient_k"]), len(frame["orient"]))
 
     return funnel
 
@@ -1217,6 +1260,9 @@ def write_funnel_pymol(
     unbinding_axis = np.array(funnel_params["unbinding_axis"], dtype=float)
     unbinding_axis /= np.linalg.norm(unbinding_axis)
     com_traj = funnel_params["com_trajectory"].astype(float)
+    if "orient_rotation" in funnel_params:
+        # sMD COM vectors are in the master orientation
+        com_traj = com_traj @ np.asarray(funnel_params["orient_rotation"], float).T
 
     z_max = funnel_params["z_max"].value_in_unit(openmmunit.angstrom)
     z_low = funnel_lower_wall_ang(funnel_params)
