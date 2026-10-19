@@ -59,6 +59,32 @@ def add_monitor(system, cv, name):
     return f
 
 
+def add_orientation_restraint(system, funnel_force, funnel_params, positions_nm):
+    """Add the OrientationRestraintForce of orientation-restrained funnel params to ``system``.
+
+    Refuses a start whose core is more than ``ORIENT_MAX_START_DEG`` from ``orient_ref``, a funnel
+    force that does not match the params' mode, or a system that already has an orientation restraint.
+    Returns the start θ (deg), or None for other funnel modes.
+    """
+    from autopath.metadynamics.Funnel import (ORIENT_OFFSET_PARAMS, check_orient_start, funnel_mode,
+                                              orientation_restraint_force)
+    has_offset = funnel_force is not None and any(
+        funnel_force.getGlobalParameterName(i) == ORIENT_OFFSET_PARAMS[0]
+        for i in range(getattr(funnel_force, "getNumGlobalParameters", lambda: 0)()))
+    orient = funnel_params is not None and funnel_mode(funnel_params) == "orient"
+    if has_offset != orient:
+        raise ValueError("funnel force and funnel_params disagree on the orientation restraint: not supported")
+    if not orient:
+        return None
+    if any(isinstance(f, OrientationRestraintForce) for f in system.getForces()):
+        raise ValueError("system already has an OrientationRestraintForce: not supported")
+    theta = check_orient_start(funnel_params, positions_nm)
+    system.addForce(orientation_restraint_force(funnel_params, system.getNumParticles()))
+    logger.info("Added the orientation restraint (k %.3g kJ/mol); start core %.3f deg from orient_ref",
+                float(funnel_params["orient_k"]), theta)
+    return theta
+
+
 try:
     from openmmtools.integrators import LangevinSplittingGirsanov
     from reweightingreporter import ReweightingReporter
@@ -363,6 +389,9 @@ class MetadynamicsMD:
                 "k_CA",
                 14,
             )
+
+        add_orientation_restraint(system, funnel_force, funnel_params,
+                                  np.asarray(input_positions.value_in_unit(openmmunit.nanometer)))
 
         # Serialize/deserialize to get a fresh C++-owned copy (addForce transfers ownership).
         if funnel_force is not None:

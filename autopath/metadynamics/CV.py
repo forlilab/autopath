@@ -134,13 +134,27 @@ def funnel_z_cv(
     because OpenMM's bias is zero outside it. z = 0 is the bound end; set
     grid_min < 0 so the bias also acts below the host COM. ``bounds`` are the
     boundary-correction edges (nm), see ``funnel_z_bounds_nm``. ``frame`` (from
-    ``Funnel.funnel_frame``) rebuilds n from the protein frame; None uses ``axis``.
+    ``Funnel.funnel_frame``) rebuilds n from the protein frame; an orientation frame
+    measures n·(COM_guest − COM_core − v) along the literal ``axis`` (``host_atoms`` unused);
+    None uses ``axis``.
     """
     n = np.asarray(axis, dtype=float)
     n = n / np.linalg.norm(n)
     host, guest = [int(i) for i in host_atoms], [int(i) for i in guest_atoms]
 
     def factory(input_positions, n_atoms, topology):
+        if frame is not None and "orient" in frame:
+            v = np.asarray(frame["offset"], dtype=float)
+            return cvpack.CentroidFunction(
+                "min(max(fz_nx*(x2-x1-fz_vx) + fz_ny*(y2-y1-fz_vy) + fz_nz*(z2-z1-fz_vz), fz_lo), fz_hi)",
+                openmmunit.nanometers,
+                [[int(i) for i in frame["orient"]], guest],
+                weighByMass=True,
+                pbc=False,
+                fz_nx=[float(n[0])], fz_ny=[float(n[1])], fz_nz=[float(n[2])],
+                fz_vx=[float(v[0])], fz_vy=[float(v[1])], fz_vz=[float(v[2])],
+                fz_lo=[float(grid_min)], fz_hi=[float(grid_max)],
+            )
         if frame is not None:
             from .Funnel import _frame_definitions
             return cvpack.CentroidFunction(
