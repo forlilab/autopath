@@ -357,8 +357,9 @@ def add_funnel_restraints(
     funnel.addGlobalParameter("alpha", alpha)
     funnel.addGlobalParameter("R_cylinder", R_cylinder)
 
-    g1 = funnel.addGroup(host_index, [1.0 for i in range(len(host_index))])
-    g2 = funnel.addGroup(guest_index, [1.0 for i in range(len(guest_index))])
+    # empty weights: mass-weighted centroids, as funnel z and the funnel geometry
+    g1 = funnel.addGroup([int(i) for i in host_index])
+    g2 = funnel.addGroup([int(i) for i in guest_index])
 
     funnel.addBond([g1, g2], [])
     funnel.setName(force_name)
@@ -814,8 +815,9 @@ def create_funnel_force_from_trajectory_analysis(
     funnel.addGlobalParameter("z_low", z_low)
     funnel.addGlobalParameter("alpha", alpha)
     funnel.addGlobalParameter("R_cylinder", R_cylinder)
-    g1 = funnel.addGroup(host_index, [1.0 for i in range(len(host_index))])
-    g2 = funnel.addGroup(guest_index, [1.0 for i in range(len(guest_index))])
+    # empty weights: mass-weighted centroids, as funnel z and the funnel geometry
+    g1 = funnel.addGroup([int(i) for i in host_index])
+    g2 = funnel.addGroup([int(i) for i in guest_index])
     if frame is None:
         funnel.addGlobalParameter("nx", float(unbinding_axis[0]))
         funnel.addGlobalParameter("ny", float(unbinding_axis[1]))
