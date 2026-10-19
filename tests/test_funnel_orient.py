@@ -1,4 +1,6 @@
 """Orientation-restrained funnel: core pinned by OrientationRestraintForce, lab axis, origin COM(core) + v."""
+from pathlib import Path
+
 import numpy as np
 import openmm as mm
 import openmm.unit as u
@@ -7,7 +9,7 @@ from openmm.app import PDBFile
 from scipy.spatial.transform import Rotation
 
 from autopath.metadynamics.CV import funnel_z_cv
-from autopath.metadynamics.Funnel import (FRAME_MIN_ATOMS, ORIENT_FORCE_GROUP, ORIENT_MAX_START_DEG,
+from autopath.metadynamics.Funnel import (FRAME_MIN_ATOMS, ORIENT_FORCE_GROUP, ORIENT_K_DEFAULT, ORIENT_MAX_START_DEG,
                                           _default_core, check_orient_start,
                                           create_funnel_force_from_trajectory_analysis, funnel_axis_at,
                                           funnel_coords_ang, funnel_frame, funnel_lower_wall_ang, funnel_mode,
@@ -37,7 +39,7 @@ def _ctx(forces, pos):
     return ctx
 
 
-def _energy(params, pos, group=None):
+def _energy(params, pos):
     f = create_funnel_force_from_trajectory_analysis(params)
     st = _ctx([f], pos).getState(getEnergy=True)
     return st.getPotentialEnergy().value_in_unit(KJ)
@@ -54,10 +56,10 @@ def _z_force(params, pos):
                                     frame=funnel_frame(params)), pos)
 
 
-def _numpy_energy(params, pos):
+def _numpy_energy(params, pos, runtime=False):
     """The one-sided funnel written out in numpy from the Python mirror's (z, r_xy)."""
     nm, kjnm2 = u.nanometer, KJ / u.nanometer**2
-    rz, rxy = (c / 10.0 for c in funnel_coords_ang(params, pos, MASSES))
+    rz, rxy = (c / 10.0 for c in funnel_coords_ang(params, pos, MASSES, runtime=runtime))
     zcc, zmax, rc = (params[k].value_in_unit(nm) for k in ("z_cc", "z_max", "R_cylinder"))
     zlow = funnel_lower_wall_ang(params) / 10.0
     kxy, kz = params["k_xy"].value_in_unit(kjnm2), params["k_z"].value_in_unit(kjnm2)
@@ -93,7 +95,7 @@ def test_builder_keeps_z_and_rxy_at_the_reference(src):
     assert o["unbinding_axis"] == pytest.approx(funnel_axis_at(src, POS, MASSES), abs=1e-12)
     v = _com(POS, HOST) - _com(POS, CORE)
     assert o["orient_offset"] == pytest.approx(v, abs=1e-12)
-    assert np.array_equal(o["orient_ref"], POS[CORE]) and o["orient_k"] == 1.0e5
+    assert np.array_equal(o["orient_ref"], POS[CORE]) and o["orient_k"] == ORIENT_K_DEFAULT == 1.0e6
     for k in ("z_cc", "z_max", "R_cylinder", "alpha"):
         assert o[k] == src[k]
 
@@ -116,7 +118,7 @@ def test_mixed_partial_or_repeated_frames_are_not_supported():
 
 def test_default_core_is_dssp_ca_away_from_the_guest_and_host():
     from MDAnalysis.analysis.dssp.pydssp_numpy import assign
-    pdb = PDBFile(str(__import__("pathlib").Path(__file__).parent / "data" / "membrane_peptide.pdb"))
+    pdb = PDBFile(str(Path(__file__).parent / "data" / "membrane_peptide.pdb"))
     pos = np.array(pdb.getPositions(asNumpy=True).value_in_unit(u.nanometer))
     res = [r for r in pdb.topology.residues() if {"N", "CA", "C", "O"} <= {a.name for a in r.atoms()}]
     idx = lambda r, n: next(a.index for a in r.atoms() if a.name == n)
@@ -143,6 +145,23 @@ def test_openmm_parity_on_guest_placements():
         assert _z_cv(ORI, p) == pytest.approx(z, abs=1e-10)
         assert _z_force(ORI, p) == pytest.approx(z, abs=1e-10)
     assert hit >= 3                                    # walls and cone act on most placements
+
+
+def test_runtime_z_matches_the_force_with_the_core_rotated():
+    axis = np.array([0.7, -0.2, 0.5]) / np.linalg.norm([0.7, -0.2, 0.5])
+    R = Rotation.from_rotvec(np.radians(1.0) * axis).as_matrix()
+    fr = funnel_frame(ORI)
+    gap = []
+    for p in _guest_frames():
+        q = _rotate(p, ALL, R, _com(p, CORE)) + 0.2
+        assert orient_theta_deg(ORI, q) == pytest.approx(1.0, abs=1e-9)
+        z_rt = funnel_z_ang(q, HOST, GUEST, MASSES, ORI["unbinding_axis"], frame=fr, runtime=True) / 10.0
+        assert _z_cv(ORI, q) == pytest.approx(z_rt, abs=1e-6)
+        assert _z_force(ORI, q) == pytest.approx(z_rt, abs=1e-6)
+        assert funnel_coords_ang(ORI, q, MASSES, runtime=True)[0] / 10.0 == pytest.approx(z_rt, abs=1e-12)
+        assert _energy(ORI, q) == pytest.approx(_numpy_energy(ORI, q, runtime=True), rel=1e-8, abs=1e-8)
+        gap.append(abs(z_rt - funnel_z_ang(q, HOST, GUEST, MASSES, ORI["unbinding_axis"], frame=fr) / 10.0))
+    assert max(gap) > 1e-4                         # the own-orientation mirror differs once θ != 0
 
 
 def test_restraint_forces_match_finite_differences():
@@ -192,11 +211,13 @@ def test_orientation_restraint_energy():
         assert (e > 1.0) == (ang > 0)
 
 
-def test_restraint_is_added_with_the_funnel_and_once():
+def test_restraint_is_added_only_by_the_guarded_run_start_and_once():
     from autopath.metadynamics.MetadynamicsMD import add_orientation_restraint
     s = _system()
     create_funnel_force_from_trajectory_analysis(ORI, system=s)
-    assert sum(isinstance(f, mm.OrientationRestraintForce) for f in s.getForces()) == 1
+    assert s.getNumForces() == 1
+    assert not any(isinstance(f, mm.OrientationRestraintForce) for f in s.getForces())
+    s.addForce(orientation_restraint_force(ORI, len(MASSES)))
     with pytest.raises(ValueError, match="not supported"):
         add_orientation_restraint(s, create_funnel_force_from_trajectory_analysis(ORI), ORI, POS)
     s = _system()
@@ -316,11 +337,12 @@ def test_orchestrator_z_monitor_honours_the_orientation_frame():
     assert _cv_value(spec.resolve(p, len(MASSES), None).cv, p) == pytest.approx(_z_force(ORI, p), abs=1e-10)
 
 
-def test_lab_and_protein_params_build_the_same_forces_as_before():
-    for params, groups, names in ((LAB, 2, {"nx", "ny", "nz"}), (NEW, 5, set())):
+def test_funnel_force_per_mode_and_the_system_path_adds_only_the_funnel():
+    for params, groups, names in ((LAB, 2, {"nx", "ny", "nz"}), (NEW, 5, set()), (ORI, 2, {"nx", "fo_vx"})):
         f = create_funnel_force_from_trajectory_analysis(params)
         got = {f.getGlobalParameterName(i) for i in range(f.getNumGlobalParameters())}
-        assert f.getNumGroups() == groups and names <= got and not {"fo_vx", "fo_vy", "fo_vz"} & got
+        assert f.getNumGroups() == groups and names <= got
+        assert bool({"fo_vx", "fo_vy", "fo_vz"} & got) == (params is ORI)
         s = _system()
         create_funnel_force_from_trajectory_analysis(params, system=s)
         assert s.getNumForces() == 1
