@@ -29,12 +29,6 @@ from .Analysis import (
     dcd_frame_of_rows,
     reweighted_fes,
     write_metad_preseed,
-    plot_colvar,
-    plot_bias,
-    plot_FE,
-    plot_FE_rw,
-    plot_FE_2D,
-    plot_colvar_2D,
 )
 
 # --- CV factories ---
@@ -83,12 +77,6 @@ __all__ = [
     "dcd_frame_of_rows",
     "reweighted_fes",
     "write_metad_preseed",
-    "plot_colvar",
-    "plot_bias",
-    "plot_FE",
-    "plot_FE_rw",
-    "plot_FE_2D",
-    "plot_colvar_2D",
     "CVSpec",
     "com_cv",
     "rmsd_cv",

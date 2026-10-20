@@ -136,37 +136,6 @@ def test_no_module_calls_load_state():
     assert offenders == [], f"loadState is forbidden; found at {offenders}"
 
 
-# --- bias plot glob (isolated-walker mode) ---------------------------------
-
-def test_plot_bias_skips_walker_bias_directories(tmp_path, monkeypatch):
-    """plot_bias ignores per-walker bias_<run_id>/ directories in isolated mode."""
-    import numpy as np
-    from autopath.metadynamics.Analysis import plot_bias
-
-    # plot_bias takes sys_name from Path(out_dir).parts[0], so out_dir is relative
-    monkeypatch.chdir(tmp_path)
-    out = tmp_path / "3ptb" / "metadynamics_funnel"
-    out.mkdir(parents=True)
-    # isolated-mode layout: bias_<run_id>/ directories holding the arrays
-    for run_id in ("milestone_1_frame_0", "milestone_2_frame_145"):
-        d = out / f"bias_{run_id}"
-        d.mkdir()
-        np.save(d / "bias_12345_7.npy", np.linspace(0.0, 5.0, 25))
-    plot_bias("3ptb/metadynamics_funnel", x_min=0.0, x_max=1.0, grid_points=25,
-              colvar_name="PathCV_progress")
-    assert (out / "3ptb_quicklook_BIAS.png").exists()
-
-
-def test_plot_bias_returns_quietly_when_no_bias_arrays(tmp_path, monkeypatch):
-    from autopath.metadynamics.Analysis import plot_bias
-    monkeypatch.chdir(tmp_path)
-    out = tmp_path / "sys" / "metadynamics"
-    out.mkdir(parents=True)
-    plot_bias("sys/metadynamics", x_min=0.0, x_max=1.0, grid_points=25,
-              colvar_name="PathCV_progress")
-    assert not (out / "sys_quicklook_BIAS.png").exists()
-
-
 # --- funnel cylinder radius ------------------------------------------------
 
 def _funnel_universe(n_frames=400, r_bound=0.5, r_cyl=4.0, seed=0):
