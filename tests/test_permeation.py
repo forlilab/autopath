@@ -107,3 +107,13 @@ def test_fes2d_is_one_map_per_bias_with_z_on_columns(tmp_path):
     assert m["fes"].min() == pytest.approx(0.0)
     # mirrored hills -> the map is symmetric under (z, cos) -> (-z, -cos)
     assert np.allclose(m["fes"], m["fes"][::-1, ::-1], atol=1e-6)
+
+
+def test_symmetric_mean_sd_pools_both_sides_of_every_estimate():
+    z = np.linspace(-1, 1, 5)
+    f = np.array([[0.0, 1.0, 2.0, 3.0, 4.0]])                  # one estimate, F(z) = 2 + 2z
+    m, sd = P.symmetric_mean_sd(f)
+    assert np.allclose(m, 2.0)
+    assert np.allclose(sd, np.abs(f[0] - f[0][::-1]) / np.sqrt(2))
+    m2, sd2 = P.symmetric_mean_sd(np.vstack([f, f[:, ::-1]]))  # mirrored pair of estimates
+    assert np.allclose(m2, 2.0) and np.allclose(sd2, np.abs(f[0] - 2.0) * np.sqrt(4 / 3))

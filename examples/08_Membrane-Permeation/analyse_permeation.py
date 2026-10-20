@@ -9,8 +9,9 @@ an arm's PMF is the mean of its estimates in free-energy space with their SD, an
 the walker-ns summed over the arm, so arms of different layouts compare at equal cost.
 
 Writes to --out (nothing else is touched):
-  pmf.png          final PMF(z) per arm, mean ± SD over estimates; right: symmetrised
-  convergence.png  symmetry error, centre barrier, well depth and estimate SD vs walker-ns
+  pmf.png          final PMF(z) per arm, mean ± SD over estimates; right: symmetrised, band = SD over
+                   estimates and both sides F(z), F(-z)
+  convergence.png  mean and max symmetry error, centre barrier and well depth vs walker-ns
   fes-2d.png       final 2D PMF (z, second CV) per arm, mean over estimates; TT basins as stars
   z_traces.png     z(t) of every walker of each arm's first run
   summary.csv      one row per arm (also printed)
@@ -23,6 +24,7 @@ import os
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MultipleLocator
 import numpy as np
 import pandas as pd
 
@@ -71,7 +73,7 @@ def analyse_arm(name, arm_dir, a):
                first_crossing_median_ns=np.median(firsts) if firsts else np.nan,
                walkers_never_crossed=sum(v["full"] == 0 for v in trans.values()),
                bilayer_drift_max_nm=max(drift) if drift else np.nan)
-    return dict(name=name, dirs=dirs, est=est, z=z, pmf=pmf, vaa=vaa, centre=centre, well=well, row=row)
+    return dict(name=name, dirs=dirs, est=est, z=z, pmf=pmf, vaa=vaa, vma=vma, centre=centre, well=well, row=row)
 
 
 def _style(ax, xlabel, ylabel):
@@ -99,9 +101,13 @@ def fig_pmf(arms, a, path):
     for k, r in enumerate(arms):
         lab = f"{r['name']} ({r['row']['estimates']} est.)"
         _band(axes[0], r["z"], r["pmf"][:, -1], COLORS[k], lab)
-        _band(axes[1], r["z"], P.symmetrise(r["pmf"][:, -1]), COLORS[k], lab)
-    for ax, t in zip(axes, ["PMF, mean ± SD over estimates", "symmetrised (F(z) + F(-z)) / 2"]):
+        m, sd = P.symmetric_mean_sd(r["pmf"][:, -1])
+        axes[1].plot(r["z"], m, color=COLORS[k], lw=2, label=lab)
+        axes[1].fill_between(r["z"], m - sd, m + sd, color=COLORS[k], alpha=0.18, lw=0)
+    for ax, t in zip(axes, ["PMF, mean ± SD over estimates",
+                            "symmetrised (F(z) + F(-z)) / 2, ± SD over estimates and both sides"]):
         _style(ax, "z, solute - membrane centre (nm)", "PMF (kcal/mol), bulk = 0")
+        ax.yaxis.set_major_locator(MultipleLocator(0.5))
         ax.set_title(t, loc="left", fontsize=10, color=INK)
         ax.axhline(0, color=MUTED, lw=0.6)
         for s in (-1, 1):
@@ -117,15 +123,10 @@ def fig_convergence(arms, path):
     panels = [("vaa", "mean |F(z) - F(-z)| (kcal/mol)", "symmetry error per estimate (0 = converged)"),
               ("centre", "F(0) (kcal/mol)", "centre barrier, symmetrised"),
               ("well", "min F, |z| < membrane (kcal/mol)", "well depth, symmetrised"),
-              ("sd", "SD over estimates at z = 0 (kcal/mol)", "spread between independent estimates")]
+              ("vma", "max |F(z) - F(-z)| (kcal/mol)", "worst-point symmetry error per estimate")]
     for ax, (key, ylab, title) in zip(axes.ravel(), panels):
         for k, r in enumerate(arms):
-            x = r["est"]["agg_ns"]
-            if key == "sd":
-                if len(r["centre"]) > 1:
-                    ax.plot(x, r["centre"].std(0, ddof=1), color=COLORS[k], lw=2, label=r["name"])
-            else:
-                _band(ax, x, r[key], COLORS[k], r["name"])
+            _band(ax, r["est"]["agg_ns"], r[key], COLORS[k], r["name"])
         _style(ax, "walker-ns summed over the arm", ylab)
         ax.set_title(title, loc="left", fontsize=10, color=INK)
     axes[0, 0].legend(frameon=False, fontsize=9)
@@ -163,11 +164,12 @@ def fig_fes2d(arms, a, path):
     plt.close(fig)
 
 
-def fig_traces(arms, path):
-    fig, axes = plt.subplots(len(arms), 1, figsize=(12, 1.2 + 1.6 * len(arms)), squeeze=False, sharex=True)
+def fig_traces(arms, a, path):
+    fig, axes = plt.subplots(len(arms), 1, figsize=(8, 0.6 + 2.6 * len(arms)), squeeze=False, sharex=True)
     for k, (ax, r) in enumerate(zip(axes[:, 0], arms)):
         run = load_run(r["dirs"][0])
         hw = next(c.grid_max for c in run.cvs if c.name == P.Z_NAME)
+        ax.axhspan(-a.bilayer, a.bilayer, color="#d9d8d2", alpha=0.6, lw=0)
         for j, w in enumerate(run.walkers):
             z = w.cvs[P.Z_NAME].astype(float)
             z[1:][np.abs(np.diff(z)) > hw] = np.nan          # periodic-image move through water, not a crossing
@@ -187,6 +189,8 @@ def main(argv=None):
     ap.add_argument("--bulk", nargs=2, type=float, default=[2.6, 3.3], help="|z| window of bulk water = 0 (nm)")
     ap.add_argument("--membrane", type=float, default=1.8, help="|z| splitting interior from interface (nm)")
     ap.add_argument("--inner", type=float, default=1.0, help="|z| a full crossing must reach (nm)")
+    ap.add_argument("--bilayer", type=float, default=2.0,
+                    help="|z| of the headgroup planes, shaded as the membrane on z_traces.png (nm)")
     ap.add_argument("--snapshots", type=int, default=30)
     a = ap.parse_args(argv)
     os.makedirs(a.out, exist_ok=True)
@@ -199,7 +203,7 @@ def main(argv=None):
     fig_pmf(arms, a, os.path.join(a.out, "pmf.png"))
     fig_convergence(arms, os.path.join(a.out, "convergence.png"))
     fig_fes2d(arms, a, os.path.join(a.out, "fes-2d.png"))
-    fig_traces(arms, os.path.join(a.out, "z_traces.png"))
+    fig_traces(arms, a, os.path.join(a.out, "z_traces.png"))
     print(f"figures and summary.csv in {a.out}")
 
 

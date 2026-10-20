@@ -115,6 +115,15 @@ def symmetrise(pmf):
     return 0.5 * (pmf + pmf[..., ::-1])
 
 
+def symmetric_mean_sd(pmf):
+    """Mean and SD over estimates and both mirror sides: F(z) and F(-z) of every estimate pooled.
+
+    ``pmf`` is (n_est, nz) on a grid symmetric about 0; one estimate gives SD = |F(z) - F(-z)| / sqrt(2).
+    """
+    v = np.concatenate([pmf, pmf[..., ::-1]], axis=0)
+    return v.mean(axis=0), v.std(axis=0, ddof=1)
+
+
 def symmetry_error(z, pmf, zmax):
     """max and mean |F(z) - F(-z)| over |z| <= zmax (Sun et al. 2016 Eqs 8-9), along the last axis."""
     if not np.allclose(z, -z[::-1]):
