@@ -59,10 +59,15 @@ def hills_record(meta, run_id, started_at, ps_per_step, specs, tempering, finish
     return rec
 
 
+def hills_files(out_dir) -> list:
+    """Sorted ``HILLS_*.npz`` paths in ``out_dir``, without the ``*.tmp.npz`` files of in-progress atomic saves."""
+    return sorted(f for f in glob.glob(os.path.join(out_dir, "HILLS_*.npz")) if not f.endswith(".tmp.npz"))
+
+
 def load_hills(out_dir) -> list:
     """All HILLS v2 walkers in ``out_dir`` (older files lack the metadata and are skipped)."""
     walkers = []
-    for f in sorted(glob.glob(os.path.join(out_dir, "HILLS_*.npz"))):
+    for f in hills_files(out_dir):
         with np.load(f) as d:
             if "hills_version" not in d.files or int(d["hills_version"]) < HILLS_VERSION:
                 continue

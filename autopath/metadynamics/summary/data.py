@@ -10,7 +10,7 @@ import numpy as np
 
 from ..Analysis import dcd_frame_of_rows
 from ..Funnel import load_funnel_params
-from ..Hills import HILLS_VERSION
+from ..Hills import HILLS_VERSION, hills_files
 
 logger = logging.getLogger("autopath")
 _SEG = re.compile(r"^(?P<base>.+?)(?:_x(?P<k>\d+))?$")
@@ -251,7 +251,7 @@ def load_run(run_dir, funnel=None, learned_cv=None) -> RunData:
         No HILLS files; every walker without usable records ("no usable records yet: not supported");
         mismatched CVs/grids/tempering or mixed shared/private bias dirs (not supported).
     """
-    files = sorted(glob.glob(os.path.join(run_dir, "HILLS_*.npz")))
+    files = hills_files(run_dir)
     if not files:
         raise ValueError(f"no HILLS files in {run_dir}")
     groups = {}
