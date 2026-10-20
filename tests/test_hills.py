@@ -139,3 +139,11 @@ def test_md_run_writes_v2_that_rebuilds_the_final_free_energy(tmp_path):
 def test_old_hills_files_are_skipped(tmp_path):
     np.savez(tmp_path / "HILLS_old.npz", time_ns=np.zeros(1), cv=np.zeros((1, 1)), height_kj=np.ones(1))
     assert load_hills(tmp_path) == []
+
+
+def test_in_progress_tmp_files_are_not_walkers(tmp_path):
+    meta, ctx = _meta("1d")
+    _deposit(meta, ctx, 20, np.random.default_rng(5))
+    _save(tmp_path, meta, "w")
+    (tmp_path / "HILLS_w.tmp.npz").write_bytes((tmp_path / "HILLS_w.npz").read_bytes())
+    assert [w["run_id"] for w in load_hills(str(tmp_path))] == ["w"]

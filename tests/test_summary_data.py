@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import pytest
 from autopath.metadynamics.summary.data import load_run
@@ -123,3 +124,11 @@ def test_failed_segment_lists_later_segments(tmp_path):
     assert [w.rid for w in run.walkers] == ["w0"]
     assert any(s.startswith("w1:") for s in run.skipped)
     assert any(s.startswith("w1_x2:") and "earlier segment failed" in s for s in run.skipped)
+
+
+def test_in_progress_tmp_hills_are_ignored(tmp_path):
+    import shutil
+    d = make_run(str(tmp_path / "run"), layout="shared", n_walkers=2)
+    shutil.copy(os.path.join(d, "HILLS_w0.npz"), os.path.join(d, "HILLS_w0.tmp.npz"))
+    run = load_run(d)
+    assert sorted(w.rid for w in run.walkers) == ["w0", "w1"] and not run.skipped
