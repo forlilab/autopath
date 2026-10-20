@@ -72,6 +72,44 @@ def pmf_history(run_dir, bulk, n=30, z_name=Z_NAME) -> list:
     return out
 
 
+def fes2d(run_dir, z_name=Z_NAME) -> list:
+    """Final 2D FES (z, other CV) of every independent bias in ``run_dir``, minimum = 0.
+
+    Returns
+    -------
+    list of dict
+        One per bias: ``bias_dir``, ``z`` (nz,), ``y`` (ny,), ``y_name``, ``fes`` (ny, nz) kJ/mol,
+        ``basins`` (TT basin points in (z, y) order, or None).
+
+    Raises
+    ------
+    ValueError
+        A run without exactly two CVs (not supported).
+    """
+    walkers = load_hills(run_dir)
+    if not walkers:
+        raise ValueError(f"no HILLS v2 files in {run_dir}")
+    w = walkers[0]
+    names = [str(x) for x in np.atleast_1d(w["cv_names"])]
+    if len(names) != 2:
+        raise ValueError(f"2D FES needs two CVs, got {names}: not supported")
+    z, _, _ = _z_axis(w, z_name)
+    k = 1 - names.index(z_name)
+    y = np.linspace(float(np.atleast_1d(w["grid_min"])[k]), float(np.atleast_1d(w["grid_max"])[k]),
+                    int(np.atleast_1d(w["grid_points"])[k]))
+    basins = None
+    if "tt_basins" in w:
+        b = np.asarray(w["tt_basins"], float).reshape(-1, 2)
+        basins = b[:, [names.index(z_name), k]]
+    out = []
+    for h in fes_history(walkers, n=1):
+        f = h["fes"][-1]                                # grid axes (cv1, cv0)
+        if names.index(z_name) == 1:
+            f = f.T
+        out.append(dict(bias_dir=h["bias_dir"], z=z, y=y, y_name=names[k], fes=f - f.min(), basins=basins))
+    return out
+
+
 def symmetrise(pmf):
     """(F(z) + F(-z)) / 2 on a grid symmetric about 0 (last axis)."""
     return 0.5 * (pmf + pmf[..., ::-1])

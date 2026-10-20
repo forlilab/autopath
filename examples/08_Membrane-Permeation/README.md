@@ -58,6 +58,7 @@ so shared and isolated arms compare at equal cost.
 | `summary.csv` | centre barrier and well depth ± SD, symmetry error, full crossings, walkers that never crossed, bilayer drift |
 | `pmf.png` | PMF ± SD; raw (asymmetry = unconverged) and symmetrised |
 | `convergence.png` | symmetry error, barrier, well and estimate spread vs walker-ns: flat and small = converged |
+| `fes-2d.png` | final 2D PMF (z, cos θ) per arm from the bias, summary-report palette; TT basins as stars |
 | `z_traces.png` | does every walker cross, or sit on one side? |
 
 There is no reference PMF: the symmetry F(z) = F(-z) is the known-answer check. It is necessary,

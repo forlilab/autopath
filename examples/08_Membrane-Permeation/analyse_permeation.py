@@ -11,6 +11,7 @@ the walker-ns summed over the arm, so arms of different layouts compare at equal
 Writes to --out (nothing else is touched):
   pmf.png          final PMF(z) per arm, mean ± SD over estimates; right: symmetrised
   convergence.png  symmetry error, centre barrier, well depth and estimate SD vs walker-ns
+  fes-2d.png       final 2D PMF (z, second CV) per arm, mean over estimates; TT basins as stars
   z_traces.png     z(t) of every walker of each arm's first run
   summary.csv      one row per arm (also printed)
 Works on runs still in progress (each estimate is cut at the shortest one).
@@ -27,6 +28,7 @@ import pandas as pd
 
 from autopath.metadynamics import permeation as P
 from autopath.metadynamics.summary.data import load_run
+from autopath.metadynamics.summary.plots import _cap, _fill_capped
 
 plt.style.use("default")                        # autopath's import switches to fivethirtyeight
 KCAL = 4.184
@@ -132,6 +134,35 @@ def fig_convergence(arms, path):
     plt.close(fig)
 
 
+def fig_fes2d(arms, a, path):
+    """Final 2D PMF per arm in the summary report's palette (1 kcal/mol levels, shared cap)."""
+    maps = []
+    for r in arms:
+        try:
+            est = [m for d in r["dirs"] for m in P.fes2d(d)]
+        except ValueError:                                # single-CV arm
+            continue
+        f = np.mean([m["fes"] for m in est], axis=0) / KCAL
+        maps.append((r["name"], est[0], f - f.min()))
+    if not maps:
+        return
+    fmax = _cap([m[2] for m in maps])
+    fig, axes = plt.subplots(1, len(maps), figsize=(4.8 * len(maps) + 1.2, 4.2), squeeze=False,
+                             gridspec_kw=dict(wspace=0.3))
+    for ax, (name, m, f) in zip(axes[0], maps):
+        cf = _fill_capped(fig, ax, m["z"], m["y"], f, None, fmax)
+        for s in (-1, 1):
+            ax.axvline(s * a.bulk[0], color="k", ls=":", lw=0.8)
+        if m["basins"] is not None:
+            ax.plot(m["basins"][:, 0], m["basins"][:, 1], ls="none", marker="*", ms=14, mfc="w", mec="k", zorder=5)
+        ax.set_title(name, loc="left", fontsize=10, color=INK)
+        ax.set_xlabel("z, solute - membrane centre (nm)", color=INK)
+        ax.set_ylabel(m["y_name"], color=INK)
+    fig.colorbar(cf, ax=axes[0].tolist(), label="F (kcal/mol), min = 0")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def fig_traces(arms, path):
     fig, axes = plt.subplots(len(arms), 1, figsize=(12, 1.2 + 1.6 * len(arms)), squeeze=False, sharex=True)
     for k, (ax, r) in enumerate(zip(axes[:, 0], arms)):
@@ -167,6 +198,7 @@ def main(argv=None):
         print(table.T.to_string(header=False))
     fig_pmf(arms, a, os.path.join(a.out, "pmf.png"))
     fig_convergence(arms, os.path.join(a.out, "convergence.png"))
+    fig_fes2d(arms, a, os.path.join(a.out, "fes-2d.png"))
     fig_traces(arms, os.path.join(a.out, "z_traces.png"))
     print(f"figures and summary.csv in {a.out}")
 

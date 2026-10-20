@@ -94,3 +94,16 @@ def test_walker_transits_reads_colvar_with_record_time(tmp_path):
     _walker(tmp_path, "w0", tmp_path, z, np.zeros(4), np.full(4, 0.1))
     r = P.walker_transits(str(tmp_path), bulk_lo=2.2, inner=1.0)["w0"]
     assert r["full"] == 1 and r["first_full_ns"] == pytest.approx(0.02)
+
+
+def test_fes2d_is_one_map_per_bias_with_z_on_columns(tmp_path):
+    rng = np.random.default_rng(3)
+    for k in range(2):
+        _walker(tmp_path, f"w{k}", tmp_path / f"bias_w{k}", *_hills(rng, 50, True))
+    maps = P.fes2d(str(tmp_path))
+    assert len(maps) == 2
+    m = maps[0]
+    assert m["fes"].shape == (41, 121) and m["y_name"] == "cos_theta"
+    assert m["fes"].min() == pytest.approx(0.0)
+    # mirrored hills -> the map is symmetric under (z, cos) -> (-z, -cos)
+    assert np.allclose(m["fes"], m["fes"][::-1, ::-1], atol=1e-6)
