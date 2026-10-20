@@ -87,19 +87,12 @@ def test_reference_range_ignores_a_funnel_z_grid_below_zero():
     assert (lo, hi) == pytest.approx((1.4, 2.3))
 
 
-def test_quicklook_and_well_depth_use_the_origin(tmp_path, monkeypatch):
+def test_well_depth_uses_the_origin():
     """Readers of the bound site must look at z >= 0, not the first bins of the grid."""
-    from autopath.metadynamics.Analysis import plot_FE_rw
     z = np.linspace(-1.4, 2.6, 190)
     fe = -50.0 * np.exp(-((z - 0.2) / 0.08) ** 2) + 60.0 * (z < -0.05)
     assert R._well_depth(fe, (-1.4, 2.6), 0.0) == pytest.approx(-50.0, abs=1.0)
     assert R._well_depth(fe, (-1.4, 2.6)) > 0                   # grid start: nothing bound
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / "out").mkdir()
-    np.save(tmp_path / "out" / "FE_w_rw.npy", fe)
-    plot_FE_rw("out", -1.4, 2.6, 190, "z", origin=0.0)
-    plot_FE_rw("out", -1.4, 2.6, 190, "z")                      # unresolved: still plots
-    assert (tmp_path / "out" / "out_quicklook_FE_rw.png").exists()
 
 
 def test_finite_fes_result_is_unchanged_by_finite_masking():

@@ -1711,9 +1711,6 @@ class AutoPath:
                             bias_factor=float(self.mMD_bias_factor),
                             grid_min=metad_cv.grid_min,
                             grid_max=metad_cv.grid_max,
-                            cv_name=("PathCV progress (s)" if metad_cv.name == "pathCV_progress"
-                                     else "funnel z (nm)"),
-                            out_prefix=os.path.join(group_out_dir, sys_name),
                             cv_length_per_unit_ang=metad_cv.cv_length_per_unit_ang,
                             cv_is_funnel_z=metad_cv.name == "funnel_z",
                             hill_width=metad_cv.hill_width,

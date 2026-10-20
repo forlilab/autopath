@@ -79,7 +79,7 @@ def test_report_survives_missing_colvar(tmp_path):
     d = T._shared(tmp_path)
     np.savez(d / "REWEIGHT_w1.npz", time_ns=np.arange(50.0), bias_kj=np.zeros(50),
              rct_kj=np.zeros(50), monitor_funnel_z=z)
-    out = rep.report(str(d), 300.0, 0.0, 1.0, "s", cv_length_per_unit_ang=20.0,
-                     out_prefix=str(tmp_path / "rep"), funnel_params=T._fp())
+    out = rep.report(str(d), 300.0, 0.0, 1.0, cv_length_per_unit_ang=20.0,
+                     funnel_params=T._fp())
     assert "z reweighting failed" in out["z_reweighted"]["reason"]
     assert out["dG_bind_std_kj"] is not None
