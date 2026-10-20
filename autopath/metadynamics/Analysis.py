@@ -662,11 +662,9 @@ class MetadynamicsAnalysis:
         bias_factor: float = 15.0,
         grid_min: float = 0.0,
         grid_max: float = 1.0,
-        cv_name: str = "CV",
         bound_threshold: float = 0.1,
         unbound_threshold: float = 0.9,
         coverage_threshold: float = 0.6,
-        out_prefix: str = None,
         cv_length_per_unit_ang: float = None,
         cv_is_funnel_z: bool = False,
         hill_width: float = None,
@@ -679,7 +677,6 @@ class MetadynamicsAnalysis:
         """
         from autopath.metadynamics.report import report
         return report(self.out_dir, temperature, grid_min=grid_min,
-                      grid_max=grid_max, cv_name=cv_name,
+                      grid_max=grid_max,
                       cv_length_per_unit_ang=cv_length_per_unit_ang,
-                      out_prefix=out_prefix, cv_is_funnel_z=cv_is_funnel_z,
-                      hill_width=hill_width)
+                      cv_is_funnel_z=cv_is_funnel_z, hill_width=hill_width)
