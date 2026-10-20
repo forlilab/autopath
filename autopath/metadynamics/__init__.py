@@ -46,6 +46,8 @@ from .CV import (
     path_rmsd_cv,
     pathCV_cv,
     funnel_z_cv,
+    membrane_z_cv,
+    axis_cos_cv,
     contacts_cv,
 )
 
@@ -96,6 +98,8 @@ __all__ = [
     "path_rmsd_cv",
     "pathCV_cv",
     "funnel_z_cv",
+    "membrane_z_cv",
+    "axis_cos_cv",
     "contacts_cv",
     "add_funnel_restraints",
     "generate_funnel_parameters_from_trajectory",

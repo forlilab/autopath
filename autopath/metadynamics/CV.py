@@ -176,6 +176,102 @@ def funnel_z_cv(
     )
 
 
+def membrane_z_cv(
+    solute_atoms: list[int],
+    center_atoms: list[int],
+    half_width: float,
+    hill_width: float = 0.2,
+    grid_points: Optional[int] = None,
+    name: str = "membrane_z",
+) -> CVSpec:
+    """Signed minimum-image z offset of the solute centroid from the membrane centre (nm).
+
+    The sign comes from nudging the solute by +0.01 nm and checking whether the
+    periodic |dz| grows, so the CV wraps at ±Lz/2 of the current box without
+    knowing Lz (barostats change it). Clamped to ``[-half_width, half_width]``,
+    the grid and boundary-correction edges.
+
+    Parameters
+    ----------
+    solute_atoms : list of int
+        Permeant atoms (unweighted centroid).
+    center_atoms : list of int
+        Membrane-centre reference, e.g. a fixed dummy atom (unweighted centroid).
+    half_width : float
+        Grid half-width in nm, normally half the box height.
+    hill_width : float, optional
+        Gaussian width in nm (default 0.2).
+    grid_points : int, optional
+        Default: spacing of hill_width / 5.
+    name : str, optional
+
+    Returns
+    -------
+    CVSpec
+    """
+    solute, center = [int(i) for i in solute_atoms], [int(i) for i in center_atoms]
+    hw = float(half_width)
+    if grid_points is None:
+        grid_points = int(round(2 * hw / (hill_width / 5))) + 1
+
+    def factory(input_positions, n_atoms, topology):
+        return cvpack.CentroidFunction(
+            "min(max(d0*select(step(pointdistance(0, 0, z1 + 0.01, 0, 0, z2) - d0), 1, -1), -mz_hw), mz_hw);"
+            "d0 = pointdistance(0, 0, z1, 0, 0, z2)",
+            openmmunit.nanometers,
+            [solute, center],
+            weighByMass=False,
+            pbc=True,
+            mz_hw=[hw],
+        )
+
+    return CVSpec(
+        cv=None,
+        grid_min=-hw,
+        grid_max=hw,
+        hill_width=hill_width,
+        grid_points=grid_points,
+        name=name,
+        cv_length_per_unit_ang=10.0,
+        origin=0.0,
+        _factory=factory,
+    )
+
+
+def axis_cos_cv(
+    tail_atom: int,
+    head_atom: int,
+    hill_width: float = 0.1,
+    grid_points: int = 101,
+    name: str = "cos_theta",
+) -> CVSpec:
+    """Cosine of the angle between the tail -> head bond vector and the z axis.
+
+    The cosine avoids the singular poles of acos at 0 and pi. The two atoms must
+    be bonded (no minimum image is applied).
+    """
+    i, j = int(tail_atom), int(head_atom)
+
+    def factory(input_positions, n_atoms, topology):
+        return cvpack.CentroidFunction(
+            "(z2 - z1) / sqrt((x2 - x1)^2 + (y2 - y1)^2 + (z2 - z1)^2)",
+            openmmunit.dimensionless,
+            [[i], [j]],
+            weighByMass=False,
+            pbc=False,
+        )
+
+    return CVSpec(
+        cv=None,
+        grid_min=-1.0,
+        grid_max=1.0,
+        hill_width=hill_width,
+        grid_points=grid_points,
+        name=name,
+        _factory=factory,
+    )
+
+
 def torsion_cv(
     atoms: tuple[int, int, int, int],
     hill_width: float = 0.1,
