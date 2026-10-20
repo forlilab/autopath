@@ -132,3 +132,10 @@ def test_report_one_d_bias_has_no_fes2d(tmp_path):
     s = report(make_run(str(tmp_path / "r")), out_dir=str(tmp_path / "o"), step_ns=0.5)
     assert s["files"]["fes2d"] is None and any("2D maps" in x for x in s["skipped_panels"])
     assert not os.path.exists(str(tmp_path / "o" / "metad_fes-2d.png"))
+
+
+def test_map_contours_are_half_kcal_apart(tmp_path):
+    run = _run(tmp_path)
+    fig, axes, _, nums = fig_fes2d(run, bands(run))
+    lv = _levels(axes[0, 0])
+    assert lv[0] == 0.0 and np.allclose(np.diff(lv), 0.5)

@@ -48,7 +48,9 @@ after `GUARD_AFTER_S` (default 900 s); resubmit that array task.
 python analyse_permeation.py WT=runs/wt_shared TT=runs/tt_shared --out analysis/
 ```
 
-Works mid-run. Each independent bias is one PMF estimate (isolated: one per walker; shared: one
+Add `--reports` to also write the autopath summary report of every run (`reports/<arm>/<run>/`:
+CV traces, bias deposition, FE with four estimators, 2D maps, blocks; bound band = |z| < `--report-centre`,
+unbound = the +z bulk window). Works mid-run. Each independent bias is one PMF estimate (isolated: one per walker; shared: one
 per run); an arm's PMF is the free-energy-space mean of its estimates ± SD (paper Eq 13), never
 a pool of frames across biases. Time on the convergence plots is walker-ns summed over the arm,
 so shared and isolated arms compare at equal cost.

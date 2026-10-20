@@ -14,6 +14,8 @@ Writes to --out (nothing else is touched):
   convergence.png  mean and max symmetry error, centre barrier and well depth vs walker-ns
   fes-2d.png       final 2D PMF (z, second CV) per arm, mean over estimates; TT basins as stars
   z_traces.png     z(t) of every walker of each arm's first run
+  reports/         with --reports: the autopath summary report of every run
+                   (python -m autopath.metadynamics.summary), bound = |z| < --report-centre, unbound = bulk (+z)
   summary.csv      one row per arm (also printed)
 Works on runs still in progress (each estimate is cut at the shortest one).
 """
@@ -31,6 +33,7 @@ import pandas as pd
 from autopath.metadynamics import permeation as P
 from autopath.metadynamics.summary.data import load_run
 from autopath.metadynamics.summary.plots import _cap, _fill_capped
+from autopath.metadynamics.summary.report import report
 
 plt.style.use("default")                        # autopath's import switches to fivethirtyeight
 KCAL = 4.184
@@ -120,10 +123,10 @@ def fig_pmf(arms, a, path):
 
 def fig_convergence(arms, path):
     fig, axes = plt.subplots(2, 2, figsize=(12, 7.5), sharex=True)
-    panels = [("vaa", "mean |F(z) - F(-z)| (kcal/mol)", "symmetry error per estimate (0 = converged)"),
-              ("centre", "F(0) (kcal/mol)", "centre barrier, symmetrised"),
-              ("well", "min F, |z| < membrane (kcal/mol)", "well depth, symmetrised"),
-              ("vma", "max |F(z) - F(-z)| (kcal/mol)", "worst-point symmetry error per estimate")]
+    panels = [("vaa", "mean |F(z) - F(-z)| (kcal/mol)", "a  mean symmetry error (0 = converged)"),
+              ("vma", "max |F(z) - F(-z)| (kcal/mol)", "b  worst-point symmetry error"),
+              ("centre", "F(0) (kcal/mol)", "c  centre barrier, symmetrised"),
+              ("well", "min F, |z| < membrane (kcal/mol)", "d  well depth, symmetrised")]
     for ax, (key, ylab, title) in zip(axes.ravel(), panels):
         for k, r in enumerate(arms):
             _band(ax, r["est"]["agg_ns"], r[key], COLORS[k], r["name"])
@@ -182,6 +185,17 @@ def fig_traces(arms, a, path):
     plt.close(fig)
 
 
+def run_reports(arms, a):
+    """Summary report per run dir: bound band = membrane centre, unbound = the +z bulk window."""
+    bands = {P.Z_NAME: {"bound": [-a.report_centre, a.report_centre], "unbound": list(a.bulk)}}
+    for r in arms:
+        for d in r["dirs"]:
+            run = os.path.basename(os.path.normpath(d))
+            out = os.path.join(a.out, "reports", r["name"], run)
+            report(d, bands=bands, out_dir=out, prefix=f"{r['name']}_{run}")
+            print(f"report: {out}")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("arms", nargs="+", help="NAME=ARM_DIR")
@@ -192,6 +206,9 @@ def main(argv=None):
     ap.add_argument("--bilayer", type=float, default=2.0,
                     help="|z| of the headgroup planes, shaded as the membrane on z_traces.png (nm)")
     ap.add_argument("--snapshots", type=int, default=30)
+    ap.add_argument("--reports", action="store_true", help="also write the autopath summary report of every run")
+    ap.add_argument("--report-centre", type=float, default=0.5,
+                    help="|z| (nm) of the report's bound band, the membrane centre")
     a = ap.parse_args(argv)
     os.makedirs(a.out, exist_ok=True)
 
@@ -205,6 +222,8 @@ def main(argv=None):
     fig_fes2d(arms, a, os.path.join(a.out, "fes-2d.png"))
     fig_traces(arms, a, os.path.join(a.out, "z_traces.png"))
     print(f"figures and summary.csv in {a.out}")
+    if a.reports:
+        run_reports(arms, a)
 
 
 if __name__ == "__main__":

@@ -167,12 +167,12 @@ def _cap(maps, fmax=None):
     return float(np.percentile(fin, 99)) if fin.size else 1.0
 
 
-def _fill_capped(fig, ax, x, y, Z, label, fmax):
-    """Filled map with 1-unit levels from 0 to ``fmax``; values above saturate at the top colour.
+def _fill_capped(fig, ax, x, y, Z, label, fmax, step=0.5):
+    """Filled map with ``step``-unit levels from 0 to ``fmax``; values above saturate at the top colour.
 
     ``label=None`` draws no colorbar (the caller adds a shared one).
     """
-    lv = np.arange(0.0, fmax + 1e-9, 1.0)
+    lv = np.arange(0.0, fmax + 1e-9, step)
     if len(lv) < 2:
         lv = np.array([0.0, max(fmax, 1e-6)])
     cf = ax.contourf(x, y, np.asarray(Z, float), levels=lv, cmap="Spectral_r", alpha=0.78, extend="max")
