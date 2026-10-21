@@ -334,7 +334,7 @@ def test_fes2d_four_maps_and_primary_cap(tmp_path):
     fig, axes, skipped, nums = fig_fes2d(run, b)
     assert axes.shape == (1, 4)
     titles = [a.get_title("left") for a in axes[0]]
-    assert titles[0].startswith("all: reweighted F (ESS ")
+    assert titles[0].startswith("all: reweight c(t) F (ESS ")
     assert titles[1].startswith("all: reweight final bias F (ESS ")
     assert titles[2].startswith("all: reweight balanced F (ESS ")
     assert titles[3].startswith("all: bias-derived F")

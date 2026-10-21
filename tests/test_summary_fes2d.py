@@ -43,7 +43,7 @@ def test_shared_panels_share_limits_levels_colourbar(tmp_path):
     assert l.get_xlim() == r.get_xlim() and l.get_ylim() == r.get_ylim()
     assert np.array_equal(_levels(l), _levels(r)) and _levels(l)[-1] == pytest.approx(nums["fmax"], abs=1.0)
     assert len(_cbars(fig)) == 1
-    assert l.get_title("left").startswith("all: reweighted F (ESS ") and "smoothed σ=2 bins)" in l.get_title("left")
+    assert l.get_title("left").startswith("all: reweight c(t) F (ESS ") and "smoothed σ=2 bins)" in l.get_title("left")
     assert r.get_title("left").startswith("all: bias-derived F = −") and r.get_title("left").endswith("·V (final bias)")
     assert not any("bias-derived" in s for s in skipped) and "funnel outline: no funnel" in skipped
 
@@ -56,7 +56,7 @@ def test_isolated_panels_per_walker(tmp_path):
     assert all(np.array_equal(lv[0], x) for x in lv[1:])
     assert len({a.get_xlim() for a in axes.flat}) == 1 and len({a.get_ylim() for a in axes.flat}) == 1
     for i, rid in enumerate(("w0", "w1", "w2")):
-        assert axes[i, 0].get_title("left").startswith(f"{rid}: reweighted F")
+        assert axes[i, 0].get_title("left").startswith(f"{rid}: reweight c(t) F")
         assert axes[i, 3].get_title("left").startswith(f"{rid}: bias-derived F")
     assert set(nums["fes_ess"]["map"]) == {"w0", "w1", "w2"} and len(_cbars(fig)) == 1
 
