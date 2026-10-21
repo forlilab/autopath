@@ -730,14 +730,14 @@ def _agg_axis(ax, rws, t_end):
 
 
 def _right_labels(ax, items, lo, hi):
-    """Direct labels ``(text, y)`` at the right edge, nudged apart by 7% of the y-range."""
+    """Direct labels ``(text, y)`` just outside the right edge, nudged apart by 7% of the y-range."""
     gap = 0.07 * (hi - lo)
     ys = []
     for text, y in sorted(items, key=lambda it: it[1]):
         y = max(y, ys[-1] + gap) if ys else y
         ys.append(y)
-        ax.text(0.995, y, text, transform=ax.get_yaxis_transform(), ha="right", va="bottom", fontsize=7.5,
-                color=_INK, zorder=5)
+        ax.annotate(text, (1.0, y), xycoords=ax.get_yaxis_transform(), xytext=(4, 0), textcoords="offset points",
+                    ha="left", va="center", fontsize=7.5, color=_INK, annotation_clip=False)
 
 
 def fig_blocks(run, numbers, out_path=None, axes=None, t_rej=0.2):
@@ -746,10 +746,10 @@ def fig_blocks(run, numbers, out_path=None, axes=None, t_rej=0.2):
     Rows are shared and single biases pooled and isolated walkers (up to ``MAX_ROWS``), never pooled. Blocks
     are equal windows of walker time after ``t_rej``; a pooled block holds every walker's frames in its window,
     and a top axis gives the walker time summed over walkers. (a) ΔG° of each block per reweighting estimator
-    (colour and marker = estimator), the final ΔG° of every estimator dashed and labelled, the primary
-    estimator's block-bootstrap ±SD as a band, undefined blocks hatched and each block's round-trip count on
-    top. (b) site and bulk ESS per block of the primary estimator (log y). (c) ESS/N(t) of the primary
-    estimator.
+    (colour and marker = estimator), the final ΔG° of every estimator dashed and labelled, the
+    block-bootstrap ±SD of each reweighted final value as a band, undefined blocks hatched and each block's
+    round-trip count on top. (b) effective samples (Kish ESS) per block in the bound and unbound bands, primary
+    estimator (log y). (c) ESS/N(t) of the primary estimator.
 
     Parameters
     ----------
@@ -826,13 +826,17 @@ def fig_blocks(run, numbers, out_path=None, axes=None, t_rej=0.2):
                 final[m] = v["value"] * KJ_TO_KCAL
                 a.axhline(final[m], color=ESTIMATOR_COLORS[m], ls="--", lw=1.0, zorder=1)
         ys = list(final.values())
-        finals = [(f"{ESTIMATOR_LABELS[m]} {y:+.2f}", y) for m, y in final.items()]
-        pf = final.get(prim)
-        sd = pb.get("boot_sd")
-        if pf is not None and sd is not None and np.isfinite(sd):
-            s = sd * KJ_TO_KCAL
-            a.axhspan(pf - s, pf + s, color=pc, alpha=0.12, lw=0, zorder=0)
-            ys += [pf - s, pf + s]
+        boot = {}                                                    # block-bootstrap SD of each final value
+        for m in rwm:
+            blk = _est_blocks(est, m, lab, iso)
+            sd = None if blk is None else blk.get("boot_sd")
+            if m in final and sd is not None and np.isfinite(sd):
+                boot[m] = sd * KJ_TO_KCAL
+                a.axhspan(final[m] - boot[m], final[m] + boot[m], color=ESTIMATOR_COLORS[m], alpha=0.12, lw=0,
+                          zorder=0)
+                ys += [final[m] - boot[m], final[m] + boot[m]]
+        finals = [(f"{ESTIMATOR_LABELS[m]} {y:+.2f}" + (f" ± {boot[m]:.2f}" if m in boot else ""), y)
+                  for m, y in final.items()]
         for m in rwm:
             blk = _est_blocks(est, m, lab, iso)
             if blk is None or len(blk["block_dg"]) != nb:
@@ -857,19 +861,22 @@ def fig_blocks(run, numbers, out_path=None, axes=None, t_rej=0.2):
                ha="center", va="bottom", fontsize=7, color=_MUTED)
         a.set_ylabel(f"block {sym} (kcal/mol)", fontsize=9)
         valid, ntrip = nb - len(bad), int(np.sum(rc)) if rc else None
-        stats = [f"{ESTIMATOR_LABELS[prim]}: bootstrap SD {_num(sd * KJ_TO_KCAL) if sd is not None else 'n/a'} "
-                 f"kcal/mol", f"{valid}/{nb} blocks defined"] + ([f"{ntrip} round trips"] if ntrip is not None else [])
+        stats = [f"{valid}/{nb} blocks defined"] + ([f"{ntrip} round trips"] if ntrip is not None else [])
         a.set_title(f"{lab}: block analysis (t_rej {t_rej:g}, n blocks {nb})  ·  " + "  ·  ".join(stats),
                     fontsize=9, loc="left")
         if not iso and len(rws) > 1:
             _agg_axis(a, rws, t_end)
-            for i, w in enumerate(rws):                                  # later blocks lose this walker
-                te = float(w.t[-1])
+            ends = {}                                                    # later blocks lose these walkers
+            for i, w in enumerate(rws):
+                te = round(float(w.t[-1]), 1)
                 if te < t_end - 1e-9:
-                    for x in (a, b, c):
-                        x.axvline(te, color=_MUTED, ls=":", lw=1.0, zorder=1)
-                    a.text(te, 0.04, f"walker {i} ends ", transform=a.get_xaxis_transform(), rotation=90,
-                           ha="right", va="bottom", fontsize=7, color=_MUTED)
+                    ends.setdefault(te, []).append(str(i))
+            for te, ids in ends.items():
+                for x in (a, b, c):
+                    x.axvline(te, color=_MUTED, ls=":", lw=1.0, zorder=1)
+                txt = f"walker {ids[0]} ends " if len(ids) == 1 else f"walkers {','.join(ids)} end "
+                a.text(te, 0.04, txt, transform=a.get_xaxis_transform(), rotation=90, ha="right", va="bottom",
+                       fontsize=7, color=_MUTED)
 
         if "block_ess_site" in pb:
             si = np.asarray(pb["block_ess_site"], float)
@@ -883,24 +890,25 @@ def fig_blocks(run, numbers, out_path=None, axes=None, t_rej=0.2):
                 b.yaxis.set_minor_formatter(NullFormatter())
         else:
             b.text(0.5, 0.5, "no site/bulk ESS", ha="center", va="center", transform=b.transAxes, fontsize=8)
-        b.set_ylabel("block ESS", fontsize=9)
+        b.set_ylabel("effective samples\nper block", fontsize=9)
         if "ess_frac" in ser:
             c.plot(np.asarray(ser["t"], float), 100.0 * np.asarray(ser["ess_frac"], float), color=pc, lw=1.6)
             c.set_ylim(bottom=0.0)
         c.set_ylabel("ESS/N (%)", fontsize=9)
-        c.set_xlabel("walker time (ns)" if iso else "walker time (ns); a block pools every walker's frames in it",
+        c.set_xlabel("walker time (ns)" if iso else "walker time (ns); a block pools every walker's records in it",
                      fontsize=9)
 
         handles = [Line2D([], [], color=ESTIMATOR_COLORS[m], lw=1.2, marker=ESTIMATOR_MARKERS[m], ms=6.5,
                           mec="white") for m in rwm]
-        labels = [f"{ESTIMATOR_LABELS[m]} (block)" for m in rwm]
-        handles += [Line2D([], [], color=_MUTED, ls="--", lw=1.0), Patch(color=pc, alpha=0.12),
+        labels = [f"{ESTIMATOR_LABELS[m]}: per-block {sym}" for m in rwm]
+        handles += [Line2D([], [], color=_MUTED, ls="--", lw=1.0), Patch(color=_MUTED, alpha=0.2),
                     Patch(facecolor="none", edgecolor=_HATCH, hatch="///"),
                     Line2D([], [], color=_INK, lw=1.0, marker="^", mfc="white", ms=6),
                     Line2D([], [], color=_MUTED, lw=1.0, ls="--", marker="v", ms=6),
                     Line2D([], [], color=pc, lw=1.6)]
-        labels += [f"final {sym} (labelled)", f"bootstrap ±SD ({ESTIMATOR_LABELS[prim]})", "block undefined",
-                   f"site ESS ({ESTIMATOR_LABELS[prim]})", f"bulk ESS ({ESTIMATOR_LABELS[prim]})",
+        labels += [f"final {sym}, all records", "block-bootstrap ±SD of final", "block undefined",
+                   f"effective samples, bound band ({ESTIMATOR_LABELS[prim]})",
+                   f"effective samples, unbound band ({ESTIMATOR_LABELS[prim]})",
                    f"ESS/N(t) ({ESTIMATOR_LABELS[prim]})"]
         if leg[r] is not None:
             leg[r].legend(handles, labels, fontsize=7.5, frameon=False, loc="upper left", borderaxespad=0)

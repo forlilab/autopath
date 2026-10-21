@@ -568,7 +568,7 @@ def test_fig_blocks_three_panels_per_row_sharing_x(tmp_path, layout, n):
             x = np.asarray(ln.get_xdata(), float)
             assert len(x) == 10 and np.allclose(np.diff(x), np.diff(x)[0]) and x[0] > 0.2 * a.get_xlim()[1]
         assert b.get_yscale() == "log" and c.get_ylabel() == "ESS/N (%)" and c.get_lines()
-        assert any(t.get_text() == f"site ESS ({LABELS['rw_ct']})" for x in fig.axes if x.get_legend() is not None
+        assert any(t.get_text() == f"effective samples, bound band ({LABELS['rw_ct']})" for x in fig.axes if x.get_legend() is not None
                    for t in x.get_legend().get_texts())
         assert sum(t.get_text().isdigit() for t in a.texts) == 10
         assert len(a.child_axes) == (1 if layout == "shared" else 0)   # aggregate-time axis on pooled rows
