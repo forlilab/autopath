@@ -550,22 +550,28 @@ def test_fig_blocks_three_panels_per_row_sharing_x(tmp_path, layout, n):
     from matplotlib.colors import to_hex
     from autopath.metadynamics.summary.plots import ESTIMATOR_COLORS
     run = load_run(make_run(str(tmp_path / "r"), layout=layout, n_walkers=n), funnel=FP)
-    fig, axes, _ = fig_blocks(run, _blocks_numbers(run), out_path=str(tmp_path / "bl.png"))
+    nums = _blocks_numbers(run)
+    fig, axes, _ = fig_blocks(run, nums, out_path=str(tmp_path / "bl.png"))
     rows = 1 if layout == "shared" else n
+    rw = {ESTIMATOR_COLORS[m].upper() for m in ("rw_ct", "rw_final", "rw_balanced")}
     assert axes.shape == (rows, 3) and os.path.getsize(tmp_path / "bl.png") > 1000
     for r in range(rows):
         a, b, c = axes[r]
         assert a.get_shared_x_axes().joined(a, b) and a.get_shared_x_axes().joined(a, c)
         assert "block analysis (t_rej 0.2, n blocks 10)" in a.get_title("left")
         assert a.get_title("left").startswith("all" if layout == "shared" else f"w{r}")
-        cols = {to_hex(ln.get_color()).upper() for ln in a.get_lines() if ln.get_linestyle() == "--"}
-        assert cols and cols <= {c_.upper() for c_ in ESTIMATOR_COLORS.values()}   # final dG per estimator
-        seg = {to_hex(col).upper() for coll in a.collections for col in coll.get_colors()}
-        assert seg <= {c_.upper() for c_ in ESTIMATOR_COLORS.values()}
-        assert b.get_yscale() == "log" and c.get_ylabel() == "ESS/N" and c.get_lines()
-        assert any(t.get_text() == "primary (rw_ct) site ESS" for x in fig.axes if x.get_legend() is not None
+        dashed = {to_hex(ln.get_color()).upper() for ln in a.get_lines() if ln.get_linestyle() == "--"}
+        assert dashed and dashed <= {c_.upper() for c_ in ESTIMATOR_COLORS.values()}   # final value per estimator
+        blocks = [ln for ln in a.get_lines() if ln.get_linestyle() == "-" and ln.get_marker() not in (None, "None")]
+        assert blocks and {to_hex(ln.get_color()).upper() for ln in blocks} <= rw
+        for ln in blocks:                                    # equal blocks of walker time after t_rej
+            x = np.asarray(ln.get_xdata(), float)
+            assert len(x) == 10 and np.allclose(np.diff(x), np.diff(x)[0]) and x[0] > 0.2 * a.get_xlim()[1]
+        assert b.get_yscale() == "log" and c.get_ylabel() == "ESS/N (%)" and c.get_lines()
+        assert any(t.get_text() == f"site ESS ({LABELS['rw_ct']})" for x in fig.axes if x.get_legend() is not None
                    for t in x.get_legend().get_texts())
-        assert len(a.texts) == 10 and all(t.get_text().isdigit() for t in a.texts)
+        assert sum(t.get_text().isdigit() for t in a.texts) == 10
+        assert len(a.child_axes) == (1 if layout == "shared" else 0)   # aggregate-time axis on pooled rows
 
 
 def test_fig_blocks_isolated_row_shows_its_walker_only(tmp_path):
@@ -573,7 +579,8 @@ def test_fig_blocks_isolated_row_shows_its_walker_only(tmp_path):
     nums = _blocks_numbers(run)
     _, axes, _ = fig_blocks(run, nums)
     for r, rid in enumerate(("w0", "w1")):
-        assert [t.get_text() for t in axes[r, 0].texts] == [str(k) for k in nums["blocks"][rid]["block_recross"]]
+        assert [t.get_text() for t in axes[r, 0].texts if t.get_text().isdigit()] == \
+            [str(k) for k in nums["blocks"][rid]["block_recross"]]
 
 
 def test_fig_blocks_short_series_blank_row(tmp_path):
