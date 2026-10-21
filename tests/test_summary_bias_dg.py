@@ -225,7 +225,7 @@ def test_fig_fe_overlays_bias_curves(tmp_path):
     for a in axes["w"]:                                         # bias-derived W is a solid estimator line
         assert not [ln for ln in a.get_lines() if ln.get_linestyle() == "--"]
         leg = [t.get_text() for t in a.get_legend().get_texts()]
-        assert any(t.startswith("final bias:") for t in leg) and len(leg) == 4
+        assert any(t.startswith("bias-derived:") for t in leg) and len(leg) == 4
     txt = axes["text"].texts[0].get_text()
     assert txt.count("bias-derived ΔG°") == 2 and txt.count("estimator gap") == 2
     assert nums["estimator_gap"]["pooled"] is None

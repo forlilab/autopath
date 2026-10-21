@@ -21,7 +21,7 @@ HIGH_BOUND_PREFIX = "contacts"
 
 ESTIMATORS = ("rw_ct", "rw_final", "rw_balanced", "bias")
 LABELS = {"rw_ct": "reweight c(t)", "rw_final": "reweight final bias", "rw_balanced": "reweight balanced",
-          "bias": "final bias"}
+          "bias": "bias-derived"}
 PRIMARY = "rw_ct"
 
 

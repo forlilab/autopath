@@ -277,7 +277,7 @@ def fig_bias(run, out_path=None, axes=None, n_snap=5, hill_mask_sigmas=2.0):
         times = np.linspace(tmax / n_snap, tmax, n_snap)
         ah = axes[gi, 0]
         for w in g:
-            ah.plot(w.hill_t, w.hill_h, lw=0.6, alpha=0.6, color=cols[w.rid], label=w.rid)
+            ah.plot(w.hill_t, w.hill_h, lw=1.6, alpha=0.9, color=cols[w.rid], label=w.rid)
         ah.set(yscale="log", xlabel="walker time (ns)", ylabel="hill height (kJ/mol)")
         ah.set_title(f"hill heights {tag}".strip(), fontsize=8, loc="left")
         if not isolated:
@@ -286,7 +286,7 @@ def fig_bias(run, out_path=None, axes=None, n_snap=5, hill_mask_sigmas=2.0):
             x = np.linspace(float(gmin[0]), float(gmax[0]), int(np.atleast_1d(h0["grid_points"])[0]))
             for tt in times:
                 V = np.asarray(bias_from_hills(raw, until=_until(g, tt))).ravel()
-                axes[gi, 1].plot(x, V, lw=1, label=f"{tag} t<={tt:.1f}".strip())
+                axes[gi, 1].plot(x, V, lw=2.0, label=f"{tag} t<={tt:.1f}".strip())
             axes[gi, 1].set(xlabel=_label(run, run.cvs[0].name), ylabel="V (kJ/mol)")
             axes[gi, 1].set_title(f"bias growth {tag}".strip(), fontsize=8, loc="left")
             _legend(axes[gi, 1], fontsize=7, ncol=2, frameon=False)
@@ -307,7 +307,7 @@ def fig_bias(run, out_path=None, axes=None, n_snap=5, hill_mask_sigmas=2.0):
                 V = _masked_bias(raw, hill_mask_sigmas, _until(g, tt))
                 for k in range(2):
                     m = fes_marginal(-scale * V, k, kt) * KJ_TO_KCAL
-                    axes[gi, 2 + k].plot(xs[k], m, lw=1, label=f"t<={tt:.1f}")
+                    axes[gi, 2 + k].plot(xs[k], m, lw=2.0, label=f"t<={tt:.1f}")
             for k in range(2):
                 b = axes[gi, 2 + k]
                 b.set(xlabel=_label(run, run.cvs[k].name), ylabel="F (kcal/mol)")
@@ -324,7 +324,7 @@ def fig_bias(run, out_path=None, axes=None, n_snap=5, hill_mask_sigmas=2.0):
                 skipped.append("V* length != hill count: not supported")
                 continue
             for w, v in zip(have, vs):
-                axes[gi, vcol].plot(w.hill_t, v, lw=0.8, color=cols[w.rid], label=w.rid)
+                axes[gi, vcol].plot(w.hill_t, v, lw=1.8, color=cols[w.rid], label=w.rid)
             if have:
                 vstar_rows.add(gi)
                 axes[gi, vcol].set(xlabel="walker time (ns)", ylabel="V* (kJ/mol)")
@@ -587,7 +587,7 @@ def fig_fe(run, bands_, burn=0.2, t_rej=0.2, step_ns=1.0, out_path=None, axes=No
         be = blk.get("block_ess")
         extra = []
         if vb is not None:
-            extra.append(f"bias-derived {sym} {_num(vb['value'])}")
+            extra.append(f"{LABELS['bias']} {sym} {_num(vb['value'])}")
             g = gap["per_walker"].get(lab) if gap and gap["pooled"] is None else (gap or {}).get("pooled")
             extra.append(f"estimator gap (rw - bias) {_num(g) if g is not None else 'n/a'}")
         lines.append("\n".join(pre + [
@@ -1061,9 +1061,9 @@ def fig_fes2d(run, bands_, pair=None, burn=0.2, out_path=None, axes=None, min_co
             if outline:
                 a.plot(*_funnel_outline(run, ang_per_unit(run, x)), "k--", lw=1)
             if m == "bias":
-                a.set_title(f"{lab}: bias-derived F = −{scale:.3g}·V (final bias)", fontsize=8, loc="left")
+                a.set_title(f"{lab}: {LABELS['bias']} F = −{scale:.3g}·V (final bias)", fontsize=8, loc="left")
             else:
-                name = "reweighted F" if m == "rw_ct" else f"{LABELS[m]} F"
+                name = f"{LABELS[m]} F"
                 a.set_title(f"{lab}: {name} ({_ess(_pick_ess(frs[m], key(lab)))}{smooth})", fontsize=8,
                             loc="left")
     if drawn is not None:
