@@ -62,6 +62,16 @@ from .Funnel import (
     upgrade_funnel_params,
     funnel_frame,
     funnel_axis_at,
+    funnel_z_ang,
+    funnel_mode,
+    funnel_coords_ang,
+    funnel_origin_axis_at,
+    orientation_restrained_params,
+    orient_params_for_state,
+    orientation_restraint_force,
+    check_orient_start,
+    orient_theta_deg,
+    ORIENT_MAX_START_DEG,
 )
 
 __all__ = [
@@ -104,4 +114,14 @@ __all__ = [
     "upgrade_funnel_params",
     "funnel_frame",
     "funnel_axis_at",
+    "funnel_z_ang",
+    "funnel_mode",
+    "funnel_coords_ang",
+    "funnel_origin_axis_at",
+    "orientation_restrained_params",
+    "orient_params_for_state",
+    "orientation_restraint_force",
+    "check_orient_start",
+    "orient_theta_deg",
+    "ORIENT_MAX_START_DEG",
 ]

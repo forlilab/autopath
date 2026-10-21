@@ -48,6 +48,7 @@ from autopath.metadynamics import (
     upgrade_funnel_params,
     funnel_frame,
     funnel_axis_at,
+    funnel_z_ang,
 )
 from autopath.pulling import SMDData, SMDAnalysis
 from autopath.pulling.Convergence import (tail_converged, validate_autostop_options,
@@ -1559,15 +1560,10 @@ class AutoPath:
                                     bounds=funnel_z_bounds_nm(funnel_params),
                                     frame=funnel_frame(funnel_params),
                                 )
-                                _pos0 = read_positions(path_milestones[0]) * 10.0
-                                _hm = [int(i) for i in funnel_params["host_index"]]
-                                _gm = [int(i) for i in funnel_params["guest_index"]]
-                                _w = lambda idx: np.array([
-                                    base_system.getParticleMass(i).value_in_unit(openmmunit.dalton) for i in idx])
-                                _ax0 = funnel_axis_at(funnel_params, _pos0 / 10.0, _all_mass)
-                                _z_bound = float(np.dot(
-                                    np.average(_pos0[_gm], axis=0, weights=_w(_gm))
-                                    - np.average(_pos0[_hm], axis=0, weights=_w(_hm)), _ax0))
+                                _z_bound = funnel_z_ang(
+                                    read_positions(path_milestones[0]), funnel_params["host_index"],
+                                    funnel_params["guest_index"], _all_mass, funnel_params["unbinding_axis"],
+                                    frame=funnel_frame(funnel_params))
                                 logger.info(
                                     "Biasing the funnel axis coordinate z on [%.2f, %.2f] A (lower wall at "
                                     "%.2f A); bound milestone at z=%.2f A.", _zlo, _zmax,

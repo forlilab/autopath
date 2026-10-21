@@ -119,11 +119,14 @@ def _cache_key(pulls, stride, direction, topology_pdb, ligand_sdf, ligand_idx, p
         idx = list(funnel["host"]) + list(funnel["guest"])
         fr = funnel.get("frame")
         if fr is not None:
-            idx += list(fr["b"]) + list(fr["c"])
+            idx += list(fr["orient"]) if "orient" in fr else list(fr["b"]) + list(fr["c"])
         fz = {"host": sorted(funnel["host"]), "guest": sorted(funnel["guest"]),
               "axis": [round(float(a), 9) for a in funnel["axis"]],
               "masses_sha": hashlib.sha256(np.asarray(masses, float)[idx].tobytes()).hexdigest()}
-        if fr is not None:
+        if fr is not None and "orient" in fr:
+            fz["frame"] = {"orient": list(fr["orient"]), "offset": [round(float(a), 9) for a in fr["offset"]],
+                           "ref_sha": hashlib.sha256(np.round(np.asarray(fr["ref"], float), 9).tobytes()).hexdigest()}
+        elif fr is not None:
             fz["frame"] = {"b": list(fr["b"]), "c": list(fr["c"]),
                            "coeffs": [round(float(a), 9) for a in fr["coeffs"]]}
     return json.dumps({
@@ -152,8 +155,8 @@ def _cache_valid(npz_path, key) -> bool:
 
 
 def _funnel_geometry(funnel):
-    """{"host", "guest", "axis" (unit), "frame" (protein frame or None)} from a funnel_params dict
-    or its saved .npz path."""
+    """{"host", "guest", "axis" (unit), "frame" (protein or orientation frame, or None)} from a funnel_params
+    dict or its saved .npz path."""
     if isinstance(funnel, (str, os.PathLike)):
         funnel = load_funnel_params(str(funnel))
     axis = np.asarray(funnel["unbinding_axis"], float)
@@ -162,7 +165,11 @@ def _funnel_geometry(funnel):
 
 
 def _funnel_z_nm(X, funnel, masses):
-    """Funnel z (nm) per frame of X (n, N, 3) nm, as the run-time funnel z computes it."""
+    """Funnel z (nm) per frame of X (n, N, 3) nm, as the run-time funnel z computes it.
+
+    An orientation frame measures each frame in its own core orientation; this equals the
+    run-time value only at θ = 0 (training frames are not aligned to ``orient_ref``).
+    """
     return np.array([funnel_z_ang(x, funnel["host"], funnel["guest"], masses, funnel["axis"],
                                   frame=funnel["frame"]) for x in X]) / 10.0
 
@@ -674,6 +681,9 @@ def _finish_rupture(shared, Z, z, diag, reducer, funnel, analysis_dir, temperatu
         funnel_host=np.array(funnel["host"]), funnel_guest=np.array(funnel["guest"]),
         funnel_axis=np.asarray(funnel["axis"], float),
         **({} if funnel["frame"] is None else dict(
+            funnel_orient_index=np.array(funnel["frame"]["orient"]),
+            funnel_orient_offset=np.asarray(funnel["frame"]["offset"], float),
+            funnel_orient_ref=np.asarray(funnel["frame"]["ref"], float)) if "orient" in funnel["frame"] else dict(
             funnel_frame_b=np.array(funnel["frame"]["b"]), funnel_frame_c=np.array(funnel["frame"]["c"]),
             funnel_axis_coeffs=np.asarray(funnel["frame"]["coeffs"], float))),
         sw_lo=sw_lo, sw_hi=sw_hi, sw_grid_min=sw_lo - 3 * hw, sw_grid_max=sw_hi + 3 * hw, sw_hill_width=hw,

@@ -83,6 +83,7 @@ TOY = _toy()
 TOP, POS, MASSES, HOST, GUEST, PROTEIN = TOY
 LAB = _lab_params(HOST, GUEST)
 NEW = upgrade_funnel_params(LAB, POS, TOP, MASSES)
+SIDE = np.cross(AXIS, [0.0, 0.0, 1.0]) / np.linalg.norm(np.cross(AXIS, [0.0, 0.0, 1.0]))
 
 
 def _system():
@@ -233,12 +234,13 @@ def test_restraint_forces_are_finite_and_match_finite_differences():
 # ---- old params ----------------------------------------------------------------------------------
 
 def _old_energy(params, pos):
-    """The lab-frame restraint written out in numpy (unweighted centroids)."""
+    """The funnel restraint written out in numpy (mass-weighted centroids; frame axis if any)."""
     to = lambda q, un: q.value_in_unit(un)
     nm, kjnm2 = u.nanometer, u.kilojoule_per_mole / u.nanometer**2
-    from autopath.metadynamics.Funnel import funnel_lower_wall_ang
-    n = np.asarray(params["unbinding_axis"], float)
-    r = pos[params["guest_index"]].mean(0) - pos[params["host_index"]].mean(0)
+    from autopath.metadynamics.Funnel import funnel_axis_at, funnel_lower_wall_ang
+    n = funnel_axis_at(params, pos, MASSES)
+    com = lambda idx: np.average(pos[idx], axis=0, weights=MASSES[idx])
+    r = com(params["guest_index"]) - com(params["host_index"])
     rz, rxy = float(n @ r), float(np.linalg.norm(np.cross(n, r)))
     zcc, zmax, rc = (to(params[k], nm) for k in ("z_cc", "z_max", "R_cylinder"))
     zlow = funnel_lower_wall_ang(params) / 10.0
@@ -258,9 +260,20 @@ def test_old_params_keep_the_lab_frame_restraint():
         pos = _rotate(POS, np.arange(len(POS)), _random_rotation(seed), np.zeros(3))
         for shift in (0.0, 1.0, -0.8):
             p = pos.copy()
-            p[GUEST] += shift * AXIS
+            p[GUEST] += shift * AXIS + 0.6 * SIDE
             assert _restraint(LAB, p)[0] == pytest.approx(_old_energy(LAB, p), rel=1e-9, abs=1e-9)
 
+
+
+def test_frame_restraint_uses_mass_weighted_centroids():
+    for seed in range(3):
+        pos = _rotate(POS, np.arange(len(POS)), _random_rotation(seed), np.zeros(3))
+        for shift in (0.0, 1.0, -0.8):
+            p = pos.copy()
+            p[GUEST] += shift * AXIS + 0.6 * SIDE           # off axis: the funnel wall acts
+            e = _old_energy(NEW, p)
+            assert e > 1.0
+            assert _restraint(NEW, p)[0] == pytest.approx(e, rel=1e-7, abs=1e-7)
 
 # ---- training z, upgrade round trip, learned-CV match --------------------------------------------
 

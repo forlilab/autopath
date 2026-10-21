@@ -10,6 +10,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
+from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter
 from openmm import unit
 
 from ..Hills import bias_from_hills
@@ -21,7 +23,10 @@ KJ_TO_KCAL = 1 / 4.184
 
 MAX_ROWS = 6
 _BOUND, _UNBOUND = "#9ecae1", "#fdd0a2"
-ESTIMATOR_COLORS = {"rw_ct": "#6A3D9A", "rw_final": "#1B9E77", "rw_balanced": "#E7298A", "bias": "#4D4D4D"}
+# Reweighting estimators validated all-pairs for colour-vision deficiency; bias is the neutral reference.
+ESTIMATOR_COLORS = {"rw_ct": "#2a78d6", "rw_final": "#eb6834", "rw_balanced": "#1baf7a", "bias": "#52514e"}
+ESTIMATOR_MARKERS = {"rw_ct": "o", "rw_final": "s", "rw_balanced": "D", "bias": None}
+_INK, _MUTED, _REJECT, _HATCH = "#0b0b0b", "#52514e", "#ececea", "#b5b4ae"
 ESTIMATOR_LABELS = dict(LABELS)
 
 
@@ -714,16 +719,26 @@ def _est_blocks(est, m, lab, iso):
     return e["blocks"].get(lab) if iso else e["blocks"]
 
 
-def fig_blocks(run, numbers, out_path=None, axes=None, t_rej=0.2):
-    """Block analysis, one row per bias group, three stacked panels sharing walker time.
+def _agg_axis(ax, rws, t_end):
+    """Top axis with the walker time summed over walkers; a monotone relabelling of walker time."""
+    tt = np.linspace(0.0, t_end, 2001)
+    ag = aggregate_time(rws, tt)
+    sec = ax.secondary_xaxis("top", functions=(lambda t: np.interp(t, tt, ag), lambda s: np.interp(s, ag, tt)))
+    sec.set_xlabel("aggregate walker time (ns, summed over walkers)", fontsize=8, color=_MUTED)
+    sec.tick_params(labelsize=7, colors=_MUTED)
+    return sec
 
-    Rows are shared and single biases pooled (aggregate walker time) and isolated walkers (up to
-    ``MAX_ROWS``), never pooled. (a) ΔG° of each block for every reweighting estimator in
-    ``numbers["estimators"]`` (short segments in ``ESTIMATOR_COLORS``, offset in x per estimator; hollow
-    markers on the bottom edge for undefined blocks; round-trip count of the block on top; dashed lines are
-    the final ΔG° of every estimator, including ``bias``, which has no frame blocks). (b) min(site, bulk)
-    ESS per block of the primary estimator as bars (log y) with the site and bulk ESS as markers. (c) ESS/N(t)
-    of the primary estimator.
+
+def fig_blocks(run, numbers, out_path=None, axes=None, t_rej=0.2):
+    """Block analysis, one row per bias group, three stacked panels on walker time.
+
+    Rows are shared and single biases pooled and isolated walkers (up to ``MAX_ROWS``), never pooled. Blocks
+    are equal windows of walker time after ``t_rej``; a pooled block holds every walker's frames in its window,
+    and a top axis gives the walker time summed over walkers. (a) ΔG° of each block per reweighting estimator
+    (colour and marker = estimator), the final ΔG° of every estimator dashed with its value in the legend, the
+    block-bootstrap ±SD of each reweighted final value as a band, undefined blocks hatched and each block's
+    round-trip count on top. (b) effective samples (Kish ESS) per block in the bound and unbound bands, primary
+    estimator (log y). (c) ESS/N(t) of the primary estimator.
 
     Parameters
     ----------
@@ -745,20 +760,17 @@ def fig_blocks(run, numbers, out_path=None, axes=None, t_rej=0.2):
         skipped.append(f"block rows: {len(groups) - MAX_ROWS} of {len(groups)} isolated walkers not drawn")
         groups = groups[:MAX_ROWS]
     n = len(groups)
-    leg_ax = [None] * n
-    leg_b = [None] * n
+    leg = [None] * n
     if axes is None:
-        fig = plt.figure(figsize=(12, 6.2 * n + 0.6), constrained_layout=True)
-        gs = fig.add_gridspec(3 * n, 2, height_ratios=[3, 1.6, 1.3] * n, width_ratios=[1, 0.2])
+        fig = plt.figure(figsize=(11, 5.4 * n + 0.4), constrained_layout=True)
+        gs = fig.add_gridspec(3 * n, 2, height_ratios=[3, 1.3, 1.1] * n, width_ratios=[1, 0.22])
         axes = np.empty((n, 3), object)
         for r in range(n):
             axes[r, 0] = fig.add_subplot(gs[3 * r, 0])
             for k in (1, 2):
                 axes[r, k] = fig.add_subplot(gs[3 * r + k, 0], sharex=axes[r, 0])
-            leg_ax[r] = fig.add_subplot(gs[3 * r, 1])
-            leg_ax[r].axis("off")
-            leg_b[r] = fig.add_subplot(gs[3 * r + 1, 1])
-            leg_b[r].axis("off")
+            leg[r] = fig.add_subplot(gs[3 * r:3 * r + 3, 1])
+            leg[r].axis("off")
     else:
         axes = np.asarray(axes)
         if axes.shape != (n, 3):
@@ -769,6 +781,7 @@ def fig_blocks(run, numbers, out_path=None, axes=None, t_rej=0.2):
     kinds = {(_get(e["binding"], g) or {}).get("kind") for e in est.values() for g in groups} - {None}
     sym = "ΔG°" if kinds <= {"dG0"} else "band ΔF"
     rwm = [m for m in RW_METHODS if m in est]
+    pc = ESTIMATOR_COLORS[prim]
     for r, lab in enumerate(groups):
         a, b, c = axes[r]
         for x in (a, b):
@@ -779,91 +792,121 @@ def fig_blocks(run, numbers, out_path=None, axes=None, t_rej=0.2):
             a.text(0.5, 0.5, "blocks n/a", ha="center", va="center", transform=a.transAxes)
             for x in (a, b, c):
                 x.set_axis_off()
-            a.set_title(f"{lab}: block analysis (t_rej {t_rej:g}, blocks n/a)", fontsize=8, loc="left")
+            a.set_title(f"{lab}: block analysis (t_rej {t_rej:g}, blocks n/a)", fontsize=9, loc="left")
             continue
         nb = len(pb["block_dg"])
         t_end = float(ser["t"][-1])
+        ed = np.linspace(t_rej * t_end, t_end, nb + 1)
+        xm = 0.5 * (ed[:-1] + ed[1:])
+        bad = [k for k, v in enumerate(pb["block_dg"]) if not np.isfinite(v)]
+        for x in (a, b, c):
+            x.axvspan(0.0, ed[0], color=_REJECT, lw=0, zorder=0)
+            for k in bad:
+                x.axvspan(ed[k], ed[k + 1], facecolor="none", edgecolor=_HATCH, hatch="///", lw=0, zorder=0)
+            x.set_xlim(0.0, t_end)
+            x.tick_params(labelsize=8)
+            _grid(x)
 
-        def agg(t):
-            return np.asarray(t, float) if iso else aggregate_time(rws, np.asarray(t, float))
-        ed = agg(np.linspace(t_rej * t_end, t_end, nb + 1))
-        xm, bw = 0.5 * (ed[:-1] + ed[1:]), np.diff(ed)
-        off = {m: (j - (len(rwm) - 1) / 2) * 0.24 for j, m in enumerate(rwm)}
-        ys = []
+        final = {}
         for m in ESTIMATORS:
             e = est.get(m)
             v = None if e is None else _get(e["binding"], lab)
             if v is not None and np.isfinite(v["value"]):
-                y = v["value"] * KJ_TO_KCAL
-                a.axhline(y, color=ESTIMATOR_COLORS[m], ls="--", lw=1.0, alpha=0.9, zorder=1)
-                ys.append(y)
+                final[m] = v["value"] * KJ_TO_KCAL
+                a.axhline(final[m], color=ESTIMATOR_COLORS[m], ls="--", lw=1.0, zorder=1)
+        ys = list(final.values())
+        boot = {}                                                    # block-bootstrap SD of each final value
+        for m in rwm:
+            blk = _est_blocks(est, m, lab, iso)
+            sd = None if blk is None else blk.get("boot_sd")
+            if m in final and sd is not None and np.isfinite(sd):
+                boot[m] = sd * KJ_TO_KCAL
+                a.axhspan(final[m] - boot[m], final[m] + boot[m], color=ESTIMATOR_COLORS[m], alpha=0.12, lw=0,
+                          zorder=0)
+                ys += [final[m] - boot[m], final[m] + boot[m]]
+        ftxt = {m: f"final {y:+.2f}" + (f" ± {boot[m]:.2f}" if m in boot else "") for m, y in final.items()}
         for m in rwm:
             blk = _est_blocks(est, m, lab, iso)
             if blk is None or len(blk["block_dg"]) != nb:
                 continue
-            for k, bv in enumerate(blk["block_dg"]):
-                xc = xm[k] + off[m] * bw[k]
-                if np.isfinite(bv):
-                    y = bv * KJ_TO_KCAL
-                    a.hlines(y, xc - 0.1 * bw[k], xc + 0.1 * bw[k], color=ESTIMATOR_COLORS[m], lw=3.0, zorder=3)
-                    ys.append(y)
-                else:
-                    a.plot([xc], [0.03], marker="o", mfc="none", mec=ESTIMATOR_COLORS[m], ms=6, ls="none",
-                           transform=a.get_xaxis_transform(), clip_on=False, zorder=3)
-        if ys:
-            lo, hi = min(ys), max(ys)
-            pad = 0.12 * (hi - lo) if hi > lo else 1.0
-            a.set_ylim(lo - pad, hi + pad + 0.18 * (hi - lo + 2 * pad))
-        for k, rc in enumerate(pb.get("block_recross", [])):
-            a.annotate(str(rc), (xm[k], 0.97), xycoords=a.get_xaxis_transform(), ha="center", va="top",
-                       fontsize=8, color="0.2")
-        a.set_ylabel(f"{sym} (kcal/mol)")
-        a.set_title(f"{lab}: block analysis (t_rej {t_rej:g}, n blocks {nb})", fontsize=8, loc="left")
-        handles = [Line2D([], [], color=ESTIMATOR_COLORS[m], lw=3.0) for m in ESTIMATORS if m in est]
-        labels = [ESTIMATOR_LABELS[m] for m in ESTIMATORS if m in est]
-        handles += [Line2D([], [], color="0.3", ls="--", lw=1.0),
-                    Line2D([], [], color="0.3", marker="o", mfc="none", ls="none"),
-                    Line2D([], [], color="0.2", marker="$n$", ls="none")]
-        labels += [f"final {sym}(t)", "block undefined", "round trips"]
-        if leg_ax[r] is not None:
-            leg_ax[r].legend(handles, labels, fontsize=7, frameon=False, loc="upper left", borderaxespad=0)
-        else:
-            a.legend(handles, labels, fontsize=6.5, frameon=False, loc="lower right", ncol=2)
-        _grid(a)
-        pc = ESTIMATOR_COLORS[prim]
+            y = np.asarray(blk["block_dg"], float) * KJ_TO_KCAL
+            a.plot(xm, y, color=ESTIMATOR_COLORS[m], lw=1.2, marker=ESTIMATOR_MARKERS[m], ms=6.5, mec="white",
+                   mew=0.8, zorder=3)
+            ys += list(y[np.isfinite(y)])
+        lo, hi = (min(ys), max(ys)) if ys else (-1.0, 1.0)
+        pad = 0.1 * (hi - lo) if hi > lo else 1.0
+        lo, hi = lo - pad, hi + pad
+        a.set_ylim(lo, hi + 0.12 * (hi - lo))                         # headroom for the round-trip row
+        rc = pb.get("block_recross", [])
+        for k, v in enumerate(rc):
+            a.text(xm[k], 0.975, str(v), transform=a.get_xaxis_transform(), ha="center", va="top", fontsize=8,
+                   color=_INK)
+        if rc:
+            a.text(ed[0] - 0.01 * t_end, 0.975, "round trips", transform=a.get_xaxis_transform(), ha="right",
+                   va="top", fontsize=7.5, color=_MUTED)
+        a.text(0.5 * ed[0], 0.04, f"rejected\n(t_rej {t_rej:g})", transform=a.get_xaxis_transform(),
+               ha="center", va="bottom", fontsize=7, color=_MUTED)
+        a.set_ylabel(f"block {sym} (kcal/mol)", fontsize=9)
+        valid, ntrip = nb - len(bad), int(np.sum(rc)) if rc else None
+        stats = [f"{valid}/{nb} blocks defined"] + ([f"{ntrip} round trips"] if ntrip is not None else [])
+        a.set_title(f"{lab}: block analysis (t_rej {t_rej:g}, n blocks {nb})  ·  " + "  ·  ".join(stats),
+                    fontsize=9, loc="left")
+        if not iso and len(rws) > 1:
+            _agg_axis(a, rws, t_end)
+            ends = {}                                                    # later blocks lose these walkers
+            for i, w in enumerate(rws):
+                te = round(float(w.t[-1]), 1)
+                if te < t_end - 1e-9:
+                    ends.setdefault(te, []).append(str(i))
+            for te, ids in ends.items():
+                for x in (a, b, c):
+                    x.axvline(te, color=_MUTED, ls=":", lw=1.0, zorder=1)
+                txt = f"walker {ids[0]} ends " if len(ids) == 1 else f"walkers {','.join(ids)} end "
+                a.text(te, 0.04, txt, transform=a.get_xaxis_transform(), rotation=90, ha="right", va="bottom",
+                       fontsize=7, color=_MUTED)
+
         if "block_ess_site" in pb:
-            si, bu = np.asarray(pb["block_ess_site"], float), np.asarray(pb["block_ess_bulk"], float)
-            mn = np.minimum(si, bu)
-            ok = mn > 0
-            b.bar(xm[ok], mn[ok], width=0.8 * bw[ok], color=pc, alpha=0.45, label="min(site, bulk)")
-            b.plot(xm[si > 0], si[si > 0], ls="none", marker="^", ms=5, mfc="w", mec="k", mew=0.9,
-                   label=f"primary ({prim}) site ESS")
-            b.plot(xm[bu > 0], bu[bu > 0], ls="none", marker="v", ms=5, color="k",
-                   label=f"primary ({prim}) bulk ESS")
-            b.set_yscale("log")
-            b.set_ylabel("block ESS")
-            hb, lb = b.get_legend_handles_labels()
-            if leg_b[r] is not None:
-                leg_b[r].legend(hb, lb, fontsize=7, frameon=False, loc="upper left", borderaxespad=0)
-            else:
-                b.legend(hb, lb, fontsize=6.5, frameon=False, loc="lower right", ncol=3)
-            allv = np.r_[si, bu]
-            if (allv > 0).any():
-                b.set_ylim(top=float(allv[allv > 0].max()) * 2.0)
+            si = np.asarray(pb["block_ess_site"], float)
+            bu = np.asarray(pb["block_ess_bulk"], float)
+            b.plot(xm, np.where(si > 0, si, np.nan), color=_INK, lw=1.0, marker="^", ms=6, mfc="white", mew=1.0)
+            b.plot(xm, np.where(bu > 0, bu, np.nan), color=_MUTED, lw=1.0, ls="--", marker="v", ms=6)
+            if ((si > 0) | (bu > 0)).any():
+                b.set_yscale("log")
+                b.yaxis.set_major_locator(LogLocator(subs=(1.0, 2.0, 5.0)))
+                b.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
+                b.yaxis.set_minor_formatter(NullFormatter())
         else:
-            b.text(0.5, 0.5, "no site/bulk ESS", ha="center", va="center", transform=b.transAxes)
-        _grid(b)
+            b.text(0.5, 0.5, "no site/bulk ESS", ha="center", va="center", transform=b.transAxes, fontsize=8)
+        b.set_ylabel("effective samples\nper block", fontsize=9)
         if "ess_frac" in ser:
-            c.plot(np.asarray(ser.get("t_aggregate", ser["t"]), float), ser["ess_frac"], color=pc, lw=1.6)
-            c.set_yscale("log")
-        c.set_ylabel("ESS/N")
-        c.set_xlabel("walker time (ns)" if iso else "aggregate walker time (ns, summed over walkers)")
-        _grid(c)
-        for x in (a, b, c):
-            x.axvline(ed[0], color="0.5", ls=":", lw=0.8, zorder=0)
-    fig.suptitle(f"{sym} block analysis, {run.layout}", fontsize=9)
+            c.plot(np.asarray(ser["t"], float), 100.0 * np.asarray(ser["ess_frac"], float), color=pc, lw=1.6)
+            c.set_ylim(bottom=0.0)
+        c.set_ylabel("ESS/N (%)", fontsize=9)
+        c.set_xlabel("walker time (ns)" if iso else "walker time (ns); a block pools every walker's records in it",
+                     fontsize=9)
+
+        handles = [Line2D([], [], color=ESTIMATOR_COLORS[m], lw=1.2, marker=ESTIMATOR_MARKERS[m], ms=6.5,
+                          mec="white") for m in rwm]
+        labels = [f"{ESTIMATOR_LABELS[m]}: per-block {sym}" + (f"  ({ftxt[m]})" if m in ftxt else "") for m in rwm]
+        if "bias" in ftxt:
+            handles.append(Line2D([], [], color=ESTIMATOR_COLORS["bias"], ls="--", lw=1.0))
+            labels.append(f"{ESTIMATOR_LABELS['bias']}  ({final['bias']:+.2f})")
+        handles += [Line2D([], [], color=_MUTED, ls="--", lw=1.0), Patch(color=_MUTED, alpha=0.2),
+                    Patch(facecolor="none", edgecolor=_HATCH, hatch="///"),
+                    Line2D([], [], color=_INK, lw=1.0, marker="^", mfc="white", ms=6),
+                    Line2D([], [], color=_MUTED, lw=1.0, ls="--", marker="v", ms=6),
+                    Line2D([], [], color=pc, lw=1.6)]
+        labels += [f"final {sym}, all records", "block-bootstrap ±SD of final", "block undefined",
+                   f"effective samples, bound band ({ESTIMATOR_LABELS[prim]})",
+                   f"effective samples, unbound band ({ESTIMATOR_LABELS[prim]})",
+                   f"ESS/N(t) ({ESTIMATOR_LABELS[prim]})"]
+        if leg[r] is not None:
+            leg[r].legend(handles, labels, fontsize=7.5, frameon=False, loc="upper left", borderaxespad=0)
+        else:
+            a.legend(handles, labels, fontsize=6.5, frameon=False, loc="lower left", ncol=3)
+    fig.suptitle(f"{sym} block analysis, {run.layout}", fontsize=10)
     if out_path:
-        fig.savefig(out_path, dpi=110)
+        fig.savefig(out_path, dpi=120)
     return fig, axes, skipped
 
 

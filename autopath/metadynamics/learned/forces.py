@@ -300,9 +300,17 @@ def funnel_z_force(host, guest, axis, name="funnel_z_lc", frame=None):
     ----------
     host, guest : atom index lists
     axis : (3,) array, normalised here; the literal axis when ``frame`` is None
-    frame : protein frame from ``Funnel.funnel_frame``; n is rebuilt from it
+    frame : frame from ``Funnel.funnel_frame``: a protein frame rebuilds n; an orientation frame
+        measures n·(COM_guest − COM_core − v) along the literal ``axis`` (``host`` unused)
     """
     groups = [[int(i) for i in host], [int(i) for i in guest]]
+    if frame is not None and "orient" in frame:
+        n = np.asarray(axis, dtype=float)
+        n = n / np.linalg.norm(n)
+        v = np.asarray(frame["offset"], dtype=float)
+        expr = " + ".join(f"({float(c)!r})*({x}2-{x}1-({float(o)!r}))" for c, o, x in zip(n, v, "xyz"))
+        return cvpack.CentroidFunction(expr, unit.nanometer, [[int(i) for i in frame["orient"]], groups[1]],
+                                       pbc=False, weighByMass=True, name=name)
     if frame is not None:
         from ..Funnel import _frame_definitions
         expr = "r_z;" + _frame_definitions(1, 2, 1, 3, 4, frame["coeffs"], radial=False)
@@ -315,7 +323,11 @@ def funnel_z_force(host, guest, axis, name="funnel_z_lc", frame=None):
 
 
 def _npz_frame(d):
-    """Protein frame stored in a learned_cv npz, or None."""
+    """Protein or orientation frame stored in a learned_cv npz, or None."""
+    if "funnel_orient_index" in d.files:
+        return {"orient": [int(i) for i in d["funnel_orient_index"]],
+                "offset": np.array(d["funnel_orient_offset"], dtype=float),
+                "ref": np.array(d["funnel_orient_ref"], dtype=float)}
     if "funnel_axis_coeffs" not in d.files:
         return None
     return {"b": [int(i) for i in d["funnel_frame_b"]], "c": [int(i) for i in d["funnel_frame_c"]],
@@ -346,10 +358,18 @@ def check_funnel_match(npz_path, funnel):
             and list(guest) == [int(i) for i in funnel["guest_index"]]
             and np.allclose(axis / np.linalg.norm(axis), f_axis / np.linalg.norm(f_axis))
             and (frame is None) == (f_frame is None)
-            and (frame is None or (frame["b"] == f_frame["b"] and frame["c"] == f_frame["c"]
-                                   and np.allclose(frame["coeffs"], f_frame["coeffs"]))))
+            and (frame is None or _same_frame(frame, f_frame)))
     if not same:
         raise ValueError("learned CV funnel differs from --funnel-from: not supported")
+
+
+def _same_frame(a, b) -> bool:
+    if ("orient" in a) != ("orient" in b):
+        return False
+    if "orient" in a:
+        return (a["orient"] == b["orient"] and np.allclose(a["offset"], b["offset"])
+                and a["ref"].shape == b["ref"].shape and np.allclose(a["ref"], b["ref"]))
+    return a["b"] == b["b"] and a["c"] == b["c"] and np.allclose(a["coeffs"], b["coeffs"])
 
 
 def _sw_spec(d, system, kept, n_plain_cvs=0, fused=None):

@@ -109,8 +109,10 @@ def _draw(cmd, f, weight, wmax, ref, X, rgb, kept):
 
 def _funnel_cgo_obj(cmd, funnel, X, ref):
     from openmm import unit as openmmunit
-    from ..Funnel import _funnel_cgo, funnel_lower_wall_ang
+    from ..Funnel import _funnel_cgo, funnel_lower_wall_ang, funnel_mode
 
+    if funnel_mode(funnel) == "orient":
+        raise ValueError("feature viewer: orientation-restrained funnel outline is not supported")
     axis = np.asarray(funnel["unbinding_axis"], float)
     host = list(funnel.get("host_index", []))
     if host:
