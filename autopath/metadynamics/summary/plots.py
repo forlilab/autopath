@@ -729,24 +729,13 @@ def _agg_axis(ax, rws, t_end):
     return sec
 
 
-def _right_labels(ax, items, lo, hi):
-    """Direct labels ``(text, y)`` just outside the right edge, nudged apart by 7% of the y-range."""
-    gap = 0.07 * (hi - lo)
-    ys = []
-    for text, y in sorted(items, key=lambda it: it[1]):
-        y = max(y, ys[-1] + gap) if ys else y
-        ys.append(y)
-        ax.annotate(text, (1.0, y), xycoords=ax.get_yaxis_transform(), xytext=(4, 0), textcoords="offset points",
-                    ha="left", va="center", fontsize=7.5, color=_INK, annotation_clip=False)
-
-
 def fig_blocks(run, numbers, out_path=None, axes=None, t_rej=0.2):
     """Block analysis, one row per bias group, three stacked panels on walker time.
 
     Rows are shared and single biases pooled and isolated walkers (up to ``MAX_ROWS``), never pooled. Blocks
     are equal windows of walker time after ``t_rej``; a pooled block holds every walker's frames in its window,
     and a top axis gives the walker time summed over walkers. (a) ΔG° of each block per reweighting estimator
-    (colour and marker = estimator), the final ΔG° of every estimator dashed and labelled, the
+    (colour and marker = estimator), the final ΔG° of every estimator dashed with its value in the legend, the
     block-bootstrap ±SD of each reweighted final value as a band, undefined blocks hatched and each block's
     round-trip count on top. (b) effective samples (Kish ESS) per block in the bound and unbound bands, primary
     estimator (log y). (c) ESS/N(t) of the primary estimator.
@@ -835,8 +824,7 @@ def fig_blocks(run, numbers, out_path=None, axes=None, t_rej=0.2):
                 a.axhspan(final[m] - boot[m], final[m] + boot[m], color=ESTIMATOR_COLORS[m], alpha=0.12, lw=0,
                           zorder=0)
                 ys += [final[m] - boot[m], final[m] + boot[m]]
-        finals = [(f"{ESTIMATOR_LABELS[m]} {y:+.2f}" + (f" ± {boot[m]:.2f}" if m in boot else ""), y)
-                  for m, y in final.items()]
+        ftxt = {m: f"final {y:+.2f}" + (f" ± {boot[m]:.2f}" if m in boot else "") for m, y in final.items()}
         for m in rwm:
             blk = _est_blocks(est, m, lab, iso)
             if blk is None or len(blk["block_dg"]) != nb:
@@ -849,7 +837,6 @@ def fig_blocks(run, numbers, out_path=None, axes=None, t_rej=0.2):
         pad = 0.1 * (hi - lo) if hi > lo else 1.0
         lo, hi = lo - pad, hi + pad
         a.set_ylim(lo, hi + 0.12 * (hi - lo))                         # headroom for the round-trip row
-        _right_labels(a, finals, lo, hi)
         rc = pb.get("block_recross", [])
         for k, v in enumerate(rc):
             a.text(xm[k], 0.975, str(v), transform=a.get_xaxis_transform(), ha="center", va="top", fontsize=8,
@@ -900,7 +887,10 @@ def fig_blocks(run, numbers, out_path=None, axes=None, t_rej=0.2):
 
         handles = [Line2D([], [], color=ESTIMATOR_COLORS[m], lw=1.2, marker=ESTIMATOR_MARKERS[m], ms=6.5,
                           mec="white") for m in rwm]
-        labels = [f"{ESTIMATOR_LABELS[m]}: per-block {sym}" for m in rwm]
+        labels = [f"{ESTIMATOR_LABELS[m]}: per-block {sym}" + (f"  ({ftxt[m]})" if m in ftxt else "") for m in rwm]
+        if "bias" in ftxt:
+            handles.append(Line2D([], [], color=ESTIMATOR_COLORS["bias"], ls="--", lw=1.0))
+            labels.append(f"{ESTIMATOR_LABELS['bias']}  ({final['bias']:+.2f})")
         handles += [Line2D([], [], color=_MUTED, ls="--", lw=1.0), Patch(color=_MUTED, alpha=0.2),
                     Patch(facecolor="none", edgecolor=_HATCH, hatch="///"),
                     Line2D([], [], color=_INK, lw=1.0, marker="^", mfc="white", ms=6),
