@@ -1,0 +1,63 @@
+import numpy as np
+import pytest
+
+from autopath.pulling.hummer_szabo import (
+    f_jarzynski, g0_profile, hs_log_weights, slice_table, slice_weights,
+)
+
+from .hs_toys import flat, harmonic, protocol_grids, simulate_pulls
+
+K = 3765.6
+BETA = 1.0 / (0.008314462618 * 300.0)
+
+
+def _chain(rows):
+    slices = slice_table(rows, protocol_grids(rows), BETA)
+    F = f_jarzynski(slices, BETA)
+    c = slice_weights(slices, "uniform")
+    return slices, F, c
+
+
+def _logw(rows):
+    slices, F, c = _chain(rows)
+    return hs_log_weights(rows, slices, F, c, K, BETA)
+
+
+def _g0(rows, F):
+    assert F == "jarzynski"
+    return g0_profile(rows.r_after.to_numpy(), _logw(rows), rows.trajname.to_numpy(), BETA)
+
+
+def test_flat_landscape_is_recovered():
+    rows = simulate_pulls(*flat(), n_pulls=40, speed=0.01, length_nm=0.4, seed=3)
+    out = _g0(rows, F="jarzynski")
+    m = out.ess_pulls >= 5
+    assert np.ptp(out.G0[m]) < 1.0
+
+
+def test_harmonic_well_is_recovered():
+    G0, dG0 = harmonic(r0=1.0, kappa=500.0)
+    rows = simulate_pulls(G0, dG0, n_pulls=60, speed=0.005, r_start=0.9, length_nm=0.2, seed=2)
+    out = _g0(rows, F="jarzynski")
+    m = out.ess_pulls >= 5
+    ref = G0(out.r_bin[m]); ref -= ref.min()
+    assert np.max(np.abs(out.G0[m] - ref)) < 1.0
+
+
+def test_incomplete_support_is_not_supported():
+    rows = simulate_pulls(*flat(), n_pulls=4, speed=0.01, length_nm=0.1, stop_steps=[50, 99, 99, 99])
+    with pytest.raises(ValueError, match="not supported"):
+        slice_table(rows, protocol_grids(rows), BETA)
+
+
+def test_constant_work_offset_leaves_weights_unchanged():
+    rows = simulate_pulls(*flat(), n_pulls=8, speed=0.01, length_nm=0.1, seed=3)
+    a = _logw(rows)
+    b = _logw(rows.assign(work=rows.work + 1e4))
+    np.testing.assert_allclose(a - a.max(), b - b.max(), atol=1e-9)
+
+
+def test_row_far_from_every_lambda_gets_finite_weight():
+    rows = simulate_pulls(*flat(), n_pulls=4, speed=0.01, length_nm=0.1, seed=4)
+    rows.loc[rows.index[0], "r_after"] = rows.r_target.max() + 1.0
+    assert np.isfinite(_logw(rows)).all()
