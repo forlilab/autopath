@@ -1,4 +1,6 @@
 import os
+import copy
+import json
 import numpy as np
 import pandas as pd
 from glob import glob
@@ -36,6 +38,7 @@ from autopath.pulling.LigandFeatures import (
     SUPPORTED_FEATURES as LIGAND_FEATURE_POOL,
 )
 from autopath.pulling.support import SupportPolicy
+from autopath.pulling.hummer_szabo import HummerSzaboEstimator
 
 logger = logging.getLogger("autopath.pulling")
 
@@ -67,6 +70,15 @@ assert TRACE_FEATURE_POOL.isdisjoint(LIGAND_FEATURE_POOL), (
     "TRACE_FEATURE_POOL and LIGAND_FEATURE_POOL must be disjoint; got overlap: "
     f"{sorted(TRACE_FEATURE_POOL & LIGAND_FEATURE_POOL)}"
 )
+
+
+def _json_default(o):
+    if isinstance(o, np.generic):
+        return o.item()
+    if isinstance(o, np.ndarray):
+        return o.tolist()
+    raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
+
 
 class SMDAnalysis:
     """Orchestrates the full dcTMD/SMD post-processing pipeline.
@@ -113,6 +125,7 @@ class SMDAnalysis:
         max_frac_neg_dG_first_half: float = 0.25,
         min_speeds_for_extrapolation: int = 2,
         replica_imbalance_threshold: float = 3.0,
+        hummer_szabo: dict | None = None,
     ):
         self.sysname = sysname
         self.n_paths = n_paths
@@ -131,6 +144,8 @@ class SMDAnalysis:
         self.max_frac_neg_dG_first_half = max_frac_neg_dG_first_half
         self.min_speeds_for_extrapolation = min_speeds_for_extrapolation
         self.replica_imbalance_threshold = replica_imbalance_threshold
+        self.hummer_szabo = hummer_szabo
+        self.hs_result = None
         self.support_policy = SupportPolicy(
             min_samples_per_step=self.min_samples_per_step,
             min_trajs_per_path=self.min_replicas_per_path,
@@ -143,6 +158,37 @@ class SMDAnalysis:
 
         return None
     
+    def _run_hummer_szabo(self, sMDDdata):
+        """Fit the Hummer-Szabo estimator and write its tables to ``outdir``.
+
+        HS runs on all paths, including those rejected by path filtering: its primary
+        estimate is all pulls jointly, and path filtering guards the per-path estimators.
+        :meth:`run` passes the rows as they were before its support trim.
+
+        Parameters
+        ----------
+        sMDDdata : SMDData
+            Conditioned data with paths assigned.
+
+        Returns
+        -------
+        HSResult or None
+            ``None`` (nothing written) when ``hummer_szabo`` is ``None``.
+        """
+        if self.hummer_szabo is None:
+            return None
+        res = HummerSzaboEstimator(**self.hummer_szabo).fit(sMDDdata)
+        self.hs_result = res
+        os.makedirs(self.outdir, exist_ok=True)
+        res.g0.to_csv(f'{self.outdir}/hs_g0.csv', index=False)
+        res.slices.to_csv(f'{self.outdir}/hs_slices.csv', index=False)
+        res.row_weights.to_csv(f'{self.outdir}/hs_row_weights.csv.gz', index=False)
+        with open(f'{self.outdir}/hs_excluded.json', 'w') as fh:
+            json.dump(res.excluded, fh, indent=2, default=_json_default)
+        logger.info(f"Hummer-Szabo: wrote hs_g0.csv, hs_slices.csv, "
+                    f"hs_row_weights.csv.gz, hs_excluded.json to {self.outdir}")
+        return res
+
     @staticmethod
     def _ligand_resname_from_select(ligand_select: str | None) -> str:
         """Extract the residue name from an MDAnalysis-style selection string.
@@ -438,6 +484,8 @@ class SMDAnalysis:
         )
 
         sMDDdata.raw_data['path'] = sMDDdata.raw_data['trajname'].map(path_mappings)
+        # HS needs every pull of a speed; the trim below can delete whole small paths.
+        hs_raw = sMDDdata.raw_data.copy() if self.hummer_szabo is not None else None
 
         if self.filter_low_support:
             sMDDdata.raw_data = trim_results_by_n_samples_support(
@@ -518,6 +566,10 @@ class SMDAnalysis:
             self.mixture_pmfs = pd.concat([self.mixture_pmfs, _v0], ignore_index=True)
 
         self.mixture_pmfs.to_csv(f'{self.outdir}/mixture_pmfs.csv', index=False)
+        if self.hummer_szabo is not None:
+            hs_view = copy.copy(sMDDdata)
+            hs_view.raw_data = hs_raw
+            self._run_hummer_szabo(hs_view)
 
         friction_est = FrictionEstimator(use_spline=False,
                                          realized_speed_map=sMDDdata.realized_speed_map)
