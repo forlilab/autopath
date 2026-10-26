@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.special import logsumexp
 
 from autopath.pulling.hummer_szabo import (
     f_cumulant, f_force_v0, f_jarzynski, f_self_consistent, g0_profile, hs_log_weights,
@@ -116,3 +117,67 @@ def test_unequal_pull_counts_across_speeds(seed):
         simulate_pulls(G0, dG0, n_pulls=90, speed=0.005, r_start=0.9, length_nm=0.1, seed=seed + 10),
     ], ignore_index=True)
     assert _max_dev(_g0(rows, F="jarzynski", c="ess"), G0) < 1.0
+
+
+def test_cumulant_formula():
+    rows = simulate_pulls(*flat(), n_pulls=4, speed=0.01, length_nm=0.02, seed=7)
+    slices = slice_table(rows, protocol_grids(rows), BETA)
+    g = rows.groupby(["speed", "step"])["work"]
+    ref = (g.mean() - 0.5 * BETA * g.var(ddof=1)).to_numpy()
+    np.testing.assert_allclose(f_cumulant(slices, BETA), ref, rtol=1e-12)
+
+
+def test_force_v0_recovers_intercept():
+    speeds, b = (0.001, 0.002, 0.004), 50.0
+    a = lambda s: 3.0 * np.sin(0.7 * s)
+    recs = [(v, s, 0.9 + 0.001 * s, a(s) + b * v) for v in speeds for s in range(10)]
+    recs += [(v, 10, 0.91, a(10) + b * v) for v in speeds[:2]]     # step at fewer than all speeds
+    slices = pd.DataFrame(recs, columns=["speed", "step", "lam", "Wmean"])
+    F = f_force_v0(slices, {v: v for v in speeds})
+    full = (slices.step < 10).to_numpy()
+    np.testing.assert_allclose(F[full], a(slices.step[full].to_numpy()), rtol=0, atol=1e-8)
+    assert np.isnan(F[~full]).all()
+
+
+def test_force_v0_needs_every_realized_speed():
+    slices = pd.DataFrame({"speed": [0.001, 0.002], "step": [0, 0], "lam": [0.9, 0.9], "Wmean": [1.0, 2.0]})
+    with pytest.raises(ValueError, match="not supported"):
+        f_force_v0(slices, {0.001: 0.001})
+
+
+def test_self_consistent_is_fixed_point(dw):
+    _, rows = dw
+    bin_nm, tol = 0.002, 1e-6
+    slices = slice_table(rows, protocol_grids(rows), BETA)
+    c = slice_weights(slices, "ess")
+    F = f_self_consistent(rows, slices, c, K, BETA, bin_nm=bin_nm, tol=tol)
+    edges, rho = wham_density(rows, slices, F, c, K, BETA, bin_nm)
+    occ = rho > 0
+    centres = 0.5 * (edges[:-1] + edges[1:])[occ]
+    u = 0.5 * K * (centres[None, :] - slices.lam.to_numpy()[:, None]) ** 2
+    Fn = -logsumexp(np.log(rho[occ])[None, :] - BETA * u, axis=1) / BETA
+    np.testing.assert_allclose(Fn - Fn[0], F - F[0], rtol=0, atol=10 * tol)
+    Fj = f_jarzynski(slices, BETA)
+    assert np.max(np.abs((F - F[0]) - (Fj - Fj[0]))) > tol
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_self_consistent_immune_to_staggered_start(seed):
+    # Per-speed Jarzynski F is referenced to each speed's own lambda0; WHAM solves one common F.
+    G0, dG0 = harmonic(r0=1.0, kappa=500.0)
+    rows = pd.concat([
+        simulate_pulls(G0, dG0, n_pulls=30, speed=0.0025, r_start=0.9, length_nm=0.2, seed=seed),
+        simulate_pulls(G0, dG0, n_pulls=90, speed=0.005, r_start=1.0, length_nm=0.2, seed=seed + 10),
+    ], ignore_index=True)
+    sc = _max_dev(_g0(rows, F="self_consistent", c="ess"), G0)
+    jz = _max_dev(_g0(rows, F="jarzynski", c="ess"), G0)
+    assert sc < 1.0
+    assert jz > sc
+
+
+def test_self_consistent_needs_increasing_lambda():
+    rows = simulate_pulls(*flat(), n_pulls=3, speed=0.01, length_nm=0.02, seed=2)
+    slices = slice_table(rows, protocol_grids(rows), BETA)
+    slices["lam"] = slices["lam"].to_numpy()[::-1]
+    with pytest.raises(ValueError, match="not supported"):
+        f_self_consistent(rows, slices, slice_weights(slices, "uniform"), K, BETA)

@@ -122,6 +122,9 @@ def f_force_v0(slices: pd.DataFrame, realized_speed_map: dict) -> np.ndarray:
 
     if slices["speed"].nunique() < 2:
         raise ValueError("not supported: force F needs at least 2 speeds")
+    missing = sorted(set(slices["speed"].astype(float)) - set(map(float, realized_speed_map)))
+    if missing:
+        raise ValueError(f"not supported: realized_speed_map lacks speeds {missing}")
     tab = pd.DataFrame({"step": slices["step"], "r_coord": slices["lam"], "speed": slices["speed"],
                         "estimator": "force", "dG": slices["Wmean"]})
     v0 = extrapolate_to_v0(tab, param="dG", min_speeds=2, realized_speed_map=realized_speed_map)
@@ -392,6 +395,10 @@ def f_self_consistent(rows, slices, c, k, beta, bin_nm=0.002, stride=1, tol=1e-6
     if int(stride) != stride or stride < 1:
         raise ValueError(f"not supported: stride {stride!r}; use a positive integer")
     slices = slices.reset_index(drop=True)
+    # Stride interpolation in lam assumes lam increases with step within a speed.
+    inc = slices.sort_values(_KEYS).groupby("speed")["lam"].apply(lambda x: bool(np.all(np.diff(x) > 0)))
+    if not inc.all():
+        raise ValueError("not supported: lam must increase strictly with step within each speed")
     step0 = slices.groupby("speed")["step"].transform("min")
     last = slices.groupby("speed")["step"].transform("max")
     sel = (((slices["step"] - step0) % stride) == 0) | (slices["step"] == last)
