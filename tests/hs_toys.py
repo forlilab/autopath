@@ -83,7 +83,7 @@ def simulate_pulls(G0, dG0, n_pulls, speed, k=3765.6, T=300.0, r_start=1.0, leng
     steps = np.arange(n_moves)
     frames = []
     for j in range(n_pulls):
-        last = n_moves - 1 if stop_steps is None else int(stop_steps[j])
+        last = n_moves - 1 if stop_steps is None or stop_steps[j] is None else int(stop_steps[j])
         sl = slice(0, last + 1)
         frames.append(pd.DataFrame({
             "trajname": f"replica-{j}_v{speed}",
@@ -115,16 +115,25 @@ def protocol_grids(rows):
     return grids
 
 
-def write_dat(rows, out_dir, header_k=True):
+def write_dat(rows, out_dir, header_k=True, direction="forward"):
+    """Write one sMD log per pull; the file id is the pull's ``replica-{id}`` trajname id.
+
+    Without the k header the force column is the pre-step sample k (r_target - r_before),
+    as in logs that predate the header.
+    """
     k = rows.attrs.get("k", 3765.6)
     os.makedirs(out_dir, exist_ok=True)
+    ids = {name: int(name.split("_")[0].split("-")[1]) for name in rows["trajname"].unique()}
+    if len(set(ids.values())) != len(ids):
+        raise ValueError("replica ids must be unique across pulls and speeds")
     paths = []
-    for i, (name, g) in enumerate(rows.groupby("trajname", sort=False)):
+    for name, g in rows.groupby("trajname", sort=False):
         speed = g["speed"].iloc[0]
-        fn = os.path.join(out_dir, f"sMD_replica-{i}_v{speed}_forward.dat")
+        fn = os.path.join(out_dir, f"sMD_replica-{ids[name]}_v{speed}_{direction}.dat")
         d = pd.DataFrame({
             "step": g["step"], "time": g["time"], "r_target": g["r_target"],
-            "r_before": g["r_before"], "r_after": g["r_after"], "force": g["force"],
+            "r_before": g["r_before"], "r_after": g["r_after"],
+            "force": g["force"] if header_k else k * (g["r_target"] - g["r_before"]),
             "U_cvpack": 0.5 * k * (g["r_after"] - g["r_target"]) ** 2,
             "dW_protocol": g["dW_protocol"],
         })

@@ -1,7 +1,12 @@
 """Hummer-Szabo reweighting of steered-MD frames to the unbiased density."""
+import logging
+from dataclasses import dataclass
+
 import numpy as np
 import pandas as pd
 from scipy.special import logsumexp
+
+logger = logging.getLogger("autopath.pulling.hummer_szabo")
 
 _KEYS = ["speed", "step"]
 F_SOURCES = ("jarzynski", "cumulant", "force", "self_consistent")
@@ -590,3 +595,198 @@ def slice_diagnostics(rows, slices, F_by_source, k, beta):
                 spread[idx] = A.max(axis=1) - A.min(axis=1)
     d["F_spread"] = spread
     return d
+
+
+@dataclass
+class HSResult:
+    """Output of :meth:`HummerSzaboEstimator.fit`.
+
+    Attributes
+    ----------
+    g0 : pandas.DataFrame
+        ``f_source, scope, path, speed, r_bin, G0, G0_sd, n_rows, ess_pulls``. ``scope`` is
+        ``"all"`` (all pulls jointly), ``"speed"`` (one speed, all paths) or ``"path"``
+        (one path, all speeds); ``path``/``speed`` are NaN where not applicable.
+        ``force`` is run only for groups with at least 2 speeds.
+    row_weights : pandas.DataFrame
+        ``trajname, speed, step, r, path, f_source, logw, logw_path``. ``logw`` is from scope
+        ``"all"`` with sum(exp) = 1 per source; ``logw_path`` is from the row's path with
+        sum(exp) = 1 per (path, source). -inf for rows without support or F in that scope,
+        NaN where the source was not run for the path.
+    slices : pandas.DataFrame
+        :func:`slice_diagnostics` for scope ``"all"``.
+    excluded : dict
+        ``n_rows_unsupported``, ``n_rows_no_F`` (per source), ``n_pulls_dropped``,
+        ``lam0_spread_nm``, ``skipped_sources``, ``skipped_groups``.
+    """
+
+    g0: pd.DataFrame
+    row_weights: pd.DataFrame
+    slices: pd.DataFrame
+    excluded: dict
+
+
+_ROW_COLS = ["trajname", "speed", "step", "work", "r_after", "path"]
+
+
+def _trim(rows: pd.DataFrame) -> pd.DataFrame:
+    from .Estimators import trim_results_by_n_samples_support
+
+    out = trim_results_by_n_samples_support(rows, min_samples=2, min_support_ratio=1.0,
+                                            add_support_columns=False)
+    return out.drop(columns="n_samples", errors="ignore").reset_index(drop=True)
+
+
+def _check_step_size(raw: pd.DataFrame, tol: float = 1e-6) -> None:
+    r = raw.sort_values(["trajname", "step"])
+    dx = r.groupby("trajname")["r_target"].diff()
+    med = dx.groupby(r["speed"]).transform("median")
+    bad = (dx - med).abs() > tol
+    if bad.any():
+        names = sorted(set(r.loc[bad, "trajname"]))
+        raise ValueError(f"not supported: {len(names)} pulls (first {names[0]}) have a per-move dx "
+                         f"differing from their speed's median by > {tol} nm")
+
+
+class HummerSzaboEstimator:
+    """Hummer-Szabo unbiased profile G0(r) from the frames of an :class:`SMDData`.
+
+    Parameters
+    ----------
+    f_sources : tuple of str, optional
+        Slice free-energy sources, a subset of :data:`F_SOURCES`.
+    slice_weights : {"ess", "uniform"}, optional
+        Slice weighting c.
+    bin_nm : float, optional
+        Profile bin width, nm.
+    n_boot : int, optional
+        Pull-bootstrap resamples per profile; 0 gives NaN ``G0_sd``.
+    seed : int, optional
+        Bootstrap RNG seed.
+    wham_stride : int, optional
+        Step stride for the ``self_consistent`` source.
+    """
+
+    name = "hummer_szabo"
+
+    def __init__(self, f_sources=F_SOURCES, slice_weights="ess", bin_nm=0.02, n_boot=200, seed=0,
+                 wham_stride=1):
+        unknown = [s for s in f_sources if s not in F_SOURCES]
+        if unknown:
+            raise ValueError(f"not supported: F sources {unknown}; use a subset of {F_SOURCES}")
+        self.f_sources = tuple(f_sources)
+        self.slice_weights = slice_weights
+        self.bin_nm = bin_nm
+        self.n_boot = n_boot
+        self.seed = seed
+        self.wham_stride = wham_stride
+
+    def _run(self, rows, grids, k, beta, rsm, sources):
+        # Per source: bootstrap profile, log weights aligned with rows, F per slice.
+        kw = dict(c_mode=self.slice_weights, bin_nm=self.bin_nm, realized_speed_map=rsm,
+                  wham_stride=self.wham_stride)
+        out = {}
+        for src in sources:
+            _, logw, F = estimate(rows, grids, k, beta, src, **kw)
+            g0 = bootstrap_g0(rows, grids, k, beta, src, n_boot=self.n_boot, seed=self.seed, **kw)
+            out[src] = (g0, logw - logsumexp(logw), F)
+        return out
+
+    def fit(self, smd_data) -> HSResult:
+        """Estimate G0 for every F source and scope.
+
+        Parameters
+        ----------
+        smd_data : SMDData
+            Loaded forward pulls; ``raw_data`` and ``results`` are not modified.
+
+        Returns
+        -------
+        HSResult
+            Profiles, per-row weights, slice diagnostics and exclusion counts.
+        """
+        from .Estimators import recover_spring_constant
+
+        if smd_data.pulling_direction != "forward":
+            raise ValueError(f"not supported: {smd_data.pulling_direction!r} pulls; HS needs forward pulls")
+        raw = smd_data.raw_data.reset_index(drop=True)
+        _check_step_size(raw)
+        k = recover_spring_constant(raw, logged_k=smd_data.spring_constant)
+        beta, grids, rsm = smd_data.beta, smd_data.protocol_grids, smd_data.realized_speed_map
+        rows_in = raw[_ROW_COLS].copy()
+
+        # One path label so support is trimmed over all pulls of each speed.
+        joint = _trim(rows_in.assign(path=0)).drop(columns="path")
+        if joint.empty:
+            raise ValueError("not supported: no (speed, step) has rows from at least 2 pulls of its speed")
+        joint = joint.merge(rows_in[["trajname", "step", "path"]], on=["trajname", "step"], how="left")
+        speeds = sorted(joint["speed"].unique())
+        skipped = {}
+        sources = list(self.f_sources)
+        if "force" in sources and len(speeds) < 2:
+            logger.warning("Skipping F source 'force': it needs at least 2 speeds")
+            skipped["force"] = "single speed"
+            sources.remove("force")
+        if not sources:
+            raise ValueError("not supported: no F source can run on this dataset")
+
+        g0_parts, skipped_groups = [], []
+
+        def _collect(res, scope, path=np.nan, speed=np.nan):
+            for src, (g0, _, _) in res.items():
+                g0_parts.append(g0.assign(f_source=src, scope=scope, path=path, speed=speed))
+
+        res_all = self._run(joint, grids, k, beta, rsm, sources)
+        _collect(res_all, "all")
+
+        # The joint trim already holds every pull of a speed, so it is that speed's own trim.
+        for speed in speeds:
+            sub = joint[joint["speed"] == speed].reset_index(drop=True)
+            _collect(self._run(sub, grids, k, beta, rsm, [s for s in sources if s != "force"]),
+                     "speed", speed=speed)
+
+        path_rw = []
+        for path, g in rows_in.groupby("path"):
+            sub = _trim(g)
+            if sub.empty:
+                skipped_groups.append(("path", path))
+                continue
+            srcs = [s for s in sources if s != "force" or sub["speed"].nunique() > 1]
+            res = self._run(sub, grids, k, beta, rsm, srcs)
+            _collect(res, "path", path=path)
+            for src, (_, lw, _) in res.items():
+                path_rw.append(sub[["trajname", "step"]].assign(path=path, f_source=src, logw_path=lw))
+
+        rw = pd.concat([joint[["trajname", "speed", "step", "r_after", "path"]].assign(f_source=src, logw=lw)
+                        for src, (_, lw, _) in res_all.items()], ignore_index=True)
+        pw = pd.concat(path_rw, ignore_index=True) if path_rw else pd.DataFrame(
+            columns=["trajname", "step", "path", "f_source", "logw_path"])
+        keys = ["trajname", "step", "path", "f_source"]
+        rw = rw.merge(pw, on=keys, how="outer")
+        # Path-only rows (past the joint cutoff) take speed and r from the input rows.
+        rw = rw.drop(columns=["speed", "r_after"]).merge(
+            rows_in[["trajname", "step", "speed", "r_after"]], on=["trajname", "step"], how="left")
+        rw["logw"] = rw["logw"].fillna(-np.inf)
+        ran = rw.groupby(["path", "f_source"])["logw_path"].transform(lambda x: x.notna().any())
+        rw.loc[ran & rw["logw_path"].isna(), "logw_path"] = -np.inf
+        rw = rw.rename(columns={"r_after": "r"})[
+            ["trajname", "speed", "step", "r", "path", "f_source", "logw", "logw_path"]]
+        rw = rw.sort_values(["f_source", "speed", "trajname", "step"]).reset_index(drop=True)
+
+        g0 = pd.concat(g0_parts, ignore_index=True)[
+            ["f_source", "scope", "path", "speed", "r_bin", "G0", "G0_sd", "n_rows", "ess_pulls"]]
+        sl = slice_table(joint, grids, beta)
+        slices = slice_diagnostics(joint, sl, {s: F for s, (_, _, F) in res_all.items()}, k, beta)
+
+        lam0 = [grids[s]["r_target_protocol"].iloc[0] for s in speeds]
+        # Loaded logs, including those SMDData dropped as incomplete.
+        n_loaded = len(smd_data.log_metadata)
+        excluded = {
+            "n_rows_unsupported": int(len(rows_in) - len(joint)),
+            "n_rows_no_F": {s: int(np.isneginf(lw).sum()) for s, (_, lw, _) in res_all.items()},
+            "n_pulls_dropped": int(n_loaded - joint["trajname"].nunique()),
+            "lam0_spread_nm": float(max(lam0) - min(lam0)),
+            "skipped_sources": skipped,
+            "skipped_groups": skipped_groups,
+        }
+        return HSResult(g0=g0, row_weights=rw, slices=slices, excluded=excluded)

@@ -33,6 +33,7 @@ from .Estimators import (
     CumulantEstimator,
     ForceEstimator,
 )
+from .hummer_szabo import HummerSzaboEstimator
 __all__ = [
             "SteeredMD",
             "SMDData",
@@ -43,4 +44,5 @@ __all__ = [
             "JarzynskiEstimator",
             "CumulantEstimator",
             "ForceEstimator",
+            "HummerSzaboEstimator",
         ]
