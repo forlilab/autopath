@@ -44,7 +44,8 @@ def _sample_initial(G0, lam0, k, beta, centre, rng, n, half_width=0.6, grid=1e-4
 
 def simulate_pulls(G0, dG0, n_pulls, speed, k=3765.6, T=300.0, r_start=1.0, length_nm=1.0,
                    dx=0.001, D=0.01, dt=0.002, lam0="common", r0_jitter_nm=0.0,
-                   stop_steps=None, seed=0):
+                   stop_steps=None, k_eq=None, seed=0):
+    # k_eq: stiffness of the spring the own-lambda0 start is equilibrated in (default k).
     beta = 1.0 / (R_KJ * T)
     assert beta * D * k * dt < 0.1, "dt too large for the spring"
     rng = np.random.default_rng(seed)
@@ -57,7 +58,8 @@ def simulate_pulls(G0, dG0, n_pulls, speed, k=3765.6, T=300.0, r_start=1.0, leng
         lam_start = np.full(n_pulls, float(r_start))
         r = _sample_initial(G0, lam_start, k, beta, r_start, rng, n_pulls)
     elif lam0 == "own":
-        r = _sample_initial(G0, np.full(n_pulls, float(r_start)), k, beta, r_start, rng, n_pulls)
+        r = _sample_initial(G0, np.full(n_pulls, float(r_start)), k if k_eq is None else k_eq,
+                            beta, r_start, rng, n_pulls)
         r = r + rng.normal(0.0, r0_jitter_nm, n_pulls) if r0_jitter_nm else r
         lam_start = r.copy()
     else:

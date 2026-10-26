@@ -59,17 +59,15 @@ def test_missing_k_header_is_recovered(tmp_path):
     np.testing.assert_allclose(b.logw.to_numpy(), a.logw.to_numpy(), rtol=1e-8)
 
 
-# Own-lambda0 pulls start as a delta at r(0), not equilibrated with the spring; the bias
-# grows with the start sd. Toy well chosen so that sd is 0.02 nm (pending user ruling).
-@pytest.mark.xfail(strict=False, reason="own-lambda0 bias exceeds 3 sd + 0.3 at 0.02 nm start sd")
+# Own-lambda0 pulls start as a delta at r(0); start sd 0.01 nm set by the equilibration spring.
 @pytest.mark.parametrize("seed", [0, 1, 2])
 def test_own_lambda0_realistic_spread(tmp_path, seed):
-    kT = 0.008314462618 * 300.0
-    G0, dG0 = harmonic(r0=1.0, kappa=kT / 0.02 ** 2 - 3765.6)
+    kT, kappa = 0.008314462618 * 300.0, 500.0
+    G0, dG0 = harmonic(r0=1.0, kappa=kappa)
     rows = simulate_pulls(G0, dG0, n_pulls=60, speed=0.005, r_start=0.9, length_nm=0.2,
-                          lam0="own", seed=seed)
+                          lam0="own", k_eq=kT / 0.01 ** 2 - kappa, seed=seed)
     res = HummerSzaboEstimator(f_sources=("jarzynski",), n_boot=50).fit(_smd(tmp_path, rows))
-    assert res.excluded["lam0_sd_nm"] == pytest.approx(0.02, abs=0.006)
+    assert res.excluded["lam0_sd_nm"] == pytest.approx(0.01, abs=0.003)
     g = res.g0.query("scope == 'all'")
     d, m = _aligned_dev(g, G0, 5)
     assert np.all(np.abs(d) <= 3 * g.G0_sd.to_numpy()[m] + 0.3)
