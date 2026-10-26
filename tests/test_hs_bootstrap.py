@@ -91,12 +91,33 @@ def test_estimate_unknown_source():
         estimate(rows, protocol_grids(rows), K, BETA, "bogus")
 
 
-def test_bootstrap_relabels_duplicates():
-    # One distinct trajname per resampled pull keeps ess_pulls from collapsing duplicates.
+def test_bootstrap_relabels_duplicates(monkeypatch):
+    # Resamples must keep one distinct trajname per resampled pull, per speed.
+    from autopath.pulling import hummer_szabo as hs
     G0, dG0 = harmonic()
-    rows = simulate_pulls(G0, dG0, n_pulls=6, speed=0.005, r_start=0.9, length_nm=0.05, seed=3)
-    out = _boot(rows, n_boot=3, seed=5)
-    assert len(out) > 0 and out.G0_sd.notna().any()
+    rows = pd.concat([simulate_pulls(G0, dG0, n_pulls=n, speed=v, r_start=0.9, length_nm=0.05, seed=n)
+                      for n, v in ((6, 0.005), (9, 0.01))], ignore_index=True)
+    seen, real = [], hs.estimate
+
+    def spy(r, *a, **kw):
+        seen.append(r)
+        return real(r, *a, **kw)
+
+    monkeypatch.setattr(hs, "estimate", spy)
+    _boot(rows, n_boot=3, seed=5)
+    assert len(seen) == 4
+    want = rows.groupby("speed").trajname.nunique()
+    for r in seen[1:]:
+        pd.testing.assert_series_equal(r.groupby("speed").trajname.nunique(), want)
+
+
+def test_lag_eq_tracks_mean_lag_on_harmonic():
+    G0, dG0 = harmonic(r0=1.0, kappa=500.0)
+    rows = simulate_pulls(G0, dG0, n_pulls=40, speed=0.001, r_start=0.9, length_nm=0.2, seed=9)
+    d = _diag(rows)
+    d = d[d.n_pulls >= 30]
+    assert np.corrcoef(d.lag_mean, d.lag_eq)[0, 1] > 0.8
+    assert np.mean(np.sign(d.lag_eq) == np.sign(d.lag_mean)) > 0.8
 
 
 def test_slice_diagnostics_columns_and_spread():

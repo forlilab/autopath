@@ -532,7 +532,7 @@ def bootstrap_g0(rows, grids, k, beta, f_source, n_boot=200, seed=0, **estimate_
                 parts.append(gs[i].assign(trajname=f"{gs[i]['trajname'].iloc[0]}#b{j}"))
         g, _, _ = estimate(pd.concat(parts, ignore_index=True), grids, k, beta, f_source, **estimate_kw)
         s = g.set_index("r_bin")["G0"].reindex(ref.index)
-        ok = np.isfinite(s.to_numpy())
+        ok = np.isfinite(s.to_numpy()) & np.isfinite(ref.to_numpy())
         if ok.any():
             s = s - (s - ref)[ok].mean()
         prof.append(s.to_numpy())
