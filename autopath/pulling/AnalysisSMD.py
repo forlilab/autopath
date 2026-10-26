@@ -1,4 +1,5 @@
 import os
+import copy
 import json
 import numpy as np
 import pandas as pd
@@ -70,13 +71,13 @@ assert TRACE_FEATURE_POOL.isdisjoint(LIGAND_FEATURE_POOL), (
     f"{sorted(TRACE_FEATURE_POOL & LIGAND_FEATURE_POOL)}"
 )
 
+
 def _json_default(o):
-    # numpy scalars/arrays and tuple-keyed leftovers in HSResult.excluded
     if isinstance(o, np.generic):
         return o.item()
     if isinstance(o, np.ndarray):
         return o.tolist()
-    return str(o)
+    raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
 
 
 class SMDAnalysis:
@@ -159,6 +160,10 @@ class SMDAnalysis:
     
     def _run_hummer_szabo(self, sMDDdata):
         """Fit the Hummer-Szabo estimator and write its tables to ``outdir``.
+
+        HS runs on all paths, including those rejected by path filtering: its primary
+        estimate is all pulls jointly, and path filtering guards the per-path estimators.
+        :meth:`run` passes the rows as they were before its support trim.
 
         Parameters
         ----------
@@ -479,6 +484,8 @@ class SMDAnalysis:
         )
 
         sMDDdata.raw_data['path'] = sMDDdata.raw_data['trajname'].map(path_mappings)
+        # HS needs every pull of a speed; the trim below can delete whole small paths.
+        hs_raw = sMDDdata.raw_data.copy() if self.hummer_szabo is not None else None
 
         if self.filter_low_support:
             sMDDdata.raw_data = trim_results_by_n_samples_support(
@@ -559,7 +566,10 @@ class SMDAnalysis:
             self.mixture_pmfs = pd.concat([self.mixture_pmfs, _v0], ignore_index=True)
 
         self.mixture_pmfs.to_csv(f'{self.outdir}/mixture_pmfs.csv', index=False)
-        self._run_hummer_szabo(sMDDdata)
+        if self.hummer_szabo is not None:
+            hs_view = copy.copy(sMDDdata)
+            hs_view.raw_data = hs_raw
+            self._run_hummer_szabo(hs_view)
 
         friction_est = FrictionEstimator(use_spline=False,
                                          realized_speed_map=sMDDdata.realized_speed_map)
