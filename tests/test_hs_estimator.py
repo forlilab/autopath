@@ -127,11 +127,11 @@ def test_two_speeds_report_lam0_spread_and_force_gaps(tmp_path):
     smd = _smd(tmp_path, _relabel(slow, fast))
     res = HummerSzaboEstimator(n_boot=0).fit(smd)
 
-    lam0 = [g["r_target_protocol"].iloc[0] for g in smd.protocol_grids.values()]
-    assert res.excluded["lam0_spread_nm"] == pytest.approx(max(lam0) - min(lam0))
-    assert res.excluded["lam0_spread_nm"] > 0
     raw = smd.raw_data.sort_values(["trajname", "step"])
     first = raw.groupby("trajname")[["speed", "r_target"]].first()
+    med = (first["r_target"] - 0.001).groupby(first["speed"]).median()
+    assert res.excluded["lam0_spread_nm"] == pytest.approx(med.max() - med.min(), abs=1e-12)
+    assert res.excluded["lam0_spread_nm"] > 0
     by_hand = (first["r_target"] - 0.001).groupby(first["speed"]).std().max()
     assert res.excluded["lam0_sd_nm"] == pytest.approx(by_hand, rel=1e-9)
     assert "skipped_sources" not in res.excluded or not res.excluded["skipped_sources"]
@@ -160,3 +160,31 @@ def test_single_speed_skips_force(tmp_path):
     assert "force" not in set(res.g0.f_source)
     assert set(res.g0.f_source) == set(F_SOURCES) - {"force"}
     assert res.excluded["lam0_spread_nm"] == 0.0
+
+
+def test_non_protocol_work_is_not_supported(tmp_path):
+    rows = simulate_pulls(*flat(), n_pulls=4, speed=0.01, length_nm=0.05, seed=30)
+    est = HummerSzaboEstimator(f_sources=("jarzynski",), n_boot=0)
+    with pytest.raises(ValueError, match="not supported: .*protocol"):
+        est.fit(_smd(tmp_path / "fdx", rows, work_mode="force_dx"))
+    auto = _smd(tmp_path / "auto", rows, work_mode="auto")
+    assert np.isfinite(est.fit(auto).row_weights.logw).all()
+    auto.raw_data = auto.raw_data.drop(columns="dW_protocol")
+    with pytest.raises(ValueError, match="not supported: .*protocol"):
+        est.fit(auto)
+
+
+def test_force_with_speed_dependent_dx_is_not_supported(tmp_path):
+    a = simulate_pulls(*flat(), n_pulls=4, speed=0.01, dx=0.001, length_nm=0.05, seed=31)
+    b = simulate_pulls(*flat(), n_pulls=4, speed=0.02, dx=0.002, length_nm=0.1, seed=32)
+    smd = _smd(tmp_path, _relabel(a, b))
+    with pytest.raises(ValueError, match="not supported: .*dx"):
+        HummerSzaboEstimator(f_sources=("force",), n_boot=0).fit(smd)
+    res = HummerSzaboEstimator(f_sources=("jarzynski",), n_boot=0).fit(smd)
+    # Per-pull lambda0 = first target minus the speed's move; spread over per-speed medians.
+    raw = smd.raw_data.sort_values(["trajname", "step"])
+    first = raw.groupby("trajname")[["speed", "r_target"]].first()
+    lam0 = first["r_target"] - first["speed"].map({0.01: 0.001, 0.02: 0.002})
+    med = lam0.groupby(first["speed"]).median()
+    assert res.excluded["lam0_spread_nm"] == pytest.approx(med.max() - med.min(), abs=1e-12)
+    assert res.excluded["lam0_sd_nm"] == pytest.approx(lam0.groupby(first["speed"]).std().max(), abs=1e-12)

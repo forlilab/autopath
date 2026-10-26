@@ -628,6 +628,11 @@ class HSResult:
     excluded : dict
         ``n_rows_unsupported``, ``n_rows_no_F`` (per source), ``n_pulls_dropped``,
         ``lam0_spread_nm``, ``lam0_sd_nm``, ``skipped_sources``, ``skipped_groups``.
+        ``n_pulls_dropped`` is loaded logs minus pulls in the joint estimate: pulls
+        :class:`SMDData` dropped as incomplete or in excluded speeds, plus any removed upstream
+        of HS. ``lam0_*`` use per-pull lambda0 = first ``r_target`` minus its speed's median dx;
+        ``lam0_spread_nm`` is the range of the per-speed medians, ``lam0_sd_nm`` the largest
+        per-speed sd.
     """
 
     g0: pd.DataFrame
@@ -658,13 +663,21 @@ def _check_step_size(raw: pd.DataFrame, tol: float = 1e-6) -> None:
                          f"differing from their speed's median by > {tol} nm")
 
 
-def _lam0_sd(raw: pd.DataFrame, pulls) -> float:
-    # Per-pull protocol lambda0: first logged target minus one move.
+def _speed_dx(raw: pd.DataFrame) -> pd.Series:
+    # Median per-move target increment of each speed.
+    r = raw.sort_values(["trajname", "step"])
+    return r.groupby("trajname")["r_target"].diff().groupby(r["speed"]).median()
+
+
+def _lam0_stats(raw: pd.DataFrame, pulls) -> tuple[float, float]:
+    # Per-pull protocol lambda0: first logged target minus its speed's move.
+    # Returns (spread of per-speed medians, largest per-speed sd).
     r = raw[raw["trajname"].isin(pulls)].sort_values(["trajname", "step"])
-    dx = r.groupby("trajname")["r_target"].diff().groupby(r["speed"]).median()
     first = r.groupby("trajname")[["speed", "r_target"]].first()
-    lam0 = first["r_target"] - first["speed"].map(dx)
-    return float(lam0.groupby(first["speed"]).std().max())
+    lam0 = first["r_target"] - first["speed"].map(_speed_dx(r))
+    by = lam0.groupby(first["speed"])
+    med = by.median()
+    return float(med.max() - med.min()), float(by.std().max())
 
 
 class HummerSzaboEstimator:
@@ -731,6 +744,11 @@ class HummerSzaboEstimator:
 
         if smd_data.pulling_direction != "forward":
             raise ValueError(f"not supported: {smd_data.pulling_direction!r} pulls; HS needs forward pulls")
+        mode = getattr(smd_data, "work_mode", None)
+        col = getattr(smd_data, "protocol_work_column", "dW_protocol")
+        if not (mode == "protocol" or (mode == "auto" and col in smd_data.raw_data.columns)):
+            raise ValueError(f"not supported: work_mode {mode!r}; HS needs protocol work "
+                             f"(work_mode 'protocol', or 'auto' with a {col!r} column)")
         raw = smd_data.raw_data.reset_index(drop=True)
         _check_step_size(raw)
         k = recover_spring_constant(raw, logged_k=smd_data.spring_constant)
@@ -749,6 +767,11 @@ class HummerSzaboEstimator:
             logger.warning("Skipping F source 'force': it needs at least 2 speeds")
             skipped["force"] = "single speed"
             sources.remove("force")
+        if "force" in sources:
+            dx = _speed_dx(raw)
+            if dx.max() - dx.min() > 1e-6:
+                raise ValueError(f"not supported: force F joins speeds on step, but the per-speed median "
+                                 f"dx differ ({dx.min():.6g}-{dx.max():.6g} nm); drop 'force'")
         if not sources:
             raise ValueError("not supported: no F source can run on this dataset")
 
@@ -800,15 +823,15 @@ class HummerSzaboEstimator:
         sl = slice_table(joint, grids, beta)
         slices = slice_diagnostics(joint, sl, {s: F for s, (_, _, F) in res_all.items()}, k, beta)
 
-        lam0 = [grids[s]["r_target_protocol"].iloc[0] for s in speeds]
+        lam0_spread, lam0_sd = _lam0_stats(raw, joint["trajname"].unique())
         # Loaded logs, including those SMDData dropped as incomplete.
         n_loaded = len(smd_data.log_metadata)
         excluded = {
             "n_rows_unsupported": int(len(rows_in) - len(joint)),
             "n_rows_no_F": {s: int(np.isneginf(lw).sum()) for s, (_, lw, _) in res_all.items()},
             "n_pulls_dropped": int(n_loaded - joint["trajname"].nunique()),
-            "lam0_spread_nm": float(max(lam0) - min(lam0)),
-            "lam0_sd_nm": _lam0_sd(raw, joint["trajname"].unique()),
+            "lam0_spread_nm": lam0_spread,
+            "lam0_sd_nm": lam0_sd,
             "skipped_sources": skipped,
             "skipped_groups": skipped_groups,
         }
