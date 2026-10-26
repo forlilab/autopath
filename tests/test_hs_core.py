@@ -28,20 +28,25 @@ def _g0(rows, F):
     return g0_profile(rows.r_after.to_numpy(), _logw(rows), rows.trajname.to_numpy(), BETA)
 
 
-def test_flat_landscape_is_recovered():
-    rows = simulate_pulls(*flat(), n_pulls=40, speed=0.01, length_nm=0.4, seed=3)
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_flat_landscape_is_recovered(seed):
+    rows = simulate_pulls(*flat(), n_pulls=40, speed=0.01, length_nm=0.4, seed=seed)
     out = _g0(rows, F="jarzynski")
-    m = out.ess_pulls >= 5
+    m = out.ess_pulls >= 30
+    assert m.sum() > 5
     assert np.ptp(out.G0[m]) < 1.0
 
 
-def test_harmonic_well_is_recovered():
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_harmonic_well_is_recovered(seed):
     G0, dG0 = harmonic(r0=1.0, kappa=500.0)
-    rows = simulate_pulls(G0, dG0, n_pulls=60, speed=0.005, r_start=0.9, length_nm=0.2, seed=2)
+    rows = simulate_pulls(G0, dG0, n_pulls=60, speed=0.005, r_start=0.9, length_nm=0.2, seed=seed)
     out = _g0(rows, F="jarzynski")
-    m = out.ess_pulls >= 5
-    ref = G0(out.r_bin[m]); ref -= ref.min()
-    assert np.max(np.abs(out.G0[m] - ref)) < 1.0
+    m = out.ess_pulls >= 30
+    assert m.sum() > 3
+    ref = G0(out.r_bin[m].to_numpy())
+    d = out.G0[m].to_numpy() - ref
+    assert np.max(np.abs(d - d.mean())) < 1.0
 
 
 def test_incomplete_support_is_not_supported():

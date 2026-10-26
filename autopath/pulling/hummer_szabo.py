@@ -7,7 +7,18 @@ _KEYS = ["speed", "step"]
 
 
 def check_full_support(rows: pd.DataFrame) -> None:
-    """Raise if any (speed, step) lacks a row from every pull of its speed."""
+    """Raise if any (speed, step) lacks a row from every pull of its speed.
+
+    Parameters
+    ----------
+    rows : pandas.DataFrame
+        Conditioned rows with ``trajname``, ``speed``, ``step``.
+
+    Raises
+    ------
+    ValueError
+        "not supported" when support is incomplete.
+    """
     for speed, g in rows.groupby("speed"):
         n = g["trajname"].nunique()
         counts = g.groupby("step")["trajname"].nunique()
@@ -20,7 +31,22 @@ def check_full_support(rows: pd.DataFrame) -> None:
 
 
 def slice_table(rows: pd.DataFrame, grids: dict, beta: float) -> pd.DataFrame:
-    """One row per (speed, step) with lam, n_pulls, lnZ, ess, Wmean, Wvar."""
+    """One row per (speed, step) with lam, n_pulls, lnZ, ess, Wmean, Wvar.
+
+    Parameters
+    ----------
+    rows : pandas.DataFrame
+        Conditioned rows with ``speed``, ``step``, ``work``, ``trajname``.
+    grids : dict
+        ``grids[speed]`` DataFrame with ``step`` and ``r_target_protocol``.
+    beta : float
+        Inverse temperature, 1/(kJ/mol).
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns ``speed, step, lam, n_pulls, lnZ, ess, Wmean, Wvar``.
+    """
     check_full_support(rows)
     out = []
     for (speed, step), w in rows.groupby(_KEYS, sort=True)["work"]:
@@ -38,12 +64,38 @@ def slice_table(rows: pd.DataFrame, grids: dict, beta: float) -> pd.DataFrame:
 
 
 def f_jarzynski(slices: pd.DataFrame, beta: float) -> np.ndarray:
-    """Jarzynski free energy per slice, -lnZ/beta."""
+    """Jarzynski free energy per slice, -lnZ/beta.
+
+    Parameters
+    ----------
+    slices : pandas.DataFrame
+        Output of :func:`slice_table`.
+    beta : float
+        Inverse temperature, 1/(kJ/mol).
+
+    Returns
+    -------
+    numpy.ndarray
+        F per slice, kJ/mol.
+    """
     return -slices["lnZ"].to_numpy() / beta
 
 
 def slice_weights(slices: pd.DataFrame, mode: str) -> np.ndarray:
-    """Slice weights c: Kish ESS or uniform."""
+    """Slice weights c: Kish ESS or uniform.
+
+    Parameters
+    ----------
+    slices : pandas.DataFrame
+        Output of :func:`slice_table`.
+    mode : {"ess", "uniform"}
+        Weighting scheme.
+
+    Returns
+    -------
+    numpy.ndarray
+        c per slice.
+    """
     if mode == "ess":
         return slices["ess"].to_numpy(float)
     if mode == "uniform":
@@ -55,6 +107,30 @@ def log_denominator(r, slices, F, c, k, beta, dr=None, max_block=2_000_000):
     """ln sum_tau c_tau exp(-beta[u(r, lam_tau) - F_tau]) at each r.
 
     Evaluated on a uniform grid over [min r, max r] and linearly interpolated.
+
+    Parameters
+    ----------
+    r : array_like
+        Positions, nm.
+    slices : pandas.DataFrame
+        Output of :func:`slice_table` (uses ``lam``).
+    F : array_like
+        Free energy per slice, kJ/mol.
+    c : array_like
+        Slice weights.
+    k : float
+        Spring constant, kJ/mol/nm^2.
+    beta : float
+        Inverse temperature, 1/(kJ/mol).
+    dr : float, optional
+        Grid spacing, nm; default sqrt(1/(beta k))/10.
+    max_block : int, optional
+        Maximum slices-by-grid block size per logsumexp call.
+
+    Returns
+    -------
+    numpy.ndarray
+        Log denominator at each r.
     """
     r = np.asarray(r, float)
     lo, hi = r.min(), r.max()
@@ -72,7 +148,26 @@ def log_denominator(r, slices, F, c, k, beta, dr=None, max_block=2_000_000):
 
 
 def hs_log_weights(rows, slices, F, c, k, beta) -> np.ndarray:
-    """Per-row ln c_s - beta W - lnZ_s - ln denominator(r_after)."""
+    """Per-row ln c_s - beta W - lnZ_s - ln denominator(r_after).
+
+    Parameters
+    ----------
+    rows : pandas.DataFrame
+        Conditioned rows with ``speed, step, work, r_after``.
+    slices : pandas.DataFrame
+        Output of :func:`slice_table`.
+    F, c : array_like
+        Free energy and weight per slice, aligned with ``slices``.
+    k : float
+        Spring constant, kJ/mol/nm^2.
+    beta : float
+        Inverse temperature, 1/(kJ/mol).
+
+    Returns
+    -------
+    numpy.ndarray
+        Log weight per row (unnormalised).
+    """
     idx = pd.MultiIndex.from_frame(slices[_KEYS])
     pos = idx.get_indexer(pd.MultiIndex.from_frame(rows[_KEYS]))
     if (pos < 0).any():
@@ -85,7 +180,26 @@ def hs_log_weights(rows, slices, F, c, k, beta) -> np.ndarray:
 
 
 def g0_profile(r, logw, pull, beta, bin_nm=0.02) -> pd.DataFrame:
-    """Binned unbiased free energy from log weights, minimum set to 0."""
+    """Binned unbiased free energy from log weights, minimum set to 0.
+
+    Parameters
+    ----------
+    r : array_like
+        Row positions, nm.
+    logw : array_like
+        Log weight per row.
+    pull : array_like
+        Pull identifier per row.
+    beta : float
+        Inverse temperature, 1/(kJ/mol).
+    bin_nm : float, optional
+        Bin width, nm.
+
+    Returns
+    -------
+    pandas.DataFrame
+        ``r_bin, G0, n_rows, ess_pulls`` per occupied bin.
+    """
     r = np.asarray(r, float)
     w = np.exp(np.asarray(logw, float) - np.max(logw))
     b = np.floor(r / bin_nm).astype(int)
