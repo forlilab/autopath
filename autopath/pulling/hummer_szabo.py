@@ -147,8 +147,22 @@ def log_denominator(r, slices, F, c, k, beta, dr=None, max_block=2_000_000):
     return np.interp(r, grid, acc)
 
 
-def hs_log_weights(rows, slices, F, c, k, beta) -> np.ndarray:
-    """Per-row ln c_s - beta W - lnZ_s - ln denominator(r_after).
+def _slice_pos(rows, slices) -> np.ndarray:
+    idx = pd.MultiIndex.from_frame(slices[_KEYS])
+    pos = idx.get_indexer(pd.MultiIndex.from_frame(rows[_KEYS]))
+    if (pos < 0).any():
+        raise ValueError("not supported: rows outside the slice table")
+    return pos
+
+
+def _log_p_slice(rows, slices, pos, beta) -> np.ndarray:
+    # ln of e^{-beta W} / sum_slice e^{-beta W}: each slice's p_t sums to 1 whatever its n_pulls.
+    lnz = slices["lnZ"].to_numpy()[pos] + np.log(slices["n_pulls"].to_numpy(float)[pos])
+    return -beta * rows["work"].to_numpy() - lnz
+
+
+def hs_log_weights(rows, slices, F, c, k, beta, dr=None) -> np.ndarray:
+    """Per-row ln c_s - beta W - ln(n_s Z_s) - ln denominator(r_after).
 
     Parameters
     ----------
@@ -162,21 +176,19 @@ def hs_log_weights(rows, slices, F, c, k, beta) -> np.ndarray:
         Spring constant, kJ/mol/nm^2.
     beta : float
         Inverse temperature, 1/(kJ/mol).
+    dr : float, optional
+        Denominator grid spacing, nm; see :func:`log_denominator`.
 
     Returns
     -------
     numpy.ndarray
         Log weight per row (unnormalised).
     """
-    idx = pd.MultiIndex.from_frame(slices[_KEYS])
-    pos = idx.get_indexer(pd.MultiIndex.from_frame(rows[_KEYS]))
-    if (pos < 0).any():
-        raise ValueError("not supported: rows outside the slice table")
+    pos = _slice_pos(rows, slices)
     with np.errstate(divide="ignore"):
         lnc = np.log(np.asarray(c, float))[pos]
-    lnz = slices["lnZ"].to_numpy()[pos]
-    den = log_denominator(rows["r_after"].to_numpy(), slices, F, c, k, beta)
-    return lnc - beta * rows["work"].to_numpy() - lnz - den
+    den = log_denominator(rows["r_after"].to_numpy(), slices, F, c, k, beta, dr=dr)
+    return lnc + _log_p_slice(rows, slices, pos, beta) - den
 
 
 def g0_profile(r, logw, pull, beta, bin_nm=0.02) -> pd.DataFrame:
