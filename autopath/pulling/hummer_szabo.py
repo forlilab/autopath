@@ -425,3 +425,168 @@ def f_self_consistent(rows, slices, c, k, beta, bin_nm=0.002, stride=1, tol=1e-6
         m = (sub["speed"] == speed).to_numpy()
         out[idx] = np.interp(slices.loc[idx, "lam"], sub.loc[m, "lam"], F[m])
     return out
+
+
+def _source_F(rows, slices, c, k, beta, f_source, realized_speed_map, wham_stride):
+    if f_source == "jarzynski":
+        return f_jarzynski(slices, beta)
+    if f_source == "cumulant":
+        return f_cumulant(slices, beta)
+    if f_source == "force":
+        if realized_speed_map is None:
+            raise ValueError("not supported: force F needs realized_speed_map")
+        return f_force_v0(slices, realized_speed_map)
+    if f_source == "self_consistent":
+        return f_self_consistent(rows, slices, c, k, beta, stride=wham_stride)
+    raise ValueError(f"not supported: F source {f_source!r}; use one of {F_SOURCES}")
+
+
+def estimate(rows, grids, k, beta, f_source, c_mode="ess", bin_nm=0.02,
+             realized_speed_map=None, wham_stride=1):
+    """HS unbiased profile for one F source.
+
+    Slices with NaN F are dropped from the denominator and their rows get log weight -inf.
+
+    Parameters
+    ----------
+    rows : pandas.DataFrame
+        Full-support conditioned rows.
+    grids : dict
+        ``grids[speed]`` DataFrame with ``step`` and ``r_target_protocol``.
+    k : float
+        Spring constant, kJ/mol/nm^2.
+    beta : float
+        Inverse temperature, 1/(kJ/mol).
+    f_source : {"jarzynski", "cumulant", "force", "self_consistent"}
+        Slice free-energy source.
+    c_mode : {"ess", "uniform"}, optional
+        Slice weighting.
+    bin_nm : float, optional
+        Profile bin width, nm.
+    realized_speed_map : dict, optional
+        Nominal -> realized speed; required for ``force``.
+    wham_stride : int, optional
+        Step stride for ``self_consistent``.
+
+    Returns
+    -------
+    g0 : pandas.DataFrame
+        ``r_bin, G0, n_rows, ess_pulls``.
+    logw : numpy.ndarray
+        Log weight per input row.
+    F : numpy.ndarray
+        F per slice (rows of :func:`slice_table`), kJ/mol.
+    """
+    rows = rows.reset_index(drop=True)
+    slices = slice_table(rows, grids, beta)
+    c = slice_weights(slices, c_mode)
+    F = _source_F(rows, slices, c, k, beta, f_source, realized_speed_map, wham_stride)
+    keep = np.isfinite(F)
+    if not keep.any():
+        raise ValueError("not supported: no slice has a finite F")
+    pos = _slice_pos(rows, slices)
+    row_ok = keep[pos]
+    sub = rows[row_ok]
+    sl = slices[keep].reset_index(drop=True)
+    lw = hs_log_weights(sub, sl, F[keep], c[keep], k, beta)
+    logw = np.full(len(rows), -np.inf)
+    logw[row_ok] = lw
+    g0 = g0_profile(sub["r_after"].to_numpy(), lw, sub["trajname"].to_numpy(), beta, bin_nm)
+    return g0, logw, F
+
+
+def bootstrap_g0(rows, grids, k, beta, f_source, n_boot=200, seed=0, **estimate_kw):
+    """Point-estimate profile with a pull-resampling bootstrap sd.
+
+    Whole pulls are resampled with replacement within each speed; F is re-solved per resample.
+
+    Parameters
+    ----------
+    rows, grids, k, beta, f_source
+        As in :func:`estimate`.
+    n_boot : int, optional
+        Resamples; 0 returns the point estimate with NaN ``G0_sd``.
+    seed : int, optional
+        RNG seed.
+    **estimate_kw
+        Passed to :func:`estimate`.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Point-estimate ``r_bin, G0, n_rows, ess_pulls`` plus ``G0_sd`` per ``r_bin``.
+    """
+    point, _, _ = estimate(rows, grids, k, beta, f_source, **estimate_kw)
+    point = point.copy()
+    if n_boot == 0:
+        point["G0_sd"] = np.nan
+        return point
+    rng = np.random.default_rng(seed)
+    pulls = {s: [g for _, g in sp.groupby("trajname", sort=False)] for s, sp in rows.groupby("speed")}
+    ref = point.set_index("r_bin")["G0"]
+    prof = []
+    for b in range(n_boot):
+        parts = []
+        for speed, gs in pulls.items():
+            for j, i in enumerate(rng.integers(0, len(gs), len(gs))):
+                parts.append(gs[i].assign(trajname=f"{gs[i]['trajname'].iloc[0]}#b{j}"))
+        g, _, _ = estimate(pd.concat(parts, ignore_index=True), grids, k, beta, f_source, **estimate_kw)
+        s = g.set_index("r_bin")["G0"].reindex(ref.index)
+        ok = np.isfinite(s.to_numpy())
+        if ok.any():
+            s = s - (s - ref)[ok].mean()
+        prof.append(s.to_numpy())
+    with np.errstate(invalid="ignore"):
+        cnt = np.isfinite(prof).sum(axis=0)
+        sd = np.nanstd(np.array(prof), axis=0, ddof=1)
+    point["G0_sd"] = np.where(cnt >= 2, sd, np.nan)
+    return point
+
+
+def slice_diagnostics(rows, slices, F_by_source, k, beta):
+    """Per-slice F by source, source spread and spring-lag statistics.
+
+    Parameters
+    ----------
+    rows : pandas.DataFrame
+        Conditioned rows with ``speed, step, r_after``.
+    slices : pandas.DataFrame
+        Output of :func:`slice_table`.
+    F_by_source : dict
+        Source name -> F per slice, aligned with ``slices``.
+    k : float
+        Spring constant, kJ/mol/nm^2.
+    beta : float
+        Inverse temperature, 1/(kJ/mol).
+
+    Returns
+    -------
+    pandas.DataFrame
+        ``speed, step, lam, n_pulls, ess, F_<source>..., F_spread, lag_mean, lag_eq,
+        lag_sd, lag_sd_eq``.
+    """
+    d = slices[["speed", "step", "lam", "n_pulls", "ess"]].reset_index(drop=True)
+    for name, F in F_by_source.items():
+        d[f"F_{name}"] = np.asarray(F, float)
+    pos = _slice_pos(rows, slices)
+    lag = slices["lam"].to_numpy(float)[pos] - rows["r_after"].to_numpy(float)
+    d["lag_mean"] = np.bincount(pos, lag, len(d)) / np.bincount(pos, minlength=len(d))
+    d["lag_sd"] = np.sqrt(np.maximum(
+        np.bincount(pos, lag ** 2, len(d)) / np.bincount(pos, minlength=len(d)) - d["lag_mean"] ** 2, 0))
+    d["lag_sd_eq"] = np.sqrt(1.0 / (beta * k))
+    Fj = f_jarzynski(slices.reset_index(drop=True), beta)
+    d["lag_eq"] = np.nan
+    cols = [f"F_{n}" for n in F_by_source]
+    spread = np.full(len(d), np.nan)
+    for _, idx in d.sort_values(_KEYS).groupby("speed").groups.items():
+        idx = np.asarray(idx)
+        if len(idx) > 1:
+            d.loc[idx, "lag_eq"] = np.gradient(Fj[idx], d["lam"].to_numpy()[idx]) / k
+        if cols:
+            A = d.loc[idx, cols].to_numpy()
+            fin = np.isfinite(A).all(axis=1)
+            if fin.any():
+                A = A - A[np.argmax(fin)]
+                spread[idx] = A.max(axis=1) - A.min(axis=1)
+    d["F_spread"] = spread
+    return d
