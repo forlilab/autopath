@@ -49,4 +49,5 @@ def test_raises_when_cvpack_cv_disagrees_with_geometry(tmp_path, monkeypatch):
     )
 
     with pytest.raises(RuntimeError, match="differs from cvpack"):
-        SteeredMD.pull_single_direction(smd, simulation, run_id=1, direction="forward")
+        SteeredMD.pull_single_direction(smd, simulation, run_id=1, direction="forward",
+                                        lambda0=1.743 * openmmunit.nanometers)

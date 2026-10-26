@@ -176,8 +176,9 @@ class SteeredMD:
 
     def pull_single_direction(self, 
                               simulation, 
-                              run_id: int, 
+                              run_id: int,
                               direction: str = "forward",
+                              lambda0=None,
                              ):
         """Main pulling loop for a single replica in one direction.
 
@@ -195,9 +196,12 @@ class SteeredMD:
 
         Output
         ------
+        The spring schedule starts at ``lambda0`` (a length Quantity, required), the spring
+        centre the replica was equilibrated at by ``run``.
+
         Writes ``{out_dir}/sMD_{run_id}.dat`` with a ``# key=value`` metadata
         header (spring_constant, requested/realized speed, steps_per_move,
-        force_n_samples) followed by columns:
+        force_n_samples, lambda0_nm, r_start_nm) followed by columns:
         step, time, r_target, r_before, r_after, force, force_sem,
         U_cvpack, dW_protocol
 
@@ -232,9 +236,13 @@ class SteeredMD:
                                                             firtsPertubation=True,
                                                             ))
 
-        # Set the initial r0 parameter
-        initial_r0 = self.com_dist.getValue(simulation.context, allowReinitialization=False)
-        logger.info(f"Initial COM distance: {initial_r0}")
+        # The schedule starts at lambda0; r_start is where the replica actually is.
+        if lambda0 is None:
+            raise ValueError("lambda0 is required: the spring centre the replica was equilibrated at")
+        initial_r0 = lambda0
+        r_start = self.com_dist.getValue(simulation.context, allowReinitialization=False)
+        r_start_nm = r_start.value_in_unit(openmmunit.nanometers)
+        logger.info(f"Spring start lambda0: {initial_r0}; COM distance at pull start: {r_start}")
         simulation.context.setParameter("r0_smd", initial_r0)
 
         # ── Move count cap: box safety + r0 factor ─────────────────────────────
@@ -280,10 +288,10 @@ class SteeredMD:
             v = com_A - com_B
             v -= np.round(v / L) * L  # minimum-image (orthorhombic only; triclinic triggers a warning above)
             v_norm = float(np.linalg.norm(v))
-            if abs(v_norm - initial_r0_nm) > 0.05:
+            if abs(v_norm - r_start_nm) > 0.05:
                 raise RuntimeError(
-                    f"PBC cap: |v|={v_norm:.3f} nm differs from cvpack initial_r0="
-                    f"{initial_r0_nm:.3f} nm. Check that protein/ligand are not split "
+                    f"PBC cap: |v|={v_norm:.3f} nm differs from cvpack COM distance "
+                    f"{r_start_nm:.3f} nm. Check that protein/ligand are not split "
                     f"across a periodic boundary at t=0; cap would be unreliable."
                 )
             abs_v = np.abs(v)
@@ -364,6 +372,8 @@ class SteeredMD:
             f.write(f"# realized_speed_nm_per_ps={getattr(self, '_realized_speed', float('nan')):.10g}\n")
             f.write(f"# steps_per_move={self.steps_per_move}\n")
             f.write(f"# force_n_samples={n_sub}\n")
+            f.write(f"# lambda0_nm={initial_r0_nm:.10g}\n")
+            f.write(f"# r_start_nm={r_start_nm:.10g}\n")
             f.write("step,time,r_target,r_before,r_after,force,force_sem,U_cvpack,dW_protocol\n")
 
             # Loop over the number of moves
@@ -480,8 +490,13 @@ class SteeredMD:
         checkpoint_file: str = None,
         pdb_file: str = None,
         state_xml_file: str = None,
+        lambda0_nm: float | None = None,
     ):
         """Run one steered MD replica at the requested speed.
+
+        The replica is equilibrated for 50 ps with the spring held at lambda0 and then pulled from
+        lambda0. lambda0_nm=None uses the COM distance of the input structure, which is shared by
+        replicas started from the same structure; pass it explicitly when starting structures differ.
 
         Sweep-fixed parameters (dx_per_move, max_displacement, sMD_spring_cte,
         save_freq) are set in __init__. Only the speed-dependent bookkeeping
@@ -652,20 +667,6 @@ class SteeredMD:
             # Remove existing MonteCarloBarostat to run NVT
             system = remove_openmm_force(system, "MonteCarloBarostat")
 
-        # Reinitialize the simulation context with the updated system
-        simulation.context.reinitialize(preserveState=True)
-
-        #run a super short simulation to ensure the system is stable after temp reset
-        simulation.step(50/self.timestep.value_in_unit(openmmunit.picoseconds))  # 50 ps
-        
-        # try:
-        #     simulation.integrator.reset()  # Reset the integrator. Only openmmtools integrators have this method    
-        # except AttributeError:
-        #     logger.warning("Integrator does not have reset method. This is expected for standard OpenMM integrators.")
-
-        simulation.context.setTime(0)  # reset simulation time
-        simulation.context.setStepCount(0)  # reset step count
-        
         weighByMass = True
         if len(self.groupA_atoms) == 1 or len(self.groupB_atoms) == 1:
             weighByMass = False  # avoid problems with single DUM massless atom
@@ -699,8 +700,19 @@ class SteeredMD:
 
         simulation.context.reinitialize(preserveState=True)
 
+        # Jarzynski/HS need every replica to start equilibrated with the spring at one shared lambda0
+        # and to follow the same schedule, so the spring is on during the pre-pull run.
+        if lambda0_nm is None:
+            lambda0 = self.com_dist.getValue(simulation.context, allowReinitialization=False)
+        else:
+            lambda0 = float(lambda0_nm) * openmmunit.nanometers
+        simulation.context.setParameter("r0_smd", lambda0)
+        simulation.step(int(round(50 / self.timestep.value_in_unit(openmmunit.picoseconds))))  # 50 ps
+        simulation.context.setTime(0)
+        simulation.context.setStepCount(0)
+
         # Run the actual pulling
-        self.pull_single_direction(simulation, run_id, direction=pulling_direction)
+        self.pull_single_direction(simulation, run_id, direction=pulling_direction, lambda0=lambda0)
 
         # Logging the total time for all replicas
         simulation_time = time.monotonic() - simulation_start_time
