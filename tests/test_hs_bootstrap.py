@@ -128,3 +128,21 @@ def test_slice_diagnostics_columns_and_spread():
     d = slice_diagnostics(rows, sl, {"jarzynski": Fj, "other": Fj + 3.0}, K, BETA)
     assert {"F_jarzynski", "F_other", "F_spread", "lag_mean", "lag_eq", "lag_sd", "lag_sd_eq"} <= set(d.columns)
     np.testing.assert_allclose(d.F_spread, 0.0, atol=1e-9)
+
+
+def test_bootstrap_reuses_given_point_estimate(monkeypatch):
+    from autopath.pulling import hummer_szabo as hs
+    G0, dG0 = harmonic()
+    rows = simulate_pulls(G0, dG0, n_pulls=8, speed=0.005, r_start=0.9, length_nm=0.05, seed=4)
+    ref = _boot(rows, n_boot=3, seed=2)
+    point, _, _ = estimate(rows, protocol_grids(rows), K, BETA, "jarzynski")
+    calls, real = [], hs.estimate
+
+    def spy(r, *a, **kw):
+        calls.append(r)
+        return real(r, *a, **kw)
+
+    monkeypatch.setattr(hs, "estimate", spy)
+    got = _boot(rows, n_boot=3, seed=2, point=point)
+    assert len(calls) == 3
+    pd.testing.assert_frame_equal(got, ref)

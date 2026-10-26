@@ -54,14 +54,21 @@ def slice_table(rows: pd.DataFrame, grids: dict, beta: float) -> pd.DataFrame:
         Columns ``speed, step, lam, n_pulls, lnZ, ess, Wmean, Wvar``.
     """
     check_full_support(rows)
-    out = []
-    for (speed, step), w in rows.groupby(_KEYS, sort=True)["work"]:
-        a = -beta * w.to_numpy()
-        n = len(a)
-        out.append((speed, step, n, logsumexp(a) - np.log(n),
-                    np.exp(2 * logsumexp(a) - logsumexp(2 * a)),
-                    w.mean(), w.var(ddof=1) if n > 1 else np.nan))
-    t = pd.DataFrame(out, columns=["speed", "step", "n_pulls", "lnZ", "ess", "Wmean", "Wvar"])
+    g = rows.groupby(_KEYS, sort=True)["work"]
+    codes = g.ngroup().to_numpy()
+    a = -beta * rows["work"].to_numpy(float)
+    amax = pd.Series(a).groupby(codes).max().to_numpy()
+    e = np.exp(a - amax[codes])
+    n = np.bincount(codes)
+    s1 = np.bincount(codes, e)
+    s2 = np.bincount(codes, e * e)
+    agg = g.agg(["mean", "var"])
+    t = agg.index.to_frame(index=False)
+    t["n_pulls"] = n
+    t["lnZ"] = amax + np.log(s1) - np.log(n)
+    t["ess"] = s1 * s1 / s2
+    t["Wmean"] = agg["mean"].to_numpy()
+    t["Wvar"] = agg["var"].to_numpy()
     lam = pd.concat([g.assign(speed=s) for s, g in grids.items()], ignore_index=True)
     t = t.merge(lam.rename(columns={"r_target_protocol": "lam"}), on=_KEYS, how="left")
     if t["lam"].isna().any():
@@ -500,7 +507,7 @@ def estimate(rows, grids, k, beta, f_source, c_mode="ess", bin_nm=0.02,
     return g0, logw, F
 
 
-def bootstrap_g0(rows, grids, k, beta, f_source, n_boot=200, seed=0, **estimate_kw):
+def bootstrap_g0(rows, grids, k, beta, f_source, n_boot=200, seed=0, point=None, **estimate_kw):
     """Point-estimate profile with a pull-resampling bootstrap sd.
 
     Whole pulls are resampled with replacement within each speed; F is re-solved per resample.
@@ -513,6 +520,8 @@ def bootstrap_g0(rows, grids, k, beta, f_source, n_boot=200, seed=0, **estimate_
         Resamples; 0 returns the point estimate with NaN ``G0_sd``.
     seed : int, optional
         RNG seed.
+    point : pandas.DataFrame, optional
+        Profile already returned by :func:`estimate` for these inputs; computed when omitted.
     **estimate_kw
         Passed to :func:`estimate`.
 
@@ -521,7 +530,8 @@ def bootstrap_g0(rows, grids, k, beta, f_source, n_boot=200, seed=0, **estimate_
     pandas.DataFrame
         Point-estimate ``r_bin, G0, n_rows, ess_pulls`` plus ``G0_sd`` per ``r_bin``.
     """
-    point, _, _ = estimate(rows, grids, k, beta, f_source, **estimate_kw)
+    if point is None:
+        point, _, _ = estimate(rows, grids, k, beta, f_source, **estimate_kw)
     point = point.copy()
     if n_boot == 0:
         point["G0_sd"] = np.nan
@@ -696,8 +706,9 @@ class HummerSzaboEstimator:
                   wham_stride=self.wham_stride)
         out = {}
         for src in sources:
-            _, logw, F = estimate(rows, grids, k, beta, src, **kw)
-            g0 = bootstrap_g0(rows, grids, k, beta, src, n_boot=self.n_boot, seed=self.seed, **kw)
+            point, logw, F = estimate(rows, grids, k, beta, src, **kw)
+            g0 = bootstrap_g0(rows, grids, k, beta, src, n_boot=self.n_boot, seed=self.seed,
+                              point=point, **kw)
             out[src] = (g0, logw - logsumexp(logw), F)
         return out
 
