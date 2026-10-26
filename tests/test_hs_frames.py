@@ -38,3 +38,60 @@ def test_frame_weights_match_row_weights(tmp_path):
     assert fw.attrs["n_frames_excluded"] > 0
     assert set(fw.step) <= set(range(4, 61, 5))
     np.testing.assert_allclose(np.exp(fw.logw).sum(), 1.0)
+
+
+def test_frame_weights_equal_frame_slice_estimate(tmp_path):
+    import pandas as pd
+    from scipy.special import logsumexp
+
+    from autopath.pulling import SMDData
+    from autopath.pulling.hummer_szabo import f_jarzynski, hs_log_weights, slice_table, slice_weights
+
+    rows = simulate_pulls(*flat(), n_pulls=6, speed=0.01, length_nm=0.1,
+                          stop_steps=[60] + [None] * 5, seed=14)
+    files = write_dat(rows, tmp_path)
+    _write_dcds(files, save_freq=5)
+    fw = hs_frame_weights(files, save_freq=5)
+
+    # Independent: HS on the frame-step rows/slices only, within the common support.
+    smd = SMDData(files, temperature=300.0)
+    raw = smd.raw_data
+    fr = raw[((raw.step + 1) % 5 == 0) & (raw.step <= 60)].reset_index(drop=True)
+    sl = slice_table(fr, smd.protocol_grids, smd.beta)
+    lw = hs_log_weights(fr, sl, f_jarzynski(sl, smd.beta), slice_weights(sl, "ess"),
+                        smd.spring_constant, smd.beta)
+    ref = fr[["trajname", "step"]].assign(ref=lw - logsumexp(lw))
+    m = fw.merge(ref, on=["trajname", "step"], how="outer")
+    assert len(m) == len(fw) == len(ref)
+    np.testing.assert_allclose(m.logw.to_numpy(), m.ref.to_numpy(), rtol=0, atol=1e-10)
+
+
+def test_dropped_pull_frames_are_counted(tmp_path):
+    rows = simulate_pulls(*flat(), n_pulls=5, speed=0.01, length_nm=0.1, seed=15)
+    bad = rows.trajname.unique()[2]
+    # SMDData drops a forward pull whose distance falls below completion_threshold_nm.
+    rows.loc[rows.trajname == bad, "r_after"] -= 0.95
+    files = write_dat(rows, tmp_path)
+    _write_dcds(files, save_freq=5)
+    fw = hs_frame_weights(files, save_freq=5)
+    # SMDData names a pull after its log file.
+    assert fw.attrs["pulls_dropped"] == [f"sMD_{bad}_forward"]
+    assert fw.trajname.nunique() == 4 and not fw.trajname.str.contains(bad + "_").any()
+    assert fw.attrs["n_frames_excluded"] == 100 // 5
+    np.testing.assert_allclose(np.exp(fw.logw).sum(), 1.0)
+
+
+def test_step_gap_is_not_supported(tmp_path):
+    import pandas as pd
+
+    rows = simulate_pulls(*flat(), n_pulls=4, speed=0.01, length_nm=0.1, seed=16)
+    files = write_dat(rows, tmp_path)
+    with open(files[1]) as f:
+        header = f.readline()
+    d = pd.read_csv(files[1], comment="#").drop(index=37)
+    with open(files[1], "w") as f:
+        f.write(header)
+        d.to_csv(f, index=False)
+    _write_dcds(files, save_freq=5)
+    with pytest.raises(ValueError, match="not supported: .*step"):
+        hs_frame_weights(files, save_freq=5)

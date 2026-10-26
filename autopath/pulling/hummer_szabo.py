@@ -885,9 +885,13 @@ def hs_frame_weights(dat_files: list[str], temperature: float = 300.0, f_source:
     Returns
     -------
     pandas.DataFrame
-        ``trajname, frame, step, logw`` with sum(exp(logw)) = 1 over the frames kept. Frames
-        without a weighted row are omitted; their count is ``attrs["n_frames_excluded"]``.
+        ``trajname, frame, step, logw`` with sum(exp(logw)) = 1 over the frames kept. The
+        estimate uses only the frame-step rows and slices (numerator and denominator). Frames
+        without a weighted row are omitted; their count, including every frame of pulls that
+        :class:`SMDData` dropped, is ``attrs["n_frames_excluded"]``, and the dropped pulls'
+        trajnames are ``attrs["pulls_dropped"]``.
     """
+    import copy
     import os
 
     from MDAnalysis.lib.formats.libdcd import DCDFile
@@ -896,17 +900,26 @@ def hs_frame_weights(dat_files: list[str], temperature: float = 300.0, f_source:
 
     smd = SMDData(dat_files, temperature=temperature)
     smd.raw_data["path"] = 0
+    raw = smd.raw_data
+    for name, st in raw.groupby("trajname", sort=False)["step"]:
+        if not np.array_equal(st.to_numpy(), np.arange(len(st))):
+            raise ValueError(f"not supported: {name} log steps are not 0..n_rows-1 in order")
+    # Frame j is the state after step (j + 1) * save_freq - 1; HS on those slices only.
+    view = copy.copy(smd)
+    view.raw_data = raw[(raw["step"] + 1) % save_freq == 0].reset_index(drop=True)
     res = HummerSzaboEstimator(f_sources=(f_source,), n_boot=0, slice_weights=slice_weights,
-                               bin_nm=bin_nm).fit(smd)
+                               bin_nm=bin_nm).fit(view)
     rw = res.row_weights
-    n_rows = smd.raw_data.groupby("trajname").size()
-    parts, n_excl = [], 0
+    n_rows = raw.groupby("trajname").size()
+    parts, n_excl, dropped = [], 0, []
     for log, dcd in zip(smd.log_files, smd.traj_files):
         name = os.path.basename(log)[:-4]
-        if name not in n_rows.index:
-            continue
         with DCDFile(dcd) as f:
             n_frames = f.n_frames
+        if name not in n_rows.index:
+            dropped.append(name)
+            n_excl += n_frames
+            continue
         steps = frame_steps(int(n_rows[name]), n_frames, save_freq)
         w = rw[rw["trajname"] == name].set_index("step")["logw"]
         lw = w.reindex(steps)
@@ -917,4 +930,5 @@ def hs_frame_weights(dat_files: list[str], temperature: float = 300.0, f_source:
     out = pd.concat(parts, ignore_index=True)
     out["logw"] -= logsumexp(out["logw"].to_numpy())
     out.attrs["n_frames_excluded"] = n_excl
+    out.attrs["pulls_dropped"] = sorted(dropped)
     return out
