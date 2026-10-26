@@ -802,3 +802,85 @@ class HummerSzaboEstimator:
             "skipped_groups": skipped_groups,
         }
         return HSResult(g0=g0, row_weights=rw, slices=slices, excluded=excluded)
+
+
+def frame_steps(n_rows: int, n_frames: int, save_freq: int) -> np.ndarray:
+    """Log step each DCD frame corresponds to.
+
+    Frame j is the state at the end of row ``(j + 1) * save_freq - 1``.
+
+    Parameters
+    ----------
+    n_rows : int
+        Rows in the pull's log.
+    n_frames : int
+        Frames in its DCD.
+    save_freq : int
+        Moves per saved frame.
+
+    Returns
+    -------
+    numpy.ndarray
+        Step per frame.
+    """
+    if n_frames != n_rows // save_freq:
+        raise ValueError(f"not supported: {n_frames} frames for {n_rows} rows at save_freq={save_freq}; "
+                         f"expected {n_rows // save_freq}")
+    return (np.arange(n_frames) + 1) * save_freq - 1
+
+
+def hs_frame_weights(dat_files: list[str], temperature: float = 300.0, f_source: str = "jarzynski",
+                     save_freq: int = 5, slice_weights: str = "ess", bin_nm: float = 0.02) -> pd.DataFrame:
+    """Hummer-Szabo weight of each saved DCD frame, all pulls jointly (one path).
+
+    Parameters
+    ----------
+    dat_files : list of str
+        sMD logs; each ``_aligned.dcd`` sits at the path :class:`SMDData` derives.
+    temperature : float, optional
+        K.
+    f_source : str, optional
+        Slice free-energy source.
+    save_freq : int, optional
+        Moves per saved frame.
+    slice_weights : {"ess", "uniform"}, optional
+        Slice weighting c.
+    bin_nm : float, optional
+        Profile bin width, nm.
+
+    Returns
+    -------
+    pandas.DataFrame
+        ``trajname, frame, step, logw`` with sum(exp(logw)) = 1 over the frames kept. Frames
+        without a weighted row are omitted; their count is ``attrs["n_frames_excluded"]``.
+    """
+    import os
+
+    from MDAnalysis.lib.formats.libdcd import DCDFile
+
+    from .SMDData import SMDData
+
+    smd = SMDData(dat_files, temperature=temperature)
+    smd.raw_data["path"] = 0
+    res = HummerSzaboEstimator(f_sources=(f_source,), n_boot=0, slice_weights=slice_weights,
+                               bin_nm=bin_nm).fit(smd)
+    rw = res.row_weights
+    n_rows = smd.raw_data.groupby("trajname").size()
+    parts, n_excl = [], 0
+    for log, dcd in zip(smd.log_files, smd.traj_files):
+        name = os.path.basename(log)[:-4]
+        if name not in n_rows.index:
+            continue
+        with DCDFile(dcd) as f:
+            n_frames = f.n_frames
+        steps = frame_steps(int(n_rows[name]), n_frames, save_freq)
+        w = rw[rw["trajname"] == name].set_index("step")["logw"]
+        lw = w.reindex(steps)
+        keep = np.isfinite(lw.to_numpy())
+        n_excl += int((~keep).sum())
+        parts.append(pd.DataFrame({"trajname": name, "frame": np.arange(n_frames)[keep],
+                                   "step": steps[keep], "logw": lw.to_numpy()[keep]}))
+    out = pd.concat(parts, ignore_index=True)
+    out["logw"] -= logsumexp(out["logw"].to_numpy())
+    out.attrs["n_frames_excluded"] = n_excl
+    return out
