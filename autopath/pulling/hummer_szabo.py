@@ -617,7 +617,7 @@ class HSResult:
         :func:`slice_diagnostics` for scope ``"all"``.
     excluded : dict
         ``n_rows_unsupported``, ``n_rows_no_F`` (per source), ``n_pulls_dropped``,
-        ``lam0_spread_nm``, ``skipped_sources``, ``skipped_groups``.
+        ``lam0_spread_nm``, ``lam0_sd_nm``, ``skipped_sources``, ``skipped_groups``.
     """
 
     g0: pd.DataFrame
@@ -646,6 +646,15 @@ def _check_step_size(raw: pd.DataFrame, tol: float = 1e-6) -> None:
         names = sorted(set(r.loc[bad, "trajname"]))
         raise ValueError(f"not supported: {len(names)} pulls (first {names[0]}) have a per-move dx "
                          f"differing from their speed's median by > {tol} nm")
+
+
+def _lam0_sd(raw: pd.DataFrame, pulls) -> float:
+    # Per-pull protocol lambda0: first logged target minus one move.
+    r = raw[raw["trajname"].isin(pulls)].sort_values(["trajname", "step"])
+    dx = r.groupby("trajname")["r_target"].diff().groupby(r["speed"]).median()
+    first = r.groupby("trajname")[["speed", "r_target"]].first()
+    lam0 = first["r_target"] - first["speed"].map(dx)
+    return float(lam0.groupby(first["speed"]).std().max())
 
 
 class HummerSzaboEstimator:
@@ -694,6 +703,8 @@ class HummerSzaboEstimator:
 
     def fit(self, smd_data) -> HSResult:
         """Estimate G0 for every F source and scope.
+
+        Pulls whose spring starts at their own position bias G0 as ``lam0_sd_nm`` grows.
 
         Parameters
         ----------
@@ -786,6 +797,7 @@ class HummerSzaboEstimator:
             "n_rows_no_F": {s: int(np.isneginf(lw).sum()) for s, (_, lw, _) in res_all.items()},
             "n_pulls_dropped": int(n_loaded - joint["trajname"].nunique()),
             "lam0_spread_nm": float(max(lam0) - min(lam0)),
+            "lam0_sd_nm": _lam0_sd(raw, joint["trajname"].unique()),
             "skipped_sources": skipped,
             "skipped_groups": skipped_groups,
         }
