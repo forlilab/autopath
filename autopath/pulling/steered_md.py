@@ -10,6 +10,9 @@ from datetime import datetime
 
 from autopath.utils import *
 from autopath.customForces import (add_harmonic_restraints, remove_openmm_force)
+from autopath.metadynamics.Funnel import create_funnel_force_from_trajectory_analysis, funnel_axis_at
+from autopath.pulling.projection import (check_projection_params, projection_cv, projection_spring,
+                                         projection_z_nm)
 
 from openmm.app import *
 from openmm import XmlSerializer
@@ -18,6 +21,8 @@ import openmm.unit as openmmunit
 import cvpack
 import logging
 logger = logging.getLogger("autopath")
+
+LATERAL_RESTRAINT_FORCE_GROUP = 10
 
 try:
     from openmmtools.integrators import LangevinSplittingGirsanov
@@ -106,7 +111,21 @@ class SteeredMD:
         force_sample_stride: int = 5,      # MD steps between force samples; n_samples adapts to move length
         verbose: int = 0,
         log_geom_features: bool | list[str] = False,  # log per-frame geom scalars to a sidecar
+        projection_params: dict | None = None,  # protein-frame funnel params: pull z along the axis; None = distance
+        lateral_restraint: bool = False,        # projection only: funnel cone/cylinder walls, no axial walls
     ):
+
+        # projection mode: z and the restraint use the pull groups, mass-weighted
+        if projection_params is None:
+            if lateral_restraint:
+                raise ValueError("not supported: lateral_restraint without projection_params")
+        else:
+            if len(groupA_atoms) == 1 or len(groupB_atoms) == 1:
+                raise ValueError("not supported: projection pulls with a one-atom group "
+                                 "(SteeredMD drops mass weighting; the projection geometry is mass-weighted)")
+            check_projection_params(projection_params, groupA_atoms, groupB_atoms)
+        self.projection_params = projection_params
+        self.lateral_restraint = bool(lateral_restraint)
 
         self.system = system
         self.topology = topology
@@ -194,6 +213,10 @@ class SteeredMD:
         samples and the cumulative displacement exceeds
         ``autostop_min_displacement``.
 
+        In projection mode (``projection_params``) r is the projection z: the r_* columns hold z,
+        the PBC cap bounds the pull end by the half-box along the frame axis n, and the
+        cvpack check compares z with :func:`projection_z_nm`.
+
         Output
         ------
         The spring schedule starts at ``lambda0`` (a length Quantity, required), the spring
@@ -219,6 +242,10 @@ class SteeredMD:
         coordinate deconvolution uses the equilibrium lag ``Feq/k`` instead.
         """
                     
+        proj = getattr(self, "projection_params", None)
+        if proj is not None and direction == "backward":
+            raise ValueError("not supported: backward pulls in projection mode")
+
         add_reporters(simulation, self.out_dir, f"sMD_{run_id}",
             total_steps=self.sMD_moves*self.steps_per_move, # total steps 
             logperiod=self.save_freq*self.steps_per_move, # steps
@@ -256,22 +283,11 @@ class SteeredMD:
         initial_r0_nm = initial_r0.value_in_unit(openmmunit.nanometers)
         dx_nm = float(self.dx_per_move.value_in_unit(openmmunit.nanometers))
         n_moves = self.sMD_moves
-        if direction == "forward" and self.sMD_max_r_offset > 0:
+        if proj is not None:
+            n_moves = self._projection_move_cap(simulation, proj, initial_r0_nm, r_start_nm, dx_nm, n_moves)
+        elif direction == "forward" and self.sMD_max_r_offset > 0:
             state    = simulation.context.getState(getPositions=True)
-            box_vecs = state.getPeriodicBoxVectors()
-            box_arr = np.array([
-                [box_vecs[i][j].value_in_unit(openmmunit.nanometers) for j in range(3)]
-                for i in range(3)
-            ])
-            off_diag_max = float(np.abs(box_arr - np.diag(np.diag(box_arr))).max())
-            if off_diag_max > 1e-3:
-                logger.warning(
-                    f"PBC move-capping: non-orthorhombic box detected "
-                    f"(max off-diagonal element = {off_diag_max:.4f} nm). "
-                    f"Minimum-image wrapping assumes orthorhombic geometry and may be incorrect "
-                    f"for triclinic boxes."
-                )
-            L = np.diag(box_arr)
+            L = SteeredMD._orthorhombic_box_lengths(state)
 
             positions = state.getPositions(asNumpy=True).value_in_unit(openmmunit.nanometers)
             weigh_by_mass = not (len(self.groupA_atoms) == 1 or len(self.groupB_atoms) == 1)
@@ -374,6 +390,10 @@ class SteeredMD:
             f.write(f"# force_n_samples={n_sub}\n")
             f.write(f"# lambda0_nm={initial_r0_nm:.10g}\n")
             f.write(f"# r_start_nm={r_start_nm:.10g}\n")
+            if proj is None:
+                f.write("# cv=distance\n")
+            else:
+                f.write(self._projection_header())
             f.write("step,time,r_target,r_before,r_after,force,force_sem,U_cvpack,dW_protocol\n")
 
             # Loop over the number of moves
@@ -495,8 +515,9 @@ class SteeredMD:
         """Run one steered MD replica at the requested speed.
 
         The replica is equilibrated for 50 ps with the spring held at lambda0 and then pulled from
-        lambda0. lambda0_nm=None uses the COM distance of the input structure, which is shared by
-        replicas started from the same structure; pass it explicitly when starting structures differ.
+        lambda0. lambda0_nm=None uses the COM distance (z in projection mode) of the input structure,
+        which is shared by replicas started from the same structure; pass it explicitly when starting
+        structures differ.
 
         Sweep-fixed parameters (dx_per_move, max_displacement, sMD_spring_cte,
         save_freq) are set in __init__. Only the speed-dependent bookkeeping
@@ -505,6 +526,8 @@ class SteeredMD:
 
         if pulling_direction not in ["forward", "backward"]:
             raise ValueError("pulling_direction must be either 'forward' or 'backward'.")
+        if self.projection_params is not None and pulling_direction == "backward":
+            raise ValueError("not supported: backward pulls in projection mode")
 
         # ensure proper formating of the file name
         if run_id is None:
@@ -667,36 +690,50 @@ class SteeredMD:
             # Remove existing MonteCarloBarostat to run NVT
             system = remove_openmm_force(system, "MonteCarloBarostat")
 
-        weighByMass = True
-        if len(self.groupA_atoms) == 1 or len(self.groupB_atoms) == 1:
-            weighByMass = False  # avoid problems with single DUM massless atom
+        if self.projection_params is None:
+            weighByMass = True
+            if len(self.groupA_atoms) == 1 or len(self.groupB_atoms) == 1:
+                weighByMass = False  # avoid problems with single DUM massless atom
         
-        # Add COM force to the ligand and pocket groups with a harmonic potential shape
-        groups = [self.groupA_atoms] + [self.groupB_atoms]
-        self.com_force = cvpack.CentroidFunction(
-            "0.5 * fc_pull * (distance(g1,g2)-r0_smd)^2",
-            openmmunit.kilojoules_per_mole,  # energy not force
-            groups,
-            weighByMass=weighByMass,
-            pbc=True,
-        )
+            # Add COM force to the ligand and pocket groups with a harmonic potential shape
+            groups = [self.groupA_atoms] + [self.groupB_atoms]
+            self.com_force = cvpack.CentroidFunction(
+                "0.5 * fc_pull * (distance(g1,g2)-r0_smd)^2",
+                openmmunit.kilojoules_per_mole,  # energy not force
+                groups,
+                weighByMass=weighByMass,
+                pbc=True,
+            )
         
-        self.com_force.addGlobalParameter("r0_smd", 0)
-        self.com_force.addGlobalParameter('fc_pull', self.sMD_spring_cte)
-        self.com_force.setForceGroup(1)  # Use a separate force group for the CV GROUP 1
-        system.addForce(self.com_force)
+            self.com_force.addGlobalParameter("r0_smd", 0)
+            self.com_force.addGlobalParameter('fc_pull', self.sMD_spring_cte)
+            self.com_force.setForceGroup(1)  # Use a separate force group for the CV GROUP 1
+            system.addForce(self.com_force)
 
-        # Add COM distance function to measure the distance between the two groups
-        self.com_dist = cvpack.CentroidFunction(
-            "distance(g1,g2)",
-            openmmunit.nanometers,  # distance not energy
-            groups,
-            weighByMass=weighByMass,
-            pbc=True,
-        )
+            # Add COM distance function to measure the distance between the two groups
+            self.com_dist = cvpack.CentroidFunction(
+                "distance(g1,g2)",
+                openmmunit.nanometers,  # distance not energy
+                groups,
+                weighByMass=weighByMass,
+                pbc=True,
+            )
         
-        self.com_dist.setForceGroup(3)  # Use a separate force group for the CV GROUP 3
-        system.addForce(self.com_dist)
+            self.com_dist.setForceGroup(3)  # Use a separate force group for the CV GROUP 3
+            system.addForce(self.com_dist)
+        else:
+            # spring and CV on z; com_force holds only the spring, so dW_protocol never sees the restraint
+            self.com_force = projection_spring(self.projection_params, self.sMD_spring_cte.value_in_unit(
+                openmmunit.kilojoules_per_mole / openmmunit.nanometer**2))
+            self.com_force.setForceGroup(1)
+            system.addForce(self.com_force)
+            self.com_dist = projection_cv(self.projection_params)
+            self.com_dist.setForceGroup(3)
+            system.addForce(self.com_dist)
+            if self.lateral_restraint:
+                funnel = create_funnel_force_from_trajectory_analysis(self.projection_params, axial_walls=False)
+                funnel.setForceGroup(LATERAL_RESTRAINT_FORCE_GROUP)
+                system.addForce(funnel)
 
         simulation.context.reinitialize(preserveState=True)
 
@@ -719,6 +756,80 @@ class SteeredMD:
         logger.info(f"Finished {pulling_direction} sMD simulation in {simulation_time/60:.2f} min.")
 
         return run_id
+
+    def _projection_move_cap(self, simulation, proj, lambda0_nm, z_start_nm, dx_nm, n_moves):
+        """Moves allowed by the PBC half-box along the frame axis and by ``sMD_max_r_offset``.
+
+        z is measured without periodic images, so the pull must end before the ligand
+        crosses half a box from the pocket along any box axis: z_end < (L_i/2)/|n_i| − pbc_safety_nm.
+        """
+        state = simulation.context.getState(getPositions=True)
+        L = self._orthorhombic_box_lengths(state)
+        positions = state.getPositions(asNumpy=True).value_in_unit(openmmunit.nanometers)
+        masses = np.array([simulation.system.getParticleMass(i).value_in_unit(openmmunit.dalton)
+                           for i in range(simulation.system.getNumParticles())])
+        z_geom = projection_z_nm(proj, positions, masses)
+        if abs(z_geom - z_start_nm) > 0.05:
+            raise RuntimeError(
+                f"PBC cap: z={z_geom:.3f} nm differs from cvpack projection z {z_start_nm:.3f} nm. "
+                f"Check that the protein is whole at t=0; cap would be unreliable."
+            )
+        abs_n = np.abs(funnel_axis_at(proj, positions, masses))
+        with np.errstate(divide='ignore'):
+            z_max_per_axis = np.where(abs_n > 1e-6, (L / 2.0) / abs_n, np.inf)
+        z_end_pbc = float(np.min(z_max_per_axis)) - self.pbc_safety_nm
+        z_end = z_end_pbc
+        if self.sMD_max_r_offset > 0:
+            z_end = min(z_end, lambda0_nm + self.sMD_max_r_offset)
+        # largest m with lambda0 + m*dx strictly below z_end
+        moves_safe = math.ceil((z_end - lambda0_nm) / dx_nm) - 1
+        if moves_safe < 1:
+            raise ValueError(f"not supported: lambda0={lambda0_nm:.3f} nm leaves no pull below the "
+                             f"z limit {z_end:.3f} nm (PBC half-box along the axis / sMD_max_r_offset)")
+        if n_moves > moves_safe:
+            if z_end == z_end_pbc:
+                ax = int(np.argmin(z_max_per_axis))
+                reason = (f"PBC axis-{'xyz'[ax]} half-box along n (L={L[ax]:.2f} nm, |n_{'xyz'[ax]}|={abs_n[ax]:.3f}, "
+                          f"safety={self.pbc_safety_nm:.2f} nm)")
+            else:
+                reason = f"lambda0+{self.sMD_max_r_offset:.1f}nm offset"
+            logger.warning(
+                f"Capping sMD_moves {n_moves} → {moves_safe}: planned z_end="
+                f"{lambda0_nm + n_moves * dx_nm:.3f} nm exceeds {reason} limit ({z_end:.6f} nm)."
+            )
+            n_moves = moves_safe
+        return n_moves
+
+    @staticmethod
+    def _orthorhombic_box_lengths(state):
+        """Box edge lengths (nm); warns when the box is triclinic."""
+        box_vecs = state.getPeriodicBoxVectors()
+        box_arr = np.array([[box_vecs[i][j].value_in_unit(openmmunit.nanometers) for j in range(3)]
+                            for i in range(3)])
+        off_diag_max = float(np.abs(box_arr - np.diag(np.diag(box_arr))).max())
+        if off_diag_max > 1e-3:
+            logger.warning(
+                f"PBC move-capping: non-orthorhombic box detected "
+                f"(max off-diagonal element = {off_diag_max:.4f} nm). "
+                f"Minimum-image wrapping assumes orthorhombic geometry and may be incorrect "
+                f"for triclinic boxes."
+            )
+        return np.diag(box_arr)
+
+    def _projection_header(self) -> str:
+        """``# key=value`` header lines of a projection pull."""
+        p = self.projection_params
+        coeffs = ",".join(f"{float(c):.10g}" for c in np.asarray(p["axis_coeffs"], dtype=float))
+        lines = ["cv=projection", f"axis_coeffs={coeffs}",
+                 f"restraint={'funnel' if self.lateral_restraint else 'none'}"]
+        if self.lateral_restraint:
+            ang, deg = openmmunit.angstrom, openmmunit.degrees
+            k_unit = openmmunit.kilocalorie_per_mole / ang**2
+            lines += [f"R_cylinder_ang={p['R_cylinder'].value_in_unit(ang):.10g}",
+                      f"z_cc_ang={p['z_cc'].value_in_unit(ang):.10g}",
+                      f"alpha_deg={p['alpha'].value_in_unit(deg):.10g}",
+                      f"k_xy_kcal_per_mol_per_ang2={p['k_xy'].value_in_unit(k_unit):.10g}"]
+        return "".join(f"# {line}\n" for line in lines)
 
     @staticmethod
     def adapt_speed_from_meff(m_eff_dalton, dx_target_nm=0.01, gammaL_ps=2.0,
