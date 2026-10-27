@@ -396,6 +396,55 @@ def plot_colvar_2D(out_dir, xCV_name, yCV_name):
 # Free energy correction
 # ---------------------------------------------------------------------------
 
+def limongelli_dG(
+    site_G_kJ: np.ndarray,
+    dz_ang: float,
+    R_cyl_ang: float,
+    kT: float,
+    C0_per_A3: float = 1.0 / 1660.0,
+) -> dict:
+    """Limongelli 2013 Eq. 15 standard-state binding free energy.
+
+    ΔG°_b = -kT ln ∫_site exp(-βW) dz − kT ln(πR²_cyl C°).
+
+    Parameters
+    ----------
+    site_G_kJ : np.ndarray
+        Site profile W(z) in kJ/mol on a uniform grid, already zeroed on the
+        unbound reference.
+    dz_ang : float
+        Grid spacing in Å.
+    R_cyl_ang : float
+        Cylinder radius in Å.
+    kT : float
+        kJ/mol.
+    C0_per_A3 : float
+        Standard concentration in Å⁻³ (default 1/1660 = 1 M).
+
+    Returns
+    -------
+    dict
+        ``integral_ang`` (Å), ``dG_basin`` (-kT ln integral), ``correction``
+        (kT ln πR²C°), ``dG_bind_std`` (kJ/mol), ``pKd``.
+    """
+    import math
+
+    # Only the cross-section is analytic; the length comes from the site integral.
+    integral_ang = float(np.trapz(np.exp(-np.asarray(site_G_kJ) / kT), dx=dz_ang))
+    if not integral_ang > 0:
+        raise ValueError("bound-site integral is not positive; cannot take its log")
+    dG_basin = -kT * math.log(integral_ang)
+    correction = kT * math.log(math.pi * R_cyl_ang ** 2 * C0_per_A3)
+    dG_bind_std = dG_basin - correction
+    return {
+        "integral_ang": integral_ang,
+        "dG_basin": dG_basin,
+        "correction": correction,
+        "dG_bind_std": dG_bind_std,
+        "pKd": -dG_bind_std / (kT * math.log(10)),
+    }
+
+
 def correct_fe_for_funnel(
     fe_files: "str | list[str] | np.ndarray",
     funnel_params: dict,
@@ -536,22 +585,18 @@ def correct_fe_for_funnel(
     R_cyl_ang = float(funnel_params["R_cylinder"].value_in_unit(openmmunit.angstrom))
     z_cc_ang = float(funnel_params["z_cc"].value_in_unit(openmmunit.angstrom))
     z_max_ang = float(funnel_params["z_max"].value_in_unit(openmmunit.angstrom))
-    # Limongelli 2013 Eq. 15: K_b = pi*R_cyl^2 * INTEGRAL_site dz exp(-beta W(z)).
-    # Only the cross-section is analytic; the length comes from the site integral.
     d_cv = (grid_max - grid_min) / max(1, len(fe_norm) - 1)
-    site = fe_norm[:bound_bins]
-    integral_ang = float(np.trapz(np.exp(-site / kT), dx=d_cv)
-                         * cv_length_per_unit_ang)
-    if integral_ang <= 0:
-        raise ValueError("bound-site integral is not positive; cannot take its log")
-    dG_basin = -kT * math.log(integral_ang)          # = -kT ln INTEGRAL_site
-    correction = kT * math.log(math.pi * R_cyl_ang ** 2 * C0_per_A3)
-    dG_bind_std = dG_basin - correction
+    res = limongelli_dG(fe_norm[:bound_bins], d_cv * cv_length_per_unit_ang,
+                        R_cyl_ang, kT, C0_per_A3)
+    integral_ang = res["integral_ang"]
+    dG_basin = res["dG_basin"]
+    correction = res["correction"]
+    dG_bind_std = res["dG_bind_std"]
 
     # Normalised FES shifted so its minimum sits at ΔG°_b.
     fe_rw = fe_norm + (dG_bind_std - dG_bind_sim)
     L_cyl_ang = z_max_ang - z_cc_ang
-    pKd = -dG_bind_std / (kT * math.log(10))
+    pKd = res["pKd"]
 
     (logger.info if verbose else logger.debug)(
         "Funnel correction (Limongelli Eq. 15): well depth %.2f, basin integral "
