@@ -11,6 +11,7 @@ MASSES = np.array([12.0, 14.0, 16.0, 12.0, 12.0, 15.0, 13.0, 14.0])
 AXIS = np.array([0.3, -0.5, 0.8]) / np.linalg.norm([0.3, -0.5, 0.8])
 BOX_NM = 6.0
 LIGAND_BOND_NM = 0.15
+TETHER_K = 50.0   # kJ/mol/nm^2: keeps the free ligand near the pocket, weak next to the pull spring
 
 
 def com(pos, idx):
@@ -46,9 +47,12 @@ def z_input():
     return float(AXIS @ (com(positions(), LIGAND) - com(positions(), POCKET)))
 
 
-def smd_system(tmp_path):
-    """(System, Topology, pdb path): stiff protein bonds, one ligand bond, nothing between them."""
-    p = positions()
+def smd_system(tmp_path, p=None):
+    """(System, Topology, pdb path): stiff protein bonds, one ligand bond, a weak ligand-pocket COM tether.
+
+    All bonds use periodic images, so ``p`` may place particles one box vector away.
+    """
+    p = positions() if p is None else p
     s = mm.System()
     box = [mm.Vec3(*(BOX_NM * np.eye(3)[i])) for i in range(3)]
     s.setDefaultPeriodicBoxVectors(*box)
@@ -61,7 +65,15 @@ def smd_system(tmp_path):
             if i < j:
                 bonds.addBond(i, j, float(np.linalg.norm(p[i] - p[j])), 1.0e4)
     bonds.addBond(*LIGAND, LIGAND_BOND_NM, 1.0e4)
+    bonds.setUsesPeriodicBoundaryConditions(True)
     s.addForce(bonds)
+    tether = mm.CustomCentroidBondForce(2, "0.5*k_tether*distance(g1,g2)^2")
+    tether.addGlobalParameter("k_tether", TETHER_K)
+    tether.addGroup(POCKET, [float(m) for m in MASSES[POCKET]])
+    tether.addGroup(LIGAND, [float(m) for m in MASSES[LIGAND]])
+    tether.addBond([0, 1], [])
+    tether.setUsesPeriodicBoundaryConditions(True)
+    s.addForce(tether)
 
     top = app.Topology()
     chain = top.addChain()

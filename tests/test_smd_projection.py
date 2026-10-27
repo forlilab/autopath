@@ -153,6 +153,8 @@ def test_pbc_cap_along_axis(tmp_path, caplog):
     msg = [r.getMessage() for r in caplog.records if "Capping sMD_moves" in r.getMessage()]
     assert len(msg) == 1
     z_end_max = float(re.search(r"limit \(([-0-9.]+) nm\)", msg[0]).group(1))
+    n_ax = float(re.search(r"\|n_[xyz]\|=([0-9.]+)", msg[0]).group(1))
+    assert z_end_max == pytest.approx((L / 2) / n_ax - safety, abs=1e-3)
     assert L / 2 - safety <= z_end_max <= np.sqrt(3) * L / 2 - safety
     assert len(d) < round(max_disp / DX)
     assert d.r_target.iloc[-1] < z_end_max
@@ -172,3 +174,48 @@ def test_distance_mode_header(tmp_path):
     p = toy.positions()
     r_in = np.linalg.norm(toy.com(p, toy.LIGAND) - toy.com(p, toy.POCKET))
     assert m["lambda0_nm"] == pytest.approx(r_in, abs=1e-3)
+
+
+def _group10(smd):
+    sim = smd._last_simulation
+    return sim, [f for f in sim.system.getForces() if f.getForceGroup() == 10]
+
+
+def test_lateral_restraint_acts(tmp_path):
+    # start 0.3 nm off the axis, in a needle-thin funnel: the walls must push the whole time
+    p = toy.positions()
+    off = np.cross(toy.AXIS, [1.0, 0.0, 0.0])
+    p[toy.LIGAND] += 0.3 * off / np.linalg.norm(off)
+    system, top, pdb = toy.smd_system(tmp_path, p)
+    proj = toy.params(R_cylinder_ang=0.0, alpha_deg=0.01)
+    smd = _smd(tmp_path, system, top, proj=proj, lateral=True, max_displacement=0.005)
+    smd.run(pulling_speed=0.01, run_id="1", pdb_file=pdb)
+    sim, forces = _group10(smd)
+    assert len(forces) == 1
+    names = {forces[0].getGlobalParameterName(i) for i in range(forces[0].getNumGlobalParameters())}
+    assert "k_xy" in names and not names & {"k_z", "z_max", "z_low"}
+    e = sim.context.getState(getEnergy=True, groups={10}).getPotentialEnergy()
+    assert e.value_in_unit(e.unit) > 0.0
+
+    smd = _smd(tmp_path / "free", system, top, proj=proj, max_displacement=0.005)
+    smd.run(pulling_speed=0.01, run_id="1", pdb_file=pdb)
+    assert _group10(smd)[1] == []
+
+
+@pytest.mark.parametrize("group, where", [(toy.POCKET, "pocket"), (toy.LIGAND, "ligand-pocket")])
+def test_split_group_refused(tmp_path, group, where):
+    p = toy.positions()
+    if where == "pocket":
+        p[group[1]] += [toy.BOX_NM, 0.0, 0.0]    # one pocket particle in the next image
+    else:
+        p[group] += [0.0, toy.BOX_NM, 0.0]       # the whole ligand in the next image
+    system, top, pdb = toy.smd_system(tmp_path, p)
+    smd = _smd(tmp_path, system, top, proj=toy.params(), max_displacement=0.005, sMD_max_r_offset=0.0)
+    with pytest.raises(RuntimeError, match=where):
+        smd.run(pulling_speed=0.01, run_id="1", pdb_file=pdb)
+
+
+def test_positional_restraints_not_supported(tmp_path):
+    system, top, _ = toy.smd_system(tmp_path)
+    with pytest.raises(ValueError, match="^not supported: positional restraints"):
+        _smd(tmp_path, system, top, proj=toy.params(), restrained_atoms=[4, 5])
