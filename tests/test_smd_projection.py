@@ -208,7 +208,11 @@ def test_rhombic_dodecahedron_wide_frame_groups(tmp_path, caplog):
     assert np.linalg.norm(n) == pytest.approx(1.0, abs=1e-9)
     expected = _lattice_limit(n, toy.RD_BOX)
     assert z_end_max == pytest.approx(expected - safety, abs=1e-6)
-    T_vec = np.asarray(T) @ toy.RD_BOX
+    # T is reported in the box vectors of the run, which OpenMM reduces (same lattice as RD_BOX)
+    run_box = openmm.app.PDBFile(pdb).topology.getPeriodicBoxVectors()
+    run_box = np.array(run_box.value_in_unit(openmm.unit.nanometer))
+    assert _lattice_limit(n, run_box) == pytest.approx(expected, abs=1e-9)
+    T_vec = np.asarray(T) @ run_box
     assert T_vec @ T_vec / (2 * abs(n @ T_vec)) == pytest.approx(expected, abs=1e-6)
     assert d.r_target.iloc[-1] < z_end_max < d.r_target.iloc[-1] + 2 * DX
 
