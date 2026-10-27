@@ -1032,6 +1032,7 @@ def load_funnel_params(filepath: str) -> Dict:
 def create_funnel_force_from_trajectory_analysis(
     params_dict: Dict,
     system: System = None,
+    axial_walls: bool = True,
 ) -> CustomCentroidBondForce:
     """
     Create a funnel force from trajectory analysis parameters.
@@ -1042,6 +1043,8 @@ def create_funnel_force_from_trajectory_analysis(
         Dictionary returned by `generate_funnel_parameters_from_trajectory`
     system : System, optional
         If provided, the force is also added to it.
+    axial_walls : bool, optional
+        False keeps only the lateral cone/cylinder walls (no ``z_max`` and ``z_low`` walls).
 
     Returns
     -------
@@ -1076,15 +1079,16 @@ def create_funnel_force_from_trajectory_analysis(
     orient = is_orient_frame(frame)
 
     # r_z, r_xy are relative to the unbinding axis (nx, ny, nz).
+    # z_max is a harmonic wall (U_axial), not a switch: gating the cylinder off
+    # beyond z_max would free the guest and make the energy discontinuous.
+    axial = ("U_axial = step(r_z - z_max)*0.5*k_z*(r_z - z_max)^2;"
+             "U_lower = step(z_low - r_z)*0.5*k_z*(z_low - r_z)^2;")
     expression = (
-        # z_max is a harmonic wall (U_axial), not a switch: gating the cylinder off
-        # beyond z_max would free the guest and make the energy discontinuous.
-        "U_funnel + U_cylinder + U_axial + U_lower;"
-        "U_funnel = step(z_cc - r_z)*step(r_xy - R_funnel)*Wall_funnel;"
+        ("U_funnel + U_cylinder + U_axial + U_lower;" if axial_walls else "U_funnel + U_cylinder;")
+        + "U_funnel = step(z_cc - r_z)*step(r_xy - R_funnel)*Wall_funnel;"
         "U_cylinder = step(r_z - z_cc)*step(r_xy - R_cylinder)*Wall_cylinder;"
-        "U_axial = step(r_z - z_max)*0.5*k_z*(r_z - z_max)^2;"
-        "U_lower = step(z_low - r_z)*0.5*k_z*(z_low - r_z)^2;"
-        "Wall_funnel = 0.5 * k_xy * (r_xy - R_funnel)^2;"
+        + (axial if axial_walls else "")
+        + "Wall_funnel = 0.5 * k_xy * (r_xy - R_funnel)^2;"
         "Wall_cylinder = 0.5 * k_xy * (r_xy - R_cylinder)^2;"
         # the cone keeps widening below z=0, down to the lower wall (as in FMAP)
         "R_funnel = max(z_cc-r_z, 0)*tan(alpha) + R_cylinder;"
@@ -1113,10 +1117,12 @@ def create_funnel_force_from_trajectory_analysis(
     funnel.setForceGroup(force_group)
 
     funnel.addGlobalParameter("k_xy", k_xy)
-    funnel.addGlobalParameter("k_z", k_z)
+    if axial_walls:
+        funnel.addGlobalParameter("k_z", k_z)
     funnel.addGlobalParameter("z_cc", z_cc)
-    funnel.addGlobalParameter("z_max", z_max)
-    funnel.addGlobalParameter("z_low", z_low)
+    if axial_walls:
+        funnel.addGlobalParameter("z_max", z_max)
+        funnel.addGlobalParameter("z_low", z_low)
     funnel.addGlobalParameter("alpha", alpha)
     funnel.addGlobalParameter("R_cylinder", R_cylinder)
     # empty weights: mass-weighted centroids, as funnel z and the funnel geometry
