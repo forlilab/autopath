@@ -146,12 +146,13 @@ def projection_z_nm(params, positions_nm, masses) -> float:
 
 
 def axis_from_pulls(universe, ligand_idx, pocket_idx, ligand_bulk_idx, frames=None, z_cc_percentile=95.0,
-                    bulk_cutoff_ang=10.0) -> dict:
+                    bulk_cutoff_ang=10.0, protein_idx=None) -> dict:
     """Pull axis, z_cc and z_max from existing pull trajectories.
 
     z is measured with the pulled groups (mass-weighted COMs, origin at the pocket COM). z_max is the
     pulled-group z once the whole ligand, moved rigidly along the axis from the first frame, clears
-    ``bulk_cutoff_ang`` from all atoms outside ``ligand_bulk_idx``.
+    ``bulk_cutoff_ang`` from the protein atoms. Trajectories must be imaged and whole: a pulled-group COM
+    step above half the smallest box length raises (checked only when the universe has box dimensions).
 
     Parameters
     ----------
@@ -159,18 +160,25 @@ def axis_from_pulls(universe, ligand_idx, pocket_idx, ligand_bulk_idx, frames=No
     ligand_idx, pocket_idx : list of int
         Atom indices of the pulled ligand and pocket groups.
     ligand_bulk_idx : list of int
-        Atom indices of the whole ligand.
+        Atom indices of the whole ligand; ``ligand_idx`` must be a subset.
     frames : sequence of int, optional
         Frames of one path; all frames if None.
     z_cc_percentile : float
         Percentile of the pulled-group z that sets z_cc.
     bulk_cutoff_ang : float
         Clearance from the protein (Å).
+    protein_idx : list of int, optional
+        Atoms the ligand must clear; default ``universe.select_atoms("protein")``. Ligand atoms are removed.
 
     Returns
     -------
     dict
         ``unbinding_axis`` (bound -> unbound), ``z_cc_ang``, ``z_max_ang``.
+
+    Raises
+    ------
+    ValueError
+        "not supported: ..." for <2 frames, no protein atoms, an unimaged jump, or ``z_max_ang <= z_cc_ang``.
     """
     frames = list(range(universe.trajectory.n_frames)) if frames is None else [int(f) for f in frames]
     if len(frames) < 2:
@@ -184,15 +192,31 @@ def axis_from_pulls(universe, ligand_idx, pocket_idx, ligand_bulk_idx, frames=No
         g.append(lig.center_of_mass())
         h.append(pocket.center_of_mass())
     g, h = np.array(g), np.array(h)
+    box = universe.trajectory[frames[0]].dimensions
+    if box is not None and box[:3].min() > 0:
+        limit = 0.5 * float(box[:3].min())
+        step = max(np.linalg.norm(np.diff(g, axis=0), axis=1).max(), np.linalg.norm(np.diff(h, axis=0), axis=1).max())
+        if step > limit:
+            raise ValueError(f"not supported: pulled-group COM step {step:.1f} A exceeds half the box "
+                             f"({limit:.1f} A); the trajectory must be imaged and whole")
     axis = pca_unbinding_axis(g, h)
     z = (g - h) @ axis
     z_cc = float(np.percentile(z, z_cc_percentile))
 
+    if protein_idx is None:
+        protein = universe.select_atoms("protein")
+    else:
+        protein = universe.atoms[list(protein_idx)]
+    protein = protein - bulk
+    if protein.n_atoms == 0:
+        raise ValueError("not supported: no protein atoms to clear for z_max")
     universe.trajectory[frames[0]]
     host_com = h[0]
-    # clearance is from every atom outside the ligand
-    protein_sel = "not index " + " ".join(str(int(i)) for i in ligand_bulk_idx)
+    sel = "index " + " ".join(str(int(i)) for i in protein.indices)
     z_bulk = z_where_guest_reaches_bulk(universe, bulk, host_com, axis, cutoff_ang=bulk_cutoff_ang,
-                                        protein_selection=protein_sel)
+                                        protein_selection=sel)
     dz = z_bulk - float(np.dot(bulk.center_of_mass() - host_com, axis))
-    return {"unbinding_axis": axis, "z_cc_ang": z_cc, "z_max_ang": float(z[0] + dz)}
+    z_max = float(z[0] + dz)
+    if z_max <= z_cc:
+        raise ValueError(f"not supported: z_max ({z_max:.2f} A) is not beyond z_cc ({z_cc:.2f} A)")
+    return {"unbinding_axis": axis, "z_cc_ang": z_cc, "z_max_ang": z_max}
