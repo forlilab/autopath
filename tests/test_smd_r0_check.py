@@ -42,6 +42,7 @@ def test_raises_when_cvpack_cv_disagrees_with_geometry(tmp_path, monkeypatch):
         steps_per_move=1,
         save_freq=1,
         sMD_max_r_offset=3.0,
+        projection_params=None,
         pbc_safety_nm=0.5,
         groupA_atoms=[0],
         groupB_atoms=[1],

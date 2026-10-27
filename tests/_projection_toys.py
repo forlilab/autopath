@@ -50,7 +50,8 @@ def z_input():
 def smd_system(tmp_path, p=None):
     """(System, Topology, pdb path): stiff protein bonds, one ligand bond, a weak ligand-pocket COM tether.
 
-    All bonds use periodic images, so ``p`` may place particles one box vector away.
+    All bonds use periodic images, so ``p`` may place particles one box vector away. The topology bonds
+    each group's two atoms, so each group is one molecule.
     """
     p = positions() if p is None else p
     s = mm.System()
@@ -84,8 +85,87 @@ def smd_system(tmp_path, p=None):
         elif i == FRAME_B[0]:
             res = top.addResidue("PRT", chain)
         top.addAtom(f"C{i}", app.element.carbon, res)
+    atoms = list(top.atoms())
+    for g in (POCKET, LIGAND, FRAME_B, FRAME_C):
+        top.addBond(atoms[g[0]], atoms[g[1]])
     top.setPeriodicBoxVectors(box)
     pdb = tmp_path / "start.pdb"
+    with open(pdb, "w") as fh:
+        app.PDBFile.writeFile(top, p * u.nanometers, fh)
+    return s, top, str(pdb)
+
+
+# Rhombic dodecahedron (OpenMM reduced form): a, b, c all of length RD_L, half the box diagonal along z is
+# RD_L/sqrt(2)/2; the frame groups are chains spanning more than that.
+RD_L = 4.0
+RD_BOX = np.array([[RD_L, 0.0, 0.0], [0.0, RD_L, 0.0], [RD_L / 2, RD_L / 2, RD_L / np.sqrt(2)]])
+RD_CHAIN_N, RD_CHAIN_DZ = 7, 0.25
+RD_POCKET, RD_LIGAND = [0, 1], [2, 3]
+RD_FRAME_B = list(range(4, 4 + RD_CHAIN_N))
+RD_FRAME_C = list(range(4 + RD_CHAIN_N, 4 + 2 * RD_CHAIN_N))
+RD_MASSES = np.full(4 + 2 * RD_CHAIN_N, 12.0)
+
+
+def rd_positions():
+    """Pocket at the box centre, ligand 0.4 nm up AXIS, two frame chains along z beside the pocket."""
+    centre = RD_BOX.sum(axis=0) / 2
+    p = np.zeros((len(RD_MASSES), 3))
+    p[0], p[1] = centre, centre + [0.1, -0.1, 0.05]
+    lig = 0.5 * (p[0] + p[1]) + 0.4 * AXIS
+    p[2], p[3] = lig + [0.075, 0.0, 0.0], lig - [0.075, 0.0, 0.0]
+    chain = (np.arange(RD_CHAIN_N) - (RD_CHAIN_N - 1) / 2) * RD_CHAIN_DZ
+    for idx, off in ((RD_FRAME_B, [1.0, 0.2, 0.0]), (RD_FRAME_C, [0.2, 1.0, 0.0])):
+        p[idx] = centre + np.asarray(off) + np.outer(chain, [0.0, 0.0, 1.0])
+    return p
+
+
+def rd_params(p=None):
+    """Protein-frame params on the rhombic-dodecahedron toy, axis = AXIS at ``p``."""
+    p = rd_positions() if p is None else p
+    c = lambda idx: np.average(p[idx], axis=0, weights=RD_MASSES[idx])
+    coeffs = frame_basis(c(RD_POCKET), c(RD_FRAME_B), c(RD_FRAME_C)) @ AXIS
+    return {"unbinding_axis": AXIS, "host_index": RD_POCKET, "guest_index": RD_LIGAND,
+            "frame_b_index": RD_FRAME_B, "frame_c_index": RD_FRAME_C, "axis_coeffs": coeffs,
+            "k_xy": 10.0 * u.kilocalorie_per_mole / u.angstrom**2, "z_cc": 6.0 * u.angstrom,
+            "z_max": 12.0 * u.angstrom, "alpha": 45.0 * u.degrees, "R_cylinder": 2.0 * u.angstrom}
+
+
+def rd_smd_system(tmp_path):
+    """(System, Topology, pdb path) of the rhombic-dodecahedron toy: a rigid protein (non-periodic
+    all-pairs bonds, longer than half the box), a bonded two-atom ligand and the COM tether."""
+    p = rd_positions()
+    s = mm.System()
+    box = [mm.Vec3(*RD_BOX[i]) for i in range(3)]
+    s.setDefaultPeriodicBoxVectors(*box)
+    for m in RD_MASSES:
+        s.addParticle(float(m))
+    rigid = mm.HarmonicBondForce()
+    protein = RD_POCKET + RD_FRAME_B + RD_FRAME_C
+    for a, i in enumerate(protein):
+        for j in protein[a + 1:]:
+            rigid.addBond(i, j, float(np.linalg.norm(p[i] - p[j])), 2.0e3)
+    rigid.addBond(*RD_LIGAND, LIGAND_BOND_NM, 1.0e4)
+    rigid.setUsesPeriodicBoundaryConditions(False)
+    s.addForce(rigid)
+    tether = mm.CustomCentroidBondForce(2, "0.5*k_tether*distance(g1,g2)^2")
+    tether.addGlobalParameter("k_tether", TETHER_K)
+    tether.addGroup(RD_POCKET, [float(m) for m in RD_MASSES[RD_POCKET]])
+    tether.addGroup(RD_LIGAND, [float(m) for m in RD_MASSES[RD_LIGAND]])
+    tether.addBond([0, 1], [])
+    tether.setUsesPeriodicBoundaryConditions(True)
+    s.addForce(tether)
+
+    top = app.Topology()
+    chain = top.addChain()
+    atoms = []
+    for name, idx in (("PRT", RD_POCKET), ("LIG", RD_LIGAND), ("PRT", RD_FRAME_B), ("PRT", RD_FRAME_C)):
+        res = top.addResidue(name, chain)
+        atoms += [top.addAtom(f"C{i}", app.element.carbon, res) for i in idx]
+    for idx in (RD_POCKET, RD_LIGAND, RD_FRAME_B, RD_FRAME_C):
+        for i, j in zip(idx[:-1], idx[1:]):
+            top.addBond(atoms[i], atoms[j])
+    top.setPeriodicBoxVectors(box)
+    pdb = tmp_path / "rd_start.pdb"
     with open(pdb, "w") as fh:
         app.PDBFile.writeFile(top, p * u.nanometers, fh)
     return s, top, str(pdb)

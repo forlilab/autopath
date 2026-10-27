@@ -11,7 +11,8 @@ from datetime import datetime
 from autopath.utils import *
 from autopath.customForces import (add_harmonic_restraints, remove_openmm_force)
 from autopath.metadynamics.Funnel import create_funnel_force_from_trajectory_analysis, funnel_axis_at
-from autopath.pulling.projection import (check_projection_params, projection_cv, projection_spring,
+from autopath.pulling.projection import (check_projection_groups_whole, check_projection_params,
+                                         frame_index_sha1, projection_cv, projection_pbc_limit, projection_spring,
                                          projection_z_nm)
 
 from openmm.app import *
@@ -90,7 +91,9 @@ class SteeredMD:
     protein frame every step. ``lateral_restraint`` adds the funnel cone/cylinder walls
     without axial walls. Pull groups with one atom (e.g. a massless dummy, which distance
     mode handles without mass weighting), positional restraints and backward pulls are
-    not supported. The PBC move cap uses n measured at the pull start.
+    not supported. The groups must be whole and in one periodic image when the forces are added
+    (see :func:`check_projection_groups_whole`). The PBC move cap uses n measured at the pull start and
+    the box lattice (:func:`projection_pbc_limit`), so triclinic boxes are handled.
     """
 
     def __init__(
@@ -226,7 +229,7 @@ class SteeredMD:
         ``autostop_min_displacement``.
 
         In projection mode (``projection_params``) r is the projection z: the r_* columns hold z,
-        the PBC cap bounds the pull end by the half-box along the frame axis n, and the
+        the PBC cap bounds the pull end by the box lattice along the frame axis n, and the
         cvpack check compares z with :func:`projection_z_nm`.
 
         Output
@@ -254,7 +257,7 @@ class SteeredMD:
         coordinate deconvolution uses the equilibrium lag ``Feq/k`` instead.
         """
                     
-        proj = getattr(self, "projection_params", None)
+        proj = self.projection_params
         if proj is not None and direction == "backward":
             raise ValueError("not supported: backward pulls in projection mode")
 
@@ -296,7 +299,7 @@ class SteeredMD:
         dx_nm = float(self.dx_per_move.value_in_unit(openmmunit.nanometers))
         n_moves = self.sMD_moves
         if proj is not None:
-            n_moves = self._projection_move_cap(simulation, proj, initial_r0_nm, r_start_nm, dx_nm, n_moves)
+            n_moves = self._projection_move_cap(simulation, initial_r0_nm, dx_nm, n_moves)
         elif direction == "forward" and self.sMD_max_r_offset > 0:
             state    = simulation.context.getState(getPositions=True)
             L = SteeredMD._orthorhombic_box_lengths(state)
@@ -405,7 +408,7 @@ class SteeredMD:
             if proj is None:
                 f.write("# cv=distance\n")
             else:
-                f.write(self._projection_header())
+                f.write(self._projection_header(initial_r0_nm + n_moves * dx_nm))
             f.write("step,time,r_target,r_before,r_after,force,force_sem,U_cvpack,dW_protocol\n")
 
             # Loop over the number of moves
@@ -748,6 +751,8 @@ class SteeredMD:
                 system.addForce(funnel)
 
         simulation.context.reinitialize(preserveState=True)
+        if self.projection_params is not None:
+            self._check_projection_start(simulation)
 
         # Jarzynski/HS need every replica to start equilibrated with the spring at one shared lambda0
         # and to follow the same schedule, so the spring is on during the pre-pull run.
@@ -759,7 +764,6 @@ class SteeredMD:
         simulation.step(int(round(50 / self.timestep.value_in_unit(openmmunit.picoseconds))))  # 50 ps
         simulation.context.setTime(0)
         simulation.context.setStepCount(0)
-        self._last_simulation = simulation  # for inspection of the built system
 
         # Run the actual pulling
         self.pull_single_direction(simulation, run_id, direction=pulling_direction, lambda0=lambda0)
@@ -770,29 +774,36 @@ class SteeredMD:
 
         return run_id
 
-    def _projection_move_cap(self, simulation, proj, lambda0_nm, z_start_nm, dx_nm, n_moves):
-        """Moves allowed by the PBC half-box along the frame axis and by ``sMD_max_r_offset``.
+    def _check_projection_start(self, simulation):
+        """Check the projection groups are whole and the cvpack z matches numpy; return (z, n, box).
 
-        z is measured without periodic images, so the pull must end before the ligand
-        crosses half a box from the pocket along any box axis: z_end < (L_i/2)/|n_i| − pbc_safety_nm,
-        with n the frame axis at the pull start. Raises RuntimeError when a group is split
-        across periodic images (see :meth:`_check_projection_groups_whole`).
+        Raises RuntimeError on a split group (:func:`check_projection_groups_whole`) or a
+        cvpack/numpy z mismatch above 0.05 nm.
         """
+        proj = self.projection_params
         state = simulation.context.getState(getPositions=True)
-        L = self._orthorhombic_box_lengths(state)
+        box = np.array(state.getPeriodicBoxVectors().value_in_unit(openmmunit.nanometers), dtype=float)
         positions = state.getPositions(asNumpy=True).value_in_unit(openmmunit.nanometers)
         masses = np.array([simulation.system.getParticleMass(i).value_in_unit(openmmunit.dalton)
                            for i in range(simulation.system.getNumParticles())])
-        self._check_projection_groups_whole(proj, positions, masses, L)
+        check_projection_groups_whole(proj, positions, masses, box, self.topology)
+        z_cv = self.com_dist.getValue(simulation.context, allowReinitialization=False).value_in_unit(
+            openmmunit.nanometers)
         z_geom = projection_z_nm(proj, positions, masses)
-        if abs(z_geom - z_start_nm) > 0.05:
-            raise RuntimeError(
-                f"PBC cap: z={z_geom:.3f} nm differs from cvpack projection z {z_start_nm:.3f} nm."
-            )
-        abs_n = np.abs(funnel_axis_at(proj, positions, masses))
-        with np.errstate(divide='ignore'):
-            z_max_per_axis = np.where(abs_n > 1e-6, (L / 2.0) / abs_n, np.inf)
-        z_end_pbc = float(np.min(z_max_per_axis)) - self.pbc_safety_nm
+        if abs(z_geom - z_cv) > 0.05:
+            raise RuntimeError(f"projection pull: z={z_geom:.3f} nm differs from cvpack projection z {z_cv:.3f} nm.")
+        return z_cv, funnel_axis_at(proj, positions, masses), box
+
+    def _projection_move_cap(self, simulation, lambda0_nm, dx_nm, n_moves):
+        """Moves allowed by the box lattice along the frame axis and by ``sMD_max_r_offset``.
+
+        z is measured without periodic images, so the pull must end before the ligand leaves the
+        pocket's periodic cell: z_end < :func:`projection_pbc_limit` − pbc_safety_nm, with n the frame
+        axis at the pull start. Re-runs :meth:`_check_projection_start`.
+        """
+        _, n, box = self._check_projection_start(simulation)
+        z_lattice, ijk = projection_pbc_limit(n, box)
+        z_end_pbc = z_lattice - self.pbc_safety_nm
         z_end = z_end_pbc
         if self.sMD_max_r_offset > 0:
             z_end = min(z_end, lambda0_nm + self.sMD_max_r_offset)
@@ -800,45 +811,20 @@ class SteeredMD:
         moves_safe = math.ceil((z_end - lambda0_nm) / dx_nm) - 1
         if moves_safe < 1:
             raise ValueError(f"not supported: lambda0={lambda0_nm:.3f} nm leaves no pull below the "
-                             f"z limit {z_end:.3f} nm (PBC half-box along the axis / sMD_max_r_offset)")
+                             f"z limit {z_end:.3f} nm (PBC lattice along the axis / sMD_max_r_offset)")
         if n_moves > moves_safe:
             if z_end == z_end_pbc:
-                ax = int(np.argmin(z_max_per_axis))
-                reason = (f"PBC axis-{'xyz'[ax]} half-box along n (L={L[ax]:.2f} nm, |n_{'xyz'[ax]}|={abs_n[ax]:.6f}, "
-                          f"safety={self.pbc_safety_nm:.2f} nm)")
+                reason = (f"PBC lattice vector T=({ijk[0]},{ijk[1]},{ijk[2]}) in (a,b,c) along "
+                          f"n=({n[0]:.12g},{n[1]:.12g},{n[2]:.12g}): |T|^2/(2|n.T|)={z_lattice:.9f} nm, "
+                          f"safety={self.pbc_safety_nm:.2f} nm,")
             else:
                 reason = f"lambda0+{self.sMD_max_r_offset:.1f}nm offset"
             logger.warning(
                 f"Capping sMD_moves {n_moves} → {moves_safe}: planned z_end="
-                f"{lambda0_nm + n_moves * dx_nm:.3f} nm exceeds {reason} limit ({z_end:.6f} nm)."
+                f"{lambda0_nm + n_moves * dx_nm:.3f} nm exceeds {reason} limit ({z_end:.9f} nm)."
             )
             n_moves = moves_safe
         return n_moves
-
-    @staticmethod
-    def _check_projection_groups_whole(proj, positions_nm, masses, L, tol_nm=0.05):
-        """Raise RuntimeError if a projection group is split across periodic images.
-
-        The projection centroids use no periodic images, so each group must span less than half
-        a box on every axis, and each COM−COM vector (ligand, frame b, frame c to the pocket)
-        must equal its minimum image within ``tol_nm``.
-        """
-        groups = {"pocket": proj["host_index"], "ligand": proj["guest_index"],
-                  "frame_b": proj["frame_b_index"], "frame_c": proj["frame_c_index"]}
-        coms = {}
-        for name, idx in groups.items():
-            idx = [int(i) for i in idx]
-            extent = np.ptp(positions_nm[idx], axis=0)
-            if np.any(extent >= L / 2.0):
-                raise RuntimeError(f"projection pull: {name} group spans {np.round(extent, 3)} nm, "
-                                   f">= half the box {np.round(L / 2.0, 3)}: split across periodic images")
-            coms[name] = np.average(positions_nm[idx], axis=0, weights=masses[idx])
-        for name in ("ligand", "frame_b", "frame_c"):
-            d = coms[name] - coms["pocket"]
-            d_min = d - np.round(d / L) * L
-            if np.linalg.norm(d - d_min) > tol_nm:
-                raise RuntimeError(f"projection pull: {name}-pocket COM vector {np.round(d, 3)} nm is not "
-                                   f"its minimum image {np.round(d_min, 3)} nm: groups in different images")
 
     @staticmethod
     def _orthorhombic_box_lengths(state):
@@ -856,11 +842,13 @@ class SteeredMD:
             )
         return np.diag(box_arr)
 
-    def _projection_header(self) -> str:
-        """``# key=value`` header lines of a projection pull."""
+    def _projection_header(self, z_end_planned_nm) -> str:
+        """``# key=value`` header lines of a projection pull ending at ``z_end_planned_nm`` (nm)."""
         p = self.projection_params
         coeffs = ",".join(f"{float(c):.10g}" for c in np.asarray(p["axis_coeffs"], dtype=float))
-        lines = ["cv=projection", f"axis_coeffs={coeffs}",
+        lines = ["cv=projection", f"axis_coeffs={coeffs}", f"z_end_planned_nm={z_end_planned_nm:.10g}",
+                 f"frame_b_n={len(p['frame_b_index'])}", f"frame_c_n={len(p['frame_c_index'])}",
+                 f"frame_index_sha1={frame_index_sha1(p)}",
                  f"restraint={'funnel' if self.lateral_restraint else 'none'}"]
         if self.lateral_restraint:
             ang, deg = openmmunit.angstrom, openmmunit.degrees

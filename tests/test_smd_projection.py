@@ -1,6 +1,10 @@
 """SteeredMD projection mode: pull z = n·(COM_ligand − COM_pocket) in the protein frame."""
+import gc
+import hashlib
+import itertools
 import logging
 import re
+import weakref
 
 import numpy as np
 import openmm
@@ -8,6 +12,7 @@ import pandas as pd
 import pytest
 
 from autopath.pulling.SMDData import SMDData
+from autopath.pulling.projection import triclinic_minimum_image
 from autopath.pulling.steered_md import SteeredMD
 from tests import _projection_toys as toy
 
@@ -96,6 +101,12 @@ def test_header_restraint_fields(tmp_path):
     assert m["z_cc_ang"] == pytest.approx(7.0)
     assert m["alpha_deg"] == pytest.approx(30.0)
     assert m["k_xy_kcal_per_mol_per_ang2"] == pytest.approx(5.0)
+    d = _read(smd, "replica-1_v0.01_forward")[0]
+    assert m["z_end_planned_nm"] == pytest.approx(d.r_target.iloc[-1], abs=1e-9)
+    assert m["z_end_planned_nm"] == pytest.approx(m["lambda0_nm"] + 5 * DX, abs=1e-9)
+    assert m["frame_b_n"] == len(toy.FRAME_B) and m["frame_c_n"] == len(toy.FRAME_C)
+    key = f"b={','.join(map(str, sorted(toy.FRAME_B)))};c={','.join(map(str, sorted(toy.FRAME_C)))}"
+    assert m["frame_index_sha1"] == hashlib.sha1(key.encode()).hexdigest()
 
     smd = _smd(tmp_path / "free", system, top, proj=p, max_displacement=0.005)
     rid = smd.run(pulling_speed=0.01, run_id="1", pdb_file=pdb)
@@ -141,24 +152,75 @@ def test_lateral_restraint_without_params_not_supported(tmp_path):
         _smd(tmp_path, system, top, lateral=True)
 
 
+def _lattice_limit(n, box):
+    vals = []
+    for i, j, k in itertools.product((-1, 0, 1), repeat=3):
+        T = i * box[0] + j * box[1] + k * box[2]
+        if (i, j, k) != (0, 0, 0) and abs(n @ T) > 1e-12:
+            vals.append(T @ T / (2 * abs(n @ T)))
+    return min(vals)
+
+
+def _cap_message(caplog):
+    msg = [r.getMessage() for r in caplog.records if "Capping sMD_moves" in r.getMessage()]
+    assert len(msg) == 1
+    z_end_max = float(re.search(r"limit \(([-0-9.]+) nm\)", msg[0]).group(1))
+    n = np.array([float(x) for x in re.search(r"n=\(([^)]*)\)", msg[0]).group(1).split(",")])
+    T = [int(x) for x in re.search(r"T=\(([^)]*)\)", msg[0]).group(1).split(",")]
+    return z_end_max, n, T
+
+
 def test_pbc_cap_along_axis(tmp_path, caplog):
     system, top, pdb = toy.smd_system(tmp_path)
     L, safety, max_disp = toy.BOX_NM, 2.5, 2.4
-    # the protein tumbles in the 50 ps, so n is unknown: min_i (L/2)/|n_i| lies in [L/2, sqrt(3) L/2]
+    # the protein tumbles in the 50 ps, so n is unknown: the cap lies in [L/2, sqrt(3) L/2]
     assert toy.z_input() + max_disp > np.sqrt(3) * L / 2 - safety
     smd = _smd(tmp_path, system, top, proj=toy.params(), max_displacement=max_disp, pbc_safety_nm=safety)
     with caplog.at_level(logging.WARNING, logger="autopath"):
         rid = smd.run(pulling_speed=0.25, run_id="1", pdb_file=pdb)
     d, m = _read(smd, rid)
-    msg = [r.getMessage() for r in caplog.records if "Capping sMD_moves" in r.getMessage()]
-    assert len(msg) == 1
-    z_end_max = float(re.search(r"limit \(([-0-9.]+) nm\)", msg[0]).group(1))
-    n_ax = float(re.search(r"\|n_[xyz]\|=([0-9.]+)", msg[0]).group(1))
-    assert z_end_max == pytest.approx((L / 2) / n_ax - safety, abs=1e-3)
+    z_end_max, n, T = _cap_message(caplog)
+    # orthorhombic: the lattice formula reduces to min_i (L/2)/|n_i|
+    assert z_end_max == pytest.approx((L / 2) / np.abs(n).max() - safety, abs=1e-6)
+    assert z_end_max == pytest.approx(_lattice_limit(n, L * np.eye(3)) - safety, abs=1e-6)
     assert L / 2 - safety <= z_end_max <= np.sqrt(3) * L / 2 - safety
     assert len(d) < round(max_disp / DX)
     assert d.r_target.iloc[-1] < z_end_max
     assert d.r_target.iloc[-1] > z_end_max - 2 * DX
+    assert m["z_end_planned_nm"] == pytest.approx(d.r_target.iloc[-1], abs=1e-9)
+
+
+def test_rhombic_dodecahedron_wide_frame_groups(tmp_path, caplog):
+    # frame chains span more than half the box diagonal along z, as real CA frame groups do
+    p = toy.rd_positions()
+    assert np.ptp(p[toy.RD_FRAME_B], axis=0)[2] > np.diag(toy.RD_BOX)[2] / 2
+    system, top, pdb = toy.rd_smd_system(tmp_path)
+    safety, max_disp = 0.5, 3.0
+    smd = SteeredMD(system=system, topology=top, groupA_atoms=toy.RD_LIGAND, groupB_atoms=toy.RD_POCKET,
+                    restart_velocities=True, timestep=0.002, autostop_nc=None, out_dir=str(tmp_path / "out"),
+                    platform="CPU", dx_per_move=DX, max_displacement=max_disp, sMD_spring_cte=K, save_freq=5,
+                    pbc_safety_nm=safety, projection_params=toy.rd_params())
+    with caplog.at_level(logging.WARNING, logger="autopath"):
+        rid = smd.run(pulling_speed=0.25, run_id="1", pdb_file=pdb)
+    assert not any("orthorhombic" in r.getMessage() for r in caplog.records)
+    d, m = _read(smd, rid)
+    z_end_max, n, T = _cap_message(caplog)
+    assert np.linalg.norm(n) == pytest.approx(1.0, abs=1e-9)
+    expected = _lattice_limit(n, toy.RD_BOX)
+    assert z_end_max == pytest.approx(expected - safety, abs=1e-6)
+    T_vec = np.asarray(T) @ toy.RD_BOX
+    assert T_vec @ T_vec / (2 * abs(n @ T_vec)) == pytest.approx(expected, abs=1e-6)
+    assert d.r_target.iloc[-1] < z_end_max < d.r_target.iloc[-1] + 2 * DX
+
+
+def test_triclinic_minimum_image():
+    box = toy.RD_BOX
+    small = np.array([0.1, -0.2, 0.3])
+    for shift in ([0, 0, 1], [1, -1, 0], [-1, 1, 1], [1, 0, -1]):
+        np.testing.assert_allclose(triclinic_minimum_image(small + np.asarray(shift) @ box, box), small,
+                                   atol=1e-12)
+    np.testing.assert_allclose(triclinic_minimum_image(np.array([[1.9, 0, 0], [2.1, 0, 0]]), box),
+                               [[1.9, 0, 0], [-1.9, 0, 0]], atol=1e-12)
 
 
 def test_distance_mode_header(tmp_path):
@@ -176,21 +238,34 @@ def test_distance_mode_header(tmp_path):
     assert m["lambda0_nm"] == pytest.approx(r_in, abs=1e-3)
 
 
-def _group10(smd):
-    sim = smd._last_simulation
-    return sim, [f for f in sim.system.getForces() if f.getForceGroup() == 10]
+def _capture_simulation(monkeypatch):
+    """Record the Simulation handed to the pull (strong ref in the list)."""
+    seen = []
+    orig = SteeredMD.pull_single_direction
+
+    def spy(self, simulation, *a, **kw):
+        seen.append(simulation)
+        return orig(self, simulation, *a, **kw)
+    monkeypatch.setattr(SteeredMD, "pull_single_direction", spy)
+    return seen
 
 
-def test_lateral_restraint_acts(tmp_path):
+def _group10(sim):
+    return [f for f in sim.system.getForces() if f.getForceGroup() == 10]
+
+
+def test_lateral_restraint_acts(tmp_path, monkeypatch):
     # start 0.3 nm off the axis, in a needle-thin funnel: the walls must push the whole time
     p = toy.positions()
     off = np.cross(toy.AXIS, [1.0, 0.0, 0.0])
     p[toy.LIGAND] += 0.3 * off / np.linalg.norm(off)
     system, top, pdb = toy.smd_system(tmp_path, p)
     proj = toy.params(R_cylinder_ang=0.0, alpha_deg=0.01)
+    seen = _capture_simulation(monkeypatch)
     smd = _smd(tmp_path, system, top, proj=proj, lateral=True, max_displacement=0.005)
     smd.run(pulling_speed=0.01, run_id="1", pdb_file=pdb)
-    sim, forces = _group10(smd)
+    sim = seen.pop()
+    forces = _group10(sim)
     assert len(forces) == 1
     names = {forces[0].getGlobalParameterName(i) for i in range(forces[0].getNumGlobalParameters())}
     assert "k_xy" in names and not names & {"k_z", "z_max", "z_low"}
@@ -199,17 +274,38 @@ def test_lateral_restraint_acts(tmp_path):
 
     smd = _smd(tmp_path / "free", system, top, proj=proj, max_displacement=0.005)
     smd.run(pulling_speed=0.01, run_id="1", pdb_file=pdb)
-    assert _group10(smd)[1] == []
+    assert _group10(seen.pop()) == []
 
 
-@pytest.mark.parametrize("group, where", [(toy.POCKET, "pocket"), (toy.LIGAND, "ligand-pocket")])
-def test_split_group_refused(tmp_path, group, where):
+def test_simulation_released_after_run(tmp_path, monkeypatch):
+    # two replicas' contexts must never coexist: nothing may keep the finished Simulation alive
+    system, top, pdb = toy.smd_system(tmp_path)
+    refs = []
+    orig = SteeredMD.pull_single_direction
+
+    def spy(self, simulation, *a, **kw):
+        refs.append(weakref.ref(simulation))
+        return orig(self, simulation, *a, **kw)
+    monkeypatch.setattr(SteeredMD, "pull_single_direction", spy)
+    smd = _smd(tmp_path, system, top, proj=toy.params(), max_displacement=0.003)
+    smd.run(pulling_speed=0.01, run_id="1", pdb_file=pdb)
+    gc.collect()
+    assert refs[0]() is None
+
+
+@pytest.mark.parametrize("group, where", [(toy.POCKET, "pocket"), (toy.FRAME_B, "frame_b"),
+                                          (toy.LIGAND, "ligand-pocket")])
+def test_split_group_refused(tmp_path, monkeypatch, group, where):
     p = toy.positions()
-    if where == "pocket":
-        p[group[1]] += [toy.BOX_NM, 0.0, 0.0]    # one pocket particle in the next image
-    else:
+    if where == "ligand-pocket":
         p[group] += [0.0, toy.BOX_NM, 0.0]       # the whole ligand in the next image
+    else:
+        p[group[1]] += [toy.BOX_NM, 0.0, 0.0]    # one particle of the group in the next image
     system, top, pdb = toy.smd_system(tmp_path, p)
+
+    def no_md(self, steps):
+        raise AssertionError("MD ran before the wholeness check")
+    monkeypatch.setattr(openmm.app.Simulation, "step", no_md)
     smd = _smd(tmp_path, system, top, proj=toy.params(), max_displacement=0.005, sMD_max_r_offset=0.0)
     with pytest.raises(RuntimeError, match=where):
         smd.run(pulling_speed=0.01, run_id="1", pdb_file=pdb)

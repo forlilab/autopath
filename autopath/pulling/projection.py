@@ -1,11 +1,127 @@
 """Protein-frame projection CV, spring and parameters for projection pulls."""
+import hashlib
+import itertools
+
 import cvpack
 import numpy as np
 import openmm.unit as openmmunit
 
-from autopath.metadynamics.Funnel import (PROTEIN_FRAME_KEYS, _frame_definitions, funnel_coords_ang, funnel_frame,
-                                          funnel_mode, pca_unbinding_axis, upgrade_funnel_params,
+from autopath.metadynamics.Funnel import (PROTEIN_FRAME_KEYS, _frame_definitions, _molecules, funnel_coords_ang,
+                                          funnel_frame, funnel_mode, pca_unbinding_axis, upgrade_funnel_params,
                                           z_where_guest_reaches_bulk)
+
+MAX_BOND_NM = 0.3
+
+
+def triclinic_minimum_image(d, box_nm) -> np.ndarray:
+    """Periodic image of ``d`` as OpenMM reduces it: by box vector c, then b, then a.
+
+    Parameters
+    ----------
+    d : array_like, shape (3,) or (M, 3)
+        Displacement(s) (nm).
+    box_nm : array_like, shape (3, 3)
+        Box vectors a, b, c as rows (nm), in OpenMM's reduced form.
+
+    Returns
+    -------
+    numpy.ndarray
+        Same shape as ``d``.
+    """
+    box = np.asarray(box_nm, dtype=float)
+    d = np.array(d, dtype=float)
+    for k in (2, 1, 0):
+        d = d - np.round(d[..., k] / box[k, k])[..., None] * box[k]
+    return d
+
+
+def projection_pbc_limit(n, box_nm):
+    """Largest z along ``n`` before the ligand–pocket vector leaves the pocket's periodic cell.
+
+    min over the lattice vectors T = i·a + j·b + k·c (i, j, k in {-1, 0, 1}, not all 0, n·T ≠ 0)
+    of |T|² / (2 |n·T|).
+
+    Parameters
+    ----------
+    n : array_like, shape (3,)
+        Unit pull axis.
+    box_nm : array_like, shape (3, 3)
+        Box vectors as rows (nm).
+
+    Returns
+    -------
+    (float, tuple of int)
+        The limit (nm) and the (i, j, k) of the limiting T.
+    """
+    n = np.asarray(n, dtype=float)
+    box = np.asarray(box_nm, dtype=float)
+    best, best_ijk = np.inf, None
+    for ijk in itertools.product((-1, 0, 1), repeat=3):
+        if ijk == (0, 0, 0):
+            continue
+        T = np.asarray(ijk, dtype=float) @ box
+        nT = abs(float(n @ T))
+        if nT < 1e-12:
+            continue
+        val = float(T @ T) / (2.0 * nT)
+        if val < best:
+            best, best_ijk = val, ijk
+    return best, best_ijk
+
+
+def frame_index_sha1(params) -> str:
+    """sha1 hex digest of ``"b=<sorted frame_b_index>;c=<sorted frame_c_index>"`` (comma-separated)."""
+    b = ",".join(str(i) for i in sorted(int(i) for i in params["frame_b_index"]))
+    c = ",".join(str(i) for i in sorted(int(i) for i in params["frame_c_index"]))
+    return hashlib.sha1(f"b={b};c={c}".encode()).hexdigest()
+
+
+def check_projection_groups_whole(params, positions_nm, masses, box_nm, topology, max_bond_nm=MAX_BOND_NM,
+                                  tol_nm=0.05) -> None:
+    """Raise RuntimeError if a projection group is split across periodic images.
+
+    The projection centroids use no periodic images. A group is whole when every topology bond of the
+    molecules holding the pocket, ligand, frame b and frame c atoms is shorter than ``max_bond_nm`` as
+    stored, and each COM−COM vector (ligand, frame b, frame c to the pocket) equals its
+    :func:`triclinic_minimum_image` within ``tol_nm``.
+
+    Parameters
+    ----------
+    params : dict
+        Protein-frame funnel_params.
+    positions_nm : array_like, shape (N, 3)
+        Positions as stored by the context (nm, not wrapped).
+    masses : array_like, shape (N,)
+        Particle masses (Da).
+    box_nm : array_like, shape (3, 3)
+        Box vectors as rows (nm).
+    topology : openmm.app.Topology
+    max_bond_nm, tol_nm : float
+    """
+    pos = np.asarray(positions_nm, dtype=float)
+    m = np.asarray(masses, dtype=float)
+    groups = {"pocket": params["host_index"], "ligand": params["guest_index"],
+              "frame_b": params["frame_b_index"], "frame_c": params["frame_c_index"]}
+    groups = {k: np.array([int(i) for i in v], dtype=int) for k, v in groups.items()}
+    mol = _molecules(topology)
+    bonds = np.array([(a.index, b.index) for a, b in topology.bonds()], dtype=int).reshape(-1, 2)
+    if len(bonds):
+        length = np.linalg.norm(pos[bonds[:, 0]] - pos[bonds[:, 1]], axis=1)
+        mols = np.unique(np.concatenate([mol[idx] for idx in groups.values()]))
+        bad = np.isin(mol[bonds[:, 0]], mols) & (length >= max_bond_nm)
+        if bad.any():
+            worst = np.flatnonzero(bad)[np.argmax(length[bad])]
+            i, j = bonds[worst]
+            names = [k for k, idx in groups.items() if mol[i] in mol[idx]]
+            raise RuntimeError(f"projection pull: {'/'.join(names)} group molecule has bond {i}-{j} of "
+                               f"{length[worst]:.3f} nm (>= {max_bond_nm} nm): split across periodic images")
+    coms = {k: np.average(pos[idx], axis=0, weights=m[idx]) for k, idx in groups.items()}
+    for name in ("ligand", "frame_b", "frame_c"):
+        d = coms[name] - coms["pocket"]
+        d_min = triclinic_minimum_image(d, box_nm)
+        if np.linalg.norm(d - d_min) > tol_nm:
+            raise RuntimeError(f"projection pull: {name}-pocket COM vector {np.round(d, 3)} nm is not "
+                               f"its minimum image {np.round(d_min, 3)} nm: groups in different images")
 
 
 def projection_params(axis, ligand_idx, pocket_idx, reference_positions_nm, topology, masses,
