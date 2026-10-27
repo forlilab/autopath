@@ -45,14 +45,17 @@ def dG_standard_from_profile(
     if z.ndim != 1 or z.shape != G.shape or len(z) < 2:
         raise ValueError("not supported: coord and G must be equal-length 1D arrays")
     dz = np.diff(z)
-    if dz[0] <= 0 or not np.allclose(dz, dz[0], rtol=1e-6, atol=0.0):
+    if dz[0] <= 0 or not np.allclose(dz, dz[0], rtol=1e-3, atol=0.0):
         raise ValueError("not supported: coordinate grid must be uniform and increasing")
-    bulk = (z >= bulk_range_nm[0]) & (z <= bulk_range_nm[1])
+    tol = 1e-9
+    bulk = (z >= bulk_range_nm[0] - tol) & (z <= bulk_range_nm[1] + tol)
     if bulk.sum() < 3:
         raise ValueError("not supported: fewer than 3 points in the bulk range")
     if not np.all(np.isfinite(G[bulk])):
         raise ValueError("not supported: non-finite PMF in the bulk range")
-    site = z <= site_max_nm
+    site = z <= site_max_nm + tol
+    if (site & bulk).any():
+        raise ValueError("not supported: site and bulk windows overlap")
     if site.sum() < 2 or not np.all(np.isfinite(G[site])):
         raise ValueError("not supported: site needs >= 2 points and no NaN")
 

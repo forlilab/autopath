@@ -77,3 +77,24 @@ def test_few_bulk_points_and_nan_not_supported():
     G[5] = np.nan
     with pytest.raises(ValueError, match="not supported"):
         dG_standard_from_profile(z_nm, G, 1.0, (2.0, 3.0), R_cyl_ang=5.0)
+
+
+def test_constant_offset_invariant():
+    z_nm, G, _ = _profile()
+    a = dG_standard_from_profile(z_nm, G, 1.0, (2.0, 3.0), R_cyl_ang=5.0)
+    b = dG_standard_from_profile(z_nm, G + 7.3, 1.0, (2.0, 3.0), R_cyl_ang=5.0)
+    assert abs(a["dG_bind_std"] - b["dG_bind_std"]) < 1e-9
+    assert b["bulk_ref_kJ"] - a["bulk_ref_kJ"] == pytest.approx(7.3, abs=1e-9)
+
+
+def test_overlapping_windows_not_supported():
+    z_nm, G, _ = _profile()
+    with pytest.raises(ValueError, match="not supported"):
+        dG_standard_from_profile(z_nm, G, 2.5, (2.0, 3.0), R_cyl_ang=5.0)
+
+
+def test_boundary_and_noisy_grid_tolerated():
+    z_nm, G, _ = _profile()
+    z_nm = z_nm + np.random.default_rng(0).normal(0, 1e-6, len(z_nm))
+    r = dG_standard_from_profile(z_nm, G, 1.0, (2.0, 3.0), R_cyl_ang=5.0)
+    assert np.isfinite(r["dG_bind_std"])
