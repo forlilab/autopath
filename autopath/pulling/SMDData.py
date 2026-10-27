@@ -76,6 +76,14 @@ class SMDData:
 
         raw_data = self.load_logs()
 
+        # Logs without a cv header predate the projection CV (distance).
+        _cvs = {str(m.get('cv', 'distance')) for m in self.log_metadata.values()}
+        if len(_cvs) > 1:
+            raise ValueError(f'not supported: mixed CV types across logs: {sorted(_cvs)}')
+        self.cv_type = _cvs.pop() if _cvs else 'distance'
+        if self.cv_type not in ('distance', 'projection'):
+            raise ValueError(f'not supported: cv type {self.cv_type!r}')
+
         # Logged per-ligand spring constant (median over replicas that recorded a
         # header); None when no log carried one (older data -> derived downstream).
         _ks = [m['spring_constant_kJ_mol_nm2'] for m in self.log_metadata.values()
@@ -95,6 +103,8 @@ class SMDData:
             
         to_drop = []
         for traj_name, traj_data in raw_data.groupby('trajname'):
+            if self.cv_type == 'projection':
+                continue  # fixed-length pulls; z <= 0 is valid
             if self.pulling_direction == 'forward':
                 if traj_data["r_after"].min() < self.completion_threshold_nm:
                     logger.warning(f'Dropping {traj_name}, min distance {traj_data["r_after"].min():.2f} nm')
