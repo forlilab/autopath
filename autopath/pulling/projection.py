@@ -4,7 +4,8 @@ import numpy as np
 import openmm.unit as openmmunit
 
 from autopath.metadynamics.Funnel import (PROTEIN_FRAME_KEYS, _frame_definitions, funnel_coords_ang, funnel_frame,
-                                          funnel_mode, upgrade_funnel_params)
+                                          funnel_mode, pca_unbinding_axis, upgrade_funnel_params,
+                                          z_where_guest_reaches_bulk)
 
 
 def projection_params(axis, ligand_idx, pocket_idx, reference_positions_nm, topology, masses,
@@ -142,3 +143,56 @@ def projection_z_nm(params, positions_nm, masses) -> float:
     float
     """
     return funnel_coords_ang(params, positions_nm, masses)[0] / 10.0
+
+
+def axis_from_pulls(universe, ligand_idx, pocket_idx, ligand_bulk_idx, frames=None, z_cc_percentile=95.0,
+                    bulk_cutoff_ang=10.0) -> dict:
+    """Pull axis, z_cc and z_max from existing pull trajectories.
+
+    z is measured with the pulled groups (mass-weighted COMs, origin at the pocket COM). z_max is the
+    pulled-group z once the whole ligand, moved rigidly along the axis from the first frame, clears
+    ``bulk_cutoff_ang`` from all atoms outside ``ligand_bulk_idx``.
+
+    Parameters
+    ----------
+    universe : MDAnalysis.Universe
+    ligand_idx, pocket_idx : list of int
+        Atom indices of the pulled ligand and pocket groups.
+    ligand_bulk_idx : list of int
+        Atom indices of the whole ligand.
+    frames : sequence of int, optional
+        Frames of one path; all frames if None.
+    z_cc_percentile : float
+        Percentile of the pulled-group z that sets z_cc.
+    bulk_cutoff_ang : float
+        Clearance from the protein (Å).
+
+    Returns
+    -------
+    dict
+        ``unbinding_axis`` (bound -> unbound), ``z_cc_ang``, ``z_max_ang``.
+    """
+    frames = list(range(universe.trajectory.n_frames)) if frames is None else [int(f) for f in frames]
+    if len(frames) < 2:
+        raise ValueError("not supported: axis_from_pulls needs at least 2 frames")
+    lig = universe.atoms[list(ligand_idx)]
+    pocket = universe.atoms[list(pocket_idx)]
+    bulk = universe.atoms[list(ligand_bulk_idx)]
+    g, h = [], []
+    for f in frames:
+        universe.trajectory[f]
+        g.append(lig.center_of_mass())
+        h.append(pocket.center_of_mass())
+    g, h = np.array(g), np.array(h)
+    axis = pca_unbinding_axis(g, h)
+    z = (g - h) @ axis
+    z_cc = float(np.percentile(z, z_cc_percentile))
+
+    universe.trajectory[frames[0]]
+    host_com = h[0]
+    # clearance is from every atom outside the ligand
+    protein_sel = "not index " + " ".join(str(int(i)) for i in ligand_bulk_idx)
+    z_bulk = z_where_guest_reaches_bulk(universe, bulk, host_com, axis, cutoff_ang=bulk_cutoff_ang,
+                                        protein_selection=protein_sel)
+    dz = z_bulk - float(np.dot(bulk.center_of_mass() - host_com, axis))
+    return {"unbinding_axis": axis, "z_cc_ang": z_cc, "z_max_ang": float(z[0] + dz)}

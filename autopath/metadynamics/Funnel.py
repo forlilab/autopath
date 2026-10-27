@@ -644,6 +644,38 @@ def add_funnel_restraints(
     return
 
 
+def pca_unbinding_axis(guest_coms, host_coms, use_pca: bool = True) -> np.ndarray:
+    """Unit unbinding axis from guest COM positions, oriented bound -> unbound.
+
+    Parameters
+    ----------
+    guest_coms, host_coms : array_like, shape (n_frames, 3)
+        Guest and host COMs (Å); ``host_coms`` is accepted for symmetry and unused.
+    use_pca : bool
+        Leading principal axis of the guest displacement; otherwise the net displacement.
+
+    Returns
+    -------
+    numpy.ndarray, shape (3,)
+    """
+    guest_coms = np.asarray(guest_coms, dtype=float)
+    if use_pca:
+        guest_displacement = guest_coms - guest_coms[0]
+        displacement_centered = guest_displacement - guest_displacement.mean(axis=0)
+        cov_matrix = np.cov(displacement_centered.T)
+        eigenvalues, eigenvectors = np.linalg.eigh(cov_matrix)
+        unbinding_axis = eigenvectors[:, -1]
+    else:
+        guest_displacement = guest_coms[-1] - guest_coms[0]
+        unbinding_axis = guest_displacement / np.linalg.norm(guest_displacement)
+
+    # eigh's eigenvector sign is arbitrary; orient the axis bound -> unbound.
+    _net = guest_coms[-1] - guest_coms[0]
+    if np.dot(unbinding_axis, _net) < 0:
+        unbinding_axis = -unbinding_axis
+    return unbinding_axis
+
+
 def generate_funnel_parameters_from_trajectory(
     universe,
     host_selection: str = "protein",
@@ -762,20 +794,7 @@ def generate_funnel_parameters_from_trajectory(
     if verbose:
         logger.info(f"Analyzed {trajectory_length} frames")
 
-    if use_pca:
-        guest_displacement = guest_coms - guest_coms[0]
-        displacement_centered = guest_displacement - guest_displacement.mean(axis=0)
-        cov_matrix = np.cov(displacement_centered.T)
-        eigenvalues, eigenvectors = np.linalg.eigh(cov_matrix)
-        unbinding_axis = eigenvectors[:, -1]
-    else:
-        guest_displacement = guest_coms[-1] - guest_coms[0]
-        unbinding_axis = guest_displacement / np.linalg.norm(guest_displacement)
-
-    # eigh's eigenvector sign is arbitrary; orient the axis bound -> unbound.
-    _net = guest_coms[-1] - guest_coms[0]
-    if np.dot(unbinding_axis, _net) < 0:
-        unbinding_axis = -unbinding_axis
+    unbinding_axis = pca_unbinding_axis(guest_coms, host_coms, use_pca=use_pca)
 
     relative_positions = guest_coms - host_coms
     z_distances = np.dot(relative_positions, unbinding_axis)
