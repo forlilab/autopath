@@ -262,10 +262,13 @@ def projection_z_nm(params, positions_nm, masses) -> float:
 
 
 def axis_from_pulls(universe, ligand_idx, pocket_idx, ligand_bulk_idx, frames=None, z_cc_percentile=95.0,
-                    bulk_cutoff_ang=10.0, protein_idx=None) -> dict:
-    """Pull axis, z_cc and z_max from existing pull trajectories.
+                    bulk_cutoff_ang=10.0, protein_idx=None, topology=None, R_cylinder_ang=2.0, alpha_deg=45.0,
+                    k_xy_kcal_per_mol_per_ang2=10.0) -> dict:
+    """Pull axis, z_cc, z_max and protein-frame params from existing pull trajectories.
 
-    z is measured with the pulled groups (mass-weighted COMs, origin at the pocket COM). z_max is the
+    The axis is the leading principal axis of the ligand COM relative to the pocket COM, oriented
+    bound -> unbound, so protein drift or tumbling does not enter it. z is measured with the pulled
+    groups (mass-weighted COMs, origin at the pocket COM). z_max is the
     pulled-group z once the whole ligand, moved rigidly along the axis from the first frame, clears
     ``bulk_cutoff_ang`` from the protein atoms. Trajectories must be imaged and whole: a pulled-group COM
     step above half the smallest box length raises (checked only when the universe has box dimensions).
@@ -285,20 +288,31 @@ def axis_from_pulls(universe, ligand_idx, pocket_idx, ligand_bulk_idx, frames=No
         Clearance from the protein (Å).
     protein_idx : list of int, optional
         Atoms the ligand must clear; default ``universe.select_atoms("protein")``. Ligand atoms are removed.
+    topology : openmm.app.Topology, optional
+        Topology of the universe's atoms (same order), for the protein-frame groups, which need the
+        bonds and backbone names an MDAnalysis universe often lacks. Without it ``params`` is None.
+    R_cylinder_ang, alpha_deg, k_xy_kcal_per_mol_per_ang2 : float
+        Restraint geometry of ``params``, see :func:`projection_params`.
 
     Returns
     -------
     dict
-        ``unbinding_axis`` (bound -> unbound), ``z_cc_ang``, ``z_max_ang``.
+        ``unbinding_axis`` (bound -> unbound, lab frame of the first frame), ``z_cc_ang``, ``z_max_ang``
+        and ``params``: :func:`projection_params` built from the first frame (positions, universe
+        masses), or None without ``topology``.
 
     Raises
     ------
     ValueError
-        "not supported: ..." for <2 frames, no protein atoms, an unimaged jump, or ``z_max_ang <= z_cc_ang``.
+        "not supported: ..." for <2 frames, no protein atoms, an unimaged jump, ``z_max_ang <= z_cc_ang``,
+        or a topology whose atom count differs from the universe's.
     """
     frames = list(range(universe.trajectory.n_frames)) if frames is None else [int(f) for f in frames]
     if len(frames) < 2:
         raise ValueError("not supported: axis_from_pulls needs at least 2 frames")
+    if topology is not None and topology.getNumAtoms() != universe.atoms.n_atoms:
+        raise ValueError(f"not supported: topology has {topology.getNumAtoms()} atoms, the universe "
+                         f"{universe.atoms.n_atoms}")
     lig = universe.atoms[list(ligand_idx)]
     pocket = universe.atoms[list(pocket_idx)]
     bulk = universe.atoms[list(ligand_bulk_idx)]
@@ -315,7 +329,7 @@ def axis_from_pulls(universe, ligand_idx, pocket_idx, ligand_bulk_idx, frames=No
         if step > limit:
             raise ValueError(f"not supported: pulled-group COM step {step:.1f} A exceeds half the box "
                              f"({limit:.1f} A); the trajectory must be imaged and whole")
-    axis = pca_unbinding_axis(g, h)
+    axis = pca_unbinding_axis(g - h, np.zeros_like(h))
     z = (g - h) @ axis
     z_cc = float(np.percentile(z, z_cc_percentile))
 
@@ -335,4 +349,10 @@ def axis_from_pulls(universe, ligand_idx, pocket_idx, ligand_bulk_idx, frames=No
     z_max = float(z[0] + dz)
     if z_max <= z_cc:
         raise ValueError(f"not supported: z_max ({z_max:.2f} A) is not beyond z_cc ({z_cc:.2f} A)")
-    return {"unbinding_axis": axis, "z_cc_ang": z_cc, "z_max_ang": z_max}
+    params = None
+    if topology is not None:
+        universe.trajectory[frames[0]]
+        params = projection_params(axis, ligand_idx, pocket_idx, universe.atoms.positions / 10.0, topology,
+                                   universe.atoms.masses, z_cc, z_max, R_cylinder_ang=R_cylinder_ang,
+                                   alpha_deg=alpha_deg, k_xy_kcal_per_mol_per_ang2=k_xy_kcal_per_mol_per_ang2)
+    return {"unbinding_axis": axis, "z_cc_ang": z_cc, "z_max_ang": z_max, "params": params}

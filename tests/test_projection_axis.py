@@ -126,3 +126,108 @@ def test_generate_funnel_parameters_unchanged_no_pca():
     np.testing.assert_allclose(p["unbinding_axis"], [0.2831356280146114, 0.1881860315379592, 0.9404361933075341],
                                atol=1e-12)
     np.testing.assert_allclose(p["z_max"]._value, 41.99323543599985, atol=1e-9)
+
+
+# Protein with a frame: pocket residues at the origin, two blobs of residues (N, CA, C) beside it, all one chain.
+N_POCKET_RES, N_BLOB_RES = 4, 25
+
+
+def _framed_protein(rng):
+    xyz, centres = [], [np.zeros(3)] * N_POCKET_RES
+    for c in (np.array([20.0, 0.0, 0.0]), np.array([0.0, 20.0, 0.0])):
+        centres += [c + rng.normal(scale=3.0, size=3) for _ in range(N_BLOB_RES)]
+    for i, c in enumerate(centres):
+        ca = c + (rng.normal(scale=1.0, size=3) if i < N_POCKET_RES else 0.0)
+        xyz += [ca + [-1.2, 0.5, 0.0], ca, ca + [1.2, 0.5, 0.0]]
+    return np.array(xyz)
+
+
+def _framed_system(n=6, drift=(0.0, 0.0, 0.0), seed=1):
+    """(universe, openmm topology, ligand idx, pocket idx); the ligand leaves the pocket along +z relative
+    to the pocket while the whole protein drifts by ``drift`` Å per frame."""
+    import openmm.app as app
+    rng = np.random.default_rng(seed)
+    prot = _framed_protein(rng)
+    n_prot = len(prot)
+    pocket = [3 * i + 1 for i in range(N_POCKET_RES)]
+    lig = [n_prot, n_prot + 1, n_prot + 2]
+    lig0 = np.array([0.0, 0.0, 2.0]) + OFFSETS
+    frames = []
+    for t in range(n):
+        shift = np.asarray(drift) * t
+        frames.append(np.vstack([prot + shift, lig0 + shift + [0.0, 0.0, 1.0 * t]
+                                 + rng.normal(scale=0.05, size=(3, 3))]))
+    n_res = n_prot // 3
+    resindex = [i // 3 for i in range(n_prot)] + [n_res] * 3
+    u = mda.Universe.empty(n_prot + 3, n_residues=n_res + 1, atom_resindex=resindex, trajectory=True)
+    u.add_TopologyAttr("resnames", ["ALA"] * n_res + ["UNK"])
+    u.add_TopologyAttr("names", ["N", "CA", "C"] * n_res + ["C1", "C2", "C3"])
+    u.add_TopologyAttr("masses", [14.0, 12.0, 12.0] * n_res + [12.0] * 3)
+    u.load_new(np.array(frames), format=MemoryReader)
+
+    top = app.Topology()
+    chain = top.addChain()
+    atoms = []
+    for r in range(n_res):
+        res = top.addResidue("ALA", chain)
+        atoms += [top.addAtom(nm, app.element.get_by_symbol(nm[0]), res) for nm in ("N", "CA", "C")]
+    res = top.addResidue("UNK", chain)
+    atoms += [top.addAtom(f"C{i}", app.element.carbon, res) for i in (1, 2, 3)]
+    for i in range(n_prot - 1):
+        top.addBond(atoms[i], atoms[i + 1])
+    top.addBond(atoms[lig[0]], atoms[lig[1]])
+    top.addBond(atoms[lig[1]], atoms[lig[2]])
+    return u, top, lig, pocket
+
+
+def _rotation(seed=3):
+    q, _ = np.linalg.qr(np.random.default_rng(seed).normal(size=(3, 3)))
+    return q * np.sign(np.linalg.det(q))
+
+
+def test_axis_uses_ligand_relative_to_pocket():
+    # the protein drifts along x while the ligand leaves along z relative to the pocket
+    u, top, lig, pocket = _framed_system(drift=(1.0, 0.0, 0.0))
+    out = axis_from_pulls(u, lig, pocket, lig)
+    assert np.dot(out["unbinding_axis"], [0.0, 0.0, 1.0]) > 0.999
+
+
+def test_params_frame_from_same_universe():
+    from autopath.metadynamics.Funnel import funnel_axis_at
+    from autopath.pulling.projection import check_projection_params
+    u, top, lig, pocket = _framed_system()
+    out = axis_from_pulls(u, lig, pocket, lig, topology=top, R_cylinder_ang=1.5)
+    p = out["params"]
+    check_projection_params(p, lig, pocket)
+    u.trajectory[0]
+    n = funnel_axis_at(p, u.atoms.positions / 10.0, u.atoms.masses)
+    np.testing.assert_allclose(n, out["unbinding_axis"], atol=1e-9)
+    assert p["z_cc"].value_in_unit(p["z_cc"].unit) == pytest.approx(out["z_cc_ang"])
+    assert p["R_cylinder"]._value == pytest.approx(1.5)
+
+
+def test_axis_coeffs_invariant_to_rigid_rotation():
+    u, top, lig, pocket = _framed_system()
+    ref = axis_from_pulls(u, lig, pocket, lig, topology=top)
+    R = _rotation()
+    rot = np.array([ts.positions.copy() for ts in u.trajectory]) @ R.T + [5.0, -3.0, 7.0]
+    u_rot = u.copy()
+    u_rot.load_new(rot, format=MemoryReader)
+    out = axis_from_pulls(u_rot, lig, pocket, lig, topology=top)
+    # MDAnalysis keeps float32 coordinates
+    np.testing.assert_allclose(out["unbinding_axis"], R @ ref["unbinding_axis"], atol=1e-6)
+    np.testing.assert_allclose(out["params"]["axis_coeffs"], ref["params"]["axis_coeffs"], atol=1e-6)
+    assert out["params"]["frame_b_index"] == ref["params"]["frame_b_index"]
+
+
+def test_topology_size_mismatch_not_supported():
+    u, top, lig, pocket = _framed_system()
+    with pytest.raises(ValueError, match="not supported"):
+        axis_from_pulls(u, lig, pocket, lig, topology=_drop_atom(top))
+
+
+def _drop_atom(top):
+    import openmm.app as app
+    mod = app.Modeller(top, [[0.0, 0.0, 0.0]] * top.getNumAtoms())
+    mod.delete([list(top.atoms())[-1]])
+    return mod.topology
