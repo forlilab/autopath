@@ -3,8 +3,8 @@ import cvpack
 import numpy as np
 import openmm.unit as openmmunit
 
-from autopath.metadynamics.Funnel import (_frame_definitions, funnel_coords_ang, funnel_frame, funnel_mode,
-                                          upgrade_funnel_params)
+from autopath.metadynamics.Funnel import (PROTEIN_FRAME_KEYS, _frame_definitions, funnel_coords_ang, funnel_frame,
+                                          funnel_mode, upgrade_funnel_params)
 
 
 def projection_params(axis, ligand_idx, pocket_idx, reference_positions_nm, topology, masses,
@@ -14,15 +14,23 @@ def projection_params(axis, ligand_idx, pocket_idx, reference_positions_nm, topo
 
     Parameters
     ----------
-    axis : (3,) unbinding direction in the lab frame of ``reference_positions_nm``
-    ligand_idx, pocket_idx : atom indices of the sMD pull groups (ligand = guest, pocket = host)
-    reference_positions_nm : (N, 3) positions (nm)
+    axis : array_like, shape (3,)
+        Unbinding direction in the lab frame of ``reference_positions_nm``.
+    ligand_idx, pocket_idx : list of int
+        Atom indices of the sMD pull groups (ligand = guest, pocket = host).
+    reference_positions_nm : array_like, shape (N, 3)
+        Positions (nm).
     topology : openmm.app.Topology
-    masses : (N,) particle masses (Da)
-    z_cc_ang, z_max_ang : end of the cone and of the cylinder along the axis (Å)
-    R_cylinder_ang : cylinder radius (Å)
-    alpha_deg : cone half-angle (degrees)
-    k_xy_kcal_per_mol_per_ang2 : lateral wall force constant
+    masses : array_like, shape (N,)
+        Particle masses (Da).
+    z_cc_ang, z_max_ang : float
+        End of the cone and of the cylinder along the axis (Å).
+    R_cylinder_ang : float
+        Cylinder radius (Å).
+    alpha_deg : float
+        Cone half-angle (degrees).
+    k_xy_kcal_per_mol_per_ang2 : float
+        Lateral wall force constant (kcal/mol/Å²).
 
     Returns
     -------
@@ -49,21 +57,30 @@ def check_projection_params(params, ligand_idx, pocket_idx) -> None:
 
     Parameters
     ----------
-    params : funnel_params dict
-    ligand_idx, pocket_idx : atom indices of the sMD pull groups
+    params : dict
+        funnel_params.
+    ligand_idx, pocket_idx : list of int
+        Atom indices of the sMD pull groups.
     """
-    if funnel_mode(params) != "protein":
-        raise ValueError("not supported: projection pulls need protein-frame funnel params "
-                         "(axis_coeffs, frame_b_index, frame_c_index)")
+    _require_protein_frame(params)
     if sorted(int(i) for i in params["guest_index"]) != sorted(int(i) for i in ligand_idx):
         raise ValueError("not supported: funnel guest_index differs from the pulled ligand group")
     if sorted(int(i) for i in params["host_index"]) != sorted(int(i) for i in pocket_idx):
         raise ValueError("not supported: funnel host_index differs from the sMD pocket group")
 
 
+def _require_protein_frame(params):
+    try:
+        mode = funnel_mode(params)
+    except ValueError as e:
+        raise ValueError(f"not supported: {e}") from e
+    missing = [k for k in PROTEIN_FRAME_KEYS if k not in params]
+    if mode != "protein" or missing:
+        raise ValueError(f"not supported: projection pulls need protein-frame funnel params; missing {missing}")
+
+
 def _groups_and_definitions(params):
-    if funnel_mode(params) != "protein":
-        raise ValueError("not supported: projection CV needs protein-frame funnel params")
+    _require_protein_frame(params)
     frame = funnel_frame(params)
     groups = [[int(i) for i in params["host_index"]], [int(i) for i in params["guest_index"]],
               frame["b"], frame["c"]]
@@ -109,5 +126,19 @@ def projection_spring(params, k_kj_per_mol_nm2):
 
 
 def projection_z_nm(params, positions_nm, masses) -> float:
-    """Projection z (nm) from numpy positions, as :func:`projection_cv` measures it."""
+    """Projection z (nm) from numpy positions, as :func:`projection_cv` measures it.
+
+    Parameters
+    ----------
+    params : dict
+        Protein-frame funnel_params.
+    positions_nm : array_like, shape (N, 3)
+        Positions (nm), not wrapped into the box.
+    masses : array_like, shape (N,)
+        Particle masses (Da).
+
+    Returns
+    -------
+    float
+    """
     return funnel_coords_ang(params, positions_nm, masses)[0] / 10.0

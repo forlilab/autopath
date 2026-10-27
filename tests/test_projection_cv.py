@@ -159,3 +159,16 @@ def test_lab_frame_params_not_supported():
         check_projection_params(lab, LIGAND, POCKET)
     with pytest.raises(ValueError, match="^not supported:"):
         projection_cv(lab)
+
+
+@pytest.mark.parametrize("drop", ["frame_b_index", "frame_c_index"])
+def test_partial_protein_frame_not_supported(drop):
+    partial = {k: v for k, v in _params().items() if k != drop}
+    with pytest.raises(ValueError, match=f"^not supported:.*{drop}"):
+        check_projection_params(partial, LIGAND, POCKET)
+
+
+def test_mixed_frame_params_not_supported():
+    mixed = dict(_params(), orient_index=[0, 1])
+    with pytest.raises(ValueError, match="^not supported:"):
+        check_projection_params(mixed, LIGAND, POCKET)
