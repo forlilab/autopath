@@ -93,8 +93,24 @@ def test_overlapping_windows_not_supported():
         dG_standard_from_profile(z_nm, G, 2.5, (2.0, 3.0), R_cyl_ang=5.0)
 
 
-def test_boundary_and_noisy_grid_tolerated():
+def test_noisy_grid_tolerated():
     z_nm, G, _ = _profile()
     z_nm = z_nm + np.random.default_rng(0).normal(0, 1e-6, len(z_nm))
     r = dG_standard_from_profile(z_nm, G, 1.0, (2.0, 3.0), R_cyl_ang=5.0)
     assert np.isfinite(r["dG_bind_std"])
+
+
+def test_window_edges_within_1e9_inclusive():
+    # a grid point within 1e-9 nm outside a window edge is counted in it; 1e-8 outside is not
+    z_nm, G, _ = _profile()
+    assert z_nm[100] == 1.0 and z_nm[200] == 2.0
+    ref = dG_standard_from_profile(z_nm, G, 1.0, (2.0, 3.0), R_cyl_ang=5.0)
+    near = dG_standard_from_profile(z_nm, G, 1.0 - 5e-10, (2.0 + 5e-10, 3.0), R_cyl_ang=5.0)
+    assert near["integral_ang"] == ref["integral_ang"]
+    assert near["bulk_ref_kJ"] == ref["bulk_ref_kJ"]
+    G2 = G.copy()
+    G2[200] = 4.0  # bulk edge point: shifts the bulk mean only if counted
+    out = dG_standard_from_profile(z_nm, G2, 1.0, (2.0 + 1e-8, 3.0), R_cyl_ang=5.0)
+    assert out["bulk_ref_kJ"] == pytest.approx(0.0, abs=1e-12)
+    far = dG_standard_from_profile(z_nm, G, 1.0 - 1e-8, (2.0, 3.0), R_cyl_ang=5.0)
+    assert far["integral_ang"] < ref["integral_ang"]

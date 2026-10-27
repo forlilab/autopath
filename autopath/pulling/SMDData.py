@@ -37,7 +37,9 @@ class SMDData:
     ---------------------
     completion_threshold_nm : float
         Distance threshold (nm) used to drop trajectories that did not
-        reach their end state (default 0.1 nm).
+        reach their end state (default 0.1 nm). Distance logs only;
+        projection logs are dropped when their last ``r_target`` is more
+        than one grid step short of the header ``z_end_planned_nm``.
     """
 
     def __init__(self,
@@ -104,7 +106,16 @@ class SMDData:
         to_drop = []
         for traj_name, traj_data in raw_data.groupby('trajname'):
             if self.cv_type == 'projection':
-                continue  # fixed-length pulls; z <= 0 is valid
+                # z <= 0 is valid; completion = reaching the planned end of the pull
+                z_end = self.log_metadata.get(traj_name, {}).get('z_end_planned_nm')
+                rt = traj_data['r_target'].to_numpy()
+                if isinstance(z_end, float) and len(rt) > 1:
+                    dx = float(np.median(np.diff(rt)))
+                    if z_end - rt[-1] > dx * (1.0 + 1e-6):
+                        logger.warning(f'Dropping {traj_name}, last r_target {rt[-1]:.4f} nm short of '
+                                       f'z_end_planned {z_end:.4f} nm')
+                        to_drop.append(traj_name)
+                continue
             if self.pulling_direction == 'forward':
                 if traj_data["r_after"].min() < self.completion_threshold_nm:
                     logger.warning(f'Dropping {traj_name}, min distance {traj_data["r_after"].min():.2f} nm')
@@ -307,14 +318,20 @@ class SMDData:
                                         (self.raw_data[r_column] <= r_range[1])]
 
 
+    _STRING_META_KEYS = ('frame_index_sha1',)
+
     @staticmethod
     def parse_log_metadata(fn) -> dict:
         """Parse leading ``# key=value`` comment lines from an sMD .dat file.
 
         These carry per-replica constants written by
         :class:`SteeredMD` (spring_constant_kJ_mol_nm2, requested/realized
-        speed, steps_per_move, force_n_samples). Values are coerced to float
-        where possible. Returns an empty dict for older logs without a header.
+        speed, steps_per_move, force_n_samples, lambda0_nm, r_start_nm) and
+        ``cv``: ``"distance"`` (COM-COM distance) or ``"projection"``
+        (z along a protein-frame axis; then also axis_coeffs, z_end_planned_nm,
+        frame_b_n, frame_c_n, frame_index_sha1 and the restraint fields). Values
+        are coerced to float where possible, except ``frame_index_sha1``, which
+        stays a string. Returns an empty dict for older logs without a header.
         """
         meta = {}
         try:
@@ -327,6 +344,9 @@ class SMDData:
                         continue
                     key, _, val = body.partition('=')
                     key, val = key.strip(), val.strip()
+                    if key in SMDData._STRING_META_KEYS:
+                        meta[key] = val
+                        continue
                     try:
                         meta[key] = float(val)
                     except ValueError:
