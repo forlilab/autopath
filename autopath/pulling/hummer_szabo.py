@@ -630,7 +630,9 @@ class HSResult:
         :func:`slice_diagnostics` for scope ``"all"``.
     excluded : dict
         ``n_rows_unsupported``, ``n_rows_no_F`` (per source), ``n_pulls_dropped``,
-        ``lam0_spread_nm``, ``lam0_sd_nm``, ``skipped_sources``, ``skipped_groups``.
+        ``lam0_spread_nm``, ``lam0_sd_nm``, ``skipped_sources``, ``bootstrap_failed``,
+        ``skipped_groups``. ``skipped_sources[src][scope]`` and ``bootstrap_failed[src][scope]``
+        hold the error message; scope labels are ``"all"``, ``"speed=<v>"``, ``"path=<p>"``.
         ``n_pulls_dropped`` is loaded logs minus pulls in the joint estimate: pulls
         :class:`SMDData` dropped as incomplete or in excluded speeds, plus any removed upstream
         of HS. ``lam0_*`` use per-pull lambda0 = first ``r_target`` minus its speed's median dx;
@@ -703,8 +705,10 @@ class HummerSzaboEstimator:
     wham_max_iter : int, optional
         Iteration cap for the ``self_consistent`` source.
 
-    A source whose estimate raises ``ValueError`` in any scope is dropped from every scope and
-    recorded in ``excluded["skipped_sources"]``; :meth:`fit` raises if no source survives.
+    A source whose point estimate raises ``ValueError`` in a scope has no output for that scope
+    and is recorded in ``excluded["skipped_sources"]``; failing in scope ``"all"`` drops it
+    everywhere, and :meth:`fit` raises if every source fails there. A failed bootstrap keeps
+    the point estimate with NaN ``G0_sd`` and is recorded in ``excluded["bootstrap_failed"]``.
     """
 
     name = "hummer_szabo"
@@ -722,23 +726,30 @@ class HummerSzaboEstimator:
         self.wham_stride = wham_stride
         self.wham_max_iter = wham_max_iter
 
-    def _run(self, rows, grids, k, beta, rsm, sources, skipped, scope):
+    def _run(self, rows, grids, k, beta, rsm, sources, skipped, boot_failed, scope):
         # Per source: bootstrap profile, log weights aligned with rows, F per slice.
-        # A source that raises ValueError is recorded in `skipped` and left out.
+        # ValueErrors are recorded per scope: a failed point estimate leaves the source out,
+        # a failed bootstrap keeps the point estimate with NaN G0_sd.
         kw = dict(c_mode=self.slice_weights, bin_nm=self.bin_nm, realized_speed_map=rsm,
                   wham_stride=self.wham_stride, wham_max_iter=self.wham_max_iter)
         out = {}
         for src in sources:
-            if src in skipped:
+            if "all" in skipped.get(src, {}):
                 continue
             try:
                 point, logw, F = estimate(rows, grids, k, beta, src, **kw)
+            except ValueError as e:
+                logger.warning(f"Skipping F source {src!r} in scope {scope}: point estimate failed: {e}")
+                skipped.setdefault(src, {})[scope] = str(e)
+                continue
+            try:
                 g0 = bootstrap_g0(rows, grids, k, beta, src, n_boot=self.n_boot, seed=self.seed,
                                   point=point, **kw)
             except ValueError as e:
-                logger.warning(f"Skipping F source {src!r} (failed in scope {scope}): {e}")
-                skipped[src] = str(e)
-                continue
+                logger.warning(f"F source {src!r} in scope {scope}: bootstrap failed, keeping the "
+                               f"point estimate with NaN G0_sd: {e}")
+                boot_failed.setdefault(src, {})[scope] = str(e)
+                g0 = point.assign(G0_sd=np.nan)
             out[src] = (g0, logw - logsumexp(logw), F)
         return out
 
@@ -782,7 +793,7 @@ class HummerSzaboEstimator:
         sources = list(self.f_sources)
         if "force" in sources and len(speeds) < 2:
             logger.warning("Skipping F source 'force': it needs at least 2 speeds")
-            skipped["force"] = "single speed"
+            skipped["force"] = {"all": "single speed"}
             sources.remove("force")
         if "force" in sources:
             dx = _speed_dx(raw)
@@ -792,20 +803,23 @@ class HummerSzaboEstimator:
         if not sources:
             raise ValueError("not supported: no F source can run on this dataset")
 
-        g0_parts, skipped_groups = [], []
+        g0_parts, skipped_groups, boot_failed = [], [], {}
 
         def _collect(res, scope, path=np.nan, speed=np.nan):
             for src, (g0, _, _) in res.items():
                 g0_parts.append(g0.assign(f_source=src, scope=scope, path=path, speed=speed))
 
-        res_all = self._run(joint, grids, k, beta, rsm, sources, skipped, "all")
+        res_all = self._run(joint, grids, k, beta, rsm, sources, skipped, boot_failed, "all")
+        if not res_all:
+            raise ValueError("not supported: every F source failed: "
+                             + "; ".join(f"{s}: {skipped[s]['all']}" for s in sources))
         _collect(res_all, "all")
 
         # The joint trim already holds every pull of a speed, so it is that speed's own trim.
         for speed in speeds:
             sub = joint[joint["speed"] == speed].reset_index(drop=True)
             _collect(self._run(sub, grids, k, beta, rsm, [s for s in sources if s != "force"],
-                               skipped, f"speed={speed}"), "speed", speed=speed)
+                               skipped, boot_failed, f"speed={speed}"), "speed", speed=speed)
 
         path_rw = []
         for path, g in rows_in.groupby("path"):
@@ -814,19 +828,10 @@ class HummerSzaboEstimator:
                 skipped_groups.append(("path", path))
                 continue
             srcs = [s for s in sources if s != "force" or sub["speed"].nunique() > 1]
-            res = self._run(sub, grids, k, beta, rsm, srcs, skipped, f"path={path}")
+            res = self._run(sub, grids, k, beta, rsm, srcs, skipped, boot_failed, f"path={path}")
             _collect(res, "path", path=path)
             for src, (_, lw, _) in res.items():
                 path_rw.append(sub[["trajname", "step"]].assign(path=path, f_source=src, logw_path=lw))
-
-        # A source that failed in any scope is dropped from every scope.
-        failed = [s for s in sources if s in skipped]
-        if len(failed) == len(sources):
-            raise ValueError("not supported: every F source failed: "
-                             + "; ".join(f"{s}: {skipped[s]}" for s in failed))
-        res_all = {s: v for s, v in res_all.items() if s not in skipped}
-        g0_parts = [g[~g["f_source"].isin(failed)] for g in g0_parts]
-        path_rw = [p[~p["f_source"].isin(failed)] for p in path_rw]
 
         rw = pd.concat([joint[["trajname", "speed", "step", "r_after", "path"]].assign(f_source=src, logw=lw)
                         for src, (_, lw, _) in res_all.items()], ignore_index=True)
@@ -859,6 +864,7 @@ class HummerSzaboEstimator:
             "lam0_spread_nm": lam0_spread,
             "lam0_sd_nm": lam0_sd,
             "skipped_sources": skipped,
+            "bootstrap_failed": boot_failed,
             "skipped_groups": skipped_groups,
         }
         return HSResult(g0=g0, row_weights=rw, slices=slices, excluded=excluded)

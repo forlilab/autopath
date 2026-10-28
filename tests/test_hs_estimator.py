@@ -156,7 +156,7 @@ def test_single_speed_skips_force(tmp_path):
     res = HummerSzaboEstimator(n_boot=0).fit(_smd(tmp_path, rows, completion_threshold_nm=cut))
     assert res.excluded["n_pulls_dropped"] == 3
     assert res.row_weights.trajname.nunique() == 5
-    assert res.excluded["skipped_sources"] == {"force": "single speed"}
+    assert res.excluded["skipped_sources"] == {"force": {"all": "single speed"}}
     assert "force" not in set(res.g0.f_source)
     assert set(res.g0.f_source) == set(F_SOURCES) - {"force"}
     assert res.excluded["lam0_spread_nm"] == 0.0
@@ -196,9 +196,9 @@ def test_failing_source_is_skipped_and_recorded(tmp_path, caplog):
     est = HummerSzaboEstimator(f_sources=("jarzynski", "self_consistent"), n_boot=0, wham_max_iter=1)
     with caplog.at_level("WARNING", logger="autopath.pulling.hummer_szabo"):
         res = est.fit(smd)
-    msg = res.excluded["skipped_sources"]["self_consistent"]
+    msg = res.excluded["skipped_sources"]["self_consistent"]["all"]
     assert "did not converge" in msg and "1 iterations" in msg
-    assert "self_consistent" in caplog.text
+    assert "'self_consistent' in scope all: point estimate failed" in caplog.text
     assert set(res.g0.f_source) == {"jarzynski"}
     assert set(res.row_weights.f_source) == {"jarzynski"}
     assert "F_self_consistent" not in res.slices.columns
@@ -226,3 +226,48 @@ def test_wham_max_iter_reaches_solver(tmp_path, monkeypatch):
     rows = simulate_pulls(*flat(), n_pulls=6, speed=0.01, length_nm=0.03, seed=42)
     HummerSzaboEstimator(f_sources=("self_consistent",), n_boot=0).fit(_smd(tmp_path, rows))
     assert seen and set(seen) == {200000}
+
+
+def test_subscope_failure_drops_only_that_scope(tmp_path, monkeypatch):
+    from autopath.pulling import hummer_szabo as hs
+
+    real = hs.estimate
+
+    def flaky(rows, *a, **kw):
+        if a[3] == "jarzynski" and set(rows["speed"]) == {0.01}:
+            raise ValueError("not supported: forced failure")
+        return real(rows, *a, **kw)
+
+    monkeypatch.setattr(hs, "estimate", flaky)
+    a = simulate_pulls(*flat(), n_pulls=6, speed=0.005, length_nm=0.03, seed=43)
+    b = simulate_pulls(*flat(), n_pulls=6, speed=0.01, length_nm=0.03, seed=44)
+    res = HummerSzaboEstimator(f_sources=("jarzynski", "cumulant"), n_boot=0).fit(
+        _smd(tmp_path, _relabel(a, b)))
+    assert res.excluded["skipped_sources"] == {"jarzynski": {"speed=0.01": "not supported: forced failure"}}
+    jz = res.g0.query("f_source == 'jarzynski'")
+    assert set(jz.scope) == {"all", "speed", "path"}
+    assert set(jz.query("scope == 'speed'").speed) == {0.005}
+    assert set(res.g0.query("f_source == 'cumulant' and scope == 'speed'").speed) == {0.005, 0.01}
+    assert np.isfinite(res.row_weights.query("f_source == 'jarzynski'").logw).all()
+
+
+def test_bootstrap_failure_keeps_point_estimate(tmp_path, monkeypatch, caplog):
+    from autopath.pulling import hummer_szabo as hs
+
+    real = hs.bootstrap_g0
+
+    def flaky(rows, grids, k, beta, f_source, **kw):
+        if f_source == "jarzynski":
+            raise ValueError("not supported: forced bootstrap failure")
+        return real(rows, grids, k, beta, f_source, **kw)
+
+    monkeypatch.setattr(hs, "bootstrap_g0", flaky)
+    rows = simulate_pulls(*flat(), n_pulls=8, speed=0.01, length_nm=0.03, seed=45)
+    with caplog.at_level("WARNING", logger="autopath.pulling.hummer_szabo"):
+        res = HummerSzaboEstimator(f_sources=("jarzynski", "cumulant"), n_boot=5).fit(_smd(tmp_path, rows))
+    assert not res.excluded["skipped_sources"]
+    assert res.excluded["bootstrap_failed"]["jarzynski"]["all"] == "not supported: forced bootstrap failure"
+    jz = res.g0.query("f_source == 'jarzynski' and scope == 'all'")
+    assert np.isfinite(jz.G0).any() and jz.G0_sd.isna().all()
+    assert res.g0.query("f_source == 'cumulant' and scope == 'all'").G0_sd.notna().any()
+    assert "'jarzynski' in scope all: bootstrap failed, keeping the point estimate" in caplog.text
