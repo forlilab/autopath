@@ -341,7 +341,7 @@ class AutoPath:
         sMD_plateau_frac: float = 0.4,  # force-plateau TS boundary as a fraction of peak |force|
         sMD_cluster_to_boundary: bool = True,  # cluster/converge only up to the force-plateau boundary
         sMD_boundary_buffer_frac: float = 0.1,  # boundary buffer as a fraction of r_ts
-        cluster_across_speeds: bool = False,
+        cluster_across_speeds: bool = True,
         sMD_min_replicas_per_path: int = 5,
         extract_milestones: bool = True,
         milestone_mode: str = "all_medoids",  # "per_path" or "all_medoids"

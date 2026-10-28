@@ -98,7 +98,7 @@ class DTWPathModel(PathModel):
                     feature_df: pd.DataFrame,
                     r_range: tuple = None,  # e.g., (0, 1.5)
                     n_paths: int = None,
-                    cluster_across_speeds: bool = False,
+                    cluster_across_speeds: bool = True,
                     reference_pdb: str = None,
                     ligand_select: str = None,
                     pocket_select: str = None,
@@ -115,8 +115,9 @@ class DTWPathModel(PathModel):
             clustering (e.g. 0.8 uses the first 80% of frames). Plots always reflect the
             full trajectory regardless.
         cluster_across_speeds : bool
-            If True, cluster all trajectories together regardless of speed.
-            If False, cluster trajectories independently per speed.
+            If True (default), cluster all trajectories together, standardising
+            features within each speed; labels are ``path-k``. If False, cluster
+            each speed independently; labels are ``path-k_v{speed}``.
         reference_pdb : str, optional
             Path to reference PDB file for unbinding path visualization.
         ligand_select : str, optional
@@ -128,7 +129,8 @@ class DTWPathModel(PathModel):
         Returns
         -------
         dict
-            Mapping of trajectory name → path label (e.g. ``"path-0_v0.001"``).
+            Mapping of trajectory name → path label (``"path-0"``, or
+            ``"path-0_v0.001"`` per speed).
             ``paths_`` in downstream SMDData contains only medoid trajectories
             (one representative per cluster), not all trajectories.
 
