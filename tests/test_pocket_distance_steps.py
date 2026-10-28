@@ -144,3 +144,53 @@ def test_ligand_features_carry_frame_step_and_time(tmp_path):
         np.testing.assert_array_equal(g["step"].to_numpy(), (j + 1) * SAVE_FREQ - 1)
         log_t = raw[raw.trajname == name].set_index("step")["time"]
         np.testing.assert_allclose(g["time"].to_numpy(), log_t.loc[g["step"]].to_numpy())
+
+
+def _write_log(fn, n_rows):
+    pd.DataFrame({"step": np.arange(n_rows), "time": 0.1 * np.arange(n_rows)}).to_csv(fn, index=False)
+
+
+@pytest.mark.parametrize("n_rows, n_frames, last", [(1003, 200, 999), (1377, 275, 1374)])
+def test_frame_log_index_mapping(tmp_path, n_rows, n_frames, last):
+    from autopath.pulling.SMDData import frame_log_index
+
+    fn = tmp_path / "pull.dat"
+    _write_log(fn, n_rows)
+    steps, times = frame_log_index(str(fn), n_frames)
+    assert len(steps) == n_frames and steps[-1] == last
+    np.testing.assert_allclose(times, 0.1 * steps)
+
+
+@pytest.mark.parametrize("n_rows, n_frames", [(24, 4), (10, 0), (10, 11), (1003, 199)])
+def test_frame_log_index_refuses(tmp_path, n_rows, n_frames):
+    from autopath.pulling.SMDData import frame_log_index
+
+    fn = tmp_path / "pull.dat"
+    _write_log(fn, n_rows)
+    with pytest.raises(ValueError, match="not supported"):
+        frame_log_index(str(fn), n_frames)
+
+
+def test_cache_covering_fewer_trajectories_is_recomputed(tmp_path, caplog):
+    smd, files = _toy(tmp_path)
+    sub = SMDData(files[:2], temperature=300.0, completion_threshold_nm=0.0,
+                  reference_pdb=smd.reference_pdb)
+    sub.calculate_pocket_distances(group_A=POCKET, group_B=LIGAND, stride=1)
+    with caplog.at_level(logging.WARNING, logger="autopath.pulling.SMDData"):
+        df = smd.calculate_pocket_distances(group_A=POCKET, group_B=LIGAND, stride=1)
+    assert any("different set of trajectories" in r.getMessage() for r in caplog.records)
+    assert df["trajname"].nunique() == 3
+
+
+@pytest.mark.parametrize("kw, word", [(dict(stride=2), "stride"),
+                                      (dict(group_A="resname PRT and name CA"), "group_A")])
+def test_cache_with_other_parameters_is_recomputed(tmp_path, caplog, kw, word):
+    smd, _ = _toy(tmp_path)
+    smd.calculate_pocket_distances(group_A=POCKET, group_B=LIGAND, stride=1)
+    args = dict(group_A=POCKET, group_B=LIGAND, stride=1) | kw
+    with caplog.at_level(logging.WARNING, logger="autopath.pulling.SMDData"):
+        df = smd.calculate_pocket_distances(**args)
+    assert any(word in r.getMessage() for r in caplog.records)
+    if "stride" in kw:
+        g = df[df.trajname == df.trajname.iloc[0]].sort_values("step")
+        np.testing.assert_array_equal(g["step"].to_numpy()[:2], [4, 14])

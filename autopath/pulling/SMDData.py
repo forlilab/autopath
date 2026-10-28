@@ -1,3 +1,4 @@
+import json
 import os
 from datetime import datetime, timedelta
 
@@ -41,6 +42,9 @@ def frame_steps(n_rows: int, n_frames: int, save_freq: int) -> np.ndarray:
 
 def frame_log_index(log_file: str, n_frames: int) -> tuple[np.ndarray, np.ndarray]:
     """Log ``step`` and ``time`` of each DCD frame of one pull.
+
+    Frame j is saved after log row ``(j + 1) * save_freq - 1``; the returned
+    ``time`` is that log row's ``time`` column, not the DCD header time.
 
     ``save_freq`` is ``n_rows // n_frames``; counts that admit no or more than
     one ``save_freq`` are refused.
@@ -548,8 +552,8 @@ class SMDData:
         and since the two groups start co-located (bound) staying continuous from
         frame 0 keeps them in a common periodic image. No-wrap trajs are unchanged.
 
-        Rows carry the DCD ``frame`` and the log ``step``/``time`` of that frame
-        (:func:`frame_log_index`).
+        Rows carry the DCD ``frame`` plus the ``step`` and ``time`` of the log
+        row that frame was saved after (:func:`frame_log_index`).
         """
         def _nojump(u, atoms):
             """Per-frame cumulative shift undoing periodic-image teleports of `atoms`
@@ -618,9 +622,12 @@ class SMDData:
         instances sharing the same outdir. Results for all requested speeds are
         concatenated on return.
 
-        Caches carry a ``frame`` column marking the log-step convention. Caches
-        without it (``step`` = DCD frame index, including the legacy combined
-        ``{sysname}_pocketDistances.csv``) are recomputed with a warning.
+        Each cache starts with a ``#`` JSON header recording the selections,
+        stride and trajectory names it was computed for. A cache is reused only
+        when all of these match the request; otherwise (including caches written
+        before the header existed, whose ``step`` is the DCD frame index, and the
+        legacy combined ``{sysname}_pocketDistances.csv``) it is recomputed with
+        a warning.
 
         Parameters
         ----------
@@ -629,8 +636,8 @@ class SMDData:
         group_B : str
             MDAnalysis selection string for the **ligand** atoms.
         recompute : bool, optional
-            If False (default), reuse each speed's cache file when present and
-            only compute missing speeds. If True, recompute and overwrite all.
+            If False (default), reuse each speed's cache file when it matches
+            and only compute the rest. If True, recompute and overwrite all.
         stride : int, optional
             Frame stride for trajectory reading (default 2).
 
@@ -638,7 +645,8 @@ class SMDData:
         -------
         pd.DataFrame
             Columns ``['trajname', 'speed', 'step', 'time'] + dist_*``; ``step``
-            and ``time`` are those of the log row each frame was saved after.
+            and ``time`` are the log row's step and time for the row each frame
+            was saved after.
         """
         trajs_by_speed = defaultdict(list)
         for traj in self.traj_files:
@@ -652,17 +660,22 @@ class SMDData:
         frames = []
         for speed_tag, trajs in trajs_by_speed.items():
             per_speed_file = f"{self.outdir}/{self.sysname}_pocketDistances_{speed_tag}.csv"
+            meta = {"convention": "log_step", "group_A": group_A, "group_B": group_B,
+                    "stride": int(stride),
+                    "trajnames": sorted(self._traj_to_log_name(t) for t in trajs)}
 
             if (not recompute) and os.path.exists(per_speed_file):
-                cached = pd.read_csv(per_speed_file)
-                if "frame" in cached.columns:
-                    frames.append(cached)
+                reason = self._pocket_cache_mismatch(per_speed_file, meta)
+                if reason is None:
+                    frames.append(pd.read_csv(per_speed_file, comment="#"))
                     continue
-                logger.warning(f"{per_speed_file} uses frame-index steps (old convention); recomputing.")
+                logger.warning(f"{per_speed_file}: {reason}; recomputing.")
 
             df_speed = self._pocket_distances_for_trajs(trajs, group_A, group_B, stride)
             if not df_speed.empty:
-                df_speed.to_csv(per_speed_file, index=False)
+                with open(per_speed_file, "w") as f:
+                    f.write("# " + json.dumps(meta) + "\n")
+                    df_speed.to_csv(f, index=False)
             frames.append(df_speed)
 
         if not frames:
@@ -670,6 +683,26 @@ class SMDData:
         out = pd.concat(frames, ignore_index=True)
         # frame is cache metadata, not a clustering feature
         return out.drop(columns="frame", errors="ignore")
+
+    @staticmethod
+    def _pocket_cache_mismatch(path: str, meta: dict) -> str | None:
+        """Why the cache at ``path`` cannot serve ``meta``; None if it can."""
+        with open(path) as f:
+            first = f.readline()
+        if not first.startswith("# "):
+            return "frame-index steps (old convention) or unknown parameters"
+        try:
+            cached = json.loads(first[2:])
+        except json.JSONDecodeError:
+            return "unreadable header"
+        if cached.get("convention") != meta["convention"]:
+            return "frame-index steps (old convention)"
+        diff = [k for k in ("group_A", "group_B", "stride") if cached.get(k) != meta[k]]
+        if diff:
+            return f"computed with different {', '.join(diff)}"
+        if cached.get("trajnames") != meta["trajnames"]:
+            return "covers a different set of trajectories"
+        return None
 
     @staticmethod
     def merge_feature_sets(*feature_dfs: pd.DataFrame,

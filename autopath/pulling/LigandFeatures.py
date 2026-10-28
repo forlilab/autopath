@@ -112,7 +112,8 @@ class LigandTrajectoryFeatures:
         Returns
         -------
         pd.DataFrame
-            Columns: trajname, speed, step, time, [feature columns].
+            Columns: trajname, speed, step, time, [feature columns]; ``step``
+            and ``time`` are those of the log row each frame was saved after.
             One row per trajectory frame sampled at self.stride.
             Empty DataFrame if no trajectories could be processed.
         """
