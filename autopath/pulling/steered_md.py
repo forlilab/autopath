@@ -10,6 +10,7 @@ from datetime import datetime
 
 from autopath.utils import *
 from autopath.customForces import (add_harmonic_restraints, remove_openmm_force)
+from autopath.pulling.pbc import lattice_pbc_limit, triclinic_minimum_image
 
 from openmm.app import *
 from openmm import XmlSerializer
@@ -92,8 +93,8 @@ class SteeredMD:
         autostop_nc: float | None = 0.1,  # fraction of NC_initial to stop at; None disables
         autostop_nc_window: int = 2,      # consecutive NC samples below threshold to confirm detachment
         autostop_min_displacement: float = 0.5,  # nm — don't fire before this displacement from r0
-        sMD_max_r_offset: float = 3.0,   # max displacement offset (nm): cap pull at r0 + offset nm (also capped by PBC half-box minus pbc_safety_nm)
-        pbc_safety_nm: float = 0.5,      # nm — safety margin subtracted from the per-axis PBC half-box cap (raise for large proteins)
+        sMD_max_r_offset: float = 3.0,   # max displacement offset (nm): cap pull at r0 + offset nm (also capped by the PBC lattice limit minus pbc_safety_nm)
+        pbc_safety_nm: float = 0.5,      # nm — safety margin subtracted from the PBC lattice cap (raise for large proteins)
         use_NVT: bool = False,  # Use NVT ensemble
         use_GReweighting: bool = False,
         out_dir: str = None,
@@ -246,13 +247,9 @@ class SteeredMD:
         simulation.context.setParameter("r0_smd", initial_r0)
 
         # ── Move count cap: box safety + r0 factor ─────────────────────────────
-        # PBC cap: cvpack uses pbc=True, so the COM-COM distance is the
-        # minimum image. The scalar becomes ill-defined once any component of
-        # the COM-COM vector exceeds L_axis/2. Per-axis limit on r:
-        #     r_max_i = (L_i / 2) * |v| / |v_i|
-        # The binding axis dominates; for a box elongated along the pull
-        # direction this gives ~L_long/2, not the more conservative min(L)/2.
-        # WARNING: minimum-image wrap (line below) is orthorhombic only.
+        # PBC cap: cvpack uses pbc=True, so the COM-COM distance is the minimum
+        # image; it stays well defined along n = v/|v| up to the nearest lattice
+        # Voronoi face, min_T |T|^2 / (2|n.T|) (exact for triclinic boxes).
         initial_r0_nm = initial_r0.value_in_unit(openmmunit.nanometers)
         dx_nm = float(self.dx_per_move.value_in_unit(openmmunit.nanometers))
         n_moves = self.sMD_moves
@@ -263,16 +260,6 @@ class SteeredMD:
                 [box_vecs[i][j].value_in_unit(openmmunit.nanometers) for j in range(3)]
                 for i in range(3)
             ])
-            off_diag_max = float(np.abs(box_arr - np.diag(np.diag(box_arr))).max())
-            if off_diag_max > 1e-3:
-                logger.warning(
-                    f"PBC move-capping: non-orthorhombic box detected "
-                    f"(max off-diagonal element = {off_diag_max:.4f} nm). "
-                    f"Minimum-image wrapping assumes orthorhombic geometry and may be incorrect "
-                    f"for triclinic boxes."
-                )
-            L = np.diag(box_arr)
-
             positions = state.getPositions(asNumpy=True).value_in_unit(openmmunit.nanometers)
             weigh_by_mass = not (len(self.groupA_atoms) == 1 or len(self.groupB_atoms) == 1)
             if weigh_by_mass:
@@ -286,7 +273,7 @@ class SteeredMD:
             com_A = np.average(positions[self.groupA_atoms], axis=0, weights=masses_A)
             com_B = np.average(positions[self.groupB_atoms], axis=0, weights=masses_B)
             v = com_A - com_B
-            v -= np.round(v / L) * L  # minimum-image (orthorhombic only; triclinic triggers a warning above)
+            v = triclinic_minimum_image(v, box_arr)
             v_norm = float(np.linalg.norm(v))
             if abs(v_norm - r_start_nm) > 0.05:
                 raise RuntimeError(
@@ -294,19 +281,15 @@ class SteeredMD:
                     f"{r_start_nm:.3f} nm. Check that protein/ligand are not split "
                     f"across a periodic boundary at t=0; cap would be unreliable."
                 )
-            abs_v = np.abs(v)
-            with np.errstate(divide='ignore', invalid='ignore'):
-                r_max_per_axis = np.where(abs_v > 1e-6, (L / 2.0) * v_norm / abs_v, np.inf)
-            r_max_pbc      = float(np.min(r_max_per_axis)) - self.pbc_safety_nm
+            r_lat, lat_ijk = lattice_pbc_limit(v / v_norm, box_arr)
+            r_max_pbc      = r_lat - self.pbc_safety_nm
             r_max_offset   = v_norm + self.sMD_max_r_offset
             r_max          = min(r_max_pbc, r_max_offset)
             moves_safe     = max(1, int((r_max - v_norm) / dx_nm))
             if n_moves > moves_safe:
                 if r_max == r_max_pbc:
-                    dom_axis = int(np.argmin(r_max_per_axis))
-                    reason = (f"PBC axis-{('xyz')[dom_axis]} half-box "
-                              f"(L={L[dom_axis]:.2f} nm, |v|/|v_{('xyz')[dom_axis]}|={v_norm/max(abs_v[dom_axis],1e-12):.2f}, "
-                              f"safety={self.pbc_safety_nm:.2f} nm)")
+                    reason = (f"PBC lattice vector T={lat_ijk[0]:+d}a{lat_ijk[1]:+d}b{lat_ijk[2]:+d}c "
+                              f"(face at {r_lat:.3f} nm, safety={self.pbc_safety_nm:.2f} nm)")
                 else:
                     reason = f"r0+{self.sMD_max_r_offset:.1f}nm offset"
                 logger.warning(
