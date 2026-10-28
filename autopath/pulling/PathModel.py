@@ -194,8 +194,8 @@ class DTWPathModel(PathModel):
         all_medoid_names = set()  # Track medoids across all speeds
         medoid_to_path = {}  # Map medoid trajectory name -> path ID
         # Per-speed breakdown, keyed by speed string ('all' if cluster_across_speeds);
-        # merged into medoid_info.json below so it accumulates across calls instead
-        # of being overwritten.
+        # with persist_medoids, per-speed calls accumulate in medoid_info.json and a
+        # change of clustering mode replaces the stored entries (see below).
         medoids_by_speed = {}
 
         for speed_key, speed_df in grouping_iter:
@@ -476,9 +476,14 @@ class DTWPathModel(PathModel):
             except (json.JSONDecodeError, OSError) as e:
                 logger.warning(f"Could not read existing {medoid_info_path} ({e}); overwriting.")
         if "all" in medoids_by_speed:
+            dropped = [k for k in by_speed if k != "all"]
             by_speed = {}
         else:
+            dropped = ["all"] if "all" in by_speed else []
             by_speed.pop("all", None)
+        if dropped:
+            logger.info(f"Clustering mode changed: dropped stored medoid entries {sorted(dropped)} "
+                        f"from {medoid_info_path}.")
         by_speed.update(medoids_by_speed)
 
         # Cross-speed union, derived (not stored) — for consumers that want a

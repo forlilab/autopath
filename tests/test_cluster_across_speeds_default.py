@@ -99,3 +99,13 @@ def test_unsuffixed_path_friction_speed_is_logged(caplog):
     with caplog.at_level(logging.WARNING, logger="autopath.pulling.Diagnostics"):
         _get_friction_profile_for_path("path-0_v0.01", prof, None)
     assert not caplog.records
+
+
+def test_mode_change_logs_dropped_medoid_entries(tmp_path, caplog):
+    feat = _make_df().drop(columns=["true_path"])
+    DTWPathModel(seed=42, do_plots=False, outdir=str(tmp_path), n_geom_pcs=None).fit_transform(feat, n_paths=2)
+    g = feat[feat.speed == feat.speed.iloc[0]]
+    with caplog.at_level(logging.INFO, logger="autopath"):
+        DTWPathModel(seed=42, do_plots=False, outdir=str(tmp_path), n_geom_pcs=None).fit_transform(
+            g, n_paths=2, cluster_across_speeds=False)
+    assert any("dropped stored medoid entries ['all']" in r.getMessage() for r in caplog.records)

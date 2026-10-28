@@ -467,9 +467,10 @@ class SMDData:
         """
         Map a log file path to the corresponding trajectory file name.
         """
-        traj_name = log_path.replace('log', 'traj')
-        traj_name = traj_name.replace('.dat', '_aligned.dcd')
-        return traj_name
+        # File name only: a directory containing "log" must not be rewritten.
+        folder, base = os.path.split(log_path)
+        root, _ = os.path.splitext(base)
+        return os.path.join(folder, root.replace('log', 'traj') + '_aligned.dcd')
         
     def get_trace_features(self, 
                            features: list[str]=[ 'work', 'lag', 'r_before'],
