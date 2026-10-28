@@ -566,11 +566,17 @@ class FrictionEstimator(BaseEstimator):
         """Mean-force TI PMF G(z)=∫Feq dz on z=λ−Feq/k, per-path remap-then-mix.
 
         Guards: sign check (Feq>0), monotone-z filter with λ fallback (never silent
-        sort), p_eq-weighted mix on a common z grid. Returns (mix_df[z,dG_z], diag)."""
+        sort), p_eq-weighted mix on a common z grid. Returns (mix_df[z,dG_z], diag);
+        (None, diag) with the reason logged at WARNING when no PMF can be built."""
         if force_results is None or force_results.empty:
+            logger.warning("[meanforce_ti] not computed: no force rows")
             return None, {}
         E = self.per_path_feq(force_results)
         if E.empty:
+            # Per-speed clustering labels every path with one speed; Feq(v->0) needs a path
+            # identity shared across speeds.
+            logger.warning("[meanforce_ti] not computed: no path has force rows at at least 2 speeds "
+                           "at any step (path labels are per speed unless clustered across speeds)")
             return None, {}
         paths = list(E['path'].unique())
         if weights:
@@ -600,11 +606,14 @@ class FrictionEstimator(BaseEstimator):
                 logger.warning(f"[meanforce_ti] path {path}: G(z) falls outward — check signs")
             per_path.append((path, zc, G))
         if not per_path:
+            logger.warning("[meanforce_ti] not computed: no path has at least 3 usable z points")
             return None, {'fell_back_paths': fell_back}
 
         z_lo = max(zc[0] for _, zc, _ in per_path)
         z_hi = min(zc[-1] for _, zc, _ in per_path)
         if not (z_hi > z_lo):
+            logger.warning(f"[meanforce_ti] not computed: no common z range across paths "
+                           f"(max start {z_lo:.3f} nm >= min end {z_hi:.3f} nm)")
             return None, {'fell_back_paths': fell_back}
         zg = np.linspace(z_lo, z_hi, n_grid)
         Gmix = np.zeros(n_grid)
