@@ -6,6 +6,8 @@ import numpy as np
 import pandas as pd
 from scipy.special import logsumexp
 
+from .SMDData import frame_steps
+
 logger = logging.getLogger("autopath.pulling.hummer_szabo")
 
 _KEYS = ["speed", "step"]
@@ -868,31 +870,6 @@ class HummerSzaboEstimator:
             "skipped_groups": skipped_groups,
         }
         return HSResult(g0=g0, row_weights=rw, slices=slices, excluded=excluded)
-
-
-def frame_steps(n_rows: int, n_frames: int, save_freq: int) -> np.ndarray:
-    """Log step each DCD frame corresponds to.
-
-    Frame j is the state at the end of row ``(j + 1) * save_freq - 1``.
-
-    Parameters
-    ----------
-    n_rows : int
-        Rows in the pull's log.
-    n_frames : int
-        Frames in its DCD.
-    save_freq : int
-        Moves per saved frame.
-
-    Returns
-    -------
-    numpy.ndarray
-        Step per frame.
-    """
-    if n_frames != n_rows // save_freq:
-        raise ValueError(f"not supported: {n_frames} frames for {n_rows} rows at save_freq={save_freq}; "
-                         f"expected {n_rows // save_freq}")
-    return (np.arange(n_frames) + 1) * save_freq - 1
 
 
 def hs_frame_weights(dat_files: list[str], temperature: float = 300.0, f_source: str = "jarzynski",

@@ -324,7 +324,7 @@ class SMDAnalysis:
                     features=ligand_feats,
                     stride=1,
                 )
-                lf = lig_calc.compute(smd.traj_files, ref_pdb)
+                lf = lig_calc.compute(smd.traj_files, ref_pdb, smd.log_files)
                 if not lf.empty:
                     ligand_feat_dfs.append(lf)
 
@@ -380,6 +380,29 @@ class SMDAnalysis:
                     logger.warning("No usable geom_ columns after selection; skipping geom merge.")
 
         return feat_df, ligand_feat_dfs
+
+    @staticmethod
+    def _cut_to_boundary(feat_df: pd.DataFrame, raw_data: pd.DataFrame,
+                         cap: float) -> pd.DataFrame:
+        """Keep feature rows whose log row has ``r_coord <= cap``.
+
+        Parameters
+        ----------
+        feat_df : pandas.DataFrame
+            Features keyed by ``trajname`` and log ``step``.
+        raw_data : pandas.DataFrame
+            Log rows with ``trajname, step, r_coord``.
+        cap : float
+            Upper ``r_coord`` bound, nm.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Rows kept; rows without a matching log row are dropped.
+        """
+        rc = raw_data[['trajname', 'step', 'r_coord']]
+        out = feat_df.merge(rc, on=['trajname', 'step'], how='left')
+        return out[out['r_coord'] <= cap].drop(columns='r_coord')
 
     def run(self,
             sMDDdata: SMDData,
@@ -457,12 +480,9 @@ class SMDAnalysis:
             recompute_distances=recompute_distances,
         )
 
-        # r_coord via (trajname, step) so the cut works for any feature set.
         if boundary_cap is not None and not feat_df.empty:
-            _rc = sMDDdata.raw_data[['trajname', 'step', 'r_coord']]
-            feat_df = feat_df.merge(_rc, on=['trajname', 'step'], how='left')
             _n0 = len(feat_df)
-            feat_df = feat_df[feat_df['r_coord'] <= boundary_cap].drop(columns='r_coord')
+            feat_df = self._cut_to_boundary(feat_df, sMDDdata.raw_data, boundary_cap)
             logger.info(
                 f"Clustering feature rows after boundary cut: {_n0} -> {len(feat_df)} "
                 f"(r <= {boundary_cap:.2f} nm)."

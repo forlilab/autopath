@@ -101,7 +101,7 @@ def test_pocket_distances_per_speed_files(tmp_path, monkeypatch):
         for tr in trajs_:
             name = SMDData._traj_to_log_name(tr)
             speed = float(name.split("_")[-2].strip("v"))
-            rows.append({"trajname": name, "speed": speed, "step": 0,
+            rows.append({"trajname": name, "speed": speed, "frame": 0, "step": 4,
                          "time": 0.0, "dist_0": 1.0})
         return pd.DataFrame(rows)
 
@@ -124,8 +124,8 @@ def test_pocket_distances_per_speed_files(tmp_path, monkeypatch):
     assert calls["n"] > first_calls
 
 
-def test_pocket_distances_migrates_legacy_cache(tmp_path, monkeypatch):
-    """A pre-existing single-file cache is reused per speed without recomputing."""
+def test_pocket_distances_ignores_legacy_cache(tmp_path, monkeypatch):
+    """The legacy single-file cache has frame-index steps, so it is recomputed."""
     from autopath.pulling.SMDData import SMDData
 
     smd = SMDData.__new__(SMDData)
@@ -134,16 +134,16 @@ def test_pocket_distances_migrates_legacy_cache(tmp_path, monkeypatch):
     smd.reference_pdb = "ref.pdb"
     smd.traj_files = ["sMD_replica-3_v0.015_forward.dcd"]
 
-    # Legacy combined cache holds v0.015 rows (as the old single-file scheme did).
     pd.DataFrame([{"trajname": "sMD_replica-3_v0.015_forward", "speed": 0.015,
                    "step": 0, "time": 0.0, "dist_0": 2.0}]).to_csv(
         tmp_path / "sys_pocketDistances.csv", index=False)
 
-    def boom(*a, **k):
-        raise AssertionError("should not recompute when legacy cache covers the speed")
-    monkeypatch.setattr(SMDData, "_pocket_distances_for_trajs", boom)
+    def fake_compute(self, trajs_, group_A, group_B, stride):
+        return pd.DataFrame([{"trajname": "sMD_replica-3_v0.015_forward", "speed": 0.015,
+                              "frame": 0, "step": 4, "time": 0.4, "dist_0": 3.0}])
+    monkeypatch.setattr(SMDData, "_pocket_distances_for_trajs", fake_compute)
 
     df = smd.calculate_pocket_distances(group_A="a", group_B="b")
-    assert (df["speed"] == 0.015).all() and len(df) == 1
-    # Promoted to a per-speed file for future loads.
+    assert df["dist_0"].tolist() == [3.0] and df["step"].tolist() == [4]
+    assert "frame" not in df.columns
     assert (tmp_path / "sys_pocketDistances_v0.015.csv").exists()
