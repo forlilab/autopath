@@ -151,7 +151,7 @@ class AutoPath:
         sMD_boundary_buffer_frac: float = 0.1,  # extend the boundary cap by this fraction of r_ts (a little buffer past rupture)
         sMD_kramers_abs: str = "end",  # Kramers absorbing boundary: 'end' (pulled range) | 'force_plateau' (legacy)
         sMD_kramers_bound: str = "mirror",  # bound population below pull start: 'mirror' | 'none'
-        cluster_across_speeds: bool = False,
+        cluster_across_speeds: bool = True,
         sMD_min_replicas_per_path: int = 5,
     ):
         # General

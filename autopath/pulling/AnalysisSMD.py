@@ -405,7 +405,7 @@ class SMDAnalysis:
             group_A: str = None,
             group_B: str = None,
             merge_features: bool = True,
-            cluster_across_speeds: bool = False,
+            cluster_across_speeds: bool = True,
             features: list[str] | None = None,
             ligand_sdf: str | None = None,
             geom_features: bool = True,
@@ -420,6 +420,11 @@ class SMDAnalysis:
         """
         Parameters
         ----------
+        cluster_across_speeds : bool
+            Cluster all speeds together (default; features standardised within
+            each speed) so each path spans every speed, as per-path force
+            ``Feq``, friction and mean-force TI need. False clusters each speed
+            independently (``path-k_v{speed}`` labels).
         features : list[str] | None
             Flat list of clustering feature names to compute. Each name must
             be in ``TRACE_FEATURE_POOL`` (e.g. ``"work"``, ``"lag"``,
@@ -480,10 +485,6 @@ class SMDAnalysis:
 
         if r_range is not None:
             sMDDdata.filter_by_r_range(r_range, sMDDdata.r_column)
-
-        if (group_A is not None and group_B is not None
-                and merge_features and cluster_across_speeds):
-            logger.warning("Clustering using all speeds together on trace features. Those depend on speed, so this may lead to suboptimal clustering. Consider setting cluster_across_speeds=False or using only distance features for clustering.")
 
         # Build the clustering feature DataFrame (trace-only / distance-only /
         # merged) — shared with check_convergence so both cluster identically.

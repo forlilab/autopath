@@ -75,7 +75,7 @@ class Config(object):
         sMD_boundary_buffer_frac: float = 0.1,  # extend the boundary cap by this fraction of r_ts
         sMD_kramers_abs: str = "end",  # Kramers absorbing boundary: "end" (pulled range) | "force_plateau" (legacy)
         sMD_kramers_bound: str = "mirror",  # bound population below pull start: "mirror" | "none"
-        cluster_across_speeds: bool = False,
+        cluster_across_speeds: bool = True,
         sMD_min_replicas_per_path: int = 5,
     ):
         """Initialise an AutoPath configuration.
@@ -280,8 +280,9 @@ class Config(object):
             Bound-state population below the pull start in the Kramers MFPT:
             ``"mirror"`` (default) or ``"none"`` (reflect at start).
         cluster_across_speeds : bool, optional
-            Pool replicas from all pulling speeds into a single clustering pass,
-            instead of clustering each speed independently.  Default ``False``.
+            Pool replicas from all pulling speeds into a single clustering pass
+            (features standardised within each speed), so a path spans all
+            speeds; ``False`` clusters each speed independently.  Default ``True``.
         sMD_min_replicas_per_path : int, optional
             Minimum number of replicas required in a cluster for it to be kept
             as a distinct path.  Default ``5``.

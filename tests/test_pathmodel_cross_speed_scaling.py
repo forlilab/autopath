@@ -83,7 +83,7 @@ def test_cross_speed_clusters_by_pathway_not_speed(tmp_path):
 
 
 def test_per_speed_clustering_unchanged(tmp_path):
-    """Default path (cluster_across_speeds=False) keeps speed-suffixed labels."""
+    """Per-speed clustering (cluster_across_speeds=False) keeps speed-suffixed labels."""
     df = _make_df()
     feat = df.drop(columns=["true_path"])
     model = DTWPathModel(seed=42, do_plots=False, outdir=str(tmp_path),
