@@ -373,7 +373,7 @@ def wham_density(rows, slices, F, c, k, beta, bin_nm=0.002):
     return edges, rho
 
 
-def f_self_consistent(rows, slices, c, k, beta, bin_nm=0.002, stride=1, tol=1e-6, max_iter=10000):
+def f_self_consistent(rows, slices, c, k, beta, bin_nm=0.002, stride=1, tol=1e-6, max_iter=200000):
     """Slice free energies solved by binned WHAM iteration.
 
     Starts from :func:`f_jarzynski`; F of the first slice is 0.
@@ -439,7 +439,8 @@ def f_self_consistent(rows, slices, c, k, beta, bin_nm=0.002, stride=1, tol=1e-6
     return out
 
 
-def _source_F(rows, slices, c, k, beta, f_source, realized_speed_map, wham_stride):
+def _source_F(rows, slices, c, k, beta, f_source, realized_speed_map, wham_stride,
+              wham_max_iter=200000):
     if f_source == "jarzynski":
         return f_jarzynski(slices, beta)
     if f_source == "cumulant":
@@ -449,12 +450,12 @@ def _source_F(rows, slices, c, k, beta, f_source, realized_speed_map, wham_strid
             raise ValueError("not supported: force F needs realized_speed_map")
         return f_force_v0(slices, realized_speed_map)
     if f_source == "self_consistent":
-        return f_self_consistent(rows, slices, c, k, beta, stride=wham_stride)
+        return f_self_consistent(rows, slices, c, k, beta, stride=wham_stride, max_iter=wham_max_iter)
     raise ValueError(f"not supported: F source {f_source!r}; use one of {F_SOURCES}")
 
 
 def estimate(rows, grids, k, beta, f_source, c_mode="ess", bin_nm=0.02,
-             realized_speed_map=None, wham_stride=1):
+             realized_speed_map=None, wham_stride=1, wham_max_iter=200000):
     """HS unbiased profile for one F source.
 
     Slices with NaN F are dropped from the denominator and their rows get log weight -inf.
@@ -479,6 +480,8 @@ def estimate(rows, grids, k, beta, f_source, c_mode="ess", bin_nm=0.02,
         Nominal -> realized speed; required for ``force``.
     wham_stride : int, optional
         Step stride for ``self_consistent``.
+    wham_max_iter : int, optional
+        Iteration cap for ``self_consistent``.
 
     Returns
     -------
@@ -492,7 +495,7 @@ def estimate(rows, grids, k, beta, f_source, c_mode="ess", bin_nm=0.02,
     rows = rows.reset_index(drop=True)
     slices = slice_table(rows, grids, beta)
     c = slice_weights(slices, c_mode)
-    F = _source_F(rows, slices, c, k, beta, f_source, realized_speed_map, wham_stride)
+    F = _source_F(rows, slices, c, k, beta, f_source, realized_speed_map, wham_stride, wham_max_iter)
     keep = np.isfinite(F)
     if not keep.any():
         raise ValueError("not supported: no slice has a finite F")
@@ -697,12 +700,17 @@ class HummerSzaboEstimator:
         Bootstrap RNG seed.
     wham_stride : int, optional
         Step stride for the ``self_consistent`` source.
+    wham_max_iter : int, optional
+        Iteration cap for the ``self_consistent`` source.
+
+    A source whose estimate raises ``ValueError`` in any scope is dropped from every scope and
+    recorded in ``excluded["skipped_sources"]``; :meth:`fit` raises if no source survives.
     """
 
     name = "hummer_szabo"
 
     def __init__(self, f_sources=F_SOURCES, slice_weights="ess", bin_nm=0.02, n_boot=200, seed=0,
-                 wham_stride=1):
+                 wham_stride=1, wham_max_iter=200000):
         unknown = [s for s in f_sources if s not in F_SOURCES]
         if unknown:
             raise ValueError(f"not supported: F sources {unknown}; use a subset of {F_SOURCES}")
@@ -712,16 +720,25 @@ class HummerSzaboEstimator:
         self.n_boot = n_boot
         self.seed = seed
         self.wham_stride = wham_stride
+        self.wham_max_iter = wham_max_iter
 
-    def _run(self, rows, grids, k, beta, rsm, sources):
+    def _run(self, rows, grids, k, beta, rsm, sources, skipped, scope):
         # Per source: bootstrap profile, log weights aligned with rows, F per slice.
+        # A source that raises ValueError is recorded in `skipped` and left out.
         kw = dict(c_mode=self.slice_weights, bin_nm=self.bin_nm, realized_speed_map=rsm,
-                  wham_stride=self.wham_stride)
+                  wham_stride=self.wham_stride, wham_max_iter=self.wham_max_iter)
         out = {}
         for src in sources:
-            point, logw, F = estimate(rows, grids, k, beta, src, **kw)
-            g0 = bootstrap_g0(rows, grids, k, beta, src, n_boot=self.n_boot, seed=self.seed,
-                              point=point, **kw)
+            if src in skipped:
+                continue
+            try:
+                point, logw, F = estimate(rows, grids, k, beta, src, **kw)
+                g0 = bootstrap_g0(rows, grids, k, beta, src, n_boot=self.n_boot, seed=self.seed,
+                                  point=point, **kw)
+            except ValueError as e:
+                logger.warning(f"Skipping F source {src!r} (failed in scope {scope}): {e}")
+                skipped[src] = str(e)
+                continue
             out[src] = (g0, logw - logsumexp(logw), F)
         return out
 
@@ -781,14 +798,14 @@ class HummerSzaboEstimator:
             for src, (g0, _, _) in res.items():
                 g0_parts.append(g0.assign(f_source=src, scope=scope, path=path, speed=speed))
 
-        res_all = self._run(joint, grids, k, beta, rsm, sources)
+        res_all = self._run(joint, grids, k, beta, rsm, sources, skipped, "all")
         _collect(res_all, "all")
 
         # The joint trim already holds every pull of a speed, so it is that speed's own trim.
         for speed in speeds:
             sub = joint[joint["speed"] == speed].reset_index(drop=True)
-            _collect(self._run(sub, grids, k, beta, rsm, [s for s in sources if s != "force"]),
-                     "speed", speed=speed)
+            _collect(self._run(sub, grids, k, beta, rsm, [s for s in sources if s != "force"],
+                               skipped, f"speed={speed}"), "speed", speed=speed)
 
         path_rw = []
         for path, g in rows_in.groupby("path"):
@@ -797,10 +814,19 @@ class HummerSzaboEstimator:
                 skipped_groups.append(("path", path))
                 continue
             srcs = [s for s in sources if s != "force" or sub["speed"].nunique() > 1]
-            res = self._run(sub, grids, k, beta, rsm, srcs)
+            res = self._run(sub, grids, k, beta, rsm, srcs, skipped, f"path={path}")
             _collect(res, "path", path=path)
             for src, (_, lw, _) in res.items():
                 path_rw.append(sub[["trajname", "step"]].assign(path=path, f_source=src, logw_path=lw))
+
+        # A source that failed in any scope is dropped from every scope.
+        failed = [s for s in sources if s in skipped]
+        if len(failed) == len(sources):
+            raise ValueError("not supported: every F source failed: "
+                             + "; ".join(f"{s}: {skipped[s]}" for s in failed))
+        res_all = {s: v for s, v in res_all.items() if s not in skipped}
+        g0_parts = [g[~g["f_source"].isin(failed)] for g in g0_parts]
+        path_rw = [p[~p["f_source"].isin(failed)] for p in path_rw]
 
         rw = pd.concat([joint[["trajname", "speed", "step", "r_after", "path"]].assign(f_source=src, logw=lw)
                         for src, (_, lw, _) in res_all.items()], ignore_index=True)

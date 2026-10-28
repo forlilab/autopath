@@ -188,3 +188,41 @@ def test_force_with_speed_dependent_dx_is_not_supported(tmp_path):
     med = lam0.groupby(first["speed"]).median()
     assert res.excluded["lam0_spread_nm"] == pytest.approx(med.max() - med.min(), abs=1e-12)
     assert res.excluded["lam0_sd_nm"] == pytest.approx(lam0.groupby(first["speed"]).std().max(), abs=1e-12)
+
+
+def test_failing_source_is_skipped_and_recorded(tmp_path, caplog):
+    rows = simulate_pulls(*flat(), n_pulls=8, speed=0.01, length_nm=0.05, seed=40)
+    smd = _smd(tmp_path, rows)
+    est = HummerSzaboEstimator(f_sources=("jarzynski", "self_consistent"), n_boot=0, wham_max_iter=1)
+    with caplog.at_level("WARNING", logger="autopath.pulling.hummer_szabo"):
+        res = est.fit(smd)
+    msg = res.excluded["skipped_sources"]["self_consistent"]
+    assert "did not converge" in msg and "1 iterations" in msg
+    assert "self_consistent" in caplog.text
+    assert set(res.g0.f_source) == {"jarzynski"}
+    assert set(res.row_weights.f_source) == {"jarzynski"}
+    assert "F_self_consistent" not in res.slices.columns
+    assert set(res.excluded["n_rows_no_F"]) == {"jarzynski"}
+
+
+def test_all_sources_failing_raises(tmp_path):
+    rows = simulate_pulls(*flat(), n_pulls=8, speed=0.01, length_nm=0.05, seed=41)
+    est = HummerSzaboEstimator(f_sources=("self_consistent",), n_boot=0, wham_max_iter=1)
+    with pytest.raises(ValueError, match="not supported: every F source failed"):
+        est.fit(_smd(tmp_path, rows))
+
+
+def test_wham_max_iter_reaches_solver(tmp_path, monkeypatch):
+    from autopath.pulling import hummer_szabo as hs
+
+    seen = []
+    real = hs.f_self_consistent
+
+    def spy(*a, **kw):
+        seen.append(kw.get("max_iter"))
+        return real(*a, **kw)
+
+    monkeypatch.setattr(hs, "f_self_consistent", spy)
+    rows = simulate_pulls(*flat(), n_pulls=6, speed=0.01, length_nm=0.03, seed=42)
+    HummerSzaboEstimator(f_sources=("self_consistent",), n_boot=0).fit(_smd(tmp_path, rows))
+    assert seen and set(seen) == {200000}
