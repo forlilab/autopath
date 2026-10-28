@@ -1,6 +1,4 @@
 """Periodic-lattice helpers for pulls in triclinic boxes."""
-import itertools
-
 import numpy as np
 
 
@@ -26,35 +24,27 @@ def triclinic_minimum_image(d, box_nm) -> np.ndarray:
     return d
 
 
-def lattice_pbc_limit(n, box_nm):
-    """Largest distance along ``n`` before a displacement leaves its periodic cell.
+def reduction_identity_limit(n, box_nm):
+    """Largest distance along ``n`` that :func:`triclinic_minimum_image` returns unchanged.
 
-    min over the lattice vectors T = i·a + j·b + k·c (i, j, k in {-1, 0, 1}, not all 0, n·T ≠ 0)
-    of |T|² / (2 |n·T|).
+    The c, b, a reduction is the identity only inside the brick |d_i| < box[i, i] / 2, so the
+    limit is min_i box[i, i] / (2 |n_i|).
 
     Parameters
     ----------
     n : array_like, shape (3,)
         Unit direction.
     box_nm : array_like, shape (3, 3)
-        Box vectors as rows (nm).
+        Box vectors a, b, c as rows (nm), in OpenMM's reduced form.
 
     Returns
     -------
-    (float, tuple of int)
-        The limit (nm) and the (i, j, k) of the limiting T.
+    (float, int)
+        The limit (nm) and the limiting axis (0, 1, 2).
     """
-    n = np.asarray(n, dtype=float)
-    box = np.asarray(box_nm, dtype=float)
-    best, best_ijk = np.inf, None
-    for ijk in itertools.product((-1, 0, 1), repeat=3):
-        if ijk == (0, 0, 0):
-            continue
-        T = np.asarray(ijk, dtype=float) @ box
-        nT = abs(float(n @ T))
-        if nT < 1e-12:
-            continue
-        val = float(T @ T) / (2.0 * nT)
-        if val < best:
-            best, best_ijk = val, ijk
-    return best, best_ijk
+    n = np.abs(np.asarray(n, dtype=float))
+    half = np.diag(np.asarray(box_nm, dtype=float)) / 2.0
+    with np.errstate(divide="ignore"):
+        per = np.where(n > 1e-12, half / n, np.inf)
+    axis = int(np.argmin(per))
+    return float(per[axis]), axis

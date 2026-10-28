@@ -10,7 +10,7 @@ from datetime import datetime
 
 from autopath.utils import *
 from autopath.customForces import (add_harmonic_restraints, remove_openmm_force)
-from autopath.pulling.pbc import lattice_pbc_limit, triclinic_minimum_image
+from autopath.pulling.pbc import reduction_identity_limit, triclinic_minimum_image
 
 from openmm.app import *
 from openmm import XmlSerializer
@@ -93,8 +93,8 @@ class SteeredMD:
         autostop_nc: float | None = 0.1,  # fraction of NC_initial to stop at; None disables
         autostop_nc_window: int = 2,      # consecutive NC samples below threshold to confirm detachment
         autostop_min_displacement: float = 0.5,  # nm — don't fire before this displacement from r0
-        sMD_max_r_offset: float = 3.0,   # max displacement offset (nm): cap pull at r0 + offset nm (also capped by the PBC lattice limit minus pbc_safety_nm)
-        pbc_safety_nm: float = 0.5,      # nm — safety margin subtracted from the PBC lattice cap (raise for large proteins)
+        sMD_max_r_offset: float = 3.0,   # max displacement offset (nm): cap pull at r0 + offset nm (also capped by the PBC per-axis half-box limit minus pbc_safety_nm)
+        pbc_safety_nm: float = 0.5,      # nm — safety margin subtracted from the per-axis PBC half-box cap (raise for large proteins)
         use_NVT: bool = False,  # Use NVT ensemble
         use_GReweighting: bool = False,
         out_dir: str = None,
@@ -247,9 +247,8 @@ class SteeredMD:
         simulation.context.setParameter("r0_smd", initial_r0)
 
         # ── Move count cap: box safety + r0 factor ─────────────────────────────
-        # PBC cap: cvpack uses pbc=True, so the COM-COM distance is the minimum
-        # image; it stays well defined along n = v/|v| up to the nearest lattice
-        # Voronoi face, min_T |T|^2 / (2|n.T|) (exact for triclinic boxes).
+        # PBC cap: per-axis (L_i/2)|v|/|v_i| is the identity region of OpenMM's
+        # c->b->a delta reduction used by the pbc=True CV (valid on triclinic boxes).
         initial_r0_nm = initial_r0.value_in_unit(openmmunit.nanometers)
         dx_nm = float(self.dx_per_move.value_in_unit(openmmunit.nanometers))
         n_moves = self.sMD_moves
@@ -281,15 +280,17 @@ class SteeredMD:
                     f"{r_start_nm:.3f} nm. Check that protein/ligand are not split "
                     f"across a periodic boundary at t=0; cap would be unreliable."
                 )
-            r_lat, lat_ijk = lattice_pbc_limit(v / v_norm, box_arr)
-            r_max_pbc      = r_lat - self.pbc_safety_nm
+            r_red, red_axis = reduction_identity_limit(v / v_norm, box_arr)
+            r_max_pbc      = r_red - self.pbc_safety_nm
             r_max_offset   = v_norm + self.sMD_max_r_offset
             r_max          = min(r_max_pbc, r_max_offset)
             moves_safe     = max(1, int((r_max - v_norm) / dx_nm))
             if n_moves > moves_safe:
                 if r_max == r_max_pbc:
-                    reason = (f"PBC lattice vector T={lat_ijk[0]:+d}a{lat_ijk[1]:+d}b{lat_ijk[2]:+d}c "
-                              f"(face at {r_lat:.3f} nm, safety={self.pbc_safety_nm:.2f} nm)")
+                    ax = "xyz"[red_axis]
+                    reason = (f"PBC axis-{ax} half-box (L={box_arr[red_axis, red_axis]:.2f} nm, "
+                              f"|v|/|v_{ax}|={v_norm / max(abs(v[red_axis]), 1e-12):.2f}, "
+                              f"safety={self.pbc_safety_nm:.2f} nm)")
                 else:
                     reason = f"r0+{self.sMD_max_r_offset:.1f}nm offset"
                 logger.warning(

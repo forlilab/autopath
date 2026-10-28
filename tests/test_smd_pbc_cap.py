@@ -3,16 +3,15 @@ import re
 from types import SimpleNamespace
 
 import numpy as np
+import openmm
 import openmm.unit as openmmunit
 import pytest
 
-from autopath.pulling.pbc import lattice_pbc_limit, triclinic_minimum_image
+from autopath.pulling.pbc import reduction_identity_limit, triclinic_minimum_image
 from autopath.pulling.steered_md import SteeredMD
 
-
-def _dodecahedron(d):
-    # OpenMM's square-xy rhombic dodecahedron, reduced form.
-    return np.array([[d, 0, 0], [0, d, 0], [d / 2, d / 2, d * np.sqrt(2) / 2]])
+# OpenMM square-xy rhombic dodecahedron, reduced form (nm).
+_DODEC = np.array([[8.4773, 0.0, 0.0], [0.0, 8.4773, 0.0], [4.2386, 4.2386, 5.9943]])
 
 
 def _old_cap(v, L):
@@ -28,7 +27,7 @@ def test_orthorhombic_cap_equals_old_formula():
         L = rng.uniform(4.0, 15.0, 3)
         v = rng.normal(size=3)
         v[rng.integers(0, 3)] *= rng.choice([1.0, 0.0])
-        lim, _ = lattice_pbc_limit(v / np.linalg.norm(v), np.diag(L))
+        lim, _ = reduction_identity_limit(v / np.linalg.norm(v), np.diag(L))
         assert lim == pytest.approx(_old_cap(v, L), rel=1e-12)
 
 
@@ -39,25 +38,42 @@ def test_orthorhombic_minimum_image_matches_old():
     np.testing.assert_allclose(triclinic_minimum_image(d, np.diag(L)), d - np.round(d / L) * L, atol=1e-12)
 
 
-def test_dodecahedron_lattice_cap_exceeds_old_diagonal_cap():
-    d = 8.0
-    box = _dodecahedron(d)
-    n = np.array([0.0, 0.0, 1.0])
-    lim, ijk = lattice_pbc_limit(n, box)
-    T = np.asarray(ijk, float) @ box
-    assert lim == pytest.approx(T @ T / (2 * abs(n @ T)))
-    assert lim == pytest.approx(d / np.sqrt(2))
-    assert lim > _old_cap(n, np.diag(box)) + 1.0
-
-
-def test_dodecahedron_reduction_recovers_in_cell_vectors():
-    box = _dodecahedron(8.0)
-    half = np.diag(box) / 2
+def test_dodecahedron_reduction_recovers_in_brick_vectors():
+    half = np.diag(_DODEC) / 2
     rng = np.random.default_rng(2)
     for _ in range(200):
         v = rng.uniform(-0.99, 0.99, 3) * half
-        far = v + np.array(rng.integers(-2, 3, 3), float) @ box
-        np.testing.assert_allclose(triclinic_minimum_image(far, box), v, atol=1e-9)
+        far = v + np.array(rng.integers(-2, 3, 3), float) @ _DODEC
+        np.testing.assert_allclose(triclinic_minimum_image(far, _DODEC), v, atol=1e-9)
+
+
+def _openmm_distance(box, p0, p1):
+    system = openmm.System()
+    for _ in range(2):
+        system.addParticle(1.0)
+    system.setDefaultPeriodicBoxVectors(*[openmm.Vec3(*row) for row in box])
+    f = openmm.CustomCentroidBondForce(2, "distance(g1,g2)")
+    f.addGroup([0])
+    f.addGroup([1])
+    f.addBond([0, 1], [])
+    f.setUsesPeriodicBoundaryConditions(True)
+    system.addForce(f)
+    ctx = openmm.Context(system, openmm.VerletIntegrator(0.001), openmm.Platform.getPlatformByName("Reference"))
+    ctx.setPositions([openmm.Vec3(*p0), openmm.Vec3(*p1)] * openmmunit.nanometers)
+    return ctx.getState(getEnergy=True).getPotentialEnergy().value_in_unit(openmmunit.kilojoules_per_mole)
+
+
+@pytest.mark.parametrize("n", [np.array([0.0, 0.0, 1.0]), np.random.default_rng(3).normal(size=3)])
+def test_cap_is_identity_region_of_openmm_pbc_distance(n):
+    n = n / np.linalg.norm(n)
+    cap, _ = reduction_identity_limit(n, _DODEC)
+    p0 = np.array([1.0, 2.0, 3.0])
+    for r, same in ((cap - 0.01, True), (cap + 0.02, False)):
+        d = _openmm_distance(_DODEC, p0 + r * n, p0)
+        if same:
+            assert d == pytest.approx(r, abs=1e-5)
+        else:
+            assert abs(d - r) > 1e-3
 
 
 class _Stop(Exception):
@@ -91,20 +107,17 @@ def _run_cap(tmp_path, box, pos, n_moves, monkeypatch, caplog):
 
 
 @pytest.mark.parametrize("wrapped", [False, True])
-def test_pull_cap_uses_lattice_limit_in_dodecahedron(tmp_path, monkeypatch, caplog, wrapped):
-    d = 8.0
-    box = _dodecahedron(d)
-    # COM-COM vector along z; wrapped stores it across the c boundary to exercise the minimum image.
+def test_pull_cap_in_dodecahedron(tmp_path, monkeypatch, caplog, wrapped):
+    # COM-COM vector along z; wrapped stores it across the c+b boundary to exercise the image.
     pos = [[0.1, 0.2, 1.5], [0.1, 0.2, 0.0]]
     if wrapped:
-        pos[0] = list(np.asarray(pos[0]) + box[2] + box[1])
-    r = _run_cap(tmp_path, box, pos, 10000, monkeypatch, caplog)
+        pos[0] = list(np.asarray(pos[0]) + _DODEC[2] + _DODEC[1])
+    r = _run_cap(tmp_path, _DODEC, pos, 10000, monkeypatch, caplog)
     assert r == pytest.approx(1.5)
-    want = int((d / np.sqrt(2) - 0.5 - r) / 0.001)
+    want = int((_old_cap(np.array([0.0, 0.0, r]), np.diag(_DODEC)) - 0.5 - r) / 0.001)
     m = re.search(r"Capping sMD_moves 10000 → (\d+)", caplog.text)
     assert m and int(m.group(1)) == want
     assert "non-orthorhombic" not in caplog.text
-    assert "lattice vector" in caplog.text
 
 
 def test_pull_cap_unchanged_in_orthorhombic_box(tmp_path, monkeypatch, caplog):
