@@ -2,6 +2,7 @@ import os
 import shutil
 import logging
 import tempfile
+import warnings
 
 logger = logging.getLogger("autopath")
 import numpy as np
