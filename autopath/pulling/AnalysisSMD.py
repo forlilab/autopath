@@ -921,7 +921,8 @@ class SMDAnalysis:
                 outdir=self.outdir,
             )
             path_mappings = clusterer.fit_transform(feat_df_cl, r_range=fit_r_range,
-                                                    cluster_across_speeds=False)
+                                                    cluster_across_speeds=False,
+                                                    persist_medoids=False)
 
             smd.raw_data['path'] = smd.raw_data['trajname'].map(path_mappings)
 

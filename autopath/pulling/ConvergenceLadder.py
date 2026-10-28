@@ -97,7 +97,8 @@ def _speed_state(sa, smd, speed, plateau_frac, boundary_buffer_frac, trim_fracti
 
     clusterer = DTWPathModel(seed=sa.seed, do_plots=False, outdir=sa.outdir)
     mappings = clusterer.fit_transform(feat_df_cl, r_range=fit_r_range,
-                                       cluster_across_speeds=False)
+                                       cluster_across_speeds=False,
+                                       persist_medoids=False)
     smd.raw_data["path"] = smd.raw_data["trajname"].map(mappings)
 
     speed_data = smd.raw_data[smd.raw_data["speed"] == speed].copy()
