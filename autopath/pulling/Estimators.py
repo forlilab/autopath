@@ -1713,6 +1713,128 @@ def combine_paths_eq21(
     return dG_mix, Wmean_mix
 
 
+def force_v0_dG(
+    force_results: pd.DataFrame,
+    p_neq_by_speed: dict,
+    beta: float,
+    min_trajs_per_path: int,
+    min_speeds: int = 2,
+    realized_speed_map: dict | None = None,
+) -> pd.DataFrame:
+    """v->0 force free-energy profile for ``path_combination='eq21'``.
+
+    Per path k, ``Fmean`` is regressed across speeds (``<F> = F_eq,k + Gamma_k v``),
+    ``F_eq,k`` is integrated over ``r_coord`` to ``dG_k`` (0 at the first common
+    step) and paths are combined by Wolf, Post & Stock 2023, Eq. 21 with ``w_k``
+    the trajectory fraction at the slowest speed. If no path label spans two
+    speeds (per-speed clustering), the trajectory-count-weighted mean force of
+    all paths is regressed and integrated instead.
+
+    Parameters
+    ----------
+    force_results : pd.DataFrame
+        Force-estimator rows with ``step, speed, path, r_coord, n_samples, Fmean``.
+    p_neq_by_speed : dict
+        ``{speed: {path: trajectory fraction}}``.
+    beta : float
+        Inverse thermal energy (mol/kJ).
+    min_trajs_per_path : int
+        Paths with fewer trajectories (median ``n_samples``) at any speed, or
+        absent at a speed, are excluded with a warning.
+    min_speeds : int
+        Passed to :func:`extrapolate_to_v0`.
+    realized_speed_map : dict | None
+        Nominal -> realized speed, passed to :func:`extrapolate_to_v0`.
+
+    Returns
+    -------
+    pd.DataFrame
+        ``step, r_coord, estimator, dG, dG_se, R2, n_speeds, n_paths, model,
+        speed`` (``speed = 0``); ``R2`` is the worst per-path force-fit R2.
+        Empty if no path is usable.
+    """
+    cols = ['step', 'r_coord', 'estimator', 'dG', 'dG_se', 'R2',
+            'n_speeds', 'n_paths', 'model', 'speed']
+    df = force_results.dropna(subset=['Fmean'])
+    speeds = sorted(df['speed'].unique())
+    if len(speeds) < 2:
+        logger.warning("[force v0] not computed: fewer than two speeds")
+        return pd.DataFrame(columns=cols)
+    x2 = dict(min_speeds=min_speeds, realized_speed_map=realized_speed_map)
+
+    if (df.groupby('path')['speed'].nunique() < 2).all():
+        logger.info("[force v0] path labels are speed-specific: per-path regression "
+                    "undefined, using the pooled ensemble mean force")
+        pooled = (df.assign(_wF=df['Fmean'] * df['n_samples'])
+                    .groupby(['speed', 'step'], as_index=False)
+                    .agg(_wF=('_wF', 'sum'), n=('n_samples', 'sum'),
+                         r_coord=('r_coord', 'mean')))
+        pooled['Fmean'] = pooled['_wF'] / pooled['n']
+        pooled['estimator'] = 'force'
+        v0 = extrapolate_to_v0(pooled, param='Fmean', **x2)
+        if v0.empty:
+            return pd.DataFrame(columns=cols)
+        v0 = v0.sort_values('step')
+        r = v0['r_coord'].to_numpy(dtype=float)
+        return pd.DataFrame({
+            'step': v0['step'].to_numpy(), 'r_coord': r, 'estimator': 'force',
+            'dG': FrictionEstimator._cumulative_integral(r, v0['Fmean'].to_numpy(dtype=float)),
+            'dG_se': np.nan, 'R2': v0['R2'].to_numpy(), 'n_speeds': v0['n_speeds'].to_numpy(),
+            'n_paths': df['path'].nunique(), 'model': 'pooled', 'speed': 0.0,
+        })[cols]
+
+    slowest = speeds[0]
+    p_slow = p_neq_by_speed.get(slowest, {})
+    n_rep = df.groupby(['path', 'speed'])['n_samples'].median()
+    per_path = {}
+    for path in sorted(df['path'].unique()):
+        reason = None
+        for sp in speeds:
+            if (path, sp) not in n_rep.index:
+                reason = f"no rows at speed={sp} (absent or removed by path filtering)"
+                break
+            n = int(n_rep[(path, sp)])
+            if n < min_trajs_per_path:
+                reason = f"{n} trajectories < {min_trajs_per_path} at speed={sp}"
+                break
+        if reason is None and p_slow.get(path, 0.0) <= 0:
+            reason = f"no trajectory fraction at slowest speed={slowest}"
+        if reason is None:
+            v0 = extrapolate_to_v0(df[df['path'] == path].assign(estimator='force'),
+                                   param='Fmean', **x2)
+            if v0.empty:
+                reason = "no step with a v->0 force fit"
+        if reason is not None:
+            logger.warning(f"[force v0] excluding path '{path}' from the force readout: {reason}")
+            continue
+        per_path[path] = v0.set_index('step')
+
+    if not per_path:
+        logger.warning("[force v0] not computed: no path usable for per-path regression")
+        return pd.DataFrame(columns=cols)
+    steps = sorted(set.intersection(*(set(v.index) for v in per_path.values())))
+    if not steps:
+        logger.warning("[force v0] not computed: paths share no fitted step")
+        return pd.DataFrame(columns=cols)
+
+    paths = list(per_path)
+    w = np.array([p_slow[p] for p in paths], dtype=float)
+    w = w / w.sum()
+    r = np.mean([per_path[p].loc[steps, 'r_coord'].to_numpy(dtype=float) for p in paths], axis=0)
+    dG_k = np.array([FrictionEstimator._cumulative_integral(
+        r, per_path[p].loc[steps, 'Fmean'].to_numpy(dtype=float)) for p in paths])
+    dG = -special.logsumexp(-beta * dG_k, b=w[:, None], axis=0) / beta
+    R2 = np.min([per_path[p].loc[steps, 'R2'].to_numpy(dtype=float) for p in paths], axis=0)
+    n_sp = np.min([per_path[p].loc[steps, 'n_speeds'].to_numpy() for p in paths], axis=0)
+    logger.info(f"[force v0] eq21 over {len(paths)} path(s), weights at speed={slowest}: "
+                + ", ".join(f"{p}={wk:.3f}" for p, wk in zip(paths, w)))
+    return pd.DataFrame({
+        'step': steps, 'r_coord': r, 'estimator': 'force', 'dG': dG, 'dG_se': np.nan,
+        'R2': R2, 'n_speeds': n_sp, 'n_paths': len(paths), 'model': 'eq21_per_path',
+        'speed': 0.0,
+    })[cols]
+
+
 def calculate_weighted_pmf(
     smd_data: SMDData,
     weight_cols: list[str] = ['dG', 'Wdiss'],
@@ -1739,7 +1861,8 @@ def calculate_weighted_pmf(
         (Wolf, Post & Stock 2023, Eq. 21), ``Wmean`` the p_neq-weighted mean
         and ``Wdiss = Wmean - dG``; supports ``weight_cols`` in
         {'dG', 'Wdiss', 'Wmean'}. ``'linear'``: p_eq-weighted mean of every
-        column. The force estimator is always mixed linearly.
+        column. The force estimator is always mixed linearly here; its eq21 v->0
+        readout is :func:`force_v0_dG`.
     p_neq_by_speed : dict | None
         ``{speed: {path: p_neq}}`` for ``'eq21'``; defaults to
         ``smd_data.get_p_neq(byspeed=True)``.

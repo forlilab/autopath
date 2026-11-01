@@ -190,3 +190,149 @@ def test_invalid_path_combination_raises(tmp_path):
                     path_combination="mean")
     assert SMDAnalysis(path_model="null", outdir=str(tmp_path / "b"),
                        path_combination="linear").path_combination == "linear"
+
+
+# --- force estimator: per-path v->0 regression + Eq. 21 ---------------------
+
+SPEEDS3 = (0.001, 0.002, 0.004)
+R_GRID = np.linspace(1.0, 2.0, 41)
+FEQ = {"pA": 40.0 * np.sin(np.pi * (R_GRID - 1.0)), "pB": 25.0 + 0.0 * R_GRID}
+GAMMA = {"pA": 3000.0, "pB": 15000.0}
+# trajectory counts change with speed: pA dominates slow pulls, pB fast ones
+N_FORCE = {"pA": {0.001: 20, 0.002: 12, 0.004: 6},
+           "pB": {0.001: 10, 0.002: 18, 0.004: 24}}
+
+
+def _force_rows(feq, gamma, n_by_speed, label=lambda p, s: p):
+    rows = []
+    for p in feq:
+        for sp in SPEEDS3:
+            if n_by_speed[p].get(sp, 0) <= 0:
+                continue
+            for s, r in enumerate(R_GRID):
+                rows.append({"step": s, "speed": sp, "path": label(p, sp), "r_coord": r,
+                             "n_samples": n_by_speed[p][sp],
+                             "Fmean": feq[p][s] + gamma[p] * sp, "estimator": "force"})
+    return pd.DataFrame(rows)
+
+
+def _p_neq(n_by_speed, label=lambda p, s: p):
+    out = {}
+    for sp in SPEEDS3:
+        tot = sum(n[sp] for n in n_by_speed.values() if n.get(sp, 0) > 0)
+        out[sp] = {label(p, sp): n[sp] / tot for p, n in n_by_speed.items() if n.get(sp, 0) > 0}
+    return out
+
+
+def _cumtrapz(y):
+    out = np.zeros_like(R_GRID)
+    out[1:] = np.cumsum(0.5 * (y[1:] + y[:-1]) * np.diff(R_GRID))
+    return out
+
+
+def _pooled_dG(df):
+    """Integral of the v->0 intercept of the trajectory-count-weighted mean force."""
+    F = np.zeros((len(SPEEDS3), len(R_GRID)))
+    for i, sp in enumerate(SPEEDS3):
+        g = df[df["speed"] == sp]
+        for s in range(len(R_GRID)):
+            gs = g[g["step"] == s]
+            F[i, s] = np.sum(gs["Fmean"] * gs["n_samples"]) / gs["n_samples"].sum()
+    feq = np.array([np.polyfit(SPEEDS3, F[:, s], 1)[1] for s in range(len(R_GRID))])
+    return _cumtrapz(feq)
+
+
+def test_force_v0_eq21_combines_per_path_profiles():
+    from autopath.pulling.Estimators import force_v0_dG
+    df = _force_rows(FEQ, GAMMA, N_FORCE)
+    out = force_v0_dG(df, _p_neq(N_FORCE), BETA, min_trajs_per_path=5).sort_values("step")
+    w = np.array([20.0, 10.0]) / 30.0
+    dGk = np.array([_cumtrapz(FEQ["pA"]), _cumtrapz(FEQ["pB"])])
+    exp = -np.log(w[0] * np.exp(-BETA * dGk[0]) + w[1] * np.exp(-BETA * dGk[1])) / BETA
+    np.testing.assert_allclose(out["dG"].to_numpy(), exp, atol=1e-8)
+    assert (out["model"] == "eq21_per_path").all() and (out["speed"] == 0.0).all()
+    # pooled intercept is biased by the speed-dependent path populations
+    assert np.max(np.abs(_pooled_dG(df) - exp)) > 5.0
+
+
+def test_force_v0_thin_path_excluded_with_warning(caplog):
+    from autopath.pulling.Estimators import force_v0_dG
+    feq = dict(FEQ, pC=10.0 + 0.0 * R_GRID)
+    gamma = dict(GAMMA, pC=1000.0)
+    n = dict(N_FORCE, pC={0.001: 15, 0.002: 3, 0.004: 9})
+    df = _force_rows(feq, gamma, n)
+    with caplog.at_level("WARNING", logger="autopath.pulling.Estimators"):
+        out = force_v0_dG(df, _p_neq(n), BETA, min_trajs_per_path=5).sort_values("step")
+    msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("'pC'" in m and "speed=0.002" in m for m in msgs), msgs
+    w = np.array([20.0, 10.0]) / 30.0
+    dGk = np.array([_cumtrapz(FEQ["pA"]), _cumtrapz(FEQ["pB"])])
+    exp = -np.log(w[0] * np.exp(-BETA * dGk[0]) + w[1] * np.exp(-BETA * dGk[1])) / BETA
+    np.testing.assert_allclose(out["dG"].to_numpy(), exp, atol=1e-8)
+    assert (out["n_paths"] == 2).all()
+
+
+def test_force_v0_speed_specific_labels_use_pooled_ensemble(caplog):
+    from autopath.pulling.Estimators import force_v0_dG
+    label = lambda p, s: f"{p}_v{s}"
+    df = _force_rows(FEQ, GAMMA, N_FORCE, label=label)
+    with caplog.at_level("INFO", logger="autopath.pulling.Estimators"):
+        out = force_v0_dG(df, _p_neq(N_FORCE, label), BETA,
+                          min_trajs_per_path=5).sort_values("step")
+    infos = [r for r in caplog.records
+             if r.levelname == "INFO" and "pooled ensemble" in r.getMessage()]
+    assert len(infos) == 1
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+    np.testing.assert_allclose(out["dG"].to_numpy(), _pooled_dG(df), atol=1e-8)
+    assert (out["model"] == "pooled").all()
+
+
+def _two_speed_toy(tmp_path):
+    from .hs_toys import double_well, simulate_pulls, write_dat
+    parts = []
+    for i, (speed, seed) in enumerate([(0.01, 1), (0.02, 2)]):
+        r = simulate_pulls(*double_well(), n_pulls=8, speed=speed, length_nm=0.8, seed=seed)
+        r["trajname"] = r["trajname"].str.replace("replica-", f"replica-{i + 1}0")
+        parts.append(r)
+    rows = pd.concat(parts, ignore_index=True)
+    rows.attrs.update(parts[0].attrs)
+    return write_dat(rows, tmp_path / "pulls")
+
+
+def _run_toy(tmp_path, files, mode):
+    smd = SMDData(files, temperature=300.0, completion_threshold_nm=0.0)
+    out = tmp_path / mode
+    an = SMDAnalysis(path_model="null", do_plots=False, outdir=str(out),
+                     estimators=["cumulant", "force"], path_combination=mode)
+    res = an.run(smd, cluster_to_boundary=False)
+    mix = pd.read_csv(out / "mixture_pmfs.csv")
+    assert (out / "friction.csv").exists()
+    return res, mix, out
+
+
+def test_force_v0_linear_mode_unchanged_and_eq21_wired(tmp_path):
+    from autopath.pulling.Estimators import extrapolate_to_v0
+    files = _two_speed_toy(tmp_path)
+    res, lin, out_lin = _run_toy(tmp_path, files, "linear")
+    _, eq, out_eq = _run_toy(tmp_path, files, "eq21")
+
+    # linear: force v->0 dG is the intercept of the p_eq-mixed per-speed mean work
+    per_speed = lin[(lin["estimator"] == "force") & (lin["speed"] > 0)]
+    ref = extrapolate_to_v0(per_speed, param="dG",
+                            realized_speed_map=res.realized_speed_map).sort_values("step")
+    got = lin[(lin["estimator"] == "force") & (lin["speed"] == 0.0)].sort_values("step")
+    np.testing.assert_allclose(got["dG"].to_numpy(), ref["dG"].to_numpy(), rtol=1e-12)
+    assert (got["model"] == "linear").all()
+
+    # eq21 with one across-speed path: integral of that path's v->0 mean force
+    fe = eq[(eq["estimator"] == "force") & (eq["speed"] == 0.0)].sort_values("step")
+    assert len(fe) > 0 and (fe["model"] == "eq21_per_path").all()
+    assert fe["dG"].iloc[0] == 0.0
+    # per-speed rows and other estimators unaffected by the force readout
+    key = ["estimator", "speed", "step"]
+    a = eq[(eq["estimator"] != "force") | (eq["speed"] > 0)].sort_values(key)
+    b = lin[(lin["estimator"] != "force") | (lin["speed"] > 0)].sort_values(key)
+    np.testing.assert_allclose(a.loc[a["estimator"] == "force", "dG"].to_numpy(),
+                               b.loc[b["estimator"] == "force", "dG"].to_numpy())
+    pd.testing.assert_frame_equal(pd.read_csv(out_lin / "friction.csv"),
+                                  pd.read_csv(out_eq / "friction.csv"))

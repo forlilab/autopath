@@ -25,6 +25,7 @@ from autopath.pulling.Estimators import (
     effective_path_combination,
     validate_path_combination,
     extrapolate_to_v0,
+    force_v0_dG,
     _find_pmf_peak,
     recover_spring_constant,
 )
@@ -110,7 +111,8 @@ class SMDAnalysis:
         :meth:`check_convergence`: ``'eq21'`` (default) uses
         ``exp(-beta dG) = sum_k p_neq,k exp(-beta dG_k)`` (Wolf, Post & Stock
         2023, Eq. 21) with ``Wdiss = <W> - dG``; ``'linear'`` is the p_eq-weighted
-        mean of each column. The force estimator is always mixed linearly.
+        mean of each column. Per-speed force profiles are always mixed linearly;
+        with ``'eq21'`` the force v->0 dG comes from :func:`force_v0_dG`.
     """
 
     def __init__(self,
@@ -586,6 +588,20 @@ class SMDAnalysis:
                     weighted_pmf_v0[pcol] = v0_df
         else:
             logger.warning("Not enough speeds to perform v=0 extrapolation. Skipping.")
+
+        if self.path_combination == 'eq21' and 'dG' in weighted_pmf_v0 and \
+           any(e.name == 'force' for e in active_estimators):
+            _dg = weighted_pmf_v0['dG']
+            _fv0 = force_v0_dG(
+                sMDDdata.results[sMDDdata.results['estimator'] == 'force'],
+                p_neq_by_speed=sMDDdata.get_p_neq(byspeed=True),
+                beta=sMDDdata.beta,
+                min_trajs_per_path=self.support_policy.min_trajs_per_path,
+                min_speeds=self.min_speeds_for_extrapolation,
+                realized_speed_map=sMDDdata.realized_speed_map,
+            )
+            weighted_pmf_v0['dG'] = pd.concat(
+                [_dg[_dg['estimator'] != 'force'], _fv0], ignore_index=True)
 
         # Fold v=0 extrapolated rows into mixture_pmfs (speed=0.0 rows with stat columns).
         # Rename R2 to {param}_R2 to distinguish dG vs Wdiss fit quality.
