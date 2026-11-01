@@ -651,6 +651,46 @@ def _smooth_profile(
     return gaussian_filter1d(arr, sigma=float(smooth_window), mode='nearest')
 
 
+def _slope_se(x: np.ndarray, y: np.ndarray) -> tuple[float, float] | None:
+    """OLS slope of y(x) and its SE, or None if untestable.
+
+    SE is inflated by the residual lag-1 autocorrelation rho
+    (n_eff = n (1 - rho) / (1 + rho)); n_eff < 3 is untestable.
+    """
+    xc = x - x.mean()
+    sxx = float(xc @ xc)
+    if x.size < 3 or sxx <= 0:
+        return None
+    b = float(xc @ (y - y.mean())) / sxx
+    res = y - y.mean() - b * xc
+    ss = float(res @ res)
+    rho = min(max(float(res[1:] @ res[:-1]) / ss if ss > 0 else 0.0, 0.0), 0.999)
+    n_eff = x.size * (1.0 - rho) / (1.0 + rho)
+    if n_eff < 3:
+        return None
+    return b, float(np.sqrt(ss / (x.size - 2) / sxx * x.size / n_eff))
+
+
+def _plateau_onset(r: np.ndarray, dG: np.ndarray, n_cand: int = 200) -> int | None:
+    """Index of the earliest point where the rise has stopped.
+
+    Tail [i:] slope within 2 SE of zero, and the slope over the equally long
+    segment before i larger than it by more than 2 combined SE. Returns None
+    when no candidate qualifies. Candidates are *n_cand* evenly spaced indices.
+    """
+    n = r.size
+    for i in np.unique(np.linspace(1, n - 3, min(n_cand, n - 3)).astype(int)):
+        tail = _slope_se(r[i:], dG[i:])
+        j = max(0, 2 * i - n)
+        pre = _slope_se(r[j:i + 1], dG[j:i + 1])
+        if tail is None or pre is None:
+            continue
+        (bt, st), (bp, sp) = tail, pre
+        if abs(bt) <= 2.0 * st and bp - bt > 2.0 * np.hypot(sp, st):
+            return int(i)
+    return None
+
+
 def _find_pmf_peak(
     r: np.ndarray,
     dG: np.ndarray,
@@ -1037,11 +1077,11 @@ class KramersEstimator:
         the highest point from itself onwards): the minimum of the smoothed
         profile past the peak, or the profile end if it still descends.
 
-        Otherwise (monotone rise to a plateau): the plateau onset, the first
-        point within 1 kBT of the profile maximum. The plateau is accepted when
-        the profile stays in that top-kBT band over at least twice the distance
-        it took to climb the kBT below it (the rise has at least halved its
-        slope); a constant-slope rise cut by the end of support fails.
+        Otherwise (rise to a plateau): the plateau onset, the earliest point
+        where the rise has stopped: the remaining profile has a linear slope
+        within 2 standard errors of zero, and the equally long segment before it
+        rises faster by more than 2 combined SE (SE corrected for residual
+        lag-1 autocorrelation). See :func:`_plateau_onset`.
 
         Returns
         -------
@@ -1068,20 +1108,17 @@ class KramersEstimator:
                 post = np.where(r > r_ts)[0]
                 i = int(post[np.argmin(smoothed[post])])
                 return float(r[i]), float(r_ts), bool(i == r.size - 1)
-        g_max = float(smoothed.max())
-        if g_max - smoothed[0] < 2.0 * kBT:
+        i_on = _plateau_onset(r, dG)
+        if i_on is None:
             raise ValueError(
-                "[Kramers] bulk boundary: profile rises < 2 kT from the start; "
-                "no bulk plateau resolved (not supported)."
+                "[Kramers] bulk boundary: no barrier and still rising at the end of "
+                "support (no tail with slope consistent with zero); plateau not "
+                "resolved (not supported)."
             )
-        i_on = int(np.argmax(smoothed >= g_max - kBT))
-        i_lo = int(np.argmax(smoothed >= g_max - 2.0 * kBT))
-        climb = r[i_on] - r[i_lo]
-        if r[-1] - r[i_on] < 2.0 * climb:
+        if float(np.mean(dG[i_on:])) - float(smoothed[0]) < kBT:
             raise ValueError(
-                f"[Kramers] bulk boundary: no barrier and still rising at the end of "
-                f"support (top-kT band {r[-1] - r[i_on]:.3f} nm < 2 x preceding kT "
-                f"climb {climb:.3f} nm); plateau not resolved (not supported)."
+                "[Kramers] bulk boundary: profile is flat from the start (plateau < 1 kT "
+                "above it); no rise to a bulk plateau (not supported)."
             )
         return float(r[i_on]), float("nan"), False
 

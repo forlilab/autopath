@@ -64,16 +64,18 @@ def test_bulk_boundary_flags_an_unresolved_descent():
     assert at_end and abs_r == pytest.approx(prof.r_coord.iloc[-1])
 
 
+NOISE = np.random.default_rng(7).normal(0.0, 0.3, 1001)
+R1 = X0 + 0.001 * np.arange(1001)
+
+
 def test_constant_slope_rise_to_the_end_is_not_supported():
-    r = np.linspace(1.0, 2.0, 501)
     with pytest.raises(ValueError, match="still rising"):
-        KramersEstimator.bulk_boundary(r, 10.0 * (r - 1.0), KBT)
+        KramersEstimator.bulk_boundary(R1, 10.0 * (R1 - X0) + NOISE, KBT)
 
 
 def test_flat_profile_is_not_supported():
-    r = np.linspace(1.0, 2.0, 501)
-    with pytest.raises(ValueError, match="rises < 2 kT"):
-        KramersEstimator.bulk_boundary(r, 0.5 * KBT * (r - 1.0), KBT)
+    with pytest.raises(ValueError, match="flat from the start"):
+        KramersEstimator.bulk_boundary(R1, NOISE, KBT)
 
 
 def G_mono(x):
@@ -84,29 +86,28 @@ def G_mono(x):
 
 
 def test_monotone_profile_absorbs_at_the_plateau_onset():
-    r = X0 + 0.001 * np.arange(1001)
-    abs_r, ts_r, at_end = KramersEstimator.bulk_boundary(r, G_mono(r), KBT)
-    x = np.linspace(X0, 2.0, 200_001)
+    abs_r, ts_r, at_end = KramersEstimator.bulk_boundary(R1, G_mono(R1) + NOISE, KBT)
     assert np.isnan(ts_r) and not at_end
-    assert abs_r == pytest.approx(x[np.argmax(G_mono(x) >= 15.0 - KBT)], abs=0.002)
+    # reached the plateau within the noise, and not deep inside it
+    assert 15.0 - G_mono(abs_r) < 1.0
+    assert abs_r < 1.75
 
 
 def test_monotone_mfpt_with_mirror_matches_full_well_reference():
-    r = X0 + 0.001 * np.arange(1001)
-    prof = pd.DataFrame({"r_coord": r, "dG": G_mono(r), "Gamma": GAMMA})
-    abs_r, _, _ = KramersEstimator.bulk_boundary(r, G_mono(r), KBT)
+    abs_r, _, _ = KramersEstimator.bulk_boundary(R1, G_mono(R1) + NOISE, KBT)
+    prof = pd.DataFrame({"r_coord": R1, "dG": G_mono(R1), "Gamma": GAMMA})
     x = np.linspace(X0 - 0.6, abs_r, 400_001)
     g = G_mono(x) / KBT
     inner = cumulative_trapezoid(np.exp(-g), x, initial=0.0)
     m = x >= X0
     ref = float(np.trapz((np.exp(g) * GAMMA / KBT * inner)[m], x[m]))
-    assert tau(prof, abs_r, "mirror") == pytest.approx(ref, rel=0.01)
+    assert tau(prof, abs_r, "mirror") == pytest.approx(ref, rel=0.02)
 
 
 def test_bump_below_a_higher_plateau_uses_the_plateau():
-    r = X0 + 0.001 * np.arange(1001)
-    dG = G_mono(r) + 3.0 * np.exp(-((r - 1.15) / 0.02) ** 2) - 3.0 * np.exp(-((r - 1.2) / 0.02) ** 2)
-    abs_r, ts_r, _ = KramersEstimator.bulk_boundary(r, dG, KBT)
+    dG = G_mono(R1) + NOISE + 3.0 * np.exp(-((R1 - 1.15) / 0.02) ** 2) \
+        - 3.0 * np.exp(-((R1 - 1.2) / 0.02) ** 2)
+    abs_r, ts_r, _ = KramersEstimator.bulk_boundary(R1, dG, KBT)
     assert np.isnan(ts_r) and abs_r > 1.2
 
 
