@@ -64,10 +64,50 @@ def test_bulk_boundary_flags_an_unresolved_descent():
     assert at_end and abs_r == pytest.approx(prof.r_coord.iloc[-1])
 
 
-def test_barrier_free_profile_is_not_supported():
+def test_constant_slope_rise_to_the_end_is_not_supported():
     r = np.linspace(1.0, 2.0, 501)
-    with pytest.raises(ValueError, match="barrier-free"):
+    with pytest.raises(ValueError, match="still rising"):
         KramersEstimator.bulk_boundary(r, 10.0 * (r - 1.0), KBT)
+
+
+def test_flat_profile_is_not_supported():
+    r = np.linspace(1.0, 2.0, 501)
+    with pytest.raises(ValueError, match="rises < 2 kT"):
+        KramersEstimator.bulk_boundary(r, 0.5 * KBT * (r - 1.0), KBT)
+
+
+def G_mono(x):
+    """Symmetric quadratic well joined to a monotone tanh rise onto a plateau."""
+    x = np.asarray(x, dtype=float)
+    up = 15.0 * np.tanh((x - X0) ** 2 / 0.08)
+    return np.where(x >= X0, up, 15.0 * (x - X0) ** 2 / 0.08)
+
+
+def test_monotone_profile_absorbs_at_the_plateau_onset():
+    r = X0 + 0.001 * np.arange(1001)
+    abs_r, ts_r, at_end = KramersEstimator.bulk_boundary(r, G_mono(r), KBT)
+    x = np.linspace(X0, 2.0, 200_001)
+    assert np.isnan(ts_r) and not at_end
+    assert abs_r == pytest.approx(x[np.argmax(G_mono(x) >= 15.0 - KBT)], abs=0.002)
+
+
+def test_monotone_mfpt_with_mirror_matches_full_well_reference():
+    r = X0 + 0.001 * np.arange(1001)
+    prof = pd.DataFrame({"r_coord": r, "dG": G_mono(r), "Gamma": GAMMA})
+    abs_r, _, _ = KramersEstimator.bulk_boundary(r, G_mono(r), KBT)
+    x = np.linspace(X0 - 0.6, abs_r, 400_001)
+    g = G_mono(x) / KBT
+    inner = cumulative_trapezoid(np.exp(-g), x, initial=0.0)
+    m = x >= X0
+    ref = float(np.trapz((np.exp(g) * GAMMA / KBT * inner)[m], x[m]))
+    assert tau(prof, abs_r, "mirror") == pytest.approx(ref, rel=0.01)
+
+
+def test_bump_below_a_higher_plateau_uses_the_plateau():
+    r = X0 + 0.001 * np.arange(1001)
+    dG = G_mono(r) + 3.0 * np.exp(-((r - 1.15) / 0.02) ** 2) - 3.0 * np.exp(-((r - 1.2) / 0.02) ** 2)
+    abs_r, ts_r, _ = KramersEstimator.bulk_boundary(r, dG, KBT)
+    assert np.isnan(ts_r) and abs_r > 1.2
 
 
 # --- bound-state extension, against the full-well reference --------------------
@@ -136,6 +176,7 @@ def test_compute_bulk_mirror_matches_direct_call():
     row = out.iloc[0]
     abs_r, _, _ = KramersEstimator.bulk_boundary(pmf.r_coord.values, pmf.dG.values, KBT)
     assert row.abs_method == "bulk" and row.bound_extension == "mirror"
+    assert row.abs_kind == "post_barrier_min"
     assert row.abs_r_nm == pytest.approx(abs_r)
     assert not row.abs_at_profile_end
     assert row.tau_mfpt_ps == pytest.approx(tau(pull_profile(), abs_r, "mirror"), rel=1e-9)

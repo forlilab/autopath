@@ -1031,39 +1031,59 @@ class KramersEstimator:
 
     @staticmethod
     def bulk_boundary(r: np.ndarray, dG: np.ndarray, kBT: float) -> tuple[float, float, bool]:
-        """Absorbing boundary at the lowest free energy past the barrier.
+        """Absorbing boundary where the free energy has reached the bulk.
 
-        The barrier is the highest-prominence PMF peak (:func:`_find_pmf_peak`);
-        the boundary is the minimum of the smoothed profile beyond it, i.e. the
-        end of the post-barrier descent, or the profile end if it still descends.
+        Peaked profile (the highest-prominence peak, :func:`_find_pmf_peak`, is
+        the highest point from itself onwards): the minimum of the smoothed
+        profile past the peak, or the profile end if it still descends.
+
+        Otherwise (monotone rise to a plateau): the plateau onset, the first
+        point within 1 kBT of the profile maximum. The plateau is accepted when
+        the profile stays in that top-kBT band over at least twice the distance
+        it took to climb the kBT below it (the rise has at least halved its
+        slope); a constant-slope rise cut by the end of support fails.
 
         Returns
         -------
         abs_r : float
             Absorbing boundary (nm).
         ts_r : float
-            Barrier position (nm).
+            Barrier position (nm); NaN for a plateau onset.
         at_end : bool
-            True when ``abs_r`` is the last profile point (descent not resolved).
+            True when a post-barrier descent reaches the last profile point.
 
         Raises
         ------
         ValueError
-            No barrier with prominence >= 0.5 kBT: the bulk boundary is undefined.
+            Monotone profile whose plateau is not resolved within the support.
         """
         order = np.argsort(r)
         r = np.asarray(r, dtype=np.float64)[order]
         dG = np.asarray(dG, dtype=np.float64)[order]
-        r_ts, _ = _find_pmf_peak(r, dG, kBT)
-        if r_ts is None:
-            raise ValueError(
-                "[Kramers] bulk boundary: no PMF barrier with prominence >= 0.5 kT; "
-                "the absorbing boundary is undefined (barrier-free profile not supported)."
-            )
         smoothed = _smooth_profile(dG)
-        post = np.where(r > r_ts)[0]
-        i = int(post[np.argmin(smoothed[post])])
-        return float(r[i]), float(r_ts), bool(i == r.size - 1)
+        r_ts, _ = _find_pmf_peak(r, dG, kBT)
+        if r_ts is not None:
+            i_ts = int(np.searchsorted(r, r_ts))
+            if smoothed[i_ts] >= smoothed[i_ts:].max():
+                post = np.where(r > r_ts)[0]
+                i = int(post[np.argmin(smoothed[post])])
+                return float(r[i]), float(r_ts), bool(i == r.size - 1)
+        g_max = float(smoothed.max())
+        if g_max - smoothed[0] < 2.0 * kBT:
+            raise ValueError(
+                "[Kramers] bulk boundary: profile rises < 2 kT from the start; "
+                "no bulk plateau resolved (not supported)."
+            )
+        i_on = int(np.argmax(smoothed >= g_max - kBT))
+        i_lo = int(np.argmax(smoothed >= g_max - 2.0 * kBT))
+        climb = r[i_on] - r[i_lo]
+        if r[-1] - r[i_on] < 2.0 * climb:
+            raise ValueError(
+                f"[Kramers] bulk boundary: no barrier and still rising at the end of "
+                f"support (top-kT band {r[-1] - r[i_on]:.3f} nm < 2 x preceding kT "
+                f"climb {climb:.3f} nm); plateau not resolved (not supported)."
+            )
+        return float(r[i_on]), float("nan"), False
 
     @staticmethod
     def kramers_mfpt(
@@ -1328,8 +1348,8 @@ class KramersEstimator:
             peak, falling back to ``r_coord.max()``);
             ``"force_plateau"`` → :meth:`force_plateau_boundary` (restraint-force
             decay; falls back to ``detect_ts`` if the force profile is unusable);
-            ``"bulk"`` → :meth:`bulk_boundary` (post-barrier free-energy minimum;
-            profiles without a resolved barrier are skipped).
+            ``"bulk"`` → :meth:`bulk_boundary` (post-barrier minimum or plateau
+            onset; profiles with no resolved plateau are skipped).
         plateau_frac : float
             Decay fraction for ``boundary_method="force_plateau"`` (default 0.3).
         bound_extension : {"none", "mirror", "harmonic"}
@@ -1382,6 +1402,7 @@ class KramersEstimator:
 
                 _start_r = start_r if start_r is not None else float(r_arr.min())
                 at_end = False
+                _r_ts = float("nan")
 
                 if abs_r is not None:
                     _abs_r = abs_r
@@ -1391,9 +1412,11 @@ class KramersEstimator:
                     except ValueError as exc:
                         logger.warning(f"[Kramers] {est_name}, speed={speed}: {exc}")
                         continue
+                    _where = (f"past barrier r={_r_ts:.4f}" if np.isfinite(_r_ts)
+                              else "at plateau onset")
                     logger.info(
-                        f"[Kramers] Bulk boundary abs_r={_abs_r:.4f} nm past barrier "
-                        f"r={_r_ts:.4f} (estimator={est_name}, speed={speed}"
+                        f"[Kramers] Bulk boundary abs_r={_abs_r:.4f} nm {_where} "
+                        f"(estimator={est_name}, speed={speed}"
                         f"{', profile end: descent unresolved' if at_end else ''})."
                     )
                 elif boundary_method == "force_plateau" and force_df is not None:
@@ -1483,6 +1506,8 @@ class KramersEstimator:
                         "reflect_r_nm": reflect_r_out,
                         "abs_method": boundary_method if abs_r is None else "explicit",
                         "abs_at_profile_end": at_end,
+                        "abs_kind": (("post_barrier_min" if np.isfinite(_r_ts) else "plateau_onset")
+                                     if boundary_method == "bulk" and abs_r is None else ""),
                         "bound_extension": bound_extension,
                         "bound_ext_frac": res["bound_ext_frac"],
                         "tau_mfpt_ps": tau_ps,
@@ -1520,7 +1545,7 @@ class KramersEstimator:
         computed as ``k_off_total = Σ_k p_eq(k) × k_off(k)`` (parallel pathways).
 
         *boundary_method* is ``"pmf_peak"`` (path's PMF peak, else its last point)
-        or ``"bulk"`` (:meth:`bulk_boundary`; paths without a barrier are skipped).
+        or ``"bulk"`` (:meth:`bulk_boundary`; paths with no resolved plateau are skipped).
         *bound_extension* is passed to :meth:`kramers_mfpt`.
         """
         if boundary_method not in ("pmf_peak", "bulk"):
