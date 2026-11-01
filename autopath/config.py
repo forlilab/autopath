@@ -67,6 +67,7 @@ class Config(object):
         sMD_path_model: str = "dtw",  # "dtw" | "null" ("null" = no clustering: one path)
         sMD_n_paths: int = None,  # fixed number of paths; None = silhouette-selected
         sMD_max_frac_neg_dG_first_half: float = 0.25,  # pass-3 binding-well filter; <=0 disables
+        sMD_path_combination: str = "eq21",  # "eq21" | "linear" per-path profile recombination
         sMD_features: list = None,
         sMD_log_geom_features: bool = True,  # log geom features during pulling + merge into clustering
         sMD_plateau_frac: float = 0.4,  # force-plateau TS boundary: fraction of peak |force|
@@ -265,6 +266,11 @@ class Config(object):
             Pass-3 binding-well filter: maximum fraction of the first half of a
             path's ΔG trace allowed to be negative before the path is discarded.
             Values ``<= 0`` disable the filter.  Default ``0.25``.
+        sMD_path_combination : str, optional
+            How per-path profiles are combined: ``"eq21"`` (free-energy
+            exponential average weighted by trajectory fraction; Wolf, Post &
+            Stock 2023, Eq. 21) or ``"linear"`` (p_eq-weighted mean).
+            Default ``"eq21"``.
         sMD_features : list, optional
             Extra per-frame features to include in path clustering, beyond
             ligand COM distance.  ``None`` uses the built-in feature set.
@@ -402,6 +408,7 @@ class Config(object):
         self.sMD_path_model = sMD_path_model
         self.sMD_n_paths = sMD_n_paths
         self.sMD_max_frac_neg_dG_first_half = sMD_max_frac_neg_dG_first_half
+        self.sMD_path_combination = sMD_path_combination
         self.sMD_features = sMD_features
         self.sMD_log_geom_features = sMD_log_geom_features
         self.sMD_plateau_frac = sMD_plateau_frac
