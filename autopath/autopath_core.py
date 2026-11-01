@@ -30,6 +30,7 @@ from autopath.pulling import SMDData, SMDAnalysis
 from autopath.pulling.Convergence import (tail_converged, validate_autostop_options,
                                           round_robin_order)
 from autopath.pulling.PathModel import DTWPathModel, NullPathModel
+from autopath.pulling.Estimators import validate_path_combination
 from autopath.pulling.Diagnostics import plot_convergence_traces, plot_convergence_metrics
 
 import logging
@@ -141,6 +142,7 @@ class AutoPath:
         sMD_path_model: str = 'dtw',   # 'dtw' | 'null' ('null' = no clustering: one path)
         sMD_n_paths: int | None = None,  # fixed number of paths; None = silhouette-selected
         sMD_max_frac_neg_dG_first_half: float = 0.25,  # pass-3 binding-well filter; <=0 disables
+        sMD_path_combination: str = 'eq21',  # 'eq21' (Wolf, Post & Stock 2023, Eq. 21) | 'linear' (p_eq mean)
         sMD_features: list | None = None,
         sMD_log_geom_features: bool | list = True,  # hybrid: log geom during pulling + merge into clustering
         sMD_plateau_frac: float = 0.4,  # force-plateau TS boundary: fraction of peak |force| (higher -> boundary nearer rupture, off the tail)
@@ -207,6 +209,7 @@ class AutoPath:
         self.sMD_path_model = str(sMD_path_model).lower()
         self.sMD_n_paths = sMD_n_paths
         self.sMD_max_frac_neg_dG_first_half = float(sMD_max_frac_neg_dG_first_half)
+        self.sMD_path_combination = validate_path_combination(sMD_path_combination)
         if self.sMD_path_model not in ('dtw', 'null'):
             raise ValueError(f"sMD_path_model must be 'dtw' or 'null', got {sMD_path_model!r}")
         self.sMD_features = sMD_features
@@ -766,6 +769,7 @@ class AutoPath:
                                     min_path_steps_ratio=0.6,
                                     max_frac_neg_dG_first_half=self.sMD_max_frac_neg_dG_first_half,
                                     min_speeds_for_extrapolation=2,
+                                    path_combination=self.sMD_path_combination,
                                     )
 
             smd_data = smdanalysis.run(smd_data,
@@ -855,7 +859,8 @@ class AutoPath:
                                   temperature=self.temperature, outdir=outdir,
                                   ligand_select=lig_sel,
                                   pocket_select=self.pocket_selection,
-                                  n_paths=self.sMD_n_paths)
+                                  n_paths=self.sMD_n_paths,
+                                  path_combination=self.sMD_path_combination)
         conv_df, traces_df = smdanalysis.check_convergence(
             logs=logs, speeds=speeds,
             min_replicas=min_replicas,

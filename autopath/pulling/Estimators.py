@@ -1665,11 +1665,93 @@ def trim_results_by_n_samples_support(
     return out
 
 
+PATH_COMBINATIONS = ("eq21", "linear")
+
+
+def validate_path_combination(path_combination: str) -> str:
+    """Return ``path_combination`` if allowed, else raise ValueError.
+
+    Parameters
+    ----------
+    path_combination : str
+        ``'eq21'`` or ``'linear'``.
+
+    Returns
+    -------
+    str
+    """
+    if path_combination not in PATH_COMBINATIONS:
+        raise ValueError(
+            f"path_combination must be one of {PATH_COMBINATIONS}, "
+            f"got {path_combination!r}"
+        )
+    return path_combination
+
+
+def effective_path_combination(estimator: str, path_combination: str) -> str:
+    """Rule actually applied to ``estimator``'s per-path profiles.
+
+    Parameters
+    ----------
+    estimator : str
+        Estimator name.
+    path_combination : str
+        Requested rule (``'eq21'`` or ``'linear'``).
+
+    Returns
+    -------
+    str
+        ``'linear'`` for the force estimator (its dG is the raw mean work),
+        otherwise ``path_combination``.
+    """
+    validate_path_combination(path_combination)
+    return "linear" if estimator == "force" else path_combination
+
+
+def combine_paths_eq21(
+    dG: np.ndarray,
+    Wmean: np.ndarray,
+    p_neq: np.ndarray,
+    beta: float,
+) -> tuple[float, float]:
+    """Combine per-path profiles at one grid point (Wolf, Post & Stock 2023, Eq. 21).
+
+    Parameters
+    ----------
+    dG : np.ndarray
+        Per-path free energies (kJ/mol).
+    Wmean : np.ndarray
+        Per-path mean work (kJ/mol).
+    p_neq : np.ndarray
+        Per-path trajectory fractions; renormalised over the paths given.
+    beta : float
+        Inverse thermal energy (mol/kJ).
+
+    Returns
+    -------
+    dG_mix : float
+        ``-(1/beta) ln sum_k p_k exp(-beta dG_k)``.
+    Wmean_mix : float
+        ``sum_k p_k Wmean_k`` (pooled mean work).
+    """
+    dG = np.asarray(dG, dtype=float)
+    Wmean = np.asarray(Wmean, dtype=float)
+    p = np.asarray(p_neq, dtype=float)
+    if dG.size == 0 or p.sum() <= 0:
+        return np.nan, np.nan
+    p = p / p.sum()
+    dG_mix = float(-special.logsumexp(-beta * dG, b=p) / beta)
+    Wmean_mix = float(np.sum(p * Wmean))
+    return dG_mix, Wmean_mix
+
+
 def calculate_weighted_pmf(
     smd_data: SMDData,
     weight_cols: list[str] = ['dG', 'Wdiss'],
     grid_col: str = "step",
     weights_by_estimator: dict | None = None,
+    path_combination: str = "eq21",
+    p_neq_by_speed: dict | None = None,
 ) -> pd.DataFrame:
     """Build weighted PMFs over paths for each estimator and speed.
 
@@ -1684,14 +1766,24 @@ def calculate_weighted_pmf(
     weights_by_estimator : dict
         Pre-computed weights ``{estimator: {speed: {path: p_eq}}}``.
         Obtain these from :meth:`SMDAnalysis.compute_p_eq`.
+    path_combination : str
+        ``'eq21'``: ``dG = -(1/beta) ln sum_k p_neq,k exp(-beta dG_k)``
+        (Wolf, Post & Stock 2023, Eq. 21), ``Wmean`` the p_neq-weighted mean
+        and ``Wdiss = Wmean - dG``; supports ``weight_cols`` in
+        {'dG', 'Wdiss', 'Wmean'}. ``'linear'``: p_eq-weighted mean of every
+        column. The force estimator is always mixed linearly.
+    p_neq_by_speed : dict | None
+        ``{speed: {path: p_neq}}`` for ``'eq21'``; defaults to
+        ``smd_data.get_p_neq(byspeed=True)``.
 
     Note
     ----
-    The grid is restricted to the shortest path's last step so that all paths
-    contribute at every grid point.  Without this restriction, when a shorter
-    path terminates the p_eq renormalization denominator changes abruptly,
-    producing a visible discontinuity in the weighted PMF.
+    The grid stops at the shortest path's last step, so the normalisation
+    does not jump where a path ends. Paths contribute only where their p_eq is
+    in ``weights_by_estimator`` (``'eq21'``: with p_eq > 0), and p_neq is
+    renormalised over the paths present at each grid point.
     """
+    validate_path_combination(path_combination)
 
     results = smd_data.results.copy()
     if results is None or results.empty:
@@ -1711,6 +1803,15 @@ def calculate_weighted_pmf(
     for estimator in estimators:
         df_est = results[results['estimator'] == estimator]
         est_weights = weights_by_estimator.get(estimator, {})
+        mode = effective_path_combination(estimator, path_combination)
+        if mode == "eq21":
+            unsupported = set(weight_cols) - {"dG", "Wdiss", "Wmean"}
+            if unsupported:
+                raise ValueError(
+                    f"path_combination='eq21' does not support columns {sorted(unsupported)}"
+                )
+            if p_neq_by_speed is None:
+                p_neq_by_speed = smd_data.get_p_neq(byspeed=True)
 
         for speed, speedg in df_est.groupby('speed'):
             speed_weights = est_weights.get(speed, {})
@@ -1720,50 +1821,33 @@ def calculate_weighted_pmf(
             path_last = speedg.groupby("path")[grid_col].max()
             max_grid_step = path_last.min()
             grid_vals = sorted(speedg.loc[speedg[grid_col] <= max_grid_step, grid_col].dropna().unique())
-            
+
             rows = []
 
             for gval in grid_vals:
-                vals_per_col = {col: [] for col in weight_cols}
-                w_per_col = {col: [] for col in weight_cols}
-
                 slice_g = speedg[speedg[grid_col] == gval]
+                if mode == "eq21":
+                    mixed = _mix_slice_eq21(
+                        slice_g, speed_weights, p_neq_by_speed.get(speed, {}),
+                        smd_data.beta, weight_cols,
+                    )
+                else:
+                    mixed = _mix_slice_linear(slice_g, speed_weights, weight_cols)
+                if mixed is None:
+                    continue
 
-                for path, g in slice_g.groupby('path'):
-                    if path not in speed_weights:
-                        continue
-
-                    w = speed_weights[path]
-
-                    for col in weight_cols:
-                        if col in g.columns:
-                            v = g[col].values[0]
-                            if pd.notna(v):
-                                vals_per_col[col].append(v)
-                                w_per_col[col].append(w)
-
-                if any(len(vals_per_col[col]) > 0 for col in weight_cols):
-                    row = {
-                        "step": gval,
-                        "speed": speed,
-                        "estimator": estimator,
-                        # protocol-anchored coordinate
-                        "r_coord": smd_data.protocol_grids[speed].loc[
-                            smd_data.protocol_grids[speed]["step"] == gval,
-                            "r_target_protocol"
-                        ].values[0],
-                    }
-
-                    for col in weight_cols:
-                        if len(vals_per_col[col]) > 0 and np.sum(w_per_col[col]) > 0:
-                            row[f"{col}"] = (
-                                np.sum(np.array(vals_per_col[col]) * np.array(w_per_col[col]))
-                                / np.sum(w_per_col[col])
-                            )
-                        else:
-                            row[f"{col}"] = np.nan
-
-                    rows.append(row)
+                row = {
+                    "step": gval,
+                    "speed": speed,
+                    "estimator": estimator,
+                    # protocol-anchored coordinate
+                    "r_coord": smd_data.protocol_grids[speed].loc[
+                        smd_data.protocol_grids[speed]["step"] == gval,
+                        "r_target_protocol"
+                    ].values[0],
+                }
+                row.update(mixed)
+                rows.append(row)
 
             if rows:
                 weighted_pmfs.append(pd.DataFrame(rows))
@@ -1772,6 +1856,63 @@ def calculate_weighted_pmf(
         return pd.DataFrame()
 
     return pd.concat(weighted_pmfs, ignore_index=True)
+
+
+def _mix_slice_linear(slice_g: pd.DataFrame, speed_weights: dict,
+                      weight_cols: list[str]) -> dict | None:
+    """p_eq-weighted mean of each column over the paths at one grid point."""
+    vals_per_col = {col: [] for col in weight_cols}
+    w_per_col = {col: [] for col in weight_cols}
+
+    for path, g in slice_g.groupby('path'):
+        if path not in speed_weights:
+            continue
+
+        w = speed_weights[path]
+
+        for col in weight_cols:
+            if col in g.columns:
+                v = g[col].values[0]
+                if pd.notna(v):
+                    vals_per_col[col].append(v)
+                    w_per_col[col].append(w)
+
+    if not any(len(vals_per_col[col]) > 0 for col in weight_cols):
+        return None
+
+    out = {}
+    for col in weight_cols:
+        if len(vals_per_col[col]) > 0 and np.sum(w_per_col[col]) > 0:
+            out[f"{col}"] = (
+                np.sum(np.array(vals_per_col[col]) * np.array(w_per_col[col]))
+                / np.sum(w_per_col[col])
+            )
+        else:
+            out[f"{col}"] = np.nan
+    return out
+
+
+def _mix_slice_eq21(slice_g: pd.DataFrame, speed_weights: dict, p_neq: dict,
+                    beta: float, weight_cols: list[str]) -> dict | None:
+    """Eq. 21 mix of the paths at one grid point (see :func:`calculate_weighted_pmf`)."""
+    dG, Wmean, p = [], [], []
+    for path, g in slice_g.groupby('path'):
+        if speed_weights.get(path, 0.0) <= 0 or p_neq.get(path, 0.0) <= 0:
+            continue
+        v = g['dG'].values[0]
+        if pd.isna(v):
+            continue
+        dG.append(float(v))
+        Wmean.append(float(g['Wmean'].values[0]) if 'Wmean' in g.columns else np.nan)
+        p.append(float(p_neq[path]))
+
+    if not dG:
+        return None
+
+    dG_mix, Wmean_mix = combine_paths_eq21(dG, Wmean, p, beta)
+    mixed = {"dG": dG_mix, "Wmean": Wmean_mix, "Wdiss": Wmean_mix - dG_mix}
+    return {col: mixed[col] for col in weight_cols}
+
 
 def recover_spring_constant(raw_data: pd.DataFrame, logged_k: float | None = None) -> float:
     """Per-ligand SMD spring constant.

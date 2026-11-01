@@ -309,6 +309,7 @@ def force_convergence_ladder(sa, logs, speeds,
                 results_df=res, path_traj_counts=st["counts"],
                 value_col="dG", beta=st["smd"].beta,
                 trim_fraction=trim_fraction, policy=conv_policy,
+                path_combination="linear",  # force is always mixed linearly
             )
             if series.empty:
                 continue
