@@ -251,7 +251,7 @@ class AutoPath:
         ``sMD_run_analysis``, ``sMD_clust_selection``, ``sMD_features``,
         ``sMD_log_geom_features``, ``sMD_plateau_frac``,
         ``sMD_cluster_to_boundary``, ``sMD_boundary_buffer_frac``,
-        ``sMD_kramers_abs``, ``sMD_kramers_bound``,
+        ``sMD_kramers_abs``, ``sMD_kramers_bound``, ``sMD_kramers_force_fraction``,
         ``cluster_across_speeds``, ``sMD_min_replicas_per_path``
     Milestone extraction
         ``extract_milestones``, ``milestone_mode``,
@@ -346,6 +346,7 @@ class AutoPath:
         sMD_boundary_buffer_frac: float = 0.1,  # boundary buffer as a fraction of r_ts
         sMD_kramers_abs: str = "bulk",  # Kramers absorbing boundary: 'bulk' | 'force_plateau' (legacy)
         sMD_kramers_bound: str = "mirror",  # bound population below pull start: 'mirror' | 'harmonic' | 'none'
+        sMD_kramers_force_fraction: float | None = 0.4,  # 'bulk' fallback for still-rising profiles; None excludes
         cluster_across_speeds: bool = True,
         sMD_min_replicas_per_path: int = 5,
         extract_milestones: bool = True,
@@ -438,6 +439,7 @@ class AutoPath:
         self.sMD_boundary_buffer_frac = sMD_boundary_buffer_frac
         self.sMD_kramers_abs = sMD_kramers_abs
         self.sMD_kramers_bound = sMD_kramers_bound
+        self.sMD_kramers_force_fraction = sMD_kramers_force_fraction
         self.cluster_across_speeds = cluster_across_speeds
         self.sMD_min_replicas_per_path = sMD_min_replicas_per_path
         # Milestones
@@ -1033,6 +1035,7 @@ class AutoPath:
                                        recompute_distances=False,  # load precomputed pocket-distance caches
                                        kramers_abs=self.sMD_kramers_abs,
                                        kramers_bound=self.sMD_kramers_bound,
+                                       kramers_force_fraction=self.sMD_kramers_force_fraction,
                                     #    r_range=(0, 1.75)
                                        )
 

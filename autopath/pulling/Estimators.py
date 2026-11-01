@@ -1011,7 +1011,20 @@ class KramersEstimator:
         if len(d) < 100:
             return None
         disp = d["r_coord"].to_numpy(dtype=np.float64) - float(d["r_coord"].min())
-        F = np.abs(d["force"].to_numpy(dtype=np.float64))
+        prof = KramersEstimator._binned_smoothed(
+            disp, np.abs(d["force"].to_numpy(dtype=np.float64)))
+        if prof is None:
+            return None
+        bc, mF, pk = prof
+        return (start_r + bc, mF, pk)
+
+    @staticmethod
+    def _binned_smoothed(disp, F):
+        """Bin F over displacement *disp* (59 bins to its 98th percentile), fill
+        empty bins, smooth with a centred 5-bin rolling mean.
+
+        Returns ``(bin_centres, smoothed_F, peak_index)`` or ``None``.
+        """
         hi = float(np.quantile(disp, 0.98))
         if hi <= 0:
             return None
@@ -1026,7 +1039,7 @@ class KramersEstimator:
         mF = np.interp(np.arange(len(bc)), np.where(ok)[0], mF[ok])
         mF = pd.Series(mF).rolling(5, center=True, min_periods=1).mean().to_numpy()
         pk = int(np.argmax(mF))
-        return (start_r + bc, mF, pk)
+        return (bc, mF, pk)
 
     @staticmethod
     def force_peak_r(force_df, speed, start_r, r_max):
@@ -1070,7 +1083,29 @@ class KramersEstimator:
         return mass, well_mass
 
     @staticmethod
-    def bulk_boundary(r: np.ndarray, dG: np.ndarray, kBT: float) -> tuple[float, float, bool]:
+    def force_fraction_boundary(r: np.ndarray, dG: np.ndarray, frac: float) -> float | None:
+        """First r past the peak of the profile's mean force F = dG/dr where F < frac * F_peak.
+
+        F is binned and smoothed as the restraint force in
+        :meth:`force_plateau_boundary`. ``None`` if F never drops below.
+        """
+        r = np.asarray(r, dtype=np.float64)
+        F = np.gradient(np.asarray(dG, dtype=np.float64), r)
+        prof = KramersEstimator._binned_smoothed(r - r[0], F)
+        if prof is None:
+            return None
+        bc, mF, pk = prof
+        if mF[pk] <= 0:
+            return None
+        after = np.where(mF[pk:] < frac * mF[pk])[0]
+        if len(after) == 0:
+            return None
+        return float(min(r[0] + bc[pk + after[0]], r[-1]))
+
+    @staticmethod
+    def bulk_boundary(
+        r: np.ndarray, dG: np.ndarray, kBT: float, force_fraction: float | None = None,
+    ) -> tuple[float, float, bool, str]:
         """Absorbing boundary where the free energy has reached the bulk.
 
         Peaked profile (the highest-prominence peak, :func:`_find_pmf_peak`, is
@@ -1083,6 +1118,9 @@ class KramersEstimator:
         rises faster by more than 2 combined SE (SE corrected for residual
         lag-1 autocorrelation). See :func:`_plateau_onset`.
 
+        Still rising at the end of support: with *force_fraction*, the
+        :meth:`force_fraction_boundary` of the profile; otherwise unsupported.
+
         Returns
         -------
         abs_r : float
@@ -1091,11 +1129,13 @@ class KramersEstimator:
             Barrier position (nm); NaN for a plateau onset.
         at_end : bool
             True when a post-barrier descent reaches the last profile point.
+        rule : {"barrier", "plateau", "force_fraction"}
+            Rule that set ``abs_r``.
 
         Raises
         ------
         ValueError
-            Monotone profile whose plateau is not resolved within the support.
+            Flat profile, or no plateau and no usable force-fraction crossing.
         """
         order = np.argsort(r)
         r = np.asarray(r, dtype=np.float64)[order]
@@ -1107,9 +1147,23 @@ class KramersEstimator:
             if smoothed[i_ts] >= smoothed[i_ts:].max():
                 post = np.where(r > r_ts)[0]
                 i = int(post[np.argmin(smoothed[post])])
-                return float(r[i]), float(r_ts), bool(i == r.size - 1)
+                return float(r[i]), float(r_ts), bool(i == r.size - 1), "barrier"
+        if float(smoothed.max()) - float(smoothed[0]) < kBT:
+            raise ValueError(
+                "[Kramers] bulk boundary: profile is flat from the start (rises < 1 kT); "
+                "no rise to a bulk plateau (not supported)."
+            )
         i_on = _plateau_onset(r, dG)
         if i_on is None:
+            if force_fraction is not None:
+                a = KramersEstimator.force_fraction_boundary(r, dG, force_fraction)
+                if a is not None and a > r[0]:
+                    return a, float("nan"), False, "force_fraction"
+                raise ValueError(
+                    f"[Kramers] bulk boundary: still rising at the end of support and the "
+                    f"mean force dG/dr never drops below {force_fraction:g} x its peak "
+                    f"(not supported)."
+                )
             raise ValueError(
                 "[Kramers] bulk boundary: no barrier and still rising at the end of "
                 "support (no tail with slope consistent with zero); plateau not "
@@ -1120,7 +1174,7 @@ class KramersEstimator:
                 "[Kramers] bulk boundary: profile is flat from the start (plateau < 1 kT "
                 "above it); no rise to a bulk plateau (not supported)."
             )
-        return float(r[i_on]), float("nan"), False
+        return float(r[i_on]), float("nan"), False, "plateau"
 
     @staticmethod
     def kramers_mfpt(
@@ -1354,6 +1408,7 @@ class KramersEstimator:
         boundary_method: str = "pmf_peak",
         plateau_frac: float = 0.3,
         bound_extension: str = "none",
+        force_fraction: float | None = None,
     ) -> pd.DataFrame:
         """Run Kramers MFPT for every dG estimator present in *mixture_pmfs*.
 
@@ -1391,6 +1446,9 @@ class KramersEstimator:
             Decay fraction for ``boundary_method="force_plateau"`` (default 0.3).
         bound_extension : {"none", "mirror", "harmonic"}
             Bound-state population below the pull start; see :meth:`kramers_mfpt`.
+        force_fraction : float or None
+            ``"bulk"`` fallback for profiles still rising at the end of support
+            (:meth:`force_fraction_boundary`); ``None`` skips them.
         reflect_r : float or None
             Explicit reflecting boundary (nm); ``None`` → same as *start_r*.
         prefer_v0 : bool
@@ -1440,19 +1498,23 @@ class KramersEstimator:
                 _start_r = start_r if start_r is not None else float(r_arr.min())
                 at_end = False
                 _r_ts = float("nan")
+                rule = "explicit" if abs_r is not None else boundary_method
 
                 if abs_r is not None:
                     _abs_r = abs_r
                 elif boundary_method == "bulk":
                     try:
-                        _abs_r, _r_ts, at_end = self.bulk_boundary(r_arr, dG_arr, self.kBT)
+                        _abs_r, _r_ts, at_end, rule = self.bulk_boundary(
+                            r_arr, dG_arr, self.kBT, force_fraction)
                     except ValueError as exc:
                         logger.warning(f"[Kramers] {est_name}, speed={speed}: {exc}")
                         continue
-                    _where = (f"past barrier r={_r_ts:.4f}" if np.isfinite(_r_ts)
-                              else "at plateau onset")
-                    logger.info(
-                        f"[Kramers] Bulk boundary abs_r={_abs_r:.4f} nm {_where} "
+                    _where = (f"past barrier r={_r_ts:.4f}" if rule == "barrier" else
+                              "at plateau onset" if rule == "plateau" else
+                              f"at mean-force {force_fraction} x peak")
+                    (logger.warning if rule == "force_fraction" else logger.info)(
+                        f"[Kramers] {'FLAG force_fraction: ' if rule == 'force_fraction' else ''}"
+                        f"Bulk boundary abs_r={_abs_r:.4f} nm {_where} "
                         f"(estimator={est_name}, speed={speed}"
                         f"{', profile end: descent unresolved' if at_end else ''})."
                     )
@@ -1543,8 +1605,7 @@ class KramersEstimator:
                         "reflect_r_nm": reflect_r_out,
                         "abs_method": boundary_method if abs_r is None else "explicit",
                         "abs_at_profile_end": at_end,
-                        "abs_kind": (("post_barrier_min" if np.isfinite(_r_ts) else "plateau_onset")
-                                     if boundary_method == "bulk" and abs_r is None else ""),
+                        "absorb_rule": rule,
                         "bound_extension": bound_extension,
                         "bound_ext_frac": res["bound_ext_frac"],
                         "tau_mfpt_ps": tau_ps,
@@ -1570,6 +1631,7 @@ class KramersEstimator:
         realized_speed_map: dict | None = None,
         boundary_method: str = "pmf_peak",
         bound_extension: str = "none",
+        force_fraction: float | None = None,
     ) -> pd.DataFrame:
         """Compute Kramers k_off for each (estimator, speed, path) independently.
 
@@ -1583,7 +1645,8 @@ class KramersEstimator:
 
         *boundary_method* is ``"pmf_peak"`` (path's PMF peak, else its last point)
         or ``"bulk"`` (:meth:`bulk_boundary`; paths with no resolved plateau are skipped).
-        *bound_extension* is passed to :meth:`kramers_mfpt`.
+        *bound_extension* is passed to :meth:`kramers_mfpt`, *force_fraction* to
+        :meth:`bulk_boundary`.
         """
         if boundary_method not in ("pmf_peak", "bulk"):
             raise ValueError(f"[Kramers/per-path] unknown boundary_method={boundary_method!r}")
@@ -1632,8 +1695,14 @@ class KramersEstimator:
             start_r = float(r_arr[0])
             try:
                 if boundary_method == "bulk":
-                    abs_r, _, _ = self.bulk_boundary(r_arr, dG_arr, self.kBT)
+                    abs_r, _, _, rule = self.bulk_boundary(
+                        r_arr, dG_arr, self.kBT, force_fraction)
+                    if rule == "force_fraction":
+                        logger.warning(
+                            f"[Kramers/per-path] FLAG force_fraction: abs_r={abs_r:.4f} nm "
+                            f"({est_name}/{speed}/{path})")
                 else:
+                    rule = "pmf_peak"
                     r_ts = self.detect_ts(r_arr, dG_arr, self.kBT)
                     abs_r = r_ts if r_ts is not None else float(r_arr[-1])
                 res = KramersEstimator.kramers_mfpt(
@@ -1665,6 +1734,7 @@ class KramersEstimator:
                 "p_eq":          p_eq,
                 "start_r_nm":    float(res["start_r_input"]),
                 "abs_r_nm":      abs_r,
+                "absorb_rule":   rule,
                 "reflect_r_nm":  float(res["reflect_r_canon"]),
                 "tau_mfpt_ps":   tau_ps,
                 "tau_mfpt_ns":   tau_ps / 1e3,

@@ -434,6 +434,7 @@ class SMDAnalysis:
             recompute_distances: bool = False,
             kramers_abs: str = "bulk",
             kramers_bound: str = "mirror",
+            kramers_force_fraction: float | None = 0.4,
             ) -> SMDData:
         """
         Parameters
@@ -462,6 +463,10 @@ class SMDAnalysis:
         kramers_bound : {"mirror", "harmonic", "none"}
             Bound-state population below the pull start
             (:meth:`KramersEstimator.kramers_mfpt`); ``"none"`` reflects at the start.
+        kramers_force_fraction : float or None
+            ``"bulk"`` fallback for profiles still rising at the end of support:
+            absorb where the profile's mean force drops below this fraction of
+            its peak; ``None`` excludes them.
         """
         if kramers_abs not in ("bulk", "force_plateau"):
             raise ValueError(f"kramers_abs must be 'bulk' or 'force_plateau', got {kramers_abs!r}")
@@ -692,6 +697,7 @@ class SMDAnalysis:
                 boundary_method=kramers_abs,
                 plateau_frac=plateau_frac,
                 bound_extension=kramers_bound,
+                force_fraction=kramers_force_fraction,
             )
             if not _koff_df.empty:
                 _koff_df.to_csv(os.path.join(self.outdir, 'koff_kramers.csv'), index=False)
@@ -707,6 +713,7 @@ class SMDAnalysis:
                 realized_speed_map=sMDDdata.realized_speed_map,
                 boundary_method="bulk" if kramers_abs == "bulk" else "pmf_peak",
                 bound_extension=kramers_bound,
+                force_fraction=kramers_force_fraction,
             )
             if not _koff_per_path.empty:
                 _koff_per_path.to_csv(

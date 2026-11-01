@@ -145,6 +145,7 @@ def main():
             sMD_boundary_buffer_frac=config.sMD_boundary_buffer_frac,
             sMD_kramers_abs=config.sMD_kramers_abs,
             sMD_kramers_bound=config.sMD_kramers_bound,
+            sMD_kramers_force_fraction=config.sMD_kramers_force_fraction,
             cluster_across_speeds=config.cluster_across_speeds,
             sMD_min_replicas_per_path=config.sMD_min_replicas_per_path,
             sMD_conv_window=config.sMD_conv_window,

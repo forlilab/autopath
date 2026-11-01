@@ -75,6 +75,7 @@ class Config(object):
         sMD_boundary_buffer_frac: float = 0.1,  # extend the boundary cap by this fraction of r_ts
         sMD_kramers_abs: str = "bulk",  # Kramers absorbing boundary: "bulk" | "force_plateau" (legacy)
         sMD_kramers_bound: str = "mirror",  # bound population below pull start: "mirror" | "harmonic" | "none"
+        sMD_kramers_force_fraction: float | None = 0.4,  # "bulk" fallback for still-rising profiles; None excludes
         cluster_across_speeds: bool = True,
         sMD_min_replicas_per_path: int = 5,
         extract_milestones: bool = True,
@@ -298,6 +299,10 @@ class Config(object):
         sMD_kramers_bound : str, optional
             Bound-state population below the pull start in the Kramers MFPT:
             ``"mirror"`` (default), ``"harmonic"`` or ``"none"`` (reflect at start).
+        sMD_kramers_force_fraction : float or None, optional
+            For ``sMD_kramers_abs="bulk"``: profiles still rising at the end of
+            support absorb where their mean force dG/dr drops below this fraction
+            of its peak (default ``0.4``); ``None`` excludes them.
         cluster_across_speeds : bool, optional
             Pool replicas from all pulling speeds into a single clustering pass
             (features standardised within each speed), so a path spans all
@@ -425,6 +430,7 @@ class Config(object):
         self.sMD_boundary_buffer_frac = sMD_boundary_buffer_frac
         self.sMD_kramers_abs = sMD_kramers_abs
         self.sMD_kramers_bound = sMD_kramers_bound
+        self.sMD_kramers_force_fraction = sMD_kramers_force_fraction
         self.cluster_across_speeds = cluster_across_speeds
         self.sMD_min_replicas_per_path = sMD_min_replicas_per_path
 
