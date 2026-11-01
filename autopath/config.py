@@ -73,6 +73,8 @@ class Config(object):
         sMD_plateau_frac: float = 0.4,  # force-plateau TS boundary: fraction of peak |force|
         sMD_cluster_to_boundary: bool = True,  # cluster + RMSD-converge only up to the force-plateau boundary
         sMD_boundary_buffer_frac: float = 0.1,  # extend the boundary cap by this fraction of r_ts
+        sMD_kramers_abs: str = "bulk",  # Kramers absorbing boundary: "bulk" | "force_plateau" (legacy)
+        sMD_kramers_bound: str = "mirror",  # bound population below pull start: "mirror" | "harmonic" | "none"
         cluster_across_speeds: bool = True,
         sMD_min_replicas_per_path: int = 5,
         extract_milestones: bool = True,
@@ -289,6 +291,13 @@ class Config(object):
             Extend the force-plateau boundary cap by this fraction of the
             transition-state distance, as a buffer past rupture.  Default
             ``0.1``.
+        sMD_kramers_abs : str, optional
+            Kramers absorbing boundary: ``"bulk"`` (post-barrier PMF minimum,
+            default) or ``"force_plateau"`` (mean |force| at ``sMD_plateau_frac``
+            of its peak).
+        sMD_kramers_bound : str, optional
+            Bound-state population below the pull start in the Kramers MFPT:
+            ``"mirror"`` (default), ``"harmonic"`` or ``"none"`` (reflect at start).
         cluster_across_speeds : bool, optional
             Pool replicas from all pulling speeds into a single clustering pass
             (features standardised within each speed), so a path spans all
@@ -414,6 +423,8 @@ class Config(object):
         self.sMD_plateau_frac = sMD_plateau_frac
         self.sMD_cluster_to_boundary = sMD_cluster_to_boundary
         self.sMD_boundary_buffer_frac = sMD_boundary_buffer_frac
+        self.sMD_kramers_abs = sMD_kramers_abs
+        self.sMD_kramers_bound = sMD_kramers_bound
         self.cluster_across_speeds = cluster_across_speeds
         self.sMD_min_replicas_per_path = sMD_min_replicas_per_path
 

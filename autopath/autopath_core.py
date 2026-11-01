@@ -251,6 +251,7 @@ class AutoPath:
         ``sMD_run_analysis``, ``sMD_clust_selection``, ``sMD_features``,
         ``sMD_log_geom_features``, ``sMD_plateau_frac``,
         ``sMD_cluster_to_boundary``, ``sMD_boundary_buffer_frac``,
+        ``sMD_kramers_abs``, ``sMD_kramers_bound``,
         ``cluster_across_speeds``, ``sMD_min_replicas_per_path``
     Milestone extraction
         ``extract_milestones``, ``milestone_mode``,
@@ -343,6 +344,8 @@ class AutoPath:
         sMD_plateau_frac: float = 0.4,  # force-plateau TS boundary as a fraction of peak |force|
         sMD_cluster_to_boundary: bool = True,  # cluster/converge only up to the force-plateau boundary
         sMD_boundary_buffer_frac: float = 0.1,  # boundary buffer as a fraction of r_ts
+        sMD_kramers_abs: str = "bulk",  # Kramers absorbing boundary: 'bulk' | 'force_plateau' (legacy)
+        sMD_kramers_bound: str = "mirror",  # bound population below pull start: 'mirror' | 'harmonic' | 'none'
         cluster_across_speeds: bool = True,
         sMD_min_replicas_per_path: int = 5,
         extract_milestones: bool = True,
@@ -433,6 +436,8 @@ class AutoPath:
         self.sMD_plateau_frac = sMD_plateau_frac
         self.sMD_cluster_to_boundary = sMD_cluster_to_boundary
         self.sMD_boundary_buffer_frac = sMD_boundary_buffer_frac
+        self.sMD_kramers_abs = sMD_kramers_abs
+        self.sMD_kramers_bound = sMD_kramers_bound
         self.cluster_across_speeds = cluster_across_speeds
         self.sMD_min_replicas_per_path = sMD_min_replicas_per_path
         # Milestones
@@ -1026,6 +1031,8 @@ class AutoPath:
                                        cluster_to_boundary=self.sMD_cluster_to_boundary,
                                        boundary_buffer_frac=self.sMD_boundary_buffer_frac,
                                        recompute_distances=False,  # load precomputed pocket-distance caches
+                                       kramers_abs=self.sMD_kramers_abs,
+                                       kramers_bound=self.sMD_kramers_bound,
                                     #    r_range=(0, 1.75)
                                        )
 
