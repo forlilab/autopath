@@ -432,9 +432,8 @@ class SMDAnalysis:
             cluster_to_boundary: bool = True,
             boundary_buffer_frac: float = 0.1,
             recompute_distances: bool = False,
-            kramers_abs: str = "bulk",
+            kramers_abs: str = "end",
             kramers_bound: str = "mirror",
-            kramers_force_fraction: float | None = 0.4,
             ) -> SMDData:
         """
         Parameters
@@ -456,23 +455,18 @@ class SMDAnalysis:
         ligand_sdf : str | None
             Path to an SDF with the ligand and correct bond orders.
             Required if any RDKit feature is in ``features``.
-        kramers_abs : {"bulk", "force_plateau"}
-            Kramers absorbing boundary: post-barrier PMF minimum (``"bulk"``) or
+        kramers_abs : {"end", "force_plateau"}
+            Kramers absorbing boundary: end of the pulled range (``"end"``) or
             where the mean |force| decays to ``plateau_frac`` of its peak
             (``"force_plateau"``, legacy).
-        kramers_bound : {"mirror", "harmonic", "none"}
+        kramers_bound : {"mirror", "none"}
             Bound-state population below the pull start
             (:meth:`KramersEstimator.kramers_mfpt`); ``"none"`` reflects at the start.
-        kramers_force_fraction : float or None
-            ``"bulk"`` fallback for profiles still rising at the end of support:
-            absorb where the profile's mean force drops below this fraction of
-            its peak; ``None`` excludes them.
         """
-        if kramers_abs not in ("bulk", "force_plateau"):
-            raise ValueError(f"kramers_abs must be 'bulk' or 'force_plateau', got {kramers_abs!r}")
-        if kramers_bound not in ("mirror", "harmonic", "none"):
-            raise ValueError(
-                f"kramers_bound must be 'mirror', 'harmonic' or 'none', got {kramers_bound!r}")
+        if kramers_abs not in ("end", "force_plateau"):
+            raise ValueError(f"kramers_abs must be 'end' or 'force_plateau', got {kramers_abs!r}")
+        if kramers_bound not in ("mirror", "none"):
+            raise ValueError(f"kramers_bound must be 'mirror' or 'none', got {kramers_bound!r}")
 
         if self.reference_pdb is None:
             self.reference_pdb = sMDDdata.reference_pdb
@@ -697,7 +691,6 @@ class SMDAnalysis:
                 boundary_method=kramers_abs,
                 plateau_frac=plateau_frac,
                 bound_extension=kramers_bound,
-                force_fraction=kramers_force_fraction,
             )
             if not _koff_df.empty:
                 _koff_df.to_csv(os.path.join(self.outdir, 'koff_kramers.csv'), index=False)
@@ -711,9 +704,8 @@ class SMDAnalysis:
                 per_path_results=sMDDdata.results,
                 weights_by_estimator=weights_by_estimator,
                 realized_speed_map=sMDDdata.realized_speed_map,
-                boundary_method="bulk" if kramers_abs == "bulk" else "pmf_peak",
+                boundary_method="end" if kramers_abs == "end" else "pmf_peak",
                 bound_extension=kramers_bound,
-                force_fraction=kramers_force_fraction,
             )
             if not _koff_per_path.empty:
                 _koff_per_path.to_csv(
@@ -760,7 +752,7 @@ class SMDAnalysis:
             if {'r_coord', 'force', 'speed'}.issubset(_rd.columns):
                 _lo, _hi = float(_rd['r_coord'].min()), float(_rd['r_coord'].max())
                 ts_r = KramersEstimator.force_peak_r(_rd, 0.0, _lo, _hi)
-                # the bulk boundary is per profile (koff_kramers.csv abs_r_nm)
+                # the "end" boundary is per profile (koff_kramers.csv abs_r_nm)
                 if kramers_abs == "force_plateau":
                     abs_r = KramersEstimator.force_plateau_boundary(
                         _rd, 0.0, _lo, _hi, plateau_frac)

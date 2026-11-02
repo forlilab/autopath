@@ -1,4 +1,4 @@
-"""Kramers MFPT boundaries: bulk absorbing boundary and bound-state extension."""
+"""Kramers MFPT: end-of-range absorbing boundary, mirror extension, plateau diagnostic."""
 import json
 import sys
 
@@ -47,35 +47,10 @@ def tau(prof, abs_r, ext):
                                          bound_extension=ext)["tau_ps"]
 
 
-# --- absorbing boundary -------------------------------------------------------
-
-def test_bulk_boundary_is_the_post_barrier_minimum():
-    prof = pull_profile()
-    abs_r, ts_r, at_end, _ = KramersEstimator.bulk_boundary(prof.r_coord.values, prof.dG.values, KBT)
-    x = np.linspace(XB, 2.0, 100_001)
-    assert ts_r == pytest.approx(XB, abs=0.003)
-    assert abs_r == pytest.approx(x[np.argmin(G(x))], abs=0.003)
-    assert not at_end
-
-
-def test_bulk_boundary_flags_an_unresolved_descent():
-    prof = pull_profile(hi=1.45)           # ends while still descending from the barrier
-    abs_r, _, at_end, _ = KramersEstimator.bulk_boundary(prof.r_coord.values, prof.dG.values, KBT)
-    assert at_end and abs_r == pytest.approx(prof.r_coord.iloc[-1])
-
+# --- plateau diagnostic ----------------------------------------------------------
 
 NOISE = np.random.default_rng(7).normal(0.0, 0.3, 1001)
 R1 = X0 + 0.001 * np.arange(1001)
-
-
-def test_constant_slope_rise_to_the_end_is_not_supported():
-    with pytest.raises(ValueError, match="still rising"):
-        KramersEstimator.bulk_boundary(R1, 10.0 * (R1 - X0) + NOISE, KBT)
-
-
-def test_flat_profile_is_not_supported():
-    with pytest.raises(ValueError, match="flat from the start"):
-        KramersEstimator.bulk_boundary(R1, NOISE, KBT)
 
 
 def G_mono(x):
@@ -85,98 +60,24 @@ def G_mono(x):
     return np.where(x >= X0, up, 15.0 * (x - X0) ** 2 / 0.08)
 
 
-def test_monotone_profile_absorbs_at_the_plateau_onset():
-    abs_r, ts_r, at_end, _ = KramersEstimator.bulk_boundary(R1, G_mono(R1) + NOISE, KBT)
-    assert np.isnan(ts_r) and not at_end
-    # reached the plateau within the noise, and not deep inside it
-    assert 15.0 - G_mono(abs_r) < 1.0
-    assert abs_r < 1.75
+def test_plateau_reached_on_a_plateaued_profile():
+    assert KramersEstimator.plateau_reached(R1, G_mono(R1) + NOISE)
 
 
-def test_monotone_mfpt_with_mirror_matches_full_well_reference():
-    abs_r, _, _, _ = KramersEstimator.bulk_boundary(R1, G_mono(R1) + NOISE, KBT)
-    prof = pd.DataFrame({"r_coord": R1, "dG": G_mono(R1), "Gamma": GAMMA})
-    x = np.linspace(X0 - 0.6, abs_r, 400_001)
-    g = G_mono(x) / KBT
-    inner = cumulative_trapezoid(np.exp(-g), x, initial=0.0)
-    m = x >= X0
-    ref = float(np.trapz((np.exp(g) * GAMMA / KBT * inner)[m], x[m]))
-    assert tau(prof, abs_r, "mirror") == pytest.approx(ref, rel=0.02)
+def test_plateau_not_reached_on_a_rising_profile():
+    assert not KramersEstimator.plateau_reached(R1, 10.0 * (R1 - X0) + NOISE)
 
 
-def test_plateau_rule_is_reported():
-    *_, rule = KramersEstimator.bulk_boundary(R1, G_mono(R1) + NOISE, KBT, force_fraction=0.4)
-    assert rule == "plateau"
+# --- mirror extension, against the full-well reference -------------------------
 
-
-def _still_rising():
-    """Rise whose mean force peaks at 1.3 nm and decays, still rising at 2 nm."""
-    F = 100.0 * np.exp(-((R1 - 1.3) / 0.15) ** 2) + 30.0
-    return F, cumulative_trapezoid(F, R1, initial=0.0) + NOISE
-
-
-def test_still_rising_profile_uses_the_force_fraction_crossing():
-    F, dG = _still_rising()
-    with pytest.raises(ValueError, match="still rising"):
-        KramersEstimator.bulk_boundary(R1, dG, KBT)
-    abs_r, ts_r, at_end, rule = KramersEstimator.bulk_boundary(R1, dG, KBT, force_fraction=0.4)
-    exact = R1[np.argmax((R1 > 1.3) & (F < 0.4 * F.max()))]
-    assert rule == "force_fraction" and np.isnan(ts_r) and not at_end
-    assert abs_r == pytest.approx(exact, abs=0.04)
-    a2, *_ = KramersEstimator.bulk_boundary(R1, dG, KBT, force_fraction=0.6)
-    assert a2 < abs_r
-
-
-def test_force_that_never_drops_is_excluded():
-    dG = 50.0 * (R1 - X0) + NOISE          # constant mean force
-    with pytest.raises(ValueError, match="never drops below 0.4"):
-        KramersEstimator.bulk_boundary(R1, dG, KBT, force_fraction=0.4)
-
-
-def test_compute_flags_force_fraction_rows(caplog):
-    _, dG = _still_rising()
-    pmf = pd.DataFrame({"estimator": "force", "speed": 0.0, "step": np.arange(R1.size),
-                        "r_coord": R1, "dG": dG})
-    fric = pmf.assign(Gamma=GAMMA, method="regression")[["estimator", "speed", "step", "r_coord",
-                                                         "Gamma", "method"]]
-    k = KramersEstimator(temperature=300)
-    assert k.compute(pmf, fric, dG_extrapolated=pmf, boundary_method="bulk").empty
-    with caplog.at_level("WARNING"):
-        out = k.compute(pmf, fric, dG_extrapolated=pmf, boundary_method="bulk",
-                        bound_extension="mirror", force_fraction=0.4)
-    assert out.iloc[0].absorb_rule == "force_fraction"
-    assert "FLAG force_fraction" in caplog.text
-
-
-def test_bump_below_a_higher_plateau_uses_the_plateau():
-    dG = G_mono(R1) + NOISE + 3.0 * np.exp(-((R1 - 1.15) / 0.02) ** 2) \
-        - 3.0 * np.exp(-((R1 - 1.2) / 0.02) ** 2)
-    abs_r, ts_r, _, _ = KramersEstimator.bulk_boundary(R1, dG, KBT)
-    assert np.isnan(ts_r) and abs_r > 1.2
-
-
-# --- bound-state extension, against the full-well reference --------------------
-
-@pytest.mark.parametrize("ext", ["mirror", "harmonic"])
-def test_extension_recovers_the_exact_mfpt(ext):
+def test_mirror_recovers_the_exact_mfpt():
     prof = pull_profile()
-    abs_r, _, _, _ = KramersEstimator.bulk_boundary(prof.r_coord.values, prof.dG.values, KBT)
-    assert tau(prof, abs_r, ext) == pytest.approx(mfpt_reference(abs_r), rel=0.01)
+    assert tau(prof, 2.0, "mirror") == pytest.approx(mfpt_reference(2.0), rel=0.01)
 
 
 def test_reflecting_at_the_start_halves_a_symmetric_well():
     prof = pull_profile()
-    abs_r, _, _, _ = KramersEstimator.bulk_boundary(prof.r_coord.values, prof.dG.values, KBT)
-    assert tau(prof, abs_r, "none") / mfpt_reference(abs_r) == pytest.approx(0.5, abs=0.03)
-
-
-def test_old_boundaries_underestimate_and_new_ones_do_not():
-    prof = pull_profile()
-    ts = KramersEstimator.detect_ts(prof.r_coord.values, prof.dG.values, KBT)
-    abs_new, _, _, _ = KramersEstimator.bulk_boundary(prof.r_coord.values, prof.dG.values, KBT)
-    ref = mfpt_reference(abs_new)
-    assert tau(prof, ts, "none") / ref < 0.4      # barrier top + reflect at start
-    assert tau(prof, abs_new, "mirror") / ref == pytest.approx(1.0, rel=0.01)
+    assert tau(prof, 2.0, "none") / mfpt_reference(2.0) == pytest.approx(0.5, abs=0.03)
 
 
 def test_extension_fraction_is_reported():
@@ -192,39 +93,59 @@ def test_extension_rejects_a_reflecting_wall_away_from_start():
     with pytest.raises(ValueError, match="reflect_r"):
         KramersEstimator.kramers_mfpt(prof, 1.1, 1.6, 1.0, KBT, 1.0, bound_extension="mirror")
     with pytest.raises(ValueError, match="bound_extension"):
-        KramersEstimator.kramers_mfpt(prof, X0, 1.6, None, KBT, 1.0, bound_extension="flat")
-
-
-def test_harmonic_rejects_a_non_convex_well():
-    r = X0 + 0.001 * np.arange(501)
-    dG = 20.0 * np.sin(np.pi * (r - X0) / 0.5)    # concave from the start
-    prof = pd.DataFrame({"r_coord": r, "dG": dG, "Gamma": GAMMA})
-    with pytest.raises(ValueError, match="curvature"):
-        KramersEstimator.kramers_mfpt(prof, X0, 1.4, None, KBT, 1.0, bound_extension="harmonic")
+        KramersEstimator.kramers_mfpt(prof, X0, 1.6, None, KBT, 1.0, bound_extension="harmonic")
 
 
 # --- compute() / compute_per_path() wiring --------------------------------------
 
-def _tables(dG):
+def _tables(dG, gamma=GAMMA):
     prof = pull_profile()
     pmf = pd.DataFrame({"estimator": "jarzynski", "speed": 0.0, "step": prof.step,
                         "r_coord": prof.r_coord, "dG": dG})
     fric = pd.DataFrame({"estimator": "jarzynski", "speed": 0.0, "step": prof.step,
-                         "r_coord": prof.r_coord, "Gamma": GAMMA, "method": "regression"})
+                         "r_coord": prof.r_coord, "Gamma": gamma, "method": "regression"})
     return pmf, fric
 
 
-def test_compute_bulk_mirror_matches_direct_call():
-    pmf, fric = _tables(pull_profile().dG.values)
-    out = KramersEstimator(temperature=300).compute(
-        pmf, fric, dG_extrapolated=pmf, boundary_method="bulk", bound_extension="mirror")
-    row = out.iloc[0]
-    abs_r, _, _, _ = KramersEstimator.bulk_boundary(pmf.r_coord.values, pmf.dG.values, KBT)
-    assert row.abs_method == "bulk" and row.bound_extension == "mirror"
-    assert row.absorb_rule == "barrier"
-    assert row.abs_r_nm == pytest.approx(abs_r)
-    assert not row.abs_at_profile_end
-    assert row.tau_mfpt_ps == pytest.approx(tau(pull_profile(), abs_r, "mirror"), rel=1e-9)
+@pytest.mark.parametrize("dG", [pull_profile().dG.values,                    # barrier
+                                10.0 * (pull_profile().r_coord.values - X0)])  # still rising
+def test_end_boundary_is_r_max_for_any_profile(dG):
+    pmf, fric = _tables(dG)
+    row = KramersEstimator(temperature=300).compute(
+        pmf, fric, dG_extrapolated=pmf, boundary_method="end", bound_extension="mirror").iloc[0]
+    assert row.abs_method == "end" and row.bound_extension == "mirror"
+    assert row.abs_r_nm == pytest.approx(pmf.r_coord.max())
+    prof = pmf.assign(Gamma=GAMMA)
+    assert row.tau_mfpt_ps == pytest.approx(
+        KramersEstimator.kramers_mfpt(prof, X0, 2.0, None, KBT, 1.0,
+                                      bound_extension="mirror")["tau_ps"], rel=1e-9)
+
+
+def test_end_boundary_ignores_trailing_nan_friction():
+    gamma = np.full(len(pull_profile()), GAMMA)
+    gamma[-50:] = np.nan
+    pmf, fric = _tables(pull_profile().dG.values, gamma)
+    row = KramersEstimator(temperature=300).compute(
+        pmf, fric, dG_extrapolated=pmf, boundary_method="end").iloc[0]
+    assert row.abs_r_nm == pytest.approx(pmf.r_coord.iloc[-51])
+
+
+def test_plateau_reached_is_reported_but_does_not_move_the_boundary():
+    k = KramersEstimator(temperature=300)
+    rising, fric = _tables(10.0 * (pull_profile().r_coord.values - X0) + NOISE)
+    flat, _ = _tables(G_mono(pull_profile().r_coord.values) + NOISE)
+    a = k.compute(rising, fric, dG_extrapolated=rising, boundary_method="end").iloc[0]
+    b = k.compute(flat, fric, dG_extrapolated=flat, boundary_method="end").iloc[0]
+    assert (bool(a.plateau_reached), bool(b.plateau_reached)) == (False, True)
+    assert a.abs_r_nm == b.abs_r_nm == pytest.approx(2.0)
+
+
+def test_uncomputable_profile_is_skipped():
+    pmf, fric = _tables(np.full(len(pull_profile()), np.nan))
+    k = KramersEstimator(temperature=300)
+    assert k.compute(pmf, fric, dG_extrapolated=pmf, boundary_method="end").empty
+    with pytest.raises(ValueError, match="boundary_method"):
+        k.compute(pmf, fric, dG_extrapolated=pmf, boundary_method="bulk")
 
 
 def test_compute_legacy_rule_is_unchanged():
@@ -236,30 +157,18 @@ def test_compute_legacy_rule_is_unchanged():
     assert row.tau_mfpt_ps == pytest.approx(tau(pull_profile(), ts, "none"), rel=1e-9)
 
 
-def test_compute_skips_barrier_free_profiles_under_bulk():
-    pmf, fric = _tables(10.0 * (pull_profile().r_coord.values - X0))
-    k = KramersEstimator(temperature=300)
-    assert k.compute(pmf, fric, dG_extrapolated=pmf, boundary_method="bulk").empty
-    with pytest.raises(ValueError, match="boundary_method"):
-        k.compute(pmf, fric, dG_extrapolated=pmf, boundary_method="plateau")
-
-
-def test_per_path_bulk_and_extension():
+def test_per_path_end_boundary():
     prof = pull_profile()
     v = 0.01
     res = pd.DataFrame({"estimator": "cumulant", "speed": v, "path": "path-0", "step": prof.step,
                         "r_coord": prof.r_coord, "dG": prof.dG,
                         "Wdiss": GAMMA * v * (prof.r_coord - X0)})
     w = {"cumulant": {v: {"path-0": 1.0}}}
-    k = KramersEstimator(temperature=300)
-    new = k.compute_per_path(res, w, boundary_method="bulk", bound_extension="mirror")
-    old = k.compute_per_path(res, w)
-    new_row = new[new.source == "per_path"].iloc[0]
-    old_row = old[old.source == "per_path"].iloc[0]
-    abs_r, _, _, _ = KramersEstimator.bulk_boundary(prof.r_coord.values, prof.dG.values, KBT)
-    assert new_row.abs_r_nm == pytest.approx(abs_r)
-    assert new_row.tau_mfpt_ps == pytest.approx(mfpt_reference(abs_r), rel=0.02)
-    assert old_row.tau_mfpt_ps < 0.4 * new_row.tau_mfpt_ps
+    out = KramersEstimator(temperature=300).compute_per_path(
+        res, w, boundary_method="end", bound_extension="mirror")
+    row = out[out.source == "per_path"].iloc[0]
+    assert row.abs_r_nm == pytest.approx(prof.r_coord.max(), abs=0.002)
+    assert "plateau_reached" in out.columns
 
 
 # --- configuration --------------------------------------------------------------
@@ -268,8 +177,8 @@ def test_config_defaults_and_cli_forwarding(tmp_path, monkeypatch):
     from autopath.cli import run_AutoPath
 
     c = Config()
-    assert (c.sMD_kramers_abs, c.sMD_kramers_bound) == ("bulk", "mirror")
-    assert c.sMD_kramers_force_fraction == 0.4
+    assert (c.sMD_kramers_abs, c.sMD_kramers_bound) == ("end", "mirror")
+    assert not hasattr(c, "sMD_kramers_force_fraction")
     seen = {}
 
     class Recorder:
@@ -281,12 +190,10 @@ def test_config_defaults_and_cli_forwarding(tmp_path, monkeypatch):
 
     cfg = tmp_path / "config.json"
     cfg.write_text(json.dumps({"sMD": {"sMD_kramers_abs": "force_plateau",
-                                       "sMD_kramers_bound": "none",
-                                       "sMD_kramers_force_fraction": 0.3}}))
+                                       "sMD_kramers_bound": "none"}}))
     lig = tmp_path / "lig.sdf"
     lig.write_text("")
     monkeypatch.setattr(run_AutoPath, "AutoPath", Recorder)
     monkeypatch.setattr(sys, "argv", ["run_AutoPath", "-c", str(cfg), "-l", str(lig)])
     run_AutoPath.main()
     assert (seen["sMD_kramers_abs"], seen["sMD_kramers_bound"]) == ("force_plateau", "none")
-    assert seen["sMD_kramers_force_fraction"] == 0.3
