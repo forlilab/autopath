@@ -530,6 +530,17 @@ class SMDAnalysis:
             n_paths=self.n_paths,      # None -> silhouette search (deployment default)
         )
 
+        # Small paths are merged, never deleted by the support trim below.
+        if hasattr(self.path_model, 'merge_small_paths'):
+            path_mappings, merges = self.path_model.merge_small_paths(
+                path_mappings,
+                max(self.support_policy.min_samples_per_step,
+                    self.min_replicas_per_path),
+            )
+            if merges:
+                os.makedirs(self.outdir, exist_ok=True)
+                pd.DataFrame(merges).to_csv(
+                    f'{self.outdir}/path_merges.csv', index=False)
         sMDDdata.raw_data['path'] = sMDDdata.raw_data['trajname'].map(path_mappings)
         # HS needs every pull of a speed; the trim below can delete whole small paths.
         hs_raw = sMDDdata.raw_data.copy() if self.hummer_szabo is not None else None

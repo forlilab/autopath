@@ -197,6 +197,7 @@ class DTWPathModel(PathModel):
         # with persist_medoids, per-speed calls accumulate in medoid_info.json and a
         # change of clustering mode replaces the stored entries (see below).
         medoids_by_speed = {}
+        dtw_groups = {}
 
         for speed_key, speed_df in grouping_iter:
             speed_df_full = speed_df
@@ -373,6 +374,12 @@ class DTWPathModel(PathModel):
                 for trajname, cluster_id in zip(trajnames, cluster_model.labels)
             }
             all_path_mappings.update(path_mapping_dic)
+            dtw_groups[str(speed_key) if speed_key is not None else "all"] = {
+                "trajnames": list(trajnames),
+                "dist": np.asarray(distmatrix),
+                "medoids": [int(i) for i in cluster_model.medoids],
+                "labels": [path_mapping_dic[t] for t in trajnames],
+            }
 
             # Medoid → path is just the subset of path_mapping_dic for medoid trajectories
             speed_medoid_to_path = {name: path_mapping_dic[name] for name in speed_medoid_names}
@@ -493,6 +500,7 @@ class DTWPathModel(PathModel):
             union_to_path.update(mapping)
 
         self.medoids_by_speed = by_speed
+        self.dtw_groups_ = dtw_groups
         self.medoid_to_path = union_to_path
         self.all_medoid_names = sorted(union_to_path)
         self.medoid_names = self.all_medoid_names
@@ -508,6 +516,60 @@ class DTWPathModel(PathModel):
 
         return all_path_mappings
     
+    def merge_small_paths(self, path_mappings: dict, min_pulls: int):
+        """Merge paths with fewer than ``min_pulls`` pulls into surviving paths.
+
+        Each pull of a small path moves to the surviving path whose medoid is
+        nearest in DTW distance. If no path survives in a clustering group, all
+        its pulls go to the largest path.
+
+        Parameters
+        ----------
+        path_mappings : dict
+            trajname -> path label, as returned by :meth:`fit_transform`.
+        min_pulls : int
+            Minimum pulls for a path to survive.
+
+        Returns
+        -------
+        mappings : dict
+            Updated trajname -> path label.
+        merges : list of dict
+            Records with keys ``speed``, ``from_path``, ``to_path``, ``n_pulls``.
+        """
+        out = dict(path_mappings)
+        merges = []
+        for key, g in getattr(self, "dtw_groups_", {}).items():
+            names, dist, labels = g["trajnames"], g["dist"], g["labels"]
+            counts = pd.Series(labels).value_counts()
+            small = set(counts.index[counts < min_pulls])
+            if not small:
+                continue
+            surv = {labels[m]: m for m in g["medoids"] if labels[m] not in small}
+            if not surv:
+                big = counts.idxmax()
+                surv = {big: None}
+                small.discard(big)
+            moved = {}
+            for i, (name, lab) in enumerate(zip(names, labels)):
+                if lab not in small:
+                    continue
+                cand = {p: m for p, m in surv.items() if m is not None}
+                dest = (min(cand, key=lambda p: dist[i, cand[p]])
+                        if cand else next(iter(surv)))
+                out[name] = dest
+                moved.setdefault(lab, {}).setdefault(dest, 0)
+                moved[lab][dest] += 1
+            for lab, dests in moved.items():
+                for dest, n in dests.items():
+                    merges.append({"speed": key, "from_path": lab,
+                                   "to_path": dest, "n_pulls": n})
+                    logger.warning(
+                        f"Merged small path {lab} (speed={key}, {n} pulls < "
+                        f"{min_pulls}) into {dest}."
+                    )
+        return out, merges
+
     def plot_distance_matrix(self, distmatrix: np.ndarray = None):
         """Plot and save the pairwise DTW distance matrix as a heatmap.
 
