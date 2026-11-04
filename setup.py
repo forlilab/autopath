@@ -25,7 +25,7 @@ setup(
     author="Manuel A. Llanos",
     author_email="mllanos@scripps.edu",
     url="https://github.com/forlilab/autopath",
-    description='A Python package for performing path metadynamics simulations',
+    description='A Python package for protein-ligand unbinding simulations with steered MD',
     long_description=open(os.path.join(base_dir, 'README.md')).read(),
     long_description_content_type="text/markdown",
     packages=find_packages(exclude=['docs']),

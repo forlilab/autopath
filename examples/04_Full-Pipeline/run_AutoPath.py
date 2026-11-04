@@ -92,20 +92,6 @@ def main():
                                         },
 
                     sMD_run_analysis=True,
-
-                    extract_milestones=False,
-                    n_milestones=3,
-                    
-                    run_metadynamics=False,
-                    mMD_use_funnel_potential=False,
-                    mMD_preseed_bias=False,
-                    mMD_milestone_seeding=False,
-                    
-                    mMD_time=10, # ns
-                    mMD_bias_frequency=2,
-                    mMD_hill_width=0.05,
-                    mMD_hill_height=1.2,
-                    mMD_bias_factor=15
                 )
     
     ap.run(ligand_file=ligand)

@@ -46,21 +46,5 @@
         "sMD_ligand_anchor_mode": "lig_ha",
         "sMD_run_analysis": true,
         "sMD_clust_selection": null
-    },
-    "milestones": {
-        "extract_milestones": true,
-        "milestone_mode": "per_path",
-        "milestone_min_frame_separation": 0,
-        "n_milestones": 3,
-        "relax_steps": 25000
-    },
-    "metadynamics": {
-        "run_metadynamics": true,
-        "mMD_use_funnel_potential": true,
-        "mMD_bias_factor": 15,
-        "mMD_bias_frequency": 2,
-        "mMD_hill_height": 1.2,
-        "mMD_hill_width": 0.05,
-        "mMD_time": 2
     }
 }

@@ -74,23 +74,6 @@ class Config(object):
         sMD_boundary_buffer_frac: float = 0.1,  # extend the boundary cap by this fraction of r_ts
         cluster_across_speeds: bool = False,
         sMD_min_replicas_per_path: int = 5,
-        extract_milestones: bool = True,
-        milestone_mode: str = "all_medoids",  # "per_path" or "all_medoids"
-        milestone_min_frame_separation: int = 0,
-        n_milestones: int = 5,
-        relax_steps: int = 25000,
-        run_metadynamics: bool = True,
-        mMD_use_funnel_potential: bool = False,
-        mMD_bias_factor: int = 15,
-        mMD_bias_frequency: int = 2,  # ps
-        mMD_hill_height: float = 1.2,  # kJ/mol
-        mMD_hill_width: float = 0.05,
-        mMD_time: int = 5,  # ns
-        mMD_milestone_seeding: bool = True,
-        mMD_multiple_walkers: bool = False,
-        mMD_preseed_bias: bool = False,
-        mMD_preseed_speed: float = None,
-        mMD_funnel_host_selection: str = None,
     ):
         """Initialise an AutoPath configuration.
 
@@ -292,64 +275,6 @@ class Config(object):
             Minimum number of replicas required in a cluster for it to be kept
             as a distinct path.  Default ``5``.
 
-        Milestone extraction
-        ~~~~~~~~~~~~~~~~~~~~
-        extract_milestones : bool, optional
-            Extract representative frames from sMD trajectories to use as
-            metadynamics starting points.  Default ``True``.
-        milestone_mode : str, optional
-            Extraction mode: ``"all_medoids"`` (pool all path medoids) or
-            ``"per_path"`` (cluster each path's medoid independently).
-            Default ``"all_medoids"``.
-        milestone_min_frame_separation : int, optional
-            Minimum number of frames between selected milestones to avoid
-            redundancy.  Default ``0``.
-        n_milestones : int, optional
-            Number of milestones to extract per path (or in total for
-            ``"all_medoids"`` mode).  Default ``5``.
-        relax_steps : int, optional
-            Number of MD steps for milestone relaxation before metadynamics.
-            Default ``25000``.
-
-        Metadynamics (mMD)
-        ~~~~~~~~~~~~~~~~~~
-        run_metadynamics : bool, optional
-            Run the multi-walker well-tempered metadynamics stage.  Default
-            ``True``.
-        mMD_use_funnel_potential : bool, optional
-            Add a funnel restraint around the sMD-derived exit path to suppress
-            unproductive sampling.  Default ``False``.
-        mMD_bias_factor : int, optional
-            Well-tempered bias factor (gamma).  Default ``15``.
-        mMD_bias_frequency : int, optional
-            Interval (ps) at which Gaussian hills are deposited.  Default ``2``.
-        mMD_hill_height : float, optional
-            Initial Gaussian hill height in kJ/mol.  Default ``1.2`` (~0.5 kBT
-            at 300 K), which is the recommended starting point; lower values
-            slow convergence, higher values risk overfilling barriers.
-        mMD_hill_width : float, optional
-            Gaussian hill width (sigma) along the path CV.  Default ``0.05``.
-        mMD_time : int, optional
-            Metadynamics simulation time per walker in ns.  Default ``5``.
-        mMD_milestone_seeding : bool, optional
-            Start each walker from the relaxed checkpoint of its own milestone.
-            When ``False``, all walkers start from the first (most-bound)
-            milestone's checkpoint.  Default ``True``.
-        mMD_multiple_walkers : bool, optional
-            Have all walkers read/write the same bias directory for true
-            multi-walker metadynamics.  When ``False``, each walker keeps an
-            independent bias subdirectory.  Default ``False``.
-        mMD_preseed_bias : bool, optional
-            Pre-seed the metadynamics bias from the sMD PMF before launching
-            walkers.  Default ``False``.
-        mMD_preseed_speed : float, optional
-            Pulling speed (nm/ps) whose sMD PMF is used for bias pre-seeding.
-            ``None`` lets the preseed routine pick automatically.  Default
-            ``None``.
-        mMD_funnel_host_selection : str, optional
-            MDAnalysis selection defining the funnel-axis host atoms.  ``None``
-            auto-derives protein CA atoms within 6 Å of the ligand in the
-            equilibrated structure.  Default ``None``.
         """
 
         # General
@@ -414,27 +339,6 @@ class Config(object):
         self.sMD_boundary_buffer_frac = sMD_boundary_buffer_frac
         self.cluster_across_speeds = cluster_across_speeds
         self.sMD_min_replicas_per_path = sMD_min_replicas_per_path
-
-        # Milestones
-        self.extract_milestones = extract_milestones
-        self.milestone_mode = milestone_mode
-        self.milestone_min_frame_separation = milestone_min_frame_separation
-        self.n_milestones = n_milestones
-        self.relax_steps = relax_steps
-
-        # Metadynamics
-        self.run_metadynamics = run_metadynamics
-        self.mMD_use_funnel_potential = mMD_use_funnel_potential
-        self.mMD_bias_factor = mMD_bias_factor
-        self.mMD_bias_frequency = mMD_bias_frequency
-        self.mMD_hill_height = mMD_hill_height
-        self.mMD_hill_width = mMD_hill_width
-        self.mMD_time = mMD_time
-        self.mMD_milestone_seeding = mMD_milestone_seeding
-        self.mMD_multiple_walkers = mMD_multiple_walkers
-        self.mMD_preseed_bias = mMD_preseed_bias
-        self.mMD_preseed_speed = mMD_preseed_speed
-        self.mMD_funnel_host_selection = mMD_funnel_host_selection
 
     @classmethod
     def get_defaults_dict(cls):
