@@ -149,7 +149,7 @@ def wrap_align_save_traj(traj_files, topology, remove_original=True, is_membrane
         when the inputs are read-only or shared.
     is_membrane : bool
         Skip imaging: ``image_molecules`` is prohibitively slow for membrane systems
-        (hundreds of lipids), and centering is sufficient for sMD/metadynamics.
+        (hundreds of lipids), and centering is sufficient for sMD.
     reference : str or mdtraj.Trajectory, optional
         Structure whose first frame is the superposition target. Default (None)
         superposes each trajectory onto its OWN first frame, which puts every
