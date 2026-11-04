@@ -24,21 +24,16 @@ import pandas as pd
 
 def score_system(job):
     import MDAnalysis as mda
-    from autopath.ap_PLIP import ligand_rmsf_contacts, cw_rmsf_scores
-    from autopath.equilibration import free_window_start
+    from autopath.ap_PLIP import cw_rmsf_windows
 
     sysname, run_dir, ligand, outdir = job
     eq = f"{run_dir}/equilibration"
     u = mda.Universe(f"{run_dir}/system.pdb", f"{eq}/equilibration_{sysname}_aligned.dcd", in_memory=True)
-    free_start = free_window_start(f"{eq}/equilibration_{sysname}.csv", f"{eq}/equilibration_protocol.json",
-                                   component="ligand", n_frames=len(u.trajectory))
-    rows = []
-    for window, start in (("whole", None), ("free", free_start)):
-        per_atom = ligand_rmsf_contacts(u, ligand, start=start)
-        per_atom.to_csv(f"{outdir}/{sysname}_RMSF_{window}.csv", index=False)
-        rows.append({"system": sysname, "window": window, "n_frames": len(u.trajectory) - (start or 0),
-                     **cw_rmsf_scores(per_atom, on_undefined="nan")})
-    return rows
+    table, per_atom = cw_rmsf_windows(u, ligand, f"{eq}/equilibration_{sysname}.csv",
+                                      f"{eq}/equilibration_protocol.json")
+    for window, pa in per_atom.items():
+        pa.to_csv(f"{outdir}/{sysname}_RMSF_{window}.csv", index=False)
+    return table.reset_index().assign(system=sysname)
 
 
 def main():
@@ -64,7 +59,7 @@ def main():
     else:
         results = [score_system(j) for j in jobs]
 
-    summary = pd.DataFrame([r for rows in results for r in rows])
+    summary = pd.concat(results, ignore_index=True)
     summary.to_csv(f"{args.outdir}/cwrmsf_summary.csv", index=False)
     print(summary.round(3).to_string(index=False))
 

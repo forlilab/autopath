@@ -1405,6 +1405,37 @@ def cw_rmsf_scores(per_atom: pd.DataFrame, atom_sets=tuple(CW_RMSF_ATOM_SETS), o
             out[f'cw_rmsf_{name}'] = float('nan')
     return out
 
+def cw_rmsf_windows(u, ligand_selection: str, state_csv: str, protocol, component: str = 'ligand'):
+    """cw-RMSF over the whole run and over the free window of an equilibration.
+
+    Parameters
+    ----------
+    u : mda.Universe
+        Universe with the aligned equilibration trajectory.
+    ligand_selection : str
+        MDAnalysis selection string for the ligand.
+    state_csv, protocol, component
+        Passed to :func:`autopath.equilibration.free_window_start`.
+
+    Returns
+    -------
+    table : pd.DataFrame
+        Indexed by window (``'whole'``, ``'free'``) with ``first_frame`` and
+        ``cw_rmsf_<set>`` columns (NaN for a set with no pocket contact). The
+        ``'free'`` row is absent when the protocol has no free window.
+    per_atom : dict of pd.DataFrame
+        :func:`ligand_rmsf_contacts` output per window.
+    """
+    from autopath.equilibration import free_window_start  # openmm import, only needed here
+    windows = {'whole': 0}
+    free = free_window_start(state_csv, protocol, component=component, n_frames=len(u.trajectory))
+    if free is not None:
+        windows['free'] = free
+    per_atom = {w: ligand_rmsf_contacts(u, ligand_selection, start=s) for w, s in windows.items()}
+    table = pd.DataFrame([{'window': w, 'first_frame': s, **cw_rmsf_scores(per_atom[w], on_undefined='nan')}
+                          for w, s in windows.items()]).set_index('window')
+    return table, per_atom
+
 def plot_atomic_property(u, weights: np.ndarray, lig_resname: str = 'resname UNK',
                          outname: str = 'property.png', ref_mol=None,
                          color=None, colormap=None) -> None:

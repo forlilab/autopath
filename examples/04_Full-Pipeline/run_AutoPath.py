@@ -5,8 +5,7 @@ import pandas as pd
 import MDAnalysis as mda
 
 from autopath.autopath_core import AutoPath
-from autopath.ap_PLIP import ligand_rmsf_contacts, cw_rmsf_scores
-from autopath.equilibration import free_window_start
+from autopath.ap_PLIP import cw_rmsf_windows
 from autopath.utils import setup_logging
 
 
@@ -26,20 +25,6 @@ def cmd_lineparser():
                         help="skip pulling if the free-window polar cw-RMSF (A) exceeds this value "
                              "(default: no filter, the score is only reported)")
     return parser.parse_args()
-
-
-def stability_report(sys_name, protocol, ligand_selection="resname UNK"):
-    """cw-RMSF of the equilibration, whole run and free window -> DataFrame."""
-    eq = f"{sys_name}/equilibration"
-    u = mda.Universe(f"{sys_name}/system.pdb", f"{eq}/equilibration_{sys_name}_aligned.dcd", in_memory=True)
-    free_start = free_window_start(f"{eq}/equilibration_{sys_name}.csv", protocol,
-                                   component="ligand", n_frames=len(u.trajectory))
-    rows = []
-    for window, start in (("whole", None), ("free", free_start)):
-        per_atom = ligand_rmsf_contacts(u, ligand_selection, start=start)
-        rows.append({"window": window, "first_frame": start or 0,
-                     **cw_rmsf_scores(per_atom, on_undefined="nan")})
-    return pd.DataFrame(rows).set_index("window")
 
 
 def main():
@@ -101,14 +86,20 @@ def main():
              run_sMDpulling=False, sMD_run_analysis=False, **settings).run(ligand_file=ligand)
 
     # Early filter: contact-weighted RMSF of the ligand over the equilibration
-    cw = stability_report(sys_name, protocol)
-    cw.to_csv(f"{sys_name}/equilibration/{sys_name}_cwRMSF.csv")
+    eq = f"{sys_name}/equilibration"
+    u = mda.Universe(f"{sys_name}/system.pdb", f"{eq}/equilibration_{sys_name}_aligned.dcd", in_memory=True)
+    cw, _ = cw_rmsf_windows(u, "resname UNK", f"{eq}/equilibration_{sys_name}.csv", protocol)
+    cw.to_csv(f"{eq}/{sys_name}_cwRMSF.csv")
     logger.info("cw-RMSF (A):\n" + cw.round(3).to_string())
-    polar_free = cw.loc["free", "cw_rmsf_polar"]
-    if args.max_polar_cwrmsf is not None and not polar_free <= args.max_polar_cwrmsf:
-        logger.warning(f"Polar cw-RMSF {polar_free:.2f} A > {args.max_polar_cwrmsf} A: pose unstable, "
-                       "skipping steered MD.")
-        return
+    if args.max_polar_cwrmsf is not None:
+        window = "free" if "free" in cw.index else "whole"
+        polar = cw.loc[window, "cw_rmsf_polar"]
+        if pd.isna(polar):
+            logger.warning("Polar cw-RMSF undefined (no polar ligand atom contacts the pocket): filter not applied.")
+        elif polar > args.max_polar_cwrmsf:
+            logger.warning(f"Polar cw-RMSF ({window}) {polar:.2f} A > {args.max_polar_cwrmsf} A: pose unstable, "
+                           "skipping steered MD.")
+            return
 
     # Phase 2: steered MD, pathway clustering and free-energy / friction / koff analysis
     AutoPath(pdb_path=receptor, do_fix_pdb=False,

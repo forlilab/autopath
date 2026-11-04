@@ -103,12 +103,24 @@ def test_free_window_starts_after_the_last_ligand_restraint(tmp_path):
         free_window_start(csv, proto, n_frames=7)
 
 
-def test_free_window_needs_an_unrestrained_tail(tmp_path):
+def test_no_free_window_is_none(tmp_path):
     csv = _state_csv(tmp_path, [1.0, 2.0])
-    with pytest.raises(ValueError, match='restrained until the end'):
-        free_window_start(csv, _protocol(tmp_path, [0.0, 1.0]))
-    with pytest.raises(ValueError, match='not in the protocol'):
-        free_window_start(csv, _protocol(tmp_path, [0.0]), component='membrane')
+    assert free_window_start(csv, _protocol(tmp_path, [0.0, 1.0])) is None, 'restrained until the end'
+    assert free_window_start(csv, _protocol(tmp_path, [0.0]), component='membrane') is None
+
+
+def test_cw_rmsf_windows_whole_and_free(tmp_path):
+    from autopath.ap_PLIP import cw_rmsf_windows, ligand_rmsf_contacts
+    u = _universe(_frames())
+    csv = _state_csv(tmp_path, np.arange(1, 7) * 1.0)
+    table, per_atom = cw_rmsf_windows(u, 'resname UNK', csv, _protocol(tmp_path, [1.0, 0.0, 0.0]))
+    assert list(table.index) == ['whole', 'free'] and table.loc['free', 'first_frame'] == 4
+    free = ligand_rmsf_contacts(u, 'resname UNK', start=4)
+    pd.testing.assert_frame_equal(per_atom['free'], free)
+    assert table.loc['free', 'cw_rmsf_polar'] == pytest.approx(cw_rmsf(free, 'polar'))
+    # protocol that never releases the ligand: whole run only, no error
+    table, per_atom = cw_rmsf_windows(u, 'resname UNK', csv, _protocol(tmp_path, [0.0, 1.0]))
+    assert list(table.index) == ['whole'] and list(per_atom) == ['whole']
 
 
 def test_cw_rmsf_scores_reports_undefined_sets_only_when_asked():

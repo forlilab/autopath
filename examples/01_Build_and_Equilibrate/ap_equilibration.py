@@ -1,14 +1,12 @@
 import os
 import argparse
 
-import pandas as pd
 import MDAnalysis as mda
 from rdkit import Chem
 from openmm.app import PDBFile
 
 from autopath import SystemPreparation, Equilibration
-from autopath.ap_PLIP import plot_atomic_property, ligand_rmsf_contacts, cw_rmsf_scores
-from autopath.equilibration import free_window_start
+from autopath.ap_PLIP import plot_atomic_property, cw_rmsf_windows
 from autopath.utils import save_pdb, load_system, setup_logging, compute_rmsd, wrap_align_save_traj
 from autopath.pdb_preprocessor import PDBPreprocessor
 
@@ -141,24 +139,17 @@ def main():
     # Ligand stability: per-atom RMSF, contact frequency and contact-weighted RMSF (cw-RMSF).
     # Whole run, and the "free window" (frames after the last ligand restraint is released).
     lig_sel = f"resname {lig_resname}"
-    free_start = free_window_start(f"{eq_dir}/equilibration_{sys_name}.csv", equilibration_scheme,
-                                   component="ligand", n_frames=len(u_eq.trajectory))
+    # polar (N, O, S), non-polar (C, halogens) and all heavy atoms; NaN if a set never contacts the pocket
+    cw, per_atom = cw_rmsf_windows(u_eq, lig_sel, f"{eq_dir}/equilibration_{sys_name}.csv", equilibration_scheme)
+    cw.to_csv(f"{eq_dir}/{sys_name}_cwRMSF.csv")
+    logger.info("cw-RMSF (A):\n" + cw.round(3).to_string())
+    for window, pa in per_atom.items():
+        pa.to_csv(f"{eq_dir}/{sys_name}_RMSF_{window}.csv", index=False)
     ref_mol = Chem.SDMolSupplier(args.lig)[0] if args.lig.endswith(".sdf") else None
-    rows = []
-    for window, start in (("whole", None), ("free", free_start)):
-        per_atom = ligand_rmsf_contacts(u_eq, lig_sel, start=start)
-        per_atom.to_csv(f"{eq_dir}/{sys_name}_RMSF_{window}.csv", index=False)
-        # polar (N, O, S), non-polar (C, halogens) and all heavy atoms; NaN if a set never contacts the pocket
-        rows.append({"window": window, "first_frame": start or 0,
-                     **cw_rmsf_scores(per_atom, on_undefined="nan")})
-        if window == "whole":
-            plot_atomic_property(u_eq, per_atom.rmsf.values, lig_resname=lig_sel, ref_mol=ref_mol,
-                                 outname=f"{eq_dir}/{sys_name}_RMSF.svg")
-            plot_atomic_property(u_eq, per_atom.contact_freq.values, lig_resname=lig_sel, ref_mol=ref_mol,
-                                 outname=f"{eq_dir}/{sys_name}_contact_freq.svg", color='r')
-    cw = pd.DataFrame(rows)
-    cw.to_csv(f"{eq_dir}/{sys_name}_cwRMSF.csv", index=False)
-    logger.info("cw-RMSF (A):\n" + cw.round(3).to_string(index=False))
+    plot_atomic_property(u_eq, per_atom["whole"].rmsf.values, lig_resname=lig_sel, ref_mol=ref_mol,
+                         outname=f"{eq_dir}/{sys_name}_RMSF.svg")
+    plot_atomic_property(u_eq, per_atom["whole"].contact_freq.values, lig_resname=lig_sel, ref_mol=ref_mol,
+                         outname=f"{eq_dir}/{sys_name}_contact_freq.svg", color='r')
     return
 
 

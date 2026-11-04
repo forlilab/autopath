@@ -340,7 +340,7 @@ def run_restrained_md(
     return None
 
 
-def free_window_start(state_csv: str, protocol, component: str = "ligand", n_frames: int = None) -> int:
+def free_window_start(state_csv: str, protocol, component: str = "ligand", n_frames: int = None):
     """First frame of the trailing window in which ``component`` is unrestrained.
 
     The window length is the summed duration of the last equilibration stages
@@ -361,14 +361,15 @@ def free_window_start(state_csv: str, protocol, component: str = "ligand", n_fra
 
     Returns
     -------
-    int
-        Index of the first frame of the unrestrained window.
+    int or None
+        Index of the first frame of the unrestrained window; None (with a
+        warning) if ``component`` is not in the protocol or is restrained in
+        the last stage.
 
     Raises
     ------
     ValueError
-        If ``component`` is not in the protocol, is restrained in the last
-        stage, or the CSV does not match ``n_frames``.
+        If the CSV does not match ``n_frames``.
     """
     import pandas as pd
     if isinstance(protocol, str):
@@ -376,7 +377,8 @@ def free_window_start(state_csv: str, protocol, component: str = "ligand", n_fra
             protocol = json.load(f)
     components = list(protocol["components_lookup"])
     if component not in components:
-        raise ValueError(f"Component {component!r} is not in the protocol ({components}).")
+        logger.warning(f"Component {component!r} is not in the protocol ({components}): no free window.")
+        return None
     k = components.index(component)
     tail_ps = 0.0
     for stage in reversed(protocol["equilibration"]):
@@ -384,7 +386,8 @@ def free_window_start(state_csv: str, protocol, component: str = "ligand", n_fra
             break
         tail_ps += stage["nsteps"] * stage["stepsize"]
     if tail_ps == 0:
-        raise ValueError(f"Component {component!r} is restrained until the end: no unrestrained window.")
+        logger.warning(f"Component {component!r} is restrained until the end: no free window.")
+        return None
     t = pd.read_csv(state_csv)["Time (ps)"].to_numpy()
     if n_frames is not None and len(t) != n_frames:
         raise ValueError(f"{state_csv} has {len(t)} rows but the trajectory has {n_frames} frames.")
