@@ -536,6 +536,8 @@ class SMDAnalysis:
                 path_mappings,
                 max(self.support_policy.min_samples_per_step,
                     self.min_replicas_per_path),
+                speeds=sMDDdata.raw_data.drop_duplicates('trajname')
+                .set_index('trajname')['speed'].to_dict(),
             )
             if merges:
                 os.makedirs(self.outdir, exist_ok=True)

@@ -83,3 +83,22 @@ def test_eq21_after_merge_equals_pooled_jarzynski(tmp_path):
         pooled = JarzynskiEstimator.estimate_dG(
             raw.loc[raw["step"] == s, "work"].to_numpy(), BETA)
         assert out.loc[s, "dG"] == pytest.approx(pooled["dG"], abs=1e-9)
+
+
+def test_cross_speed_merge_counts_per_speed(tmp_path):
+    # Both paths have >=5 pulls in total but <5 per speed; the per-speed support
+    # trim would delete everything, so they must collapse into one path.
+    speeds = [0.001, 0.005, 0.01, 0.015]
+    feat = pd.concat([
+        _features({0.0: 4, 5.0: 2}, speed=v, seed=i).assign(
+            trajname=lambda d, i=i: f"s{i}_" + d["trajname"])
+        for i, v in enumerate(speeds)], ignore_index=True)
+    m = DTWPathModel(do_plots=False, outdir=str(tmp_path), n_geom_pcs=None)
+    maps = m.fit_transform(feat, n_paths=2, cluster_across_speeds=True,
+                           persist_medoids=False)
+    assert pd.Series(maps).value_counts().min() == 8
+    sp = feat.drop_duplicates("trajname").set_index("trajname")["speed"].to_dict()
+    new, merges = m.merge_small_paths(maps, 5, speeds=sp)
+    assert len(new) == len(maps)
+    assert pd.Series(new).nunique() == 1
+    assert sorted(r["speed"] for r in merges) == sorted(speeds)

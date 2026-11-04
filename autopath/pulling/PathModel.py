@@ -516,19 +516,24 @@ class DTWPathModel(PathModel):
 
         return all_path_mappings
     
-    def merge_small_paths(self, path_mappings: dict, min_pulls: int):
-        """Merge paths with fewer than ``min_pulls`` pulls into surviving paths.
+    def merge_small_paths(self, path_mappings: dict, min_pulls: int,
+                          speeds: dict = None):
+        """Merge small (speed, path) groups into surviving paths.
 
-        Each pull of a small path moves to the surviving path whose medoid is
-        nearest in DTW distance. If no path survives in a clustering group, all
-        its pulls go to the largest path.
+        A group with fewer than ``min_pulls`` pulls at a speed moves, pull by
+        pull, to the path with at least ``min_pulls`` pulls at that speed whose
+        medoid is nearest in DTW distance. If none qualifies, all pulls at that
+        speed go to the largest path.
 
         Parameters
         ----------
         path_mappings : dict
             trajname -> path label, as returned by :meth:`fit_transform`.
         min_pulls : int
-            Minimum pulls for a path to survive.
+            Minimum pulls per speed for a path to survive.
+        speeds : dict, optional
+            trajname -> speed. Needed when paths were clustered across speeds;
+            without it each clustering group counts as one speed.
 
         Returns
         -------
@@ -541,33 +546,40 @@ class DTWPathModel(PathModel):
         merges = []
         for key, g in getattr(self, "dtw_groups_", {}).items():
             names, dist, labels = g["trajnames"], g["dist"], g["labels"]
-            counts = pd.Series(labels).value_counts()
-            small = set(counts.index[counts < min_pulls])
-            if not small:
-                continue
-            surv = {labels[m]: m for m in g["medoids"] if labels[m] not in small}
-            if not surv:
-                big = counts.idxmax()
-                surv = {big: None}
-                small.discard(big)
-            moved = {}
-            for i, (name, lab) in enumerate(zip(names, labels)):
-                if lab not in small:
+            med = {labels[m]: m for m in g["medoids"]}
+            sp = [speeds.get(n) if speeds else None for n in names]
+            for s in dict.fromkeys(sp):
+                idx = [i for i, v in enumerate(sp) if v == s]
+                counts = pd.Series([labels[i] for i in idx]).value_counts()
+                small = set(counts.index[counts < min_pulls])
+                if not small:
                     continue
+                surv = {p: m for p, m in med.items()
+                        if counts.get(p, 0) >= min_pulls}
+                if not surv:
+                    big = counts.idxmax()
+                    small.discard(big)
+                    surv = {big: None}
                 cand = {p: m for p, m in surv.items() if m is not None}
-                dest = (min(cand, key=lambda p: dist[i, cand[p]])
-                        if cand else next(iter(surv)))
-                out[name] = dest
-                moved.setdefault(lab, {}).setdefault(dest, 0)
-                moved[lab][dest] += 1
-            for lab, dests in moved.items():
-                for dest, n in dests.items():
-                    merges.append({"speed": key, "from_path": lab,
-                                   "to_path": dest, "n_pulls": n})
-                    logger.warning(
-                        f"Merged small path {lab} (speed={key}, {n} pulls < "
-                        f"{min_pulls}) into {dest}."
-                    )
+                moved = {}
+                for i in idx:
+                    lab = labels[i]
+                    if lab not in small:
+                        continue
+                    dest = (min(cand, key=lambda p: dist[i, cand[p]])
+                            if cand else next(iter(surv)))
+                    out[names[i]] = dest
+                    moved.setdefault(lab, {}).setdefault(dest, 0)
+                    moved[lab][dest] += 1
+                tag = key if s is None else s
+                for lab, dests in moved.items():
+                    for dest, n in dests.items():
+                        merges.append({"speed": tag, "from_path": lab,
+                                       "to_path": dest, "n_pulls": n})
+                        logger.warning(
+                            f"Merged small path {lab} (speed={tag}, {n} pulls < "
+                            f"{min_pulls}) into {dest}."
+                        )
         return out, merges
 
     def plot_distance_matrix(self, distmatrix: np.ndarray = None):
