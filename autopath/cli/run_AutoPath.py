@@ -150,25 +150,6 @@ def main():
             sMD_conv_streak=config.sMD_conv_streak,
             sMD_autostop_estimator=config.sMD_autostop_estimator,
             sMD_alternate_speeds=config.sMD_alternate_speeds,
-            # Milestones
-            extract_milestones=config.extract_milestones,
-            milestone_mode=config.milestone_mode,
-            milestone_min_frame_separation=config.milestone_min_frame_separation,
-            n_milestones=config.n_milestones,
-            relax_steps=config.relax_steps,
-            # Metadynamics
-            run_metadynamics=config.run_metadynamics,
-            mMD_use_funnel_potential=config.mMD_use_funnel_potential,
-            mMD_bias_factor=config.mMD_bias_factor,
-            mMD_bias_frequency=config.mMD_bias_frequency,
-            mMD_hill_height=config.mMD_hill_height,
-            mMD_hill_width=config.mMD_hill_width,
-            mMD_time=config.mMD_time,
-            mMD_milestone_seeding=config.mMD_milestone_seeding,
-            mMD_multiple_walkers=config.mMD_multiple_walkers,
-            mMD_preseed_bias=config.mMD_preseed_bias,
-            mMD_preseed_speed=config.mMD_preseed_speed,
-            mMD_funnel_host_selection=config.mMD_funnel_host_selection,
         )
 
         for lig in ligands:

@@ -11,7 +11,7 @@
 
 AutoPath is a modular and extensible framework designed, primarily, for running and analyzing protein-ligand unbinding simulations. AutoPath aims to bridge the gap between **high-throughput docking** and **high-cost physics-based refinement**. It is built for fast, reproducible triage of compounds after virtual screening, helping distinguish the **good, the bad, and the ugly** before expensive downstream simulations.
 
-It integrates system assembly and parameterization, equilibration, and enhanced sampling in a single interface, enabling efficient exploration of ligand dissociation pathways.
+It integrates system assembly and parameterization, equilibration, and steered MD in a single interface, enabling efficient exploration of ligand dissociation pathways.
 
 Predicting ligand binding is a dual problem: **thermodynamics** (how strongly a ligand binds) and **kinetics** (how long it stays bound). Docking scales well but is often noisy; rigorous free-energy workflows can be accurate but computationally expensive.
 AutoPath is designed for the practical middle ground:
@@ -24,13 +24,11 @@ AutoPath is designed for the practical middle ground:
 
 ## ⚙️ Core Features
 
-- **End-to-end pipeline**: fully automated 6-stage workflow from raw PDB to ΔG°_b, driven by a single JSON config file — no manual handoffs between stages.
+- **End-to-end pipeline**: fully automated 4-stage workflow from raw PDB to free-energy profiles and k_off, driven by a single JSON config file — no manual handoffs between stages.
 - **Force field flexibility**: protein parametrized with AMBER14 by default; ligand force field selectable per run from OpenFF, Espaloma, or GAFF (e.g. `"openff-2.3.0"`, `"espaloma-0.3.2"`, `"gaff-2.11"`) to match your accuracy vs. speed trade-off.
 - **Membrane support**: solvation in explicit water or embedding in a lipid bilayer (POPC, POPE, DLPC, DLPE, DMPC, DOPC, DPPC, or a custom lipid patch PDB) for membrane-associated targets, with a dedicated membrane equilibration protocol.
 - **Steered MD with path analysis**: multi-speed, multi-replica COM-distance pulling with an automatic per-speed convergence ladder; DTW-based clustering separates distinct unbinding pathways (or disable clustering entirely for a single path); Jarzynski, cumulant, and force/raw-work estimators give thermodynamic profiles from nonequilibrium trajectories.
 - **Kinetics from nonequilibrium work**: friction profile Γ(r) built from dissipated (or raw) work along the pulling coordinate; k_off estimated via Kramers/Pontryagin mean-first-passage-time theory.
-- **Well-tempered funnel metadynamics**: multi-walker metadynamics (Limongelli 2013) seeded from sMD pathway milestones; optional funnel restraint derived from trajectory PCA confines sampling to the relevant unbinding channel; automatic stuck-walker detection and retry keep runs productive.
-- **Standard-state correction**: Limongelli funnel volume correction converts the raw free energy profile to ΔG°_b and pK_d directly comparable to experimental binding affinities.
 - **Modular and scriptable**: each stage can be run independently via the CLI or imported as a Python library, so you can drop AutoPath classes into your own workflows.
 
 ---
@@ -53,15 +51,7 @@ Applies a COM-distance pulling force along a user-defined direction at one or mo
 
 ### 4. SMD Analysis (`SMDAnalysis`)
 
-Runs the full dcTMD post-processing pipeline on the `.dat` work logs. Trajectories are clustered with DTW + k-medoids to identify distinct unbinding pathways; Jarzynski and cumulant estimators compute ΔG and dissipated work W_diss for each path. A friction profile Γ(r) is derived from the dissipated work, and k_off is estimated via Kramers/Pontryagin MFPT theory. Medoid trajectory PDBs are saved as milestone structures that seed the subsequent metadynamics stage.
-
-### 5. Metadynamics (`MetadynamicsMD`)
-
-Each milestone PDB seeds one walker in a well-tempered metadynamics run. An optional funnel restraint — derived from PCA of the sMD trajectories — focuses sampling along the identified unbinding pathway and reduces convergence time. Walkers can share a single bias or accumulate independent hill files. Output arrays (`COLVAR_*.npy`) and OpenMM hill files are saved for downstream analysis.
-
-### 6. Analysis & Funnel Correction (`MetadynamicsAnalysis`)
-
-Reconstructs the free energy surface (FES) from the accumulated metadynamics bias and applies the Limongelli 2013 standard-state correction for the funnel geometry. The stage reports ΔG°_b and pK_d directly and generates a suite of diagnostic plots — CV traces, bias evolution, and the final FES — to support convergence assessment.
+Runs the full dcTMD post-processing pipeline on the `.dat` work logs. Trajectories are clustered with DTW + k-medoids to identify distinct unbinding pathways; Jarzynski and cumulant estimators compute ΔG and dissipated work W_diss for each path. A friction profile Γ(r) is derived from the dissipated work, and k_off is estimated via Kramers/Pontryagin MFPT theory. Medoid trajectories are saved as representative structures for each path.
 
 ---
 
@@ -148,16 +138,6 @@ Below is a minimal `config.json` skeleton with the most commonly adjusted parame
     "sMD_pulling_speeds": {"0.005": 5, "0.0025": 5, "0.001": 5},
     "sMD_max_pulling_dist": 3.5,
     "sMD_time": null
-  },
-  "milestones": {
-    "n_milestones": 5,
-    "milestone_mode": "all_medoids"
-  },
-  "metadynamics": {
-    "mMD_bias_factor": 15,
-    "mMD_hill_height": 1.2,
-    "mMD_time": 5,
-    "mMD_use_funnel_potential": false
   }
 }
 ```
@@ -214,30 +194,7 @@ AutoPath configuration files use a nested JSON structure: each top-level key is 
 | `sMD_autostop_nc` | float | `0.01` | Stop a replica once native contacts drop below this fraction of their initial value; `null` disables the check |
 | `sMD_autostop_estimator` | str | `"cumulant"` | Free-energy estimator used to judge convergence: `"cumulant"`, `"jarzynski"`, or `"force"` |
 
-**`milestones`**
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `extract_milestones` | bool | `true` | Extract representative frames from sMD trajectories as metadynamics starting points |
-| `n_milestones` | int | `5` | Number of milestones to extract per path |
-| `milestone_mode` | str | `"all_medoids"` | Extraction strategy: `"all_medoids"` (pool all path medoids) or `"per_path"` |
-| `relax_steps` | int | `25000` | MD steps for milestone relaxation before metadynamics launch |
-
-**`metadynamics`**
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `mMD_bias_factor` | int | `15` | Well-tempered bias factor (gamma); higher values flatten barriers more aggressively |
-| `mMD_hill_height` | float | `1.2` | Initial Gaussian hill height in kJ/mol (~0.5 kBT at 300 K) |
-| `mMD_time` | int | `5` | Metadynamics simulation time per walker in ns |
-| `mMD_use_funnel_potential` | bool | `false` | Add a funnel restraint along the sMD-derived exit path to suppress unproductive sampling |
-| `mMD_hill_width` | float | `0.05` | Gaussian hill width (sigma) along the path collective variable |
-| `mMD_bias_frequency` | int | `2` | Interval (ps) at which Gaussian hills are deposited |
-| `mMD_milestone_seeding` | bool | `true` | Start each walker from its own milestone's relaxed checkpoint, instead of all walkers sharing the first milestone |
-| `mMD_multiple_walkers` | bool | `false` | Share one bias directory across all walkers (true multi-walker metadynamics) instead of independent per-walker bias |
-| `mMD_preseed_bias` | bool | `false` | Pre-seed the metadynamics bias from the sMD PMF before launching walkers |
-
-All parameters, including equilibration and milestone extraction options, are documented in `autopath/config.py`.
+All parameters, including equilibration options, are documented in `autopath/config.py`.
 
 ---
 
@@ -249,15 +206,12 @@ All major pipeline components are importable as a Python library for custom work
 
 | Class | Import | Role |
 |-------|--------|------|
-| `AutoPath` | `from autopath import AutoPath` | Main orchestrator; runs the full 6-stage pipeline end-to-end (also `from autopath.autopath_core import AutoPath`) |
+| `AutoPath` | `from autopath import AutoPath` | Main orchestrator; runs the full pipeline end-to-end (also `from autopath.autopath_core import AutoPath`) |
 | `Config` | `from autopath import Config` | Configuration container; reads a JSON file or accepts keyword args |
 | `SystemPreparation` | `from autopath import SystemPreparation` | Parametrizes the ligand and solvates (or embeds in membrane) the system |
 | `Equilibration` | `from autopath import Equilibration` | JSON-driven multi-stage NPT/NVT equilibration with progressive restraint release |
 | `SteeredMD` | `from autopath.pulling import SteeredMD` | OpenMM COM-distance pulling at configurable speeds and replica counts |
 | `SMDAnalysis` | `from autopath.pulling import SMDAnalysis` | Full dcTMD analysis: path clustering, PMF, friction profile, k_off via Kramers MFPT |
-| `MetadynamicsMD` | `from autopath.metadynamics import MetadynamicsMD` | Well-tempered funnel metadynamics driver; supports multi-walker runs |
-| `MetadynamicsAnalysis` | `from autopath.metadynamics import MetadynamicsAnalysis` | Reconstructs FES, applies funnel standard-state correction, generates plots |
-| `CVSpec` | `from autopath.metadynamics import CVSpec` | Deferred collective-variable specification; materializes inside the simulation loop |
 
 ### Minimal Example
 
@@ -276,7 +230,7 @@ ap.run(ligand_file="compound_001.sdf")
 
 **`AutoPath`**
 
-The top-level orchestrator that drives the complete AutoPath pipeline. It accepts all parameters from `Config` directly and executes each stage in sequence — preparation, equilibration, sMD, nonequilibrium analysis, metadynamics, and FES reconstruction — skipping any stage whose `run_*` flag is `False` and loading previous outputs in its place. The `run()` method takes a ligand SDF file and collects all results under a subdirectory named after the ligand stem.
+The top-level orchestrator that drives the complete AutoPath pipeline. It accepts all parameters from `Config` directly and executes each stage in sequence — preparation, equilibration, sMD, and nonequilibrium analysis — skipping any stage whose `run_*` flag is `False` and loading previous outputs in its place. The `run()` method takes a ligand SDF file and collects all results under a subdirectory named after the ligand stem.
 
 **`Config`**
 
@@ -296,19 +250,7 @@ Runs a single COM-distance pulling replica in OpenMM, applying a moving harmonic
 
 **`SMDAnalysis`**
 
-Orchestrates the full dcTMD post-processing pipeline for a set of sMD replicas. It loads and filters `.dat` work-profile files via `SMDData`, clusters the trajectories into distinct unbinding paths using DTW + k-medoids (`DTWPathModel`), and estimates ΔG and dissipated work via Jarzynski and second-cumulant estimators. A friction profile Γ(r) is built from the spatially resolved work dissipation, and the unbinding rate k_off is estimated via the Kramers/Pontryagin mean first-passage time formula. Medoid trajectories from each identified path are saved as milestone PDB files for optional metadynamics seeding.
-
-**`MetadynamicsMD`**
-
-Runs a well-tempered metadynamics simulation for a single walker or milestone starting point. It supports both 1D (path RMSD) and 2D collective variables and can optionally apply a funnel restraint derived from a principal-component analysis of sMD trajectories. Walkers may share a common bias hills file for true multi-walker metadynamics or maintain independent bias for parallel exploratory runs. Output includes `COLVAR_*.npy` arrays and OpenMM hill files for subsequent analysis.
-
-**`MetadynamicsAnalysis`**
-
-Reconstructs the free energy surface from accumulated metadynamics bias using the well-tempered estimator. It applies the Limongelli 2013 standard-state correction for the funnel geometry, converting the restraint-relative FES into an absolute binding free energy ΔG°_b and the corresponding predicted pK_d. Diagnostic plots covering CV traces, bias deposition history, and FES convergence are generated automatically.
-
-**`CVSpec`**
-
-A lightweight specification object that stores the parameters needed to define a collective variable without constructing it immediately. The actual CV object is built lazily inside the simulation loop, after the OpenMM `System` object is available, which sidesteps context initialization ordering issues that arise when CVs are constructed before the system is fully assembled.
+Orchestrates the full dcTMD post-processing pipeline for a set of sMD replicas. It loads and filters `.dat` work-profile files via `SMDData`, clusters the trajectories into distinct unbinding paths using DTW + k-medoids (`DTWPathModel`), and estimates ΔG and dissipated work via Jarzynski and second-cumulant estimators. A friction profile Γ(r) is built from the spatially resolved work dissipation, and the unbinding rate k_off is estimated via the Kramers/Pontryagin mean first-passage time formula.
 
 ---
 
@@ -327,8 +269,6 @@ All examples use the trypsin–benzamidine complex (`3ptb`) as a reference syste
 - **`examples/05_VanillaMD`** — Conventional (unbiased) production MD using AutoPath's `VanillaMD` class. Useful as a baseline or for generating reference trajectories.
 
 - **`examples/06_Docking_PrEP`** — Prepares receptor and ligand structures for docking. Can auto-fetch PDB entries, run PDB fixing, apply restrained minimization, and save docking-ready files. Supports cofactors, structural waters, and multi-chain systems.
-
-- **`examples/07_WTmetaD_COM`** — Well-tempered metadynamics simulation using a center-of-mass (COM) collective variable via CVPack and OpenMM. Intended for pathway-aware sampling after sMD milestone identification.
 
 ---
 
