@@ -1234,12 +1234,13 @@ def _replace_line(lines: list,
             break
     return lines
 
-def calculate_contact_frequency(u, ligand_selection: str, pocket_cutoff: float = 5.0, contact_cutoff: float = 3.5) -> np.ndarray:
+def calculate_contact_frequency(u, ligand_selection: str, pocket_cutoff: float = 5.0, contact_cutoff: float = 3.5,
+                                start: int = None, stop: int = None, step: int = None) -> np.ndarray:
     """Return per-atom contact frequency for ligand heavy atoms.
 
     A ligand atom is counted as "in contact" in a frame if any pocket atom
     lies within ``contact_cutoff`` Å of it.  Pocket atoms are protein heavy
-    atoms within ``pocket_cutoff`` Å of the ligand in the first frame.
+    atoms within ``pocket_cutoff`` Å of the ligand in the first analysed frame.
 
     Parameters
     ----------
@@ -1248,26 +1249,32 @@ def calculate_contact_frequency(u, ligand_selection: str, pocket_cutoff: float =
     ligand_selection : str
         MDAnalysis selection string for the ligand.
     pocket_cutoff : float
-        Distance (Å) used to define the pocket in the first frame.
+        Distance (Å) used to define the pocket in the first analysed frame.
     contact_cutoff : float
         Distance threshold (Å) for declaring a contact in each frame.
+    start, stop, step : int, optional
+        Frame slice to analyse (default: whole trajectory).
 
     Returns
     -------
     np.ndarray
-        Fraction of trajectory frames in which each ligand heavy atom is in
+        Fraction of analysed frames in which each ligand heavy atom is in
         contact with any pocket atom. Shape ``(n_ligand_heavy_atoms,)``.
     """
+    frames = range(*slice(start, stop, step).indices(len(u.trajectory)))
+    if len(frames) == 0:
+        raise ValueError(f"Empty frame window start={start}, stop={stop}, step={step}.")
     lig_ha = u.select_atoms(f'({ligand_selection}) and not name H*')
-    u.trajectory[0]
+    u.trajectory[frames[0]]
     pocket = u.select_atoms(f'protein and not name H* and around {pocket_cutoff} ({ligand_selection})')
     contact_counts = np.zeros(len(lig_ha))
-    for ts in u.trajectory:
+    for _ in u.trajectory[frames.start:frames.stop:frames.step]:
         dmat = distance_array(lig_ha.positions, pocket.positions)
         contact_counts += (dmat < contact_cutoff).any(axis=1)
-    return contact_counts / len(u.trajectory)
+    return contact_counts / len(frames)
 
-def calculate_ligand_rmsf(u, ligand_selection: str = 'resname UNK') -> np.ndarray:
+def calculate_ligand_rmsf(u, ligand_selection: str = 'resname UNK',
+                          start: int = None, stop: int = None, step: int = None) -> np.ndarray:
     """Return per-atom RMSF values for ligand heavy atoms.
 
     Parameters
@@ -1276,15 +1283,127 @@ def calculate_ligand_rmsf(u, ligand_selection: str = 'resname UNK') -> np.ndarra
         MDAnalysis Universe with topology and trajectory loaded.
     ligand_selection : str
         MDAnalysis selection string for the ligand.
+    start, stop, step : int, optional
+        Frame slice to analyse (default: whole trajectory).
 
     Returns
     -------
     np.ndarray
-        RMSF (Å) for each ligand heavy atom over the full trajectory.
-        Shape ``(n_ligand_heavy_atoms,)``.
+        RMSF (Å) for each ligand heavy atom. Shape ``(n_ligand_heavy_atoms,)``.
     """
     lig_ha = u.select_atoms(f'({ligand_selection}) and not name H*')
-    return RMSF(atomgroup=lig_ha).run().rmsf
+    return RMSF(atomgroup=lig_ha).run(start=start, stop=stop, step=step).results.rmsf
+
+# Element sets of the cw-RMSF score; None = every heavy atom.
+CW_RMSF_ATOM_SETS = {
+    'polar': ('N', 'O', 'S'),
+    'nonpolar': ('C', 'F', 'Cl', 'Br', 'I'),
+    'all': None,
+}
+
+def ligand_rmsf_contacts(u, ligand_selection: str = 'resname UNK', start: int = None, stop: int = None,
+                         step: int = None, pocket_cutoff: float = 5.0, contact_cutoff: float = 3.5) -> pd.DataFrame:
+    """Per-atom RMSF and pocket-contact frequency of the ligand heavy atoms.
+
+    The trajectory must already be centred and superposed on the protein
+    (e.g. the ``*_aligned.dcd`` written by :func:`autopath.utils.wrap_align_save_traj`).
+
+    Parameters
+    ----------
+    u : mda.Universe
+        Universe with the aligned trajectory.
+    ligand_selection : str
+        MDAnalysis selection string for the ligand.
+    start, stop, step : int, optional
+        Frame slice to analyse (default: whole trajectory). The pocket is
+        defined on the first frame of the slice.
+    pocket_cutoff : float
+        Protein heavy atoms within this distance (Å) of the ligand define the pocket.
+    contact_cutoff : float
+        Ligand–pocket heavy-atom distance (Å) counted as a contact.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per ligand heavy atom with columns ``atom_name``, ``element``,
+        ``rmsf`` (Å) and ``contact_freq`` (fraction of analysed frames).
+    """
+    lig_ha = u.select_atoms(f'({ligand_selection}) and not name H*')
+    if len(lig_ha) == 0:
+        raise ValueError(f"Selection {ligand_selection!r} has no heavy atoms.")
+    contact_freq = calculate_contact_frequency(u, ligand_selection, pocket_cutoff=pocket_cutoff,
+                                               contact_cutoff=contact_cutoff, start=start, stop=stop, step=step)
+    return pd.DataFrame({
+        'atom_name': list(lig_ha.names),
+        'element': [a.element for a in lig_ha],
+        'rmsf': calculate_ligand_rmsf(u, ligand_selection, start=start, stop=stop, step=step),
+        'contact_freq': contact_freq,
+    })
+
+def cw_rmsf(per_atom: pd.DataFrame, atom_set='polar') -> float:
+    """Contact-weighted RMSF, sum(c_i * RMSF_i) / sum(c_i), over one set of ligand atoms.
+
+    Parameters
+    ----------
+    per_atom : pd.DataFrame
+        Columns ``element``, ``rmsf`` and ``contact_freq``, as returned by
+        :func:`ligand_rmsf_contacts` (or read from ``<sys>_RMSF.csv``).
+    atom_set : str or list of str
+        A key of ``CW_RMSF_ATOM_SETS`` (``'polar'``, ``'nonpolar'``, ``'all'``)
+        or an explicit list of element symbols.
+
+    Returns
+    -------
+    float
+        cw-RMSF in Å.
+
+    Raises
+    ------
+    ValueError
+        If no atom of the set is ever in contact with the pocket (score undefined).
+    """
+    if isinstance(atom_set, str):
+        if atom_set not in CW_RMSF_ATOM_SETS:
+            raise ValueError(f"Unknown atom set {atom_set!r}; use one of {list(CW_RMSF_ATOM_SETS)} or a list of elements.")
+        name, elements = atom_set, CW_RMSF_ATOM_SETS[atom_set]
+    else:
+        name, elements = '/'.join(atom_set), tuple(atom_set)
+    el = per_atom['element'].astype(str).str.capitalize()
+    sel = per_atom[el != 'H'] if elements is None else per_atom[el.isin([e.capitalize() for e in elements])]
+    weight = sel['contact_freq'].to_numpy(dtype=float)
+    if weight.sum() <= 0:
+        raise ValueError(f"cw-RMSF undefined: no {name} ligand atom contacts the pocket.")
+    return float(np.average(sel['rmsf'].to_numpy(dtype=float), weights=weight))
+
+def cw_rmsf_scores(per_atom: pd.DataFrame, atom_sets=tuple(CW_RMSF_ATOM_SETS), on_undefined: str = 'raise') -> dict:
+    """cw-RMSF for several atom sets (see :func:`cw_rmsf`).
+
+    Parameters
+    ----------
+    per_atom : pd.DataFrame
+        Output of :func:`ligand_rmsf_contacts`.
+    atom_sets : iterable of str
+        Keys of ``CW_RMSF_ATOM_SETS``.
+    on_undefined : {'raise', 'nan'}
+        For a set with no pocket contact: raise ``ValueError`` or report NaN (logged).
+
+    Returns
+    -------
+    dict
+        ``{'cw_rmsf_<set>': value}``.
+    """
+    if on_undefined not in ('raise', 'nan'):
+        raise ValueError(f"on_undefined must be 'raise' or 'nan', got {on_undefined!r}")
+    out = {}
+    for name in atom_sets:
+        try:
+            out[f'cw_rmsf_{name}'] = cw_rmsf(per_atom, name)
+        except ValueError as e:
+            if on_undefined == 'raise' or name not in CW_RMSF_ATOM_SETS:
+                raise
+            logger.warning(str(e))
+            out[f'cw_rmsf_{name}'] = float('nan')
+    return out
 
 def plot_atomic_property(u, weights: np.ndarray, lig_resname: str = 'resname UNK',
                          outname: str = 'property.png', ref_mol=None,

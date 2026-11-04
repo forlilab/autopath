@@ -319,15 +319,15 @@ A lightweight specification object that stores the parameters needed to define a
 
 All examples use the trypsin–benzamidine complex (`3ptb`) as a reference system and are located in the `examples/` directory. Shared input files (receptor PDB, ligand SDF) live in `examples/data/`.
 
-- **`examples/01_Build_and_Equilibrate`** — Assembles, parameterizes, and equilibrates a protein–ligand system through PDB fixing, solvation, force-field assignment, and a JSON-driven staged equilibration protocol. This is the standard first step before any downstream MD workflow. A Jupyter notebook is not included, but a detailed `README.md` covers all options and output files.
+- **`examples/01_Build_and_Equilibrate`** — Assembles, parameterizes, and equilibrates a protein–ligand system through PDB fixing, solvation, force-field assignment, and a JSON-driven staged equilibration protocol. This is the standard first step before any downstream MD workflow. Post-processing reports RMSD, per-atom ligand RMSF and the contact-weighted RMSF (cw-RMSF) pose-stability score; a detailed `README.md` covers all options and output files.
 
-- **`examples/02_iAnalysis`** — End-point free energy analysis of equilibrated trajectories using two complementary methods: MM-GBSA (via AMBER's `MMPBSA.py`) and Linear Interaction Energy (LIE). Includes orchestrator scripts for SLURM batch submission and two Jupyter notebooks (`analysis_mmgbsa.ipynb`, `analysis_LIE.ipynb`) for interactive exploration of results.
+- **`examples/02_iAnalysis`** — Early-filter analysis of equilibrated trajectories: cw-RMSF for every system (`run_cwrmsf.py`), MM-GBSA with the four GB models of the paper (via AMBER's `MMPBSA.py`) and Linear Interaction Energy (LIE). Includes orchestrator scripts for SLURM batch submission and two Jupyter notebooks (`analysis_mmgbsa.ipynb`, `analysis_LIE.ipynb`) for interactive exploration of results.
 
-- **`examples/03_Pull-it-out`** — Runs steered MD (sMD) pulling simulations on an equilibrated system. Demonstrates the forward-pulling protocol and the associated SLURM queue file.
+- **`examples/03_Pull-it-out`** — Runs steered MD (sMD) pulls on an equilibrated system with the paper settings (Murcko anchor, 5/10/15 m/s, size-scaled spring, contact autostop), then the nonequilibrium analysis: pathway clustering and cumulant / Jarzynski / force free-energy profiles, friction and k<sub>off</sub>.
 
-- **`examples/04_Full-Pipeline`** — Executes the complete AutoPath pipeline end-to-end (preparation → equilibration → sMD → analysis) from a single driver script.
+- **`examples/04_Full-Pipeline`** — Executes the complete AutoPath pipeline end-to-end (preparation → equilibration → cw-RMSF early filter → convergence-driven sMD → analysis) from a single driver script.
 
-- **`examples/05_VanillaMD`** — Conventional (unbiased) production MD using AutoPath's `VanillaMD` class. Useful as a baseline or for generating reference trajectories.
+- **`examples/05_VanillaMD`** — Conventional (unbiased) production MD using AutoPath's `VanillaMD` class, with RMSD and cw-RMSF of the ligand. Useful as a baseline or for generating reference trajectories.
 
 - **`examples/06_Docking_PrEP`** — Prepares receptor and ligand structures for docking. Can auto-fetch PDB entries, run PDB fixing, apply restrained minimization, and save docking-ready files. Supports cofactors, structural waters, and multi-chain systems.
 

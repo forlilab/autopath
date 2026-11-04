@@ -1,85 +1,40 @@
 import os
-import logging
 import argparse
 
+import pandas as pd
 import MDAnalysis as mda
-import mdtraj as md
+from rdkit import Chem
+from openmm.app import PDBFile
 
 from autopath import SystemPreparation, Equilibration
-from autopath.ap_PLIP import plot_atomic_property, calculate_ligand_rmsf
-from autopath.utils import save_pdb, load_system, setup_logging, compute_rmsd
+from autopath.ap_PLIP import plot_atomic_property, ligand_rmsf_contacts, cw_rmsf_scores
+from autopath.equilibration import free_window_start
+from autopath.utils import save_pdb, load_system, setup_logging, compute_rmsd, wrap_align_save_traj
 from autopath.pdb_preprocessor import PDBPreprocessor
-from openmm.app import PDBFile
+
 
 def cmd_lineparser():
     parser = argparse.ArgumentParser(
-        description="This script prepares and equilibrates a protein-ligand system using Autopath.",
-        
+        description="This script prepares and equilibrates a protein-ligand system using AutoPath.",
         epilog="""
         COPYRIGHT
-                Copyright (C) 2026 Forli Lab, Center for Computastional Structural Biology,
+                Copyright (C) 2026 Forli Lab, Center for Computational Structural Biology,
                              Scripps Research.""",
     )
-
-    parser.add_argument(
-        "-r",
-        "--rec",
-        dest="rec",
-        required=True,
-        action="store",
-        help="path to the receptor PDB file",
-    )
-
-    parser.add_argument(
-        "-l",
-        "--lig",
-        dest="lig",
-        required=False,
-        default=None,
-        help="path to the ligand SDF/PDB file",
-    )
-    
-    parser.add_argument(
-        "-n",
-        "--resname",
-        dest="resname",
-        required=False,
-        default="UNK",
-        help="residue name of the ligand",
-    )
-    parser.add_argument(
-        "-s",
-        "--smiles",
-        dest="smiles",
-        required=False,
-        default=None,
-        help="Smiles of the ligand. Will be used to assign bond orders if provided",
-    )
-
-    parser.add_argument(
-        "--lig_from_xray",
-        action='store_true',
-        help="include flag if ligand is directly extracted from crystal structure without any processing",
-        default=False
-    )
-    
-    parser.add_argument(
-        "-f",
-        "--fixpdb",
-        dest="fixpdb",
-        required=False,
-        default=True,
-        help="whether to fix the input PDB file (default: True)",
-    )
-    
-    parser.add_argument(
-        "-p",
-        "--protocol",
-        dest="protocol",
-        required=True,
-        action="store",
-        help="path to the JSON file with the equilibration protocol",
-    )
+    parser.add_argument("-r", "--rec", dest="rec", required=True,
+                        help="path to the receptor PDB file")
+    parser.add_argument("-l", "--lig", dest="lig", default=None,
+                        help="path to the ligand SDF/PDB file")
+    parser.add_argument("-n", "--resname", dest="resname", default="UNK",
+                        help="residue name of the ligand (default: UNK)")
+    parser.add_argument("-s", "--smiles", dest="smiles", default=None,
+                        help="SMILES of the ligand. Used to assign bond orders if provided")
+    parser.add_argument("--lig_from_xray", action="store_true", default=False,
+                        help="the ligand is taken directly from the crystal structure without any processing")
+    parser.add_argument("--no_fixpdb", dest="fixpdb", action="store_false",
+                        help="skip PDBFixer (use the receptor as is)")
+    parser.add_argument("-p", "--protocol", dest="protocol", required=True,
+                        help="path to the JSON file with the equilibration protocol")
     return parser.parse_args()
 
 
@@ -87,18 +42,16 @@ def main():
 
     args = cmd_lineparser()
     receptor = args.rec
-    lig_path = args.lig 
     lig_resname = args.resname
-    if lig_path is not None:
-        ligands = [(lig_resname,lig_path,args.smiles,args.lig_from_xray)]
+    if args.lig is not None:
+        ligands = [(lig_resname, args.lig, args.smiles, args.lig_from_xray)]
     else:
         ligands = None
-    equilibration_scheme = args.protocol # Make sure to customize the equilibration scheme as needed
-    
+    equilibration_scheme = args.protocol  # customize the equilibration scheme as needed
+
     sys_name = os.path.splitext(os.path.basename(receptor))[0]
     os.makedirs(sys_name, exist_ok=True)
 
-    # Setup logging
     logger = setup_logging(f"{sys_name}/autopath.log", log_level="INFO")
     logger.info("Starting equilibration process")
 
@@ -106,10 +59,8 @@ def main():
     #################################### System preparation ################################
     ########################################################################################
 
-    # Fix/prepare the receptor
-    if not args.fixpdb:
-        fixed_receptor = receptor
-    else:
+    # Fix/prepare the receptor: missing atoms/loops, non-standard residues, protonation, caps
+    if args.fixpdb:
         fixed_receptor = PDBPreprocessor(receptor).fix(
                             replace_nonstandard_residues=True,
                             ignore_terminal_missing_residues=True,
@@ -117,31 +68,31 @@ def main():
                             cap_termini=True,
                             pH=7.4
                             )
-        pdb_name = os.path.splitext(os.path.basename(receptor))[0]
-        fixed_receptor_path=f"{sys_name}/{pdb_name}_fixed.pdb"
-        save_pdb(fixed_receptor.topology, fixed_receptor.positions, fixed_receptor_path)
-        
-    # Assemble and parameterize the system
+        receptor_path = f"{sys_name}/{sys_name}_fixed.pdb"
+        save_pdb(fixed_receptor.topology, fixed_receptor.positions, receptor_path)
+    else:
+        receptor_path = receptor
+
+    # Assemble and parameterize the system (defaults used in the AutoPath paper)
     prepare_system = SystemPreparation(
             boxShape="dodecahedron",
-            padding=1.2,
-            hydrogenMass=1.5,
+            padding=1.2,           # nm
+            hydrogenMass=1.5,      # amu, HMR for a 4 fs timestep
             lig_ff="openff-2.3.0",
-            ionicStrength=0.15,
+            ionicStrength=0.15,    # M
             ions=("Na+", "Cl-"),
             is_membrane=False,
-            lipid_type="POPC",
             out_dir=sys_name,
-            forcefield = [
-            'amber14-all.xml',
-            "amber14/tip3pfb.xml",
-            "amber/tip3pfb_HFE_multivalent.xml"   
+            forcefield=[
+                'amber14-all.xml',
+                'amber14/tip3pfb.xml',
+                'amber/tip3pfb_HFE_multivalent.xml',
             ]
     )
 
-    # Variants is a dictionary which specifies the chain:resid for the variant e.g. {"A:123": "CYX"}
-    # If you re-run the script and the system is already prepared comment the following line
-    system, topology = prepare_system.run(protein=fixed_receptor_path, variants=None, ligands=ligands)
+    # variants: chain:resid -> residue variant, e.g. {"A:123": "CYX"}
+    # If the system is already prepared you can comment out this line
+    prepare_system.run(protein=receptor_path, variants=None, ligands=ligands)
 
     ########################################################################################
     ###################################### Equilibration ###################################
@@ -151,7 +102,8 @@ def main():
     topology = PDBFile(system_pdb_file).topology
     system = load_system(f"{sys_name}/system.xml")
 
-    # Run restrained equilibration
+    # restrained_minimization=False (as in the AutoPath pipeline): minimise with every
+    # component restrained at the warm-up force constants of the protocol
     equilibration = Equilibration(
         system=system,
         topology=topology,
@@ -160,50 +112,55 @@ def main():
         restrained_minimization=False,
         out_dir=f"{sys_name}/equilibration",
         )
-    
-    # If you re-run the script and the system is equilibrated prepared comment the following line
-    system = equilibration.run(pdb_file=system_pdb_file, run_id=sys_name)
-        
+
+    # If the system is already equilibrated you can comment out this line
+    equilibration.run(pdb_file=system_pdb_file, run_id=sys_name)
+
     ########################################################################################
     ###################################### Post-processing #################################
     ########################################################################################
 
-    system_prmtop = f"{sys_name}/system.prmtop"
-    equilibrated_traj = f"{sys_name}/equilibration/equilibration_{sys_name}.dcd"
-    
-    # Wrap, align and save the clean trajectory
-    traj = md.load(equilibrated_traj, top=system_pdb_file)
-    traj = traj.center_coordinates()
-    traj = traj.image_molecules()
-    try: # if there's no protein
-        backbone = traj.topology.select("backbone")
-        traj = traj.superpose(traj[0], atom_indices=backbone)
-    except Exception as e:
-        logging.warning(f"Superposition failed: {e}. Proceeding without superposition.")
-    traj.save(equilibrated_traj.replace(".dcd", "_aligned.dcd"))
-    os.remove(equilibrated_traj)
-    logger.info(f"Aligned trajectory saved to {equilibrated_traj.replace('.dcd', '_aligned.dcd')}")
+    eq_dir = f"{sys_name}/equilibration"
+    # Wrap, centre and superpose on the protein backbone -> equilibration_<sys>_aligned.dcd
+    aligned_traj = wrap_align_save_traj(f"{eq_dir}/equilibration_{sys_name}.dcd", system_pdb_file)[0]
+    logger.info(f"Aligned trajectory saved to {aligned_traj}")
 
-    # Calculate RMSD and RMSF of the ligand
-    # Make sure to customize/add the selections as needed
-    u_eq = mda.Universe(system_pdb_file, equilibrated_traj.replace(".dcd", "_aligned.dcd"), in_memory=True)
-    rmsd_equilibration = compute_rmsd(u_eq, u_eq,
-                                          alig_select="backbone", 
-                                          groupselections={
-                                                           "ligand":f"resname {lig_resname} and not name H*" if ligands is not None else None, 
-                                                           "protein":'protein and not name H*'
-                                                           },
-                                          plots_outdir=f"{sys_name}/equilibration"
-                                          )
-    rmsd_equilibration.to_csv(f"{sys_name}/equilibration/RMSD_{sys_name}.csv", index=False)
+    u_eq = mda.Universe(system_pdb_file, aligned_traj, in_memory=True)
+
+    # RMSD of protein and ligand (customize/add selections as needed)
+    groups = {"protein": "protein and not name H*"}
     if ligands is not None:
-        # both take a full MDAnalysis selection string, not a bare residue name:
-        # passing "UNK" raises SelectionError: Unknown selection token
-        lig_sel = f"resname {lig_resname}"
-        _rmsf = calculate_ligand_rmsf(u_eq, lig_sel)
-        plot_atomic_property(u_eq, _rmsf, lig_resname=lig_sel,
-                             outname=f"{sys_name}/equilibration/RMSF_{sys_name}.png")
+        groups["ligand"] = f"resname {lig_resname} and not name H*"
+    rmsd_equilibration = compute_rmsd(u_eq, u_eq, alig_select="backbone", groupselections=groups,
+                                      plots_outdir=eq_dir)
+    rmsd_equilibration.to_csv(f"{eq_dir}/{sys_name}_rmsd.csv", index=False)
+
+    if ligands is None:
+        return
+
+    # Ligand stability: per-atom RMSF, contact frequency and contact-weighted RMSF (cw-RMSF).
+    # Whole run, and the "free window" (frames after the last ligand restraint is released).
+    lig_sel = f"resname {lig_resname}"
+    free_start = free_window_start(f"{eq_dir}/equilibration_{sys_name}.csv", equilibration_scheme,
+                                   component="ligand", n_frames=len(u_eq.trajectory))
+    ref_mol = Chem.SDMolSupplier(args.lig)[0] if args.lig.endswith(".sdf") else None
+    rows = []
+    for window, start in (("whole", None), ("free", free_start)):
+        per_atom = ligand_rmsf_contacts(u_eq, lig_sel, start=start)
+        per_atom.to_csv(f"{eq_dir}/{sys_name}_RMSF_{window}.csv", index=False)
+        # polar (N, O, S), non-polar (C, halogens) and all heavy atoms; NaN if a set never contacts the pocket
+        rows.append({"window": window, "first_frame": start or 0,
+                     **cw_rmsf_scores(per_atom, on_undefined="nan")})
+        if window == "whole":
+            plot_atomic_property(u_eq, per_atom.rmsf.values, lig_resname=lig_sel, ref_mol=ref_mol,
+                                 outname=f"{eq_dir}/{sys_name}_RMSF.svg")
+            plot_atomic_property(u_eq, per_atom.contact_freq.values, lig_resname=lig_sel, ref_mol=ref_mol,
+                                 outname=f"{eq_dir}/{sys_name}_contact_freq.svg", color='r')
+    cw = pd.DataFrame(rows)
+    cw.to_csv(f"{eq_dir}/{sys_name}_cwRMSF.csv", index=False)
+    logger.info("cw-RMSF (A):\n" + cw.round(3).to_string(index=False))
     return
+
 
 if __name__ == "__main__":
     main()

@@ -1,5 +1,4 @@
 &general
-# take only 10-50ns for analysis
 use_sander=1,
 
 #startframe = 1,
