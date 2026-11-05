@@ -395,7 +395,6 @@ class AutoPath:
             #         logger.warning(f"Simulation for ligand {sys_name} terminated because ligand RMSD={final_rmsd:.2f} > {self.eq_checkpoint_cutoff}")
             #         exit(1)
             # ligand_atoms = u_eq.select_atoms(f'index {" ".join(map(str, ligand_atoms_indices))}')
-            # final_com = calculate_com_distance(u_eq, ligand_atoms, pocket_atoms, wrap=False)[-1] /10 # convert to nm
             # logger.info(f"COM distance after equilibration is: {final_com:.2f} nm")
 
             if self.pocket_selection is not None:
@@ -865,46 +864,3 @@ class AutoPath:
         )
         return conv_df, traces_df
 
-    @staticmethod
-    def _replica_idx_from_log(fn):
-        """Extract the integer replica index from an sMD log filename.
-
-        Expected filename pattern:
-        ``sMD_replica-<N>_<speed>_<direction>.dat``
-
-        Parameters
-        ----------
-        fn : str
-            Full or basename path to the sMD ``.dat`` log file.
-
-        Returns
-        -------
-        int
-            Zero-based replica index embedded in the filename.
-        """
-        base = os.path.basename(fn)[:-4]
-        rep = base.split("_")[-3]
-        return int(rep.split("-")[1])
-    
-    
-    def _trajname_to_dcd(self, trajname: str) -> str:
-        """Resolve the aligned DCD path for a medoid trajectory name.
-
-        Medoid names are stored as log-file basenames (without extension) by
-        :class:`~autopath.pulling.PathModel.DTWPathModel`.  This method maps
-        them to the corresponding aligned DCD file under
-        ``<sMD_outdir>/trajectories/``.
-
-        Parameters
-        ----------
-        trajname : str
-            Log-file basename without extension (e.g.
-            ``"sMD_replica-3_v0.001_forward"``).
-
-        Returns
-        -------
-        str
-            Absolute or relative path to ``<sMD_outdir>/trajectories/<name>_aligned.dcd``.
-        """
-        dcd_name = trajname.replace("log", "traj") + "_aligned.dcd"
-        return os.path.join(self.sMD_outdir, "trajectories", dcd_name)

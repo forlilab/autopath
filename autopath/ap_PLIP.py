@@ -1364,25 +1364,3 @@ def plot_atomic_property(u, weights: np.ndarray, lig_resname: str = 'resname UNK
         drawer.WriteDrawingText(outname)
     return
 
-def plot_rmsd(rmsd_df: pd.DataFrame = None,
-              sys_name: str = None,
-              out_dir: str = None) -> None:
-    """Plot RMSD over time and save the figure.
-
-    Parameters
-    ----------
-    rmsd_df : pd.DataFrame
-        DataFrame with at least an ``rmsd`` column; the index is used as the x-axis.
-    sys_name : str
-        System name used in the plot title and output filename.
-    out_dir : str
-        Directory where the PNG is saved.
-    """
-    plt.figure(figsize=(10, 5))
-    sns.lineplot(data=rmsd_df, y="rmsd", x=rmsd_df.index)
-    plt.ylabel("RMSD (nm)");     plt.xlabel("Frame #")
-    plt.title(f"RMSD {sys_name}", fontsize=15)
-    plt.tight_layout()
-    plt.savefig(f"{out_dir}/{sys_name}_rmsd.png")
-    plt.close()
-    return
