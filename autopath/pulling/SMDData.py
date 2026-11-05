@@ -313,6 +313,8 @@ class SMDData:
         if work_mode == 'auto':
             resolved_mode = 'protocol' if protocol_work_column in raw_data.columns else 'force_dx'
 
+        # unique labels so work goes back to the time-sorted rows it was computed for
+        raw_data = raw_data.reset_index(drop=True)
         grouped = raw_data.groupby('trajname')
         for traj, group in grouped:
             group = group.sort_values(by='time')
@@ -331,7 +333,7 @@ class SMDData:
                     initial=0.0,
                 )
 
-            raw_data.loc[raw_data['trajname'] == traj, 'work'] = work
+            raw_data.loc[group.index, 'work'] = work
 
         if resolved_mode == 'protocol':
             logger.info(
