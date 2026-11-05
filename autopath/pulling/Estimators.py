@@ -325,6 +325,8 @@ class FrictionEstimator(BaseEstimator):
             data = data[data['estimator'] == estimator]
         if self.speeds is not None:
             data = data[data['speed'].isin(self.speeds)]
+        # speed=0 rows are the v->0 extrapolation, not a measured speed
+        data = data[data['speed'] > 0]
 
         group_cols = ['estimator', 'speed']
         if 'path' in data.columns:
@@ -402,6 +404,8 @@ class FrictionEstimator(BaseEstimator):
             data = data[data['estimator'] == estimator]
         if self.speeds is not None:
             data = data[data['speed'].isin(self.speeds)]
+        # speed=0 rows are the v->0 extrapolation, not a measured speed
+        data = data[data['speed'] > 0]
 
         if 'estimator' not in data.columns:
             data['estimator'] = estimator if estimator is not None else 'unknown'
