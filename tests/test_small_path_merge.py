@@ -30,8 +30,7 @@ def _features(groups, speed=SPEED, seed=0):
 
 def _cluster(tmp_path, feat, n_paths):
     m = DTWPathModel(do_plots=False, outdir=str(tmp_path), n_geom_pcs=None)
-    maps = m.fit_transform(feat, n_paths=n_paths, cluster_across_speeds=False,
-                           persist_medoids=False)
+    maps = m.fit_transform(feat, n_paths=n_paths, cluster_across_speeds=False)
     return m, maps
 
 
@@ -94,8 +93,7 @@ def test_cross_speed_merge_counts_per_speed(tmp_path):
             trajname=lambda d, i=i: f"s{i}_" + d["trajname"])
         for i, v in enumerate(speeds)], ignore_index=True)
     m = DTWPathModel(do_plots=False, outdir=str(tmp_path), n_geom_pcs=None)
-    maps = m.fit_transform(feat, n_paths=2, cluster_across_speeds=True,
-                           persist_medoids=False)
+    maps = m.fit_transform(feat, n_paths=2, cluster_across_speeds=True)
     assert pd.Series(maps).value_counts().min() == 8
     sp = feat.drop_duplicates("trajname").set_index("trajname")["speed"].to_dict()
     new, merges = m.merge_small_paths(maps, 5, speeds=sp)
