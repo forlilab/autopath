@@ -226,8 +226,12 @@ class AutoPath:
                                   cap_termini=True,
                                   keep_heterogens=True, 
                                   pH=7.4)
-            self.protein_file = pdb_path.replace(".pdb", "_fixed.pdb")
-            save_pdb(protein_pdb.topology, protein_pdb.positions, self.protein_file)
+            root, ext = os.path.splitext(pdb_path)
+            self.protein_file = f"{root}_fixed{ext}"
+            # Parallel jobs share the receptor: write privately, then swap atomically
+            tmp = f"{root}_fixed.{os.getpid()}.tmp{ext}"
+            save_pdb(protein_pdb.topology, protein_pdb.positions, tmp)
+            os.replace(tmp, self.protein_file)
         else:
             self.protein_file = pdb_path
 
