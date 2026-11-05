@@ -27,7 +27,7 @@ def test_crashed_pull_leaves_no_dat(tmp_path, monkeypatch):
     sim = SimpleNamespace(context=SimpleNamespace(setParameter=lambda *a, **k: None,
                                                   getState=lambda **kw: state))
     smd = SimpleNamespace(
-        out_dir=str(tmp_path), use_GReweighting=False,
+        out_dir=str(tmp_path),
         com_dist=SimpleNamespace(getValue=lambda *a, **k: 1.5 * openmmunit.nanometers),
         com_force=SimpleNamespace(getValue=_raise),
         sMD_moves=10, steps_per_move=1, save_freq=1, sMD_max_r_offset=0.0,
