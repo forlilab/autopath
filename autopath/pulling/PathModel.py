@@ -323,12 +323,16 @@ class DTWPathModel(PathModel):
             )
 
             #choose number of clusters
-            if n_paths is None:
+            if n_paths is None and len(trajnames) < 3:
+                # silhouette needs 2 <= k <= n-1: too few trajectories to split
+                K = 1
+                scores = {}
+                logger.info(
+                    f"{'Global' if speed_key is None else f'Speed {speed_key}'}: "
+                    f"{len(trajnames)} trajectories, using a single path"
+                )
+            elif n_paths is None:
                 K_MAX = min(6, len(trajnames))
-                if K_MAX < 2:
-                    raise RuntimeError(
-                        "Not enough trajectories to form at least 2 clusters."
-                    )
 
                 scores = {}
                 for k in range(2, K_MAX):
