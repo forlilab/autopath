@@ -62,3 +62,21 @@ def test_fit_transform_pca_all_handles_all_geom_prefixes(tmp_path):
     m = DTWPathModel(do_plots=False, outdir=str(tmp_path))
     mapping = m.fit_transform(df, n_paths=2)
     assert len(mapping) == 3
+
+
+def test_fit_transform_two_trajectories_is_one_path(tmp_path):
+    n_traj = 2   # silhouette needs n >= 3; one trajectory is skipped upstream
+    from autopath.pulling.PathModel import DTWPathModel
+    (tmp_path / "path_analysis").mkdir()
+    df = _toy_feat_df(n_traj=n_traj)
+    mapping = DTWPathModel(do_plots=False, outdir=str(tmp_path)).fit_transform(df)
+    assert set(mapping) == set(df["trajname"].unique())
+    assert len(set(mapping.values())) == 1
+
+
+def test_fit_transform_three_trajectories_still_scans_k(tmp_path):
+    from autopath.pulling.PathModel import DTWPathModel
+    (tmp_path / "path_analysis").mkdir()
+    df = _toy_feat_df(n_traj=3)
+    mapping = DTWPathModel(do_plots=False, outdir=str(tmp_path)).fit_transform(df)
+    assert len(set(mapping.values())) == 2
