@@ -393,6 +393,7 @@ class AutoPath:
         self.protocol_fname = protocol_fname
         # Steered MD
         self.run_sMDpulling = run_sMDpulling
+        self._sMD_outdir_base = sMD_outdir   # run() prefixes the ligand name per call
         self.sMD_outdir = sMD_outdir
         self.sMD_pulling_dir = sMD_pulling_dir
         self.sMD_max_pulling_dist = sMD_max_pulling_dist
@@ -403,6 +404,9 @@ class AutoPath:
         self.sMD_autostop_nc = sMD_autostop_nc
         self.sMD_autostop_nc_window = sMD_autostop_nc_window
         self.sMD_autostop_min_displacement = sMD_autostop_min_displacement
+        for _name, _val in (("sMD_time", sMD_time), ("sMD_steps_per_move", sMD_steps_per_move)):
+            if _val is not None:
+                raise ValueError(f"{_name} is not supported; set sMD_pulling_speeds and sMD_dx_per_move instead.")
         self.sMD_time = sMD_time
         self.sMD_pulling_speeds = sMD_pulling_speeds
         self.sMD_autostop_estimator = sMD_autostop_estimator
@@ -477,12 +481,8 @@ class AutoPath:
         self.mMD_rct_ustride = mMD_rct_ustride
         self.mMD_dcd_interval = mMD_dcd_interval
         # VS mode
-        self.equilibration_checkpoint = False
-        self.pulling_checkpoint = False
         if VS_mode:
-            self.equilibration_checkpoint = True
-            self.eq_checkpoint_cutoff = 0.3  # nm
-            self.pulling_checkpoint = True
+            raise ValueError("VS_mode is not supported.")
 
         # Process the input PDB
         if do_fix_pdb:
@@ -530,7 +530,7 @@ class AutoPath:
         else:
             sys_name = os.path.splitext(os.path.basename(self.protein_file))[0]
 
-        self.sMD_outdir = f"{sys_name}/{self.sMD_outdir}"
+        self.sMD_outdir = f"{sys_name}/{self._sMD_outdir_base}"
 
         os.makedirs(sys_name, exist_ok=True)
         
@@ -656,12 +656,6 @@ class AutoPath:
                 logger.error(f"Error computing RMSD/RMSF: {e}")
                 pass
 
-            # Equilibration VS checkpoint
-            # if self.equilibration_checkpoint:
-            #     final_rmsd = lig_rmsd_equilibration[-1:].values
-            #     if final_rmsd > self.eq_checkpoint_cutoff * 10:  # to Angs
-            #         logger.warning(f"Simulation for ligand {sys_name} terminated because ligand RMSD={final_rmsd:.2f} > {self.eq_checkpoint_cutoff}")
-            #         exit(1)
             # ligand_atoms = u_eq.select_atoms(f'index {" ".join(map(str, ligand_atoms_indices))}')
             # final_com = calculate_com_distance(u_eq, ligand_atoms, pocket_atoms, wrap=False)[-1] /10 # convert to nm
             # logger.info(f"COM distance after equilibration is: {final_com:.2f} nm")
