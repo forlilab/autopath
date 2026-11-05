@@ -742,7 +742,7 @@ class AutoPath:
 
             if self.sMD_spring_cte is None:
                 sMD_spring_cte = sMD_spring_cte_per_atom * len(ligand_total_hatoms)  # Normalize by ligand size
-                logger.info(f"Spring constant set to {sMD_spring_cte} KJ/mol/nm2 for {len(ligand_atoms_indices)} atoms.")
+                logger.info(f"Spring constant set to {sMD_spring_cte} KJ/mol/nm2 for {len(ligand_total_hatoms)} atoms.")
             else:
                 sMD_spring_cte = self.sMD_spring_cte
 

@@ -30,3 +30,15 @@ def test_smd_outdir_does_not_nest_across_ligands(tmp_path, monkeypatch):
             ap.run(ligand_file=lig)
         seen.append(ap.sMD_outdir)
     assert seen == ["a/sMD", "b/sMD", "c/sMD"]
+
+
+def test_missing_aligned_traj_raises(tmp_path, monkeypatch):
+    rec = tmp_path / "rec.pdb"
+    rec.write_text("END\n")
+    monkeypatch.chdir(tmp_path)
+    ap = core.AutoPath(pdb_path=str(rec), do_fix_pdb=False, run_preparation=False,
+                       run_equilibration=False)
+    monkeypatch.setattr(core, "load_system", lambda p: None)
+    monkeypatch.setattr(core, "PDBFile", lambda p: type("P", (), {"topology": None})())
+    with pytest.raises(FileNotFoundError, match="_aligned.dcd"):
+        ap.run(ligand_file="a.sdf")
