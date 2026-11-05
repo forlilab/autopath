@@ -237,6 +237,15 @@ class SMDAnalysis:
             )
         return kept
     
+    def _convergence_paths(self, feat_df_cl, r_range):
+        """Path labels for convergence checks, using the same path model and K as run()."""
+        if isinstance(self.path_model, NullPathModel):
+            model = NullPathModel()
+        else:
+            model = DTWPathModel(seed=self.seed, do_plots=False, outdir=self.outdir)
+        return model.fit_transform(feat_df_cl, r_range=r_range, n_paths=self.n_paths,
+                                   cluster_across_speeds=False, persist_medoids=False)
+
     def _setup_path_model(self, path_model: Union[PathModel, str]):
         if isinstance(path_model, str):
             if path_model == 'dtw':
@@ -843,6 +852,14 @@ class SMDAnalysis:
                 trim_fraction=trim_fraction,
                 min_common_points=min_common_points,
                 conv_window=conv_window,
+                feature_kwargs=dict(group_A=group_A, group_B=group_B, features=features,
+                                    merge_features=merge_features, ligand_sdf=ligand_sdf,
+                                    geom_features=geom_features, geom_merge=geom_merge,
+                                    recompute_distances=recompute_distances),
+                tol_rmsd=tol_rmsd, tol_barrier=tol_barrier, tol_r_ts=tol_r_ts,
+                plateau_frac=plateau_frac, boundary_buffer_frac=boundary_buffer_frac,
+                min_samples_per_step_conv=min_samples_per_step_conv,
+                min_trajs_per_path_conv=min_trajs_per_path_conv,
             )
             return conv_df, pd.DataFrame()
 
@@ -915,14 +932,7 @@ class SMDAnalysis:
                         f"(excludes bulk-solvent tail)."
                     )
 
-            clusterer = DTWPathModel(
-                seed=self.seed,
-                do_plots=False,
-                outdir=self.outdir,
-            )
-            path_mappings = clusterer.fit_transform(feat_df_cl, r_range=fit_r_range,
-                                                    cluster_across_speeds=False,
-                                                    persist_medoids=False)
+            path_mappings = self._convergence_paths(feat_df_cl, fit_r_range)
 
             smd.raw_data['path'] = smd.raw_data['trajname'].map(path_mappings)
 

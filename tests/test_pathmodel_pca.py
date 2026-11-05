@@ -80,3 +80,14 @@ def test_fit_transform_three_trajectories_still_scans_k(tmp_path):
     df = _toy_feat_df(n_traj=3)
     mapping = DTWPathModel(do_plots=False, outdir=str(tmp_path)).fit_transform(df)
     assert len(set(mapping.values())) == 2
+
+
+@pytest.mark.parametrize("model,n_paths,want", [("null", None, 1), ("dtw", 2, 2)])
+def test_convergence_paths_follow_configured_model(tmp_path, model, n_paths, want):
+    from autopath.pulling.AnalysisSMD import SMDAnalysis
+    (tmp_path / "path_analysis").mkdir()
+    df = _toy_feat_df(n_traj=6)
+    sa = SMDAnalysis(path_model=model, n_paths=n_paths, do_plots=False, outdir=str(tmp_path))
+    mapping = sa._convergence_paths(df, None)
+    assert set(mapping) == set(df["trajname"].unique())
+    assert len(set(mapping.values())) == want
