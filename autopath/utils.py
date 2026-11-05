@@ -666,8 +666,8 @@ def get_pocket_atoms_idxs(u: mda.Universe = None,
 
     Exactly one of *pocket_selection* or *ligand_selection* must be provided.
     When *pocket_selection* is given it is used directly. When *ligand_selection*
-    is given, the pocket is defined as the CA atoms of all protein residues
-    within *cutoff* Å of any ligand atom (evaluated at the last trajectory frame).
+    is given, the pocket is the protein CA atoms within *cutoff* Å of any ligand
+    heavy atom (evaluated at the last trajectory frame).
 
     Parameters
     ----------
@@ -700,9 +700,10 @@ def get_pocket_atoms_idxs(u: mda.Universe = None,
         pocket_atoms_indices = [atom.index for atom in pocket_atoms]
     # If no custom selection, use the ligand residue name to define the pocket
     elif ligand_selection is not None and pocket_selection is None:
-        ligand = u.select_atoms(ligand_selection)
-        protein_residues = u.select_atoms(f"protein and around {cutoff} group ligand", ligand=ligand).residues
-        pocket_atoms_indices = [atom.index for res in protein_residues for atom in res.atoms if atom.name in ['CA']]
+        # CA within cutoff of ligand heavy atoms: any-atom contact pulls in CAs ~12 A away
+        ligand = u.select_atoms(f"({ligand_selection}) and not name H*")
+        pocket_atoms_indices = [int(i) for i in u.select_atoms(
+            f"protein and name CA and around {cutoff} group ligand", ligand=ligand).indices]
     else:
         raise ValueError("Please provide either a pocket selection or a ligand residue name, not both.")
 
