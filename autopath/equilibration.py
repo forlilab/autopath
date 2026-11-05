@@ -323,6 +323,10 @@ def run_restrained_md(
             simulation, components, step.forces, prev_constants
         )
 
+        if npt_prev and not step.npt_flag:
+            remove_openmm_force(system, "MonteCarlo")  # any barostat type
+            simulation.context.reinitialize(preserveState=True)
+
         if step.npt_flag != npt_prev and step.npt_flag:
             add_barostat(system, temp, is_membrane)
             simulation.context.reinitialize(preserveState=True)
@@ -736,6 +740,7 @@ class Equilibration:
                        Tstart=self.temp_init, 
                        Tend=self.temperature, 
                        Tstep=self.temp_steps,
+                       timestep=self.warm_up_timestep,
                        warming_steps=self.warm_up_steps
                        )
         
