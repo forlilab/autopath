@@ -85,6 +85,7 @@ class AutoPath:
         ``sMD_run_analysis``, ``sMD_clust_selection``, ``sMD_features``,
         ``sMD_log_geom_features``, ``sMD_plateau_frac``,
         ``sMD_cluster_to_boundary``, ``sMD_boundary_buffer_frac``,
+        ``sMD_kramers_abs``, ``sMD_kramers_bound``,
         ``cluster_across_speeds``, ``sMD_min_replicas_per_path``
     """
 
@@ -148,7 +149,9 @@ class AutoPath:
         sMD_plateau_frac: float = 0.4,  # force-plateau TS boundary: fraction of peak |force| (higher -> boundary nearer rupture, off the tail)
         sMD_cluster_to_boundary: bool = True,  # cluster + RMSD-converge only up to the force-plateau boundary (exclude bulk-solvent tail)
         sMD_boundary_buffer_frac: float = 0.1,  # extend the boundary cap by this fraction of r_ts (a little buffer past rupture)
-        cluster_across_speeds: bool = False,
+        sMD_kramers_abs: str = "end",  # Kramers absorbing boundary: 'end' (pulled range) | 'force_plateau' (legacy)
+        sMD_kramers_bound: str = "mirror",  # bound population below pull start: 'mirror' | 'none'
+        cluster_across_speeds: bool = True,
         sMD_min_replicas_per_path: int = 5,
     ):
         # General
@@ -217,6 +220,8 @@ class AutoPath:
         self.sMD_plateau_frac = sMD_plateau_frac
         self.sMD_cluster_to_boundary = sMD_cluster_to_boundary
         self.sMD_boundary_buffer_frac = sMD_boundary_buffer_frac
+        self.sMD_kramers_abs = sMD_kramers_abs
+        self.sMD_kramers_bound = sMD_kramers_bound
         self.cluster_across_speeds = cluster_across_speeds
         self.sMD_min_replicas_per_path = sMD_min_replicas_per_path
         # VS mode
@@ -362,6 +367,9 @@ class AutoPath:
         _lig_sel_ha = f"({ligand_selection}) and not name H*"
 
         equilibrated_traj = equilibrated_traj.replace(".dcd", "_aligned.dcd")
+        if self.run_sMDpulling and not os.path.exists(equilibrated_traj):
+            raise FileNotFoundError(
+                f"{equilibrated_traj} is missing; rerun equilibration (run_equilibration=True).")
         if os.path.exists(equilibrated_traj):
             u_eq = mda.Universe(equilibrated_pdb, equilibrated_traj, in_memory=True)
             is_peptide = u_eq.select_atoms(ligand_selection).n_residues > 1
@@ -470,7 +478,7 @@ class AutoPath:
 
             if self.sMD_spring_cte is None:
                 sMD_spring_cte = sMD_spring_cte_per_atom * len(ligand_total_hatoms)  # Normalize by ligand size
-                logger.info(f"Spring constant set to {sMD_spring_cte} KJ/mol/nm2 for {len(ligand_atoms_indices)} atoms.")
+                logger.info(f"Spring constant set to {sMD_spring_cte} KJ/mol/nm2 for {len(ligand_total_hatoms)} atoms.")
             else:
                 sMD_spring_cte = self.sMD_spring_cte
 
@@ -784,6 +792,8 @@ class AutoPath:
                                        cluster_to_boundary=self.sMD_cluster_to_boundary,
                                        boundary_buffer_frac=self.sMD_boundary_buffer_frac,
                                        recompute_distances=False,  # load precomputed pocket-distance caches
+                                       kramers_abs=self.sMD_kramers_abs,
+                                       kramers_bound=self.sMD_kramers_bound,
                                     #    r_range=(0, 1.75)
                                        )
 

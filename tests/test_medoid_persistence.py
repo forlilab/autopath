@@ -40,9 +40,9 @@ def test_medoid_info_accumulates_per_speed(tmp_path):
     (tmp_path / "path_analysis").mkdir()
 
     m = DTWPathModel(do_plots=False, outdir=str(tmp_path))
-    m.fit_transform(_toy_feat_df(0.005, "a", seed=1), n_paths=2)
+    m.fit_transform(_toy_feat_df(0.005, "a", seed=1), n_paths=2, cluster_across_speeds=False)
     m2 = DTWPathModel(do_plots=False, outdir=str(tmp_path))
-    m2.fit_transform(_toy_feat_df(0.015, "b", seed=2), n_paths=2)
+    m2.fit_transform(_toy_feat_df(0.015, "b", seed=2), n_paths=2, cluster_across_speeds=False)
 
     info = _load_medoid_info(tmp_path)
     # Both speeds are present (the previous behaviour kept only the last).
@@ -70,7 +70,7 @@ def test_medoid_info_single_call_multi_speed(tmp_path):
     df = pd.concat([_toy_feat_df(0.005, "a", seed=1),
                     _toy_feat_df(0.015, "b", seed=2)], ignore_index=True)
     m = DTWPathModel(do_plots=False, outdir=str(tmp_path))
-    m.fit_transform(df, n_paths=2)
+    m.fit_transform(df, n_paths=2, cluster_across_speeds=False)
 
     info = _load_medoid_info(tmp_path)
     assert set(info["by_speed"]) == {"0.005", "0.015"}

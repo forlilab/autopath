@@ -142,3 +142,9 @@ def test_key_is_usable_as_a_sort_key_type(tmp_path):
         _write_log(d, "110450", datetime(2026, 8, 2, 11, 5, 15)),
     ]
     assert len(sorted(files, key=SMDData._replica_start_datetime)) == 2
+
+
+def test_invalid_hhmmss_run_id_raises_clear_error(tmp_path):
+    fn = _write_log(str(tmp_path), "120099", datetime(2026, 7, 18, 13, 0, 0))
+    with pytest.raises(ValueError, match="sMD_replica-HHMMSS"):
+        SMDData._replica_start_datetime(fn)
