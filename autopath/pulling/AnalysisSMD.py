@@ -414,6 +414,8 @@ class SMDAnalysis:
             cluster_to_boundary: bool = True,
             boundary_buffer_frac: float = 0.1,
             recompute_distances: bool = False,
+            kramers_abs: str = "end",
+            kramers_bound: str = "mirror",
             ) -> SMDData:
         """
         Parameters
@@ -431,7 +433,18 @@ class SMDAnalysis:
         ligand_sdf : str | None
             Path to an SDF with the ligand and correct bond orders.
             Required if any RDKit feature is in ``features``.
+        kramers_abs : {"end", "force_plateau"}
+            Kramers absorbing boundary: end of the pulled range (``"end"``) or
+            where the mean |force| decays to ``plateau_frac`` of its peak
+            (``"force_plateau"``, legacy).
+        kramers_bound : {"mirror", "none"}
+            Bound-state population below the pull start
+            (:meth:`KramersEstimator.kramers_mfpt`); ``"none"`` reflects at the start.
         """
+        if kramers_abs not in ("end", "force_plateau"):
+            raise ValueError(f"kramers_abs must be 'end' or 'force_plateau', got {kramers_abs!r}")
+        if kramers_bound not in ("mirror", "none"):
+            raise ValueError(f"kramers_bound must be 'mirror' or 'none', got {kramers_bound!r}")
 
         if self.reference_pdb is None:
             self.reference_pdb = sMDDdata.reference_pdb
@@ -509,6 +522,19 @@ class SMDAnalysis:
             n_paths=self.n_paths,      # None -> silhouette search (deployment default)
         )
 
+        # Small paths are merged, never deleted by the support trim below.
+        if hasattr(self.path_model, 'merge_small_paths'):
+            path_mappings, merges = self.path_model.merge_small_paths(
+                path_mappings,
+                max(self.support_policy.min_samples_per_step,
+                    self.min_replicas_per_path),
+                speeds=sMDDdata.raw_data.drop_duplicates('trajname')
+                .set_index('trajname')['speed'].to_dict(),
+            )
+            if merges:
+                os.makedirs(self.outdir, exist_ok=True)
+                pd.DataFrame(merges).to_csv(
+                    f'{self.outdir}/path_merges.csv', index=False)
         sMDDdata.raw_data['path'] = sMDDdata.raw_data['trajname'].map(path_mappings)
 
         if self.filter_low_support:
@@ -668,8 +694,9 @@ class SMDAnalysis:
                 friction_df=friction_df,
                 dG_extrapolated=_dG_v0,
                 force_df=sMDDdata.raw_data,          # restraint force for boundary detection
-                boundary_method="force_plateau",     # kinetics-motivated abs_r (HSP90-validated)
+                boundary_method=kramers_abs,
                 plateau_frac=plateau_frac,
+                bound_extension=kramers_bound,
             )
             if not _koff_df.empty:
                 _koff_df.to_csv(os.path.join(self.outdir, 'koff_kramers.csv'), index=False)
@@ -683,6 +710,8 @@ class SMDAnalysis:
                 per_path_results=sMDDdata.results,
                 weights_by_estimator=weights_by_estimator,
                 realized_speed_map=sMDDdata.realized_speed_map,
+                boundary_method="end" if kramers_abs == "end" else "pmf_peak",
+                bound_extension=kramers_bound,
             )
             if not _koff_per_path.empty:
                 _koff_per_path.to_csv(
@@ -735,7 +764,10 @@ class SMDAnalysis:
             if {'r_coord', 'force', 'speed'}.issubset(_rd.columns):
                 _lo, _hi = float(_rd['r_coord'].min()), float(_rd['r_coord'].max())
                 ts_r = KramersEstimator.force_peak_r(_rd, 0.0, _lo, _hi)
-                abs_r = KramersEstimator.force_plateau_boundary(_rd, 0.0, _lo, _hi, plateau_frac)
+                # the "end" boundary is per profile (koff_kramers.csv abs_r_nm)
+                if kramers_abs == "force_plateau":
+                    abs_r = KramersEstimator.force_plateau_boundary(
+                        _rd, 0.0, _lo, _hi, plateau_frac)
 
             for estimator in active_estimators:
                 plot_work_profiles(sMDDdata.results, estimator=estimator.name, outdir=self.outdir)
