@@ -465,9 +465,8 @@ class SystemPreparation:
 
         Parameters
         ----------
-        protein : str, optional
-            Path to the prepared protein PDB file. If ``None``, a
-            ligand-only or membrane-only system is built.
+        protein : str
+            Path to the prepared protein PDB file. Required.
         variants : dict, optional
             Residue variant map passed to ``add_variants()`` (e.g. to
             specify HIS protonation states or CYS oxidation).
@@ -491,6 +490,8 @@ class SystemPreparation:
             Re-raised if the protein PDB cannot be loaded.
         """
 
+        if protein is None:
+            raise ValueError("protein=None is not supported; pass a protein PDB.")
         start_time = time.monotonic()
 
         if protein is not None:
@@ -533,26 +534,6 @@ class SystemPreparation:
                         used_chains.add(chr(chain_id))
                         chain_id += 1
 
-        # CASE: Ligand and membrane only (no protein)
-        max_length = 0.0 * openmmunit.angstroms
-        if protein is None and self.is_membrane:
-
-            # Centre ligand at the origin before translating it into the membrane.
-            lig_com = np.mean(ligand_positions, axis=0)
-            for i, xyz_i in enumerate(ligand_positions):
-                ligand_positions[i] = xyz_i - lig_com
-
-            pairwise_distances = np.linalg.norm(
-                ligand_positions[:, None] - ligand_positions, axis=2
-            )
-            max_length = np.max(pairwise_distances) * openmmunit.angstroms
-
-            translation_distance = 3.0
-
-            translation_vector = np.array([0, 0, translation_distance])
-            ligand_positions += translation_vector * openmmunit.nanometers
-
-            modeller = Modeller(ligand_topology, ligand_positions)
 
         # A 4-site water model needs its virtual site on EVERY water, including the
         # crystallographic ones carried in from the input. On the solvation path that has to
@@ -614,7 +595,7 @@ class SystemPreparation:
                         ionicStrength=self.ionicStrength,
                         positiveIon=self.ions[0],
                         negativeIon=self.ions[1],
-                        minimumPadding=self.padding + max_length,
+                        minimumPadding=self.padding,
                     )
 
             except OpenMMException as e:

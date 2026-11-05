@@ -54,6 +54,7 @@ from autopath.pulling import SMDData, SMDAnalysis
 from autopath.pulling.Convergence import (tail_converged, validate_autostop_options,
                                           round_robin_order)
 from autopath.pulling.PathModel import DTWPathModel, NullPathModel
+from autopath.pulling.Estimators import validate_path_combination
 from autopath.pulling.Diagnostics import plot_convergence_traces, plot_convergence_metrics
 
 import logging
@@ -336,6 +337,7 @@ class AutoPath:
         sMD_path_model: str = 'dtw',   # 'dtw' | 'null' ('null' = no clustering: one path)
         sMD_n_paths: int | None = None,  # fixed number of paths; None = silhouette-selected
         sMD_max_frac_neg_dG_first_half: float = 0.25,  # pass-3 binding-well filter; <=0 disables
+        sMD_path_combination: str = 'eq21',  # 'eq21' (Wolf, Post & Stock 2023, Eq. 21) | 'linear' (p_eq mean)
         sMD_features: list | None = None,
         sMD_log_geom_features: bool | list = True,  # hybrid: log geom during pulling + merge into clustering
         sMD_plateau_frac: float = 0.4,  # force-plateau TS boundary as a fraction of peak |force|
@@ -393,6 +395,7 @@ class AutoPath:
         self.protocol_fname = protocol_fname
         # Steered MD
         self.run_sMDpulling = run_sMDpulling
+        self._sMD_outdir_base = sMD_outdir   # run() prefixes the ligand name per call
         self.sMD_outdir = sMD_outdir
         self.sMD_pulling_dir = sMD_pulling_dir
         self.sMD_max_pulling_dist = sMD_max_pulling_dist
@@ -403,6 +406,9 @@ class AutoPath:
         self.sMD_autostop_nc = sMD_autostop_nc
         self.sMD_autostop_nc_window = sMD_autostop_nc_window
         self.sMD_autostop_min_displacement = sMD_autostop_min_displacement
+        for _name, _val in (("sMD_time", sMD_time), ("sMD_steps_per_move", sMD_steps_per_move)):
+            if _val is not None:
+                raise ValueError(f"{_name} is not supported; set sMD_pulling_speeds and sMD_dx_per_move instead.")
         self.sMD_time = sMD_time
         self.sMD_pulling_speeds = sMD_pulling_speeds
         self.sMD_autostop_estimator = sMD_autostop_estimator
@@ -423,6 +429,7 @@ class AutoPath:
         self.sMD_path_model = str(sMD_path_model).lower()
         self.sMD_n_paths = sMD_n_paths
         self.sMD_max_frac_neg_dG_first_half = float(sMD_max_frac_neg_dG_first_half)
+        self.sMD_path_combination = validate_path_combination(sMD_path_combination)
         if self.sMD_path_model not in ('dtw', 'null'):
             raise ValueError(f"sMD_path_model must be 'dtw' or 'null', got {sMD_path_model!r}")
         self.sMD_features = sMD_features
@@ -477,12 +484,8 @@ class AutoPath:
         self.mMD_rct_ustride = mMD_rct_ustride
         self.mMD_dcd_interval = mMD_dcd_interval
         # VS mode
-        self.equilibration_checkpoint = False
-        self.pulling_checkpoint = False
         if VS_mode:
-            self.equilibration_checkpoint = True
-            self.eq_checkpoint_cutoff = 0.3  # nm
-            self.pulling_checkpoint = True
+            raise ValueError("VS_mode is not supported.")
 
         # Process the input PDB
         if do_fix_pdb:
@@ -490,8 +493,12 @@ class AutoPath:
                                   cap_termini=True,
                                   keep_heterogens=True, 
                                   pH=7.4)
-            self.protein_file = pdb_path.replace(".pdb", "_fixed.pdb")
-            save_pdb(protein_pdb.topology, protein_pdb.positions, self.protein_file)
+            root, ext = os.path.splitext(pdb_path)
+            self.protein_file = f"{root}_fixed{ext}"
+            # Parallel jobs share the receptor: write privately, then swap atomically
+            tmp = f"{root}_fixed.{os.getpid()}.tmp{ext}"
+            save_pdb(protein_pdb.topology, protein_pdb.positions, tmp)
+            os.replace(tmp, self.protein_file)
         else:
             self.protein_file = pdb_path
 
@@ -526,7 +533,7 @@ class AutoPath:
         else:
             sys_name = os.path.splitext(os.path.basename(self.protein_file))[0]
 
-        self.sMD_outdir = f"{sys_name}/{self.sMD_outdir}"
+        self.sMD_outdir = f"{sys_name}/{self._sMD_outdir_base}"
 
         os.makedirs(sys_name, exist_ok=True)
         
@@ -652,12 +659,6 @@ class AutoPath:
                 logger.error(f"Error computing RMSD/RMSF: {e}")
                 pass
 
-            # Equilibration VS checkpoint
-            # if self.equilibration_checkpoint:
-            #     final_rmsd = lig_rmsd_equilibration[-1:].values
-            #     if final_rmsd > self.eq_checkpoint_cutoff * 10:  # to Angs
-            #         logger.warning(f"Simulation for ligand {sys_name} terminated because ligand RMSD={final_rmsd:.2f} > {self.eq_checkpoint_cutoff}")
-            #         exit(1)
             # ligand_atoms = u_eq.select_atoms(f'index {" ".join(map(str, ligand_atoms_indices))}')
             # final_com = calculate_com_distance(u_eq, ligand_atoms, pocket_atoms, wrap=False)[-1] /10 # convert to nm
             # logger.info(f"COM distance after equilibration is: {final_com:.2f} nm")
@@ -708,6 +709,13 @@ class AutoPath:
         ##################################### Steered MD simulations #################################
         ##############################################################################################
         MERGE_CLUSTERING_FEATURES = False
+        # Autostop and the kept vALL record must cluster exactly like the final analysis
+        self._cluster_kwargs = dict(
+            group_A=_lig_sel_ha, group_B=self.sMD_clust_selection,
+            features=self.sMD_features, merge_features=MERGE_CLUSTERING_FEATURES,
+            ligand_sdf=ligand_file, geom_features=bool(self.sMD_log_geom_features),
+            recompute_distances=False,
+        )
         CONVERGENCE_TOLERANCES = {
             "dG_weighted-rmsd": 4.0,  # kJ/mol — must match tol_rmsd in check_convergence()
             "barrier_delta":    3.0,  # kJ/mol — must match tol_barrier
@@ -937,8 +945,9 @@ class AutoPath:
                             time.sleep(min(60, 10 * consecutive_failures))  # linear backoff
                             continue
                 else:
-                    logger.info(f"Running sMD for speed {speed} nm/ps with {reps} replicas.")
-                    for i in range(reps):
+                    n_done = len(glob(f"{sMD_traj_outdir}/sMD_*_v{speed}_{self.sMD_pulling_dir}.dat"))
+                    logger.info(f"Running sMD for speed {speed} nm/ps: {reps} replicas requested, {n_done} on disk.")
+                    for i in range(max(0, reps - n_done)):
                         existing = glob(f"{sMD_traj_outdir}/sMD_*_v{speed}_{self.sMD_pulling_dir}.dat")
                         if len(existing) >= self.sMD_max_replicas:
                             logger.warning(
@@ -1008,6 +1017,7 @@ class AutoPath:
                                     min_path_steps_ratio=0.6,
                                     max_frac_neg_dG_first_half=self.sMD_max_frac_neg_dG_first_half,
                                     min_speeds_for_extrapolation=2,
+                                    path_combination=self.sMD_path_combination,
                                     )
 
             smd_data = smdanalysis.run(smd_data,
@@ -1030,20 +1040,17 @@ class AutoPath:
 
             # Convergence over all speeds, with the same features as run() above and
             # the same estimator/window as the autostop loop (this is the kept record).
+            # Same first comparison rung as the autostop loop (its per-speed `reps`)
+            _reps = [r for r in self.sMD_pulling_speeds.values() if r is not None]
             conv_df, traces_df = smdanalysis.check_convergence(logs=logs,
                 estimator_name=self.sMD_autostop_estimator,
                 conv_window=self.sMD_conv_window,
-                group_A=_lig_sel_ha,
-                group_B=self.sMD_clust_selection,
-                features=self.sMD_features,
-                merge_features=MERGE_CLUSTERING_FEATURES,
-                ligand_sdf=ligand_file,
-                geom_features=bool(self.sMD_log_geom_features),
+                **({"min_replicas": min(_reps)} if _reps else {}),
+                **self._cluster_kwargs,
                 plateau_frac=self.sMD_plateau_frac,
                 cluster_to_boundary=self.sMD_cluster_to_boundary,
                 restrict_rmsd_to_boundary=self.sMD_cluster_to_boundary,
                 boundary_buffer_frac=self.sMD_boundary_buffer_frac,
-                recompute_distances=False,  # load precomputed pocket-distance caches
             )
             conv_df.to_csv(f"{sMD_analysis_outdir}/sMD_conv_vALL_metrics.csv", index=False)
             if not traces_df.empty:
@@ -1760,13 +1767,16 @@ class AutoPath:
                                   estimators=[self.sMD_autostop_estimator],
                                   do_plots=False, seed=self.random_state,
                                   temperature=self.temperature, outdir=outdir,
-                                  ligand_select=lig_sel)
+                                  ligand_select=lig_sel,
+                                  pocket_select=self.pocket_selection,
+                                  n_paths=self.sMD_n_paths,
+                                  path_combination=self.sMD_path_combination)
         conv_df, traces_df = smdanalysis.check_convergence(
             logs=logs, speeds=speeds,
             min_replicas=min_replicas,
             estimator_name=self.sMD_autostop_estimator,
             conv_window=self.sMD_conv_window,
-            geom_features=bool(self.sMD_log_geom_features),
+            **self._cluster_kwargs,
             plateau_frac=self.sMD_plateau_frac,
             cluster_to_boundary=self.sMD_cluster_to_boundary,
             restrict_rmsd_to_boundary=self.sMD_cluster_to_boundary,

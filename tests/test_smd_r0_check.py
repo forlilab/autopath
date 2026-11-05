@@ -36,7 +36,6 @@ def test_raises_when_cvpack_cv_disagrees_with_geometry(tmp_path, monkeypatch):
     )
     smd = SimpleNamespace(
         out_dir=str(tmp_path),
-        use_GReweighting=False,
         com_dist=SimpleNamespace(getValue=lambda *a, **k: 7.612 * openmmunit.nanometers),
         sMD_moves=2700,
         steps_per_move=1,

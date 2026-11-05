@@ -21,7 +21,11 @@ from autopath.pulling.Estimators import (
     ESTIMATOR_REGISTRY,
     trim_results_by_n_samples_support,
     calculate_weighted_pmf,
+    combine_paths_eq21,
+    effective_path_combination,
+    validate_path_combination,
     extrapolate_to_v0,
+    force_v0_dG,
     _find_pmf_peak,
     recover_spring_constant,
 )
@@ -90,8 +94,8 @@ class SMDAnalysis:
        (:class:`DTWPathModel`) or a user-supplied path model.
     3. Estimate ΔG and W_diss per (speed, path, step) using
        Jarzynski and/or Cumulant estimators.
-    4. Build a mixture PMF weighted by equilibrium path probabilities
-       (p_eq), then extrapolate to v→0 when multiple speeds are present.
+    4. Combine per-path profiles into a mixture PMF (``path_combination``),
+       then extrapolate to v→0 when multiple speeds are present.
     5. Compute friction (γ) from the dissipative work profile and
        estimate k_off via Kramers/Pontryagin MFPT.
     6. Write CSV outputs and optional diagnostic plots.
@@ -102,6 +106,13 @@ class SMDAnalysis:
         Warn when the max/min replica count ratio across paths exceeds this
         value (default 3.0).  Logged in :meth:`_path_filtering` after the
         replica-balance report per speed.
+    path_combination : str, optional
+        How per-path profiles are combined, in both :meth:`run` and
+        :meth:`check_convergence`: ``'eq21'`` (default) uses
+        ``exp(-beta dG) = sum_k p_neq,k exp(-beta dG_k)`` (Wolf, Post & Stock
+        2023, Eq. 21) with ``Wdiss = <W> - dG``; ``'linear'`` is the p_eq-weighted
+        mean of each column. Per-speed force profiles are always mixed linearly;
+        with ``'eq21'`` the force v->0 dG comes from :func:`force_v0_dG`.
     """
 
     def __init__(self,
@@ -126,6 +137,7 @@ class SMDAnalysis:
         min_speeds_for_extrapolation: int = 2,
         replica_imbalance_threshold: float = 3.0,
         hummer_szabo: dict | None = None,
+        path_combination: str = 'eq21',
     ):
         self.sysname = sysname
         self.n_paths = n_paths
@@ -145,6 +157,7 @@ class SMDAnalysis:
         self.min_speeds_for_extrapolation = min_speeds_for_extrapolation
         self.replica_imbalance_threshold = replica_imbalance_threshold
         self.hummer_szabo = hummer_szabo
+        self.path_combination = validate_path_combination(path_combination)
         self.hs_result = None
         self.support_policy = SupportPolicy(
             min_samples_per_step=self.min_samples_per_step,
@@ -237,6 +250,15 @@ class SMDAnalysis:
             )
         return kept
     
+    def _convergence_paths(self, feat_df_cl, r_range):
+        """Path labels for convergence checks, using the same path model and K as run()."""
+        if isinstance(self.path_model, NullPathModel):
+            model = NullPathModel()
+        else:
+            model = DTWPathModel(seed=self.seed, do_plots=False, outdir=self.outdir)
+        return model.fit_transform(feat_df_cl, r_range=r_range, n_paths=self.n_paths,
+                                   cluster_across_speeds=False, persist_medoids=False)
+
     def _setup_path_model(self, path_model: Union[PathModel, str]):
         if isinstance(path_model, str):
             if path_model == 'dtw':
@@ -551,9 +573,11 @@ class SMDAnalysis:
 
         self._write_path_quality(sMDDdata, weights_by_estimator)
 
+        logger.info(f"[mixture] path_combination={self.path_combination}")
         self.mixture_pmfs = calculate_weighted_pmf(
             smd_data=sMDDdata,
             weights_by_estimator=weights_by_estimator,
+            path_combination=self.path_combination,
         )
 
         if self.mixture_pmfs.empty or 'speed' not in self.mixture_pmfs.columns:
@@ -573,6 +597,20 @@ class SMDAnalysis:
                     weighted_pmf_v0[pcol] = v0_df
         else:
             logger.warning("Not enough speeds to perform v=0 extrapolation. Skipping.")
+
+        if self.path_combination == 'eq21' and 'dG' in weighted_pmf_v0 and \
+           any(e.name == 'force' for e in active_estimators):
+            _dg = weighted_pmf_v0['dG']
+            _fv0 = force_v0_dG(
+                sMDDdata.results[sMDDdata.results['estimator'] == 'force'],
+                p_neq_by_speed=sMDDdata.get_p_neq(byspeed=True),
+                beta=sMDDdata.beta,
+                min_trajs_per_path=self.support_policy.min_trajs_per_path,
+                min_speeds=self.min_speeds_for_extrapolation,
+                realized_speed_map=sMDDdata.realized_speed_map,
+            )
+            weighted_pmf_v0['dG'] = pd.concat(
+                [_dg[_dg['estimator'] != 'force'], _fv0], ignore_index=True)
 
         # Fold v=0 extrapolated rows into mixture_pmfs (speed=0.0 rows with stat columns).
         # Rename R2 to {param}_R2 to distinguish dG vs Wdiss fit quality.
@@ -843,6 +881,14 @@ class SMDAnalysis:
                 trim_fraction=trim_fraction,
                 min_common_points=min_common_points,
                 conv_window=conv_window,
+                feature_kwargs=dict(group_A=group_A, group_B=group_B, features=features,
+                                    merge_features=merge_features, ligand_sdf=ligand_sdf,
+                                    geom_features=geom_features, geom_merge=geom_merge,
+                                    recompute_distances=recompute_distances),
+                tol_rmsd=tol_rmsd, tol_barrier=tol_barrier, tol_r_ts=tol_r_ts,
+                plateau_frac=plateau_frac, boundary_buffer_frac=boundary_buffer_frac,
+                min_samples_per_step_conv=min_samples_per_step_conv,
+                min_trajs_per_path_conv=min_trajs_per_path_conv,
             )
             return conv_df, pd.DataFrame()
 
@@ -915,14 +961,7 @@ class SMDAnalysis:
                         f"(excludes bulk-solvent tail)."
                     )
 
-            clusterer = DTWPathModel(
-                seed=self.seed,
-                do_plots=False,
-                outdir=self.outdir,
-            )
-            path_mappings = clusterer.fit_transform(feat_df_cl, r_range=fit_r_range,
-                                                    cluster_across_speeds=False,
-                                                    persist_medoids=False)
+            path_mappings = self._convergence_paths(feat_df_cl, fit_r_range)
 
             smd.raw_data['path'] = smd.raw_data['trajname'].map(path_mappings)
 
@@ -993,6 +1032,8 @@ class SMDAnalysis:
                     trim_fraction=trim_fraction,
                     policy=conv_policy,
                     return_paths=True,
+                    path_combination=effective_path_combination(
+                        estimator_name, self.path_combination),
                 )
 
                 # Do not append an empty PMF: it would bypass the history initialization below.
@@ -1264,13 +1305,24 @@ class SMDAnalysis:
         trim_fraction: float = 0.0,
         policy: "SupportPolicy | None" = None,
         return_paths: bool = False,
+        path_combination: str = 'eq21',
     ) -> "pd.Series | tuple[pd.Series, dict, int]":
         """Build the mixture PMF series.
 
         ``return_paths=True`` also returns ``(per_path, n_paths)``: ``per_path`` is
         ``{step: {path: value}}`` over paths with ``p_eq > 0``, and ``n_paths`` is
         the number of such paths.
+
+        ``path_combination='eq21'`` mixes paths with ``p_eq > 0`` by Eq. 21 with
+        p_neq renormalised per step (``value_col`` in {'dG', 'Wdiss', 'Wmean'});
+        ``'linear'`` takes the p_eq-weighted mean of ``value_col``. Callers pass
+        ``'linear'`` for the force estimator.
         """
+        validate_path_combination(path_combination)
+        if path_combination == 'eq21' and value_col not in ('dG', 'Wdiss', 'Wmean'):
+            raise ValueError(
+                f"path_combination='eq21' does not support value_col={value_col!r}"
+            )
         empty = (pd.Series(dtype=float), {}, 0) if return_paths else pd.Series(dtype=float)
 
         if results_df.empty or value_col not in results_df.columns:
@@ -1316,6 +1368,17 @@ class SMDAnalysis:
         per_path_out: dict = {}
         for step in grid_steps:
             slice_step = results_df[results_df['step'] == step]
+            if path_combination == 'eq21':
+                val = SMDAnalysis._eq21_step_value(
+                    slice_step, contributing_paths, p_neq, beta, value_col,
+                    per_path_out.setdefault(int(step), {}) if return_paths else None,
+                )
+                if return_paths and not per_path_out[int(step)]:
+                    del per_path_out[int(step)]
+                if val is not None:
+                    out[int(step)] = val
+                continue
+
             vals = []
             ws = []
 
@@ -1339,6 +1402,31 @@ class SMDAnalysis:
             return series, per_path_out, len(contributing_paths)
         return series
     
+    @staticmethod
+    def _eq21_step_value(
+        slice_step: pd.DataFrame,
+        paths: set,
+        p_neq: dict,
+        beta: float,
+        value_col: str,
+        per_path: dict | None = None,
+    ) -> float | None:
+        """Eq. 21 mixture of ``value_col`` at one step; None if no path contributes."""
+        dG, Wmean, p = [], [], []
+        for _, row in slice_step.iterrows():
+            path = row['path']
+            if path not in paths or pd.isna(row['dG']):
+                continue
+            dG.append(float(row['dG']))
+            Wmean.append(float(row['Wmean']) if 'Wmean' in row.index else np.nan)
+            p.append(float(p_neq[path]))
+            if per_path is not None and pd.notna(row[value_col]):
+                per_path[path] = float(row[value_col])
+        if not dG:
+            return None
+        dG_mix, Wmean_mix = combine_paths_eq21(dG, Wmean, p, beta)
+        return {'dG': dG_mix, 'Wmean': Wmean_mix, 'Wdiss': Wmean_mix - dG_mix}[value_col]
+
     def _write_path_quality(
         self,
         sMDDdata: SMDData,
