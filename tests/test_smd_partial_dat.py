@@ -40,6 +40,5 @@ def test_crashed_pull_leaves_no_dat(tmp_path, monkeypatch):
     )
     with pytest.raises(_Crash):
         SteeredMD.pull_single_direction(smd, sim, run_id="replica-1_v0.01_forward",
-                                        direction="forward",
-                                        lambda0=1.5 * openmmunit.nanometers)
+                                        direction="forward")
     assert glob.glob(f"{tmp_path}/sMD_*.dat") == []
