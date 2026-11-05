@@ -139,6 +139,7 @@ def main():
             sMD_path_model=config.sMD_path_model,
             sMD_n_paths=config.sMD_n_paths,
             sMD_max_frac_neg_dG_first_half=config.sMD_max_frac_neg_dG_first_half,
+            sMD_path_combination=config.sMD_path_combination,
             sMD_features=config.sMD_features,
             sMD_log_geom_features=config.sMD_log_geom_features,
             sMD_plateau_frac=config.sMD_plateau_frac,

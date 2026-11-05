@@ -1,5 +1,6 @@
 import time
 import math
+from copy import deepcopy
 
 from openmm import *
 from openmm.app import *
@@ -143,7 +144,9 @@ class VanillaMD:
             self.temperature, 1 / openmmunit.picoseconds, self.timestep
         )
 
-        simulation = Simulation(self.topology, self.system, integrator, self.platform)
+        # Restrain a copy: self.system stays clean for later runs and for the saved XML
+        system = deepcopy(self.system)
+        simulation = Simulation(self.topology, system, integrator, self.platform)
 
         if state_file is not None:
             logger.info(f"Loading state from {state_file}")
@@ -172,7 +175,7 @@ class VanillaMD:
         input_positions = simulation.context.getState(getPositions=True).getPositions()
         if self.restrained_atoms is not None:
             add_harmonic_restraints(
-                self.system,
+                system,
                 input_positions,
                 self.topology,
                 self.restrained_atoms,

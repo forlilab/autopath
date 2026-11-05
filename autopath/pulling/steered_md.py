@@ -19,13 +19,7 @@ import cvpack
 import logging
 logger = logging.getLogger("autopath")
 
-try:
-    from openmmtools.integrators import LangevinSplittingGirsanov
-    from reweightingreporter import ReweightingReporter
-except ImportError:
-    girsanov = False
-    logger.warning("Please install openmmtools to use Girsanov reweighting.")
-    
+
 class SteeredMD:
     """Steered molecular dynamics: pull a ligand along a COM-COM reaction
     coordinate using a moving harmonic restraint.
@@ -95,7 +89,6 @@ class SteeredMD:
         sMD_max_r_offset: float = 3.0,   # max displacement offset (nm): cap pull at r0 + offset nm (also capped by PBC half-box minus pbc_safety_nm)
         pbc_safety_nm: float = 0.5,      # nm — safety margin subtracted from the per-axis PBC half-box cap (raise for large proteins)
         use_NVT: bool = False,  # Use NVT ensemble
-        use_GReweighting: bool = False,
         out_dir: str = None,
         platform: str = "fastest",
         dx_per_move: float = 0.001,        # nm — RC grid spacing (held constant across speeds)
@@ -133,14 +126,6 @@ class SteeredMD:
         self.use_NVT = use_NVT
 
         self.integrator_friction = 1.0 / openmmunit.picoseconds  # Friction coefficient for Langevin integrator
-        self.use_GReweighting = use_GReweighting
-        if self.use_GReweighting:
-            if not girsanov:
-                logger.error("Disabled Girsanov reweighting because openmmtools is not installed.")
-                self.use_GReweighting = False
-            else:
-                logger.info("Using Girsanov reweighting for steered MD.")
-
         self.platform = select_platform(platform)
 
         # Sweep-fixed parameters: identical for every replica/speed in a sweep,
@@ -220,17 +205,6 @@ class SteeredMD:
             logperiod=self.save_freq*self.steps_per_move, # steps
             verbose=0 #verbose level
         )
-
-        if self.use_GReweighting:
-            # NOTE: 'unperturebed' and 'firtsPertubation' are the canonical parameter names in
-            # ReweightingReporter.__init__ (autopath/reweightingreporter.py) — the
-            # misspellings are in the class definition itself and must be matched here.
-            simulation.reporters.append(ReweightingReporter(f"{self.out_dir}/sMD_{run_id}.dat",
-                                                            self.steps_per_move,
-                                                            simulation.integrator,
-                                                            unperturebed=True,
-                                                            firtsPertubation=True,
-                                                            ))
 
         # Set the initial r0 parameter
         initial_r0 = self.com_dist.getValue(simulation.context, allowReinitialization=False)
@@ -358,7 +332,9 @@ class SteeredMD:
         # instead of re-deriving them.
         _k_spring_val = self.sMD_spring_cte.value_in_unit(
             openmmunit.kilojoules_per_mole / openmmunit.nanometer**2)
-        with open(f"{self.out_dir}/sMD_{run_id}.dat", "w") as f:
+        # Write to .part and rename at the end: a crashed pull leaves no .dat to count as a replica
+        dat_path = f"{self.out_dir}/sMD_{run_id}.dat"
+        with open(dat_path + ".part", "w") as f:
             f.write(f"# spring_constant_kJ_mol_nm2={_k_spring_val:.10g}\n")
             f.write(f"# requested_speed_nm_per_ps={getattr(self, '_requested_speed', float('nan')):.10g}\n")
             f.write(f"# realized_speed_nm_per_ps={getattr(self, '_realized_speed', float('nan')):.10g}\n")
@@ -460,6 +436,7 @@ class SteeredMD:
 
             if _buf:
                 f.write(''.join(_buf))
+        os.replace(dat_path + ".part", dat_path)
 
         if geom_fh is not None:
             if geom_buf:
@@ -543,23 +520,8 @@ class SteeredMD:
             self._params_logged_speeds.add(pulling_speed)
         ########################################################################################
         
-        if self.use_GReweighting:
-            integrator = LangevinSplittingGirsanov(
-                nstxout = self.steps_per_move,   
-                temperature = self.temperature,
-                collision_rate = self.integrator_friction,
-                timestep = self.timestep,
-                splitting = "R V O V R",        # ABOBA – reweightable
-                constraint_tolerance = 1.0e-6,
-            )
-        else:
-            # This is the default openMM but do not track work
-            # dicussion https://github.com/openmm/openmm/issues/2520
-            integrator = LangevinMiddleIntegrator(self.temperature, 
-                                                self.integrator_friction, 
-                                                self.timestep
-                                                # constraint_tolerance = 1.0e-6
-                                                )
+        # The OpenMM default; it does not track work (discussion https://github.com/openmm/openmm/issues/2520)
+        integrator = LangevinMiddleIntegrator(self.temperature, self.integrator_friction, self.timestep)
                     
         system = deepcopy(self.system)  # Create a copy of the system to avoid modifying the original
         simulation = Simulation(self.topology, system, integrator, self.platform)
@@ -696,6 +658,8 @@ class SteeredMD:
         
         self.com_dist.setForceGroup(3)  # Use a separate force group for the CV GROUP 3
         system.addForce(self.com_dist)
+        # cvpack CVs are real forces (U = r): read group 3, never integrate it
+        simulation.integrator.setIntegrationForceGroups(set(range(32)) - {3})
 
         simulation.context.reinitialize(preserveState=True)
 

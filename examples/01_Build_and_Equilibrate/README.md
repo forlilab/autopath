@@ -25,7 +25,7 @@ Note: Heterogens, such as waters, ligands or cofactors, can be removed or retain
 ## System assembly
 
 Depending on the user input, the script can assemble
-Protein+Ligand | Protein | Ligand systems.
+Protein+Ligand | Protein systems.
 
 * Solvation (default: dodecahedral box). Other options available.
 

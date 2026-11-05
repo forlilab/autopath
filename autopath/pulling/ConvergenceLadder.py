@@ -31,7 +31,6 @@ import pandas as pd
 from autopath.pulling.AnalysisSMD import SMDAnalysis
 from autopath.pulling.Convergence import window_mean_pmf, window_reference_scalar
 from autopath.pulling.Estimators import KramersEstimator, extrapolate_to_v0
-from autopath.pulling.PathModel import DTWPathModel
 from autopath.pulling.SMDData import SMDData
 from autopath.pulling.support import SupportPolicy
 
@@ -58,7 +57,8 @@ def _ladder_defaults() -> dict:
     }
 
 
-def _speed_state(sa, smd, speed, plateau_frac, boundary_buffer_frac, trim_fraction=0.1):
+def _speed_state(sa, smd, speed, plateau_frac, boundary_buffer_frac, trim_fraction=0.1,
+                 feature_kwargs=None):
     """Per-speed setup mirroring check_convergence: boundary, clustering.
 
     Returns
@@ -83,11 +83,11 @@ def _speed_state(sa, smd, speed, plateau_frac, boundary_buffer_frac, trim_fracti
     # merge_features=False) clusters on trace + inline-geom features only, so
     # the pocket-ligand distance selection is never consulted regardless of
     # what it's set to.
-    feat_df, _ = sa._build_cluster_feature_df(
-        smd, group_A=None, group_B=None, features=None,
-        merge_features=False, ligand_sdf=None,
-        geom_features=True, geom_merge="aligned", recompute_distances=False,
-    )
+    kw = dict(group_A=None, group_B=None, features=None, merge_features=False,
+              ligand_sdf=None, geom_features=True, geom_merge="aligned",
+              recompute_distances=False)
+    kw.update(feature_kwargs or {})
+    feat_df, _ = sa._build_cluster_feature_df(smd, **kw)
     feat_df_cl, fit_r_range = feat_df, 1 - trim_fraction
     if boundary_cap is not None:
         r_of_step = protocol_grid.reindex(feat_df["step"]).to_numpy(dtype=float)
@@ -95,8 +95,7 @@ def _speed_state(sa, smd, speed, plateau_frac, boundary_buffer_frac, trim_fracti
         if len(restricted) >= 2:
             feat_df_cl, fit_r_range = restricted, None
 
-    clusterer = DTWPathModel(seed=sa.seed, do_plots=False, outdir=sa.outdir)
-    mappings = clusterer.fit_transform(feat_df_cl, r_range=fit_r_range)
+    mappings = sa._convergence_paths(feat_df_cl, fit_r_range)
     smd.raw_data["path"] = smd.raw_data["trajname"].map(mappings)
 
     speed_data = smd.raw_data[smd.raw_data["speed"] == speed].copy()
@@ -181,7 +180,9 @@ def force_convergence_ladder(sa, logs, speeds,
                              trace_min_replicas: int = 3,
                              trim_fraction: float = 0.1,
                              min_common_points: int = 5,
-                             conv_window: int = 5) -> pd.DataFrame:
+                             conv_window: int = 5,
+                             feature_kwargs: dict | None = None,
+                             **overrides) -> pd.DataFrame:
     """Multi-speed convergence ladder for the force estimator.
 
     At rung k, each speed contributes its first k replicas; per-speed weighted
@@ -209,7 +210,8 @@ def force_convergence_ladder(sa, logs, speeds,
         Same columns as ``check_convergence``'s convergence frame, with
         ``speed`` set to the string ``"ALL"`` (the row mixes every speed).
     """
-    defaults = _ladder_defaults()
+    # check_convergence passes its own (possibly overridden) values; signature defaults otherwise
+    defaults = {**_ladder_defaults(), **overrides}
     tol = {
         "dG_weighted-rmsd": defaults["tol_rmsd"],
         "barrier_delta": defaults["tol_barrier"],
@@ -234,7 +236,8 @@ def force_convergence_ladder(sa, logs, speeds,
         smd = SMDData(speed_logs, sysname=sa.sysname, temperature=sa.temperature,
                       reference_pdb=sa.reference_pdb)
         protocol_grid, boundary_cap, speed_data = _speed_state(
-            sa, smd, speed, plateau_frac, boundary_buffer_frac, trim_fraction)
+            sa, smd, speed, plateau_frac, boundary_buffer_frac, trim_fraction,
+            feature_kwargs)
         traj_order = [os.path.basename(f)[:-4] for f in speed_logs]
         per_speed[speed] = {
             "smd": smd,
@@ -249,6 +252,9 @@ def force_convergence_ladder(sa, logs, speeds,
         }
 
     K = min(len(per_speed[s]["order"]) for s in speeds)
+    # Regress on realized speeds, exactly as run() does
+    realized = {k: v for s in speeds
+                for k, v in (per_speed[s]["smd"].realized_speed_map or {}).items()} or None
     # RMSD cap for the extrapolated PMF: use the slowest speed's boundary,
     # because the extrapolated v->0 PMF has no force profile of its own to
     # detect a rupture boundary from -- the slowest (least-dissipative) speed
@@ -303,6 +309,7 @@ def force_convergence_ladder(sa, logs, speeds,
                 results_df=res, path_traj_counts=st["counts"],
                 value_col="dG", beta=st["smd"].beta,
                 trim_fraction=trim_fraction, policy=conv_policy,
+                path_combination="linear",  # force is always mixed linearly
             )
             if series.empty:
                 continue
@@ -319,7 +326,7 @@ def force_convergence_ladder(sa, logs, speeds,
 
         extrap = extrapolate_to_v0(pd.concat(frames, ignore_index=True),
                                    param="dG_weighted", speeds=speeds,
-                                   min_speeds=2)
+                                   min_speeds=2, realized_speed_map=realized)
         if extrap is None or extrap.empty:
             continue
         pmf_k = (extrap.set_index("step")["dG_weighted"]

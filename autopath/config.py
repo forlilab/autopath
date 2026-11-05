@@ -67,6 +67,7 @@ class Config(object):
         sMD_path_model: str = "dtw",  # "dtw" | "null" ("null" = no clustering: one path)
         sMD_n_paths: int = None,  # fixed number of paths; None = silhouette-selected
         sMD_max_frac_neg_dG_first_half: float = 0.25,  # pass-3 binding-well filter; <=0 disables
+        sMD_path_combination: str = "eq21",  # "eq21" | "linear" per-path profile recombination
         sMD_features: list = None,
         sMD_log_geom_features: bool = True,  # log geom features during pulling + merge into clustering
         sMD_plateau_frac: float = 0.4,  # force-plateau TS boundary: fraction of peak |force|
@@ -82,9 +83,7 @@ class Config(object):
         General
         ~~~~~~~
         VS_mode : bool, optional
-            Enable virtual-screening mode.  Activates equilibration and pulling
-            checkpoints to terminate early if the ligand drifts from the binding
-            site.  Default ``False``.
+            Not supported; ``True`` raises ``ValueError``.  Default ``False``.
         pdb_path : str, optional
             Path to the input protein-ligand PDB file.
         do_fix_pdb : bool, optional
@@ -209,11 +208,9 @@ class Config(object):
             instead of finishing one speed before starting the next.  Default
             ``False``.
         sMD_time : int, optional
-            Maximum pulling time in ns (overrides step-count calculation when
-            set).  Default ``None``.
+            Not supported; any value raises ``ValueError``.  Default ``None``.
         sMD_steps_per_move : int, optional
-            Number of MD steps per pull increment (overrides ``sMD_dx_per_move``
-            when set).  Default ``None``.
+            Not supported; any value raises ``ValueError``.  Default ``None``.
         sMD_dx_per_move : float, optional
             COM displacement increment per move in nm.  Default ``0.001``.
         sMD_spring_cte : float, optional
@@ -250,6 +247,11 @@ class Config(object):
             Pass-3 binding-well filter: maximum fraction of the first half of a
             path's ΔG trace allowed to be negative before the path is discarded.
             Values ``<= 0`` disable the filter.  Default ``0.25``.
+        sMD_path_combination : str, optional
+            How per-path profiles are combined: ``"eq21"`` (free-energy
+            exponential average weighted by trajectory fraction; Wolf, Post &
+            Stock 2023, Eq. 21) or ``"linear"`` (p_eq-weighted mean).
+            Default ``"eq21"``.
         sMD_features : list, optional
             Extra per-frame features to include in path clustering, beyond
             ligand COM distance.  ``None`` uses the built-in feature set.
@@ -332,6 +334,7 @@ class Config(object):
         self.sMD_path_model = sMD_path_model
         self.sMD_n_paths = sMD_n_paths
         self.sMD_max_frac_neg_dG_first_half = sMD_max_frac_neg_dG_first_half
+        self.sMD_path_combination = sMD_path_combination
         self.sMD_features = sMD_features
         self.sMD_log_geom_features = sMD_log_geom_features
         self.sMD_plateau_frac = sMD_plateau_frac
@@ -396,17 +399,22 @@ class Config(object):
             logging.error(f"Config file {config} is not valid JSON.")
             raise
 
-        # Flatten the nested dictionary structure
-        flattened_config = {}
-        for section, params in config_data.items():
-            if isinstance(params, dict):
-                for key, value in params.items():
-                    flattened_config[key] = value
-
-        # Backward compatibility with old config keys
+        expected_keys = cls.get_defaults_dict().keys()
         legacy_map = {
             "equilibration_scheme": "protocol_fname",
         }
+        legacy_keys = set(legacy_map) | {"sMD_replicas"}
+
+        # A top-level parameter name is a value even when dict-valued; other dicts are sections.
+        flattened_config = {}
+        for section, params in config_data.items():
+            if isinstance(params, dict) and section not in expected_keys and section not in legacy_keys:
+                for key, value in params.items():
+                    flattened_config[key] = value
+            else:
+                flattened_config[section] = params
+
+        # Backward compatibility with old config keys
         for old_key, new_key in legacy_map.items():
             if old_key in flattened_config and new_key not in flattened_config:
                 flattened_config[new_key] = flattened_config.pop(old_key)
@@ -432,7 +440,6 @@ class Config(object):
                     speed_map[speed] = reps
             flattened_config["sMD_pulling_speeds"] = speed_map
 
-        expected_keys = cls.get_defaults_dict().keys()
         bad_keys = [k for k in flattened_config if k not in expected_keys]
         if bad_keys:
             err_msg = "Unexpected keys in Config.from_config():" + os.linesep

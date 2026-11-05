@@ -14,11 +14,6 @@ from autopath.utils import *
 from autopath.customForces import add_flatbottom_COM_restraints, add_harmonic_restraints, print_current_forces, remove_openmm_force
 from autopath.equilibration import warm_up_system
 
-try:
-    from openmmtools.integrators import LangevinSplittingGirsanov
-    from reweightingreporter import ReweightingReporter
-except ImportError:
-    logger.warning("Please install openmmtools to use Girsanov reweighting.")
 
 class RelaxMD:
     """Short equilibration / relaxation MD runner.
@@ -51,10 +46,6 @@ class RelaxMD:
     platform : str, optional
         OpenMM platform name or ``"fastest"`` to auto-select the best
         available platform.
-    use_GReweighting : bool, optional
-        When True, the Girsanov-reweighted Langevin integrator
-        (``LangevinSplittingGirsanov``) from openmmtools is used. Requires
-        optional dependencies ``openmmtools`` and ``reweightingreporter``.
 
     Note
     ----
@@ -73,7 +64,6 @@ class RelaxMD:
         timestep: float = 0.004,  # 4 fs timestep — safe with HMR
         temp: float = 300,
         platform: str = "fastest",
-        use_GReweighting: bool = False,
     ) -> None:
 
         os.makedirs(out_dir, exist_ok=True)
@@ -89,14 +79,6 @@ class RelaxMD:
         self.is_membrane = is_membrane
 
         self.platform = select_platform(platform)
-
-        self.use_GReweighting = use_GReweighting
-        if self.use_GReweighting:
-            try:
-                from openmmtools.integrators import LangevinSplittingGirsanov
-                from reweightingreporter import ReweightingReporter
-            except ImportError:
-                raise ImportError("Please install openmmtools to use Girsanov reweighting.")
 
         return None
 
@@ -144,19 +126,7 @@ class RelaxMD:
         start_time = time.monotonic()
 
         logger.debug("Setting up the integrator..")
-        if self.use_GReweighting:
-            integrator = LangevinSplittingGirsanov(
-                nstxout=100000000,  # output frequency irrelevant for this short stage
-                temperature=self.temperature,
-                collision_rate=1.0 / openmmunit.picoseconds,
-                timestep=self.timestep,
-                splitting="R V O V R",       # ABOBA splitting — required for Girsanov reweighting
-                constraint_tolerance=1.0e-6,
-            )
-        else:
-            integrator = LangevinMiddleIntegrator(self.temperature,
-                                                  1.0 / openmmunit.picoseconds,
-                                                  self.timestep)
+        integrator = LangevinMiddleIntegrator(self.temperature, 1.0 / openmmunit.picoseconds, self.timestep)
 
         simulation = Simulation(self.topology, system, integrator, self.platform)
 
