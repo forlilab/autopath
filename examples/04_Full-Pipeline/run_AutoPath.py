@@ -36,10 +36,12 @@ def main():
 
     # Settings shared by both phases (defaults of the AutoPath paper)
     settings = dict(
-        # Pocket for the pulling CV. None = CA atoms of residues within 8 A of the ligand.
-        # A list of residue numbers in the ORIGINAL receptor PDB is translated to system
-        # numbering automatically, e.g. pocket_selection=[189, 190, 195, 213, 214, 215, 216, 226]
-        pocket_selection=None,
+        # Pocket for the pulling CV: CA atoms of the beta-sheet core around the S1 site, as
+        # residue numbers of the ORIGINAL receptor PDB (translated to system numbering).
+        # None = protein CA atoms within 8 A of the ligand heavy atoms.
+        pocket_selection=[133, 134, 135, 136, 137, 138, 139, 140, 156, 157, 158, 159, 160, 161, 162,
+                          180, 181, 182, 183, 196, 197, 198, 199, 200, 201, 204, 205, 206, 207, 208,
+                          209, 210, 211, 212, 213, 214, 215, 226, 227, 228, 229, 230],
 
         # System preparation
         padding=1.2,              # nm
