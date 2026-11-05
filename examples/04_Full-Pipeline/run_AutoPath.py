@@ -59,13 +59,14 @@ def main():
                        207, 208, 209, 210, 211, 212, 213, 214, 215, 196, 197, 198, 
                        199, 200, 201, 133, 134, 135, 136, 137, 138, 139, 140, 156, 
                        157, 158, 159, 160, 161, 162]
-    pocket_selection = f'resid {" ".join(map(str, pocket_residues))} and name CA'
+    # beta-sheet core CAs, numbered as in the ORIGINAL receptor PDB (translated to system numbering)
+    pocket_selection = pocket_residues
     
     ap = AutoPath(pdb_path=receptor,
                     pocket_selection=pocket_selection,
 
-                    do_fix_pdb=False,
-                    run_preparation=False,
+                    do_fix_pdb=True,
+                    run_preparation=True,
                     padding=1.2,
                     hydrogenMass=1.5, 
                     ionicStrength=0.15,
@@ -75,10 +76,10 @@ def main():
                     
                     platform='OpenCL',
                     
-                    run_equilibration=False,
+                    run_equilibration=True,
                     protocol_fname=protocol,
 
-                    run_sMDpulling=False,
+                    run_sMDpulling=True,
                     sMD_outdir='sMD',
                     sMD_ligand_anchor_mode='murcko',
                     sMD_converge_speeds=True,
