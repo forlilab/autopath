@@ -442,12 +442,19 @@ class SMDData:
         Falls back to the plain integer ID (as a ``datetime`` offset from the
         epoch, so the key type stays comparable) if the mtime cannot be read.
         """
-        idx = SMDData._replica_idx_from_log(fn)
+        try:
+            idx = SMDData._replica_idx_from_log(fn)
+            hh, mm, ss = idx // 10000, (idx // 100) % 100, idx % 100
+            datetime.min.replace(hour=hh, minute=mm, second=ss)
+        except (ValueError, IndexError) as exc:
+            raise ValueError(
+                f"Cannot order replica log {fn}: not supported, expected "
+                "'sMD_replica-HHMMSS..._v<speed>_<dir>.dat' with a valid HHMMSS run id"
+            ) from exc
         try:
             end = datetime.fromtimestamp(os.path.getmtime(fn))
         except OSError:
             return datetime.fromtimestamp(0) + timedelta(seconds=idx)
-        hh, mm, ss = idx // 10000, (idx // 100) % 100, idx % 100
         start = end.replace(hour=hh, minute=mm, second=ss, microsecond=0)
         if start > end:  # the run crossed midnight
             start -= timedelta(days=1)
