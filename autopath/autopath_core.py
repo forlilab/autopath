@@ -626,6 +626,9 @@ class AutoPath:
         _lig_sel_ha = f"({ligand_selection}) and not name H*"
 
         equilibrated_traj = equilibrated_traj.replace(".dcd", "_aligned.dcd")
+        if self.run_sMDpulling and not os.path.exists(equilibrated_traj):
+            raise FileNotFoundError(
+                f"{equilibrated_traj} is missing; rerun equilibration (run_equilibration=True).")
         if os.path.exists(equilibrated_traj):
             u_eq = mda.Universe(equilibrated_pdb, equilibrated_traj, in_memory=True)
             is_peptide = u_eq.select_atoms(ligand_selection).n_residues > 1
@@ -742,7 +745,7 @@ class AutoPath:
 
             if self.sMD_spring_cte is None:
                 sMD_spring_cte = sMD_spring_cte_per_atom * len(ligand_total_hatoms)  # Normalize by ligand size
-                logger.info(f"Spring constant set to {sMD_spring_cte} KJ/mol/nm2 for {len(ligand_atoms_indices)} atoms.")
+                logger.info(f"Spring constant set to {sMD_spring_cte} KJ/mol/nm2 for {len(ligand_total_hatoms)} atoms.")
             else:
                 sMD_spring_cte = self.sMD_spring_cte
 

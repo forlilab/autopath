@@ -2,7 +2,6 @@ import numpy as np
 import pandas as pd
 from abc import ABC, abstractmethod
 
-import statsmodels.formula.api as smf
 from scipy import special
 from scipy.stats import linregress
 from scipy.signal import savgol_filter, find_peaks
@@ -325,6 +324,8 @@ class FrictionEstimator(BaseEstimator):
             data = data[data['estimator'] == estimator]
         if self.speeds is not None:
             data = data[data['speed'].isin(self.speeds)]
+        # speed=0 rows are the v->0 extrapolation, not a measured speed
+        data = data[data['speed'] > 0]
 
         group_cols = ['estimator', 'speed']
         if 'path' in data.columns:
@@ -402,6 +403,8 @@ class FrictionEstimator(BaseEstimator):
             data = data[data['estimator'] == estimator]
         if self.speeds is not None:
             data = data[data['speed'].isin(self.speeds)]
+        # speed=0 rows are the v->0 extrapolation, not a measured speed
+        data = data[data['speed'] > 0]
 
         if 'estimator' not in data.columns:
             data['estimator'] = estimator if estimator is not None else 'unknown'
@@ -2036,7 +2039,6 @@ def extrapolate_to_v0(
     results: pd.DataFrame,
     param: str = 'dG_weighted',
     speeds: list[float] | None = None,
-    mixed_models: bool = False,
     min_speeds: int = 2,
     realized_speed_map: dict | None = None,
 ) -> pd.DataFrame:
@@ -2059,9 +2061,6 @@ def extrapolate_to_v0(
     speeds : list[float] | None
         Optional subset of speeds to include.  If *None*, all speeds
         are used.
-    mixed_models : bool
-        If *True*, fit a mixed-effects linear model (random
-        intercept + slope per step); otherwise simple OLS per step.
     min_speeds : int
         Minimum number of distinct speeds required at a step to include
         it in the extrapolation.  Default 2 (need at least two points
@@ -2126,52 +2125,25 @@ def extrapolate_to_v0(
         # Mean r_coord per step across speeds (should be nearly identical)
         step_r_coord = sub.groupby('step')['r_coord'].mean()
 
-        if mixed_models:
-            model = smf.mixedlm(
-                f"{param} ~ _xspeed",
-                sub,
-                groups=sub["step"],
-                re_formula="~_xspeed",
-            )
-            res = model.fit(reml=False)
+        for step, g in sub.groupby("step"):
+            if g['speed'].nunique() < 2:
+                continue
 
-            fe_int = res.fe_params["Intercept"]
-            fe_slope = res.fe_params["_xspeed"]
+            lr = linregress(g['_xspeed'].values, g[param].values)
 
-            for step, re in res.random_effects.items():
-                out_rows.append({
-                    "step": step,
-                    "r_coord": step_r_coord.loc[step],
-                    "estimator": estimator,
-                    param: fe_int + re.get("Intercept", 0.0),
-                    f"{param}_slope": fe_slope + re.get("_xspeed", 0.0),
-                    f"{param}_se": np.nan,
-                    f"{param}_slope_se": np.nan,
-                    "R2": np.nan,
-                    "n_speeds": n_speeds_total,
-                    "model": "mixedlm",
-                    "speed": 0.0,
-                })
-        else:
-            for step, g in sub.groupby("step"):
-                if g['speed'].nunique() < 2:
-                    continue
-
-                lr = linregress(g['_xspeed'].values, g[param].values)
-
-                out_rows.append({
-                    "step": step,
-                    "r_coord": step_r_coord.loc[step],
-                    "estimator": estimator,
-                    param: lr.intercept,
-                    f"{param}_slope": lr.slope,
-                    f"{param}_se": lr.intercept_stderr,
-                    f"{param}_slope_se": lr.stderr,
-                    "R2": lr.rvalue ** 2,
-                    "n_speeds": g['speed'].nunique(),
-                    "model": "linear",
-                    "speed": 0.0,
-                })
+            out_rows.append({
+                "step": step,
+                "r_coord": step_r_coord.loc[step],
+                "estimator": estimator,
+                param: lr.intercept,
+                f"{param}_slope": lr.slope,
+                f"{param}_se": lr.intercept_stderr,
+                f"{param}_slope_se": lr.stderr,
+                "R2": lr.rvalue ** 2,
+                "n_speeds": g['speed'].nunique(),
+                "model": "linear",
+                "speed": 0.0,
+            })
 
     v0_df = pd.DataFrame(out_rows)
     if not v0_df.empty:
