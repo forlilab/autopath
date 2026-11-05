@@ -941,8 +941,9 @@ class AutoPath:
                             time.sleep(min(60, 10 * consecutive_failures))  # linear backoff
                             continue
                 else:
-                    logger.info(f"Running sMD for speed {speed} nm/ps with {reps} replicas.")
-                    for i in range(reps):
+                    n_done = len(glob(f"{sMD_traj_outdir}/sMD_*_v{speed}_{self.sMD_pulling_dir}.dat"))
+                    logger.info(f"Running sMD for speed {speed} nm/ps: {reps} replicas requested, {n_done} on disk.")
+                    for i in range(max(0, reps - n_done)):
                         existing = glob(f"{sMD_traj_outdir}/sMD_*_v{speed}_{self.sMD_pulling_dir}.dat")
                         if len(existing) >= self.sMD_max_replicas:
                             logger.warning(
