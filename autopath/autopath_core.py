@@ -434,6 +434,13 @@ class AutoPath:
         ##################################### Steered MD simulations #################################
         ##############################################################################################
         MERGE_CLUSTERING_FEATURES = False
+        # Autostop and the kept vALL record must cluster exactly like the final analysis
+        self._cluster_kwargs = dict(
+            group_A=_lig_sel_ha, group_B=self.sMD_clust_selection,
+            features=self.sMD_features, merge_features=MERGE_CLUSTERING_FEATURES,
+            ligand_sdf=ligand_file, geom_features=bool(self.sMD_log_geom_features),
+            recompute_distances=False,
+        )
         CONVERGENCE_TOLERANCES = {
             "dG_weighted-rmsd": 4.0,  # kJ/mol — must match tol_rmsd in check_convergence()
             "barrier_delta":    3.0,  # kJ/mol — must match tol_barrier
@@ -782,20 +789,17 @@ class AutoPath:
             # settings: this vALL frame (plus its plots) is the only surviving
             # convergence artefact, so it has to be the criterion that actually
             # made the stopping decision, not the function defaults.
+            # Same first comparison rung as the autostop loop (its per-speed `reps`)
+            _reps = [r for r in self.sMD_pulling_speeds.values() if r is not None]
             conv_df, traces_df = smdanalysis.check_convergence(logs=logs,
                 estimator_name=self.sMD_autostop_estimator,
                 conv_window=self.sMD_conv_window,
-                group_A=_lig_sel_ha,
-                group_B=self.sMD_clust_selection,
-                features=self.sMD_features,
-                merge_features=MERGE_CLUSTERING_FEATURES,
-                ligand_sdf=ligand_file,
-                geom_features=bool(self.sMD_log_geom_features),
+                **({"min_replicas": min(_reps)} if _reps else {}),
+                **self._cluster_kwargs,
                 plateau_frac=self.sMD_plateau_frac,
                 cluster_to_boundary=self.sMD_cluster_to_boundary,
                 restrict_rmsd_to_boundary=self.sMD_cluster_to_boundary,
                 boundary_buffer_frac=self.sMD_boundary_buffer_frac,
-                recompute_distances=False,  # load precomputed pocket-distance caches
             )
             conv_df.to_csv(f"{sMD_analysis_outdir}/sMD_conv_vALL_metrics.csv", index=False)
             if not traces_df.empty:
@@ -849,13 +853,15 @@ class AutoPath:
                                   estimators=[self.sMD_autostop_estimator],
                                   do_plots=False, seed=self.random_state,
                                   temperature=self.temperature, outdir=outdir,
-                                  ligand_select=lig_sel)
+                                  ligand_select=lig_sel,
+                                  pocket_select=self.pocket_selection,
+                                  n_paths=self.sMD_n_paths)
         conv_df, traces_df = smdanalysis.check_convergence(
             logs=logs, speeds=speeds,
             min_replicas=min_replicas,
             estimator_name=self.sMD_autostop_estimator,
             conv_window=self.sMD_conv_window,
-            geom_features=bool(self.sMD_log_geom_features),
+            **self._cluster_kwargs,
             plateau_frac=self.sMD_plateau_frac,
             cluster_to_boundary=self.sMD_cluster_to_boundary,
             restrict_rmsd_to_boundary=self.sMD_cluster_to_boundary,
