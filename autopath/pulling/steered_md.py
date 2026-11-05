@@ -358,7 +358,9 @@ class SteeredMD:
         # instead of re-deriving them.
         _k_spring_val = self.sMD_spring_cte.value_in_unit(
             openmmunit.kilojoules_per_mole / openmmunit.nanometer**2)
-        with open(f"{self.out_dir}/sMD_{run_id}.dat", "w") as f:
+        # Write to .part and rename at the end: a crashed pull leaves no .dat to count as a replica
+        dat_path = f"{self.out_dir}/sMD_{run_id}.dat"
+        with open(dat_path + ".part", "w") as f:
             f.write(f"# spring_constant_kJ_mol_nm2={_k_spring_val:.10g}\n")
             f.write(f"# requested_speed_nm_per_ps={getattr(self, '_requested_speed', float('nan')):.10g}\n")
             f.write(f"# realized_speed_nm_per_ps={getattr(self, '_realized_speed', float('nan')):.10g}\n")
@@ -460,6 +462,7 @@ class SteeredMD:
 
             if _buf:
                 f.write(''.join(_buf))
+        os.replace(dat_path + ".part", dat_path)
 
         if geom_fh is not None:
             if geom_buf:
