@@ -611,8 +611,8 @@ class SteeredMD:
             simulation.context.setVelocitiesToTemperature(self.temperature)
         
         if self.use_NVT:
-            # Remove existing MonteCarloBarostat to run NVT
-            system = remove_openmm_force(system, "MonteCarloBarostat")
+            # Prefix match also covers the membrane/anisotropic barostats.
+            system = remove_openmm_force(system, "MonteCarlo")
 
         # Reinitialize the simulation context with the updated system
         simulation.context.reinitialize(preserveState=True)
