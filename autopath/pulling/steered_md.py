@@ -696,6 +696,8 @@ class SteeredMD:
         
         self.com_dist.setForceGroup(3)  # Use a separate force group for the CV GROUP 3
         system.addForce(self.com_dist)
+        # cvpack CVs are real forces (U = r): read group 3, never integrate it
+        simulation.integrator.setIntegrationForceGroups(set(range(32)) - {3})
 
         simulation.context.reinitialize(preserveState=True)
 
