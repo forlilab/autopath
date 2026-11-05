@@ -1307,7 +1307,7 @@ def get_center(positions, atoms, group, weighByMass):
     group_positions = positions[group]
 
     if weighByMass:
-        masses = np.array([atom.element.mass.value_in_unit(openmmunit.dalton) for atom in atoms if atom.index in group])
+        masses = np.array([atom.element.mass.value_in_unit(openmmunit.dalton) for atom in (atoms[i] for i in group)])
         if sum(masses) == 0:
             logging.warning("All atoms in the group have zero mass. Using simple mean instead.")
             masses = None
