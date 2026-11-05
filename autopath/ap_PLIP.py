@@ -562,6 +562,12 @@ class ProteinLigandAnalyzer:
             run_name = os.path.basename(traj).split('.')[0]
 
             ptraj = pt.iterload(traj, prmtop, stride=stride)
+            # cpptraj can misread the unit cell (e.g. DCD); a wrong box silently corrupts every PBC energy
+            mda_box = mda.Universe(prmtop, traj).trajectory[0].dimensions
+            pt_box = np.asarray(ptraj[0].box.values, dtype=float)
+            if mda_box is None or not np.allclose(pt_box, mda_box, atol=0.5):
+                raise ValueError(f"pytraj box {pt_box} differs from MDAnalysis box {mda_box} for {traj}; "
+                                 "convert the trajectory to NetCDF before running LIE.")
 
             # LIE mask logic
             if use_residues is not None:
@@ -1268,8 +1274,8 @@ def calculate_contact_frequency(u, ligand_selection: str, pocket_cutoff: float =
     u.trajectory[frames[0]]
     pocket = u.select_atoms(f'protein and not name H* and around {pocket_cutoff} ({ligand_selection})')
     contact_counts = np.zeros(len(lig_ha))
-    for _ in u.trajectory[frames.start:frames.stop:frames.step]:
-        dmat = distance_array(lig_ha.positions, pocket.positions)
+    for ts in u.trajectory[frames.start:frames.stop:frames.step]:
+        dmat = distance_array(lig_ha.positions, pocket.positions, box=ts.dimensions)
         contact_counts += (dmat < contact_cutoff).any(axis=1)
     return contact_counts / len(frames)
 
