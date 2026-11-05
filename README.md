@@ -136,8 +136,7 @@ Below is a minimal `config.json` skeleton with the most commonly adjusted parame
   },
   "sMD": {
     "sMD_pulling_speeds": {"0.005": 5, "0.0025": 5, "0.001": 5},
-    "sMD_max_pulling_dist": 3.5,
-    "sMD_time": null
+    "sMD_max_pulling_dist": 3.5
   }
 }
 ```
@@ -159,7 +158,6 @@ AutoPath configuration files use a nested JSON structure: each top-level key is 
 | `platform` | str | `"fastest"` | OpenMM platform: `"fastest"`, `"CUDA"`, `"OpenCL"`, or `"CPU"` |
 | `pocket_selection` | str | *(see config.py)* | MDAnalysis selection defining binding-site atoms for COM distance and pocket features |
 | `do_fix_pdb` | bool | `true` | Run PDB preprocessing (capping, missing atoms, pH 7.4 protonation) before system build |
-| `VS_mode` | bool | `false` | Enable virtual-screening mode with early-exit checkpoints if the ligand drifts from the site |
 
 **`preparation`**
 
@@ -186,7 +184,6 @@ AutoPath configuration files use a nested JSON structure: each top-level key is 
 |-----------|------|---------|-------------|
 | `sMD_pulling_speeds` | dict | `{0.005: 5, 0.0025: 5, 0.001: 5}` | Mapping of pulling speed (nm/ps) to replica count; the count is a minimum-replicas floor when `sMD_converge_speeds=true`, or the total count otherwise |
 | `sMD_max_pulling_dist` | float | `3.5` | Maximum COM displacement from the binding site in nm |
-| `sMD_time` | int | `null` | Maximum pulling time in ns (overrides step-count calculation when set) |
 | `sMD_converge_speeds` | bool | `true` | Keep adding replicas per speed (up to `sMD_max_replicas`) until convergence, instead of a fixed replica count |
 | `sMD_max_replicas` | int | `50` | Hard cap on replicas per speed to prevent unbounded convergence loops |
 | `sMD_clust_selection` | str | `null` | Additional MDAnalysis selection for clustering features beyond ligand COM distance |

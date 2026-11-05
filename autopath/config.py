@@ -82,9 +82,7 @@ class Config(object):
         General
         ~~~~~~~
         VS_mode : bool, optional
-            Enable virtual-screening mode.  Activates equilibration and pulling
-            checkpoints to terminate early if the ligand drifts from the binding
-            site.  Default ``False``.
+            Not supported; ``True`` raises ``ValueError``.  Default ``False``.
         pdb_path : str, optional
             Path to the input protein-ligand PDB file.
         do_fix_pdb : bool, optional
@@ -209,11 +207,9 @@ class Config(object):
             instead of finishing one speed before starting the next.  Default
             ``False``.
         sMD_time : int, optional
-            Maximum pulling time in ns (overrides step-count calculation when
-            set).  Default ``None``.
+            Not supported; any value raises ``ValueError``.  Default ``None``.
         sMD_steps_per_move : int, optional
-            Number of MD steps per pull increment (overrides ``sMD_dx_per_move``
-            when set).  Default ``None``.
+            Not supported; any value raises ``ValueError``.  Default ``None``.
         sMD_dx_per_move : float, optional
             COM displacement increment per move in nm.  Default ``0.001``.
         sMD_spring_cte : float, optional
