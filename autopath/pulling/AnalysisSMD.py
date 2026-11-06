@@ -116,6 +116,9 @@ class SMDAnalysis:
     friction_model : {'ols', 'mixed'}, optional
         Regression used for the friction slopes (force and Wdiss across
         speeds); free energies always use per-step OLS.
+    friction_source_work : {'auto', 'derivative', 'regression'}, optional
+        Friction the Kramers MFPT pairs with cumulant/jarzynski per-speed
+        profiles; ``'auto'`` uses the across-speed regression with >=2 speeds.
     """
 
     def __init__(self,
@@ -142,6 +145,7 @@ class SMDAnalysis:
         hummer_szabo: dict | None = None,
         path_combination: str = 'eq21',
         friction_model: str = 'ols',
+        friction_source_work: str = 'auto',
     ):
         self.sysname = sysname
         self.n_paths = n_paths
@@ -163,6 +167,7 @@ class SMDAnalysis:
         self.hummer_szabo = hummer_szabo
         self.path_combination = validate_path_combination(path_combination)
         self.friction_model = friction_model
+        self.friction_source_work = friction_source_work
         self.hs_result = None
         self.support_policy = SupportPolicy(
             min_samples_per_step=self.min_samples_per_step,
@@ -719,6 +724,7 @@ class SMDAnalysis:
                 boundary_method=kramers_abs,
                 plateau_frac=plateau_frac,
                 bound_extension=kramers_bound,
+                friction_source_work=self.friction_source_work,
             )
             if not _koff_df.empty:
                 _koff_df.to_csv(os.path.join(self.outdir, 'koff_kramers.csv'), index=False)

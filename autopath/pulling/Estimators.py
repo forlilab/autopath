@@ -815,6 +815,7 @@ class KramersEstimator:
         estimator_name: str,
         prefer_v0: bool,
         speed_override: float | None,
+        friction_source_work: str = "auto",
     ) -> tuple[pd.DataFrame, str, float]:
         """Choose the best (merged PMF+friction) profile for *estimator_name*.
 
@@ -857,9 +858,10 @@ class KramersEstimator:
             )
 
         # --- per-speed fallback ---
-        fric_deriv, common_speeds = KramersEstimator._per_speed_candidates(
-            pmf_sub, fric_sub, estimator_name
+        fric_deriv, common_speeds, fsrc = KramersEstimator._per_speed_candidates(
+            pmf_sub, fric_sub, estimator_name, friction_source_work
         )
+        logger.info(f"[Kramers] {estimator_name}: per-speed friction source = {fsrc}")
         if not common_speeds:
             raise RuntimeError(
                 f"[Kramers] No common (speed, estimator='{estimator_name}') "
@@ -874,7 +876,7 @@ class KramersEstimator:
 
         merged = KramersEstimator._merge_pmf_friction(
             pmf_sub[pmf_sub["speed"] == chosen],
-            fric_deriv[fric_deriv["speed"] == chosen],
+            KramersEstimator._fric_at(fric_deriv, chosen, fsrc),
         )
         if merged.empty:
             raise RuntimeError(
@@ -887,8 +889,13 @@ class KramersEstimator:
         pmf_sub: pd.DataFrame,
         fric_sub: pd.DataFrame,
         estimator_name: str,
-    ) -> tuple[pd.DataFrame, list[float]]:
-        """Derivative friction and the pulling speeds usable for a per-speed profile.
+        source: str = "derivative",
+    ) -> tuple[pd.DataFrame, list[float], str]:
+        """Friction rows, usable speeds and resolved source for a per-speed profile.
+
+        *source* is ``'derivative'`` (per-speed Gamma), ``'regression'`` (the
+        across-speed Gamma, shared by all speeds) or ``'auto'`` (regression when
+        at least two speeds are present and it is available, else derivative).
 
         A per-speed profile pairs that speed's dG with the friction measured at the
         same speed. Excluded: ``speed = 0`` (the v→0 extrapolation, paired only with
@@ -896,7 +903,15 @@ class KramersEstimator:
         whose per-speed dG is not a free energy (``force``: raw mean work).
         """
         if estimator_name in NO_PER_SPEED_FREE_ENERGY:
-            return fric_sub.iloc[0:0], []
+            return fric_sub.iloc[0:0], [], source
+        pmf_speeds = set(pmf_sub.loc[pmf_sub["speed"] > 0, "speed"].unique())
+        fric_reg = fric_sub[(fric_sub["method"] == "regression")
+                            & np.isfinite(fric_sub["Gamma"].astype(float))]
+        if source == "auto":
+            source = "regression" if len(pmf_speeds) >= 2 and not fric_reg.empty \
+                else "derivative"
+        if source == "regression":
+            return fric_reg, sorted(pmf_speeds) if not fric_reg.empty else [], source
         fric_deriv = fric_sub[
             (fric_sub["method"] == "derivative")
             & (fric_sub["speed"] > 0)
@@ -906,7 +921,12 @@ class KramersEstimator:
             set(pmf_sub.loc[pmf_sub["speed"] > 0, "speed"].unique())
             & set(fric_deriv["speed"].unique())
         )
-        return fric_deriv, speeds
+        return fric_deriv, speeds, source
+
+    @staticmethod
+    def _fric_at(fric: pd.DataFrame, speed: float, source: str) -> pd.DataFrame:
+        """Friction rows for *speed*; regression friction is shared by all speeds."""
+        return fric if source == "regression" else fric[fric["speed"] == speed]
 
     @staticmethod
     def _iter_profiles(
@@ -915,6 +935,7 @@ class KramersEstimator:
         dG_extrapolated: pd.DataFrame | None,
         estimator_name: str,
         prefer_v0: bool,
+        friction_source_work: str = "auto",
     ) -> list[tuple[pd.DataFrame, str, float]]:
         """Return all available (merged, source_label, speed) profiles for *estimator_name*.
 
@@ -941,13 +962,14 @@ class KramersEstimator:
                     profiles.append((merged, "v0_extrapolation", 0.0))
 
         # per-speed profiles (derivative friction)
-        fric_deriv, common_speeds = KramersEstimator._per_speed_candidates(
-            pmf_sub, fric_sub, estimator_name
+        fric_deriv, common_speeds, fsrc = KramersEstimator._per_speed_candidates(
+            pmf_sub, fric_sub, estimator_name, friction_source_work
         )
+        logger.info(f"[Kramers] {estimator_name}: per-speed friction source = {fsrc}")
         for speed in common_speeds:
             merged = KramersEstimator._merge_pmf_friction(
                 pmf_sub[pmf_sub["speed"] == speed],
-                fric_deriv[fric_deriv["speed"] == speed],
+                KramersEstimator._fric_at(fric_deriv, speed, fsrc),
             )
             if not merged.empty:
                 profiles.append((merged, f"per_speed(v={speed})", float(speed)))
@@ -1317,6 +1339,7 @@ class KramersEstimator:
         boundary_method: str = "pmf_peak",
         plateau_frac: float = 0.3,
         bound_extension: str = "none",
+        friction_source_work: str = "auto",
     ) -> pd.DataFrame:
         """Run Kramers MFPT for every dG estimator present in *mixture_pmfs*.
 
@@ -1358,6 +1381,11 @@ class KramersEstimator:
         diagnostic that does not affect the boundary.
         reflect_r : float or None
             Explicit reflecting boundary (nm); ``None`` → same as *start_r*.
+        friction_source_work : {'auto', 'derivative', 'regression'}
+            Friction paired with per-speed profiles of work-based estimators
+            (cumulant, jarzynski). ``'auto'``: across-speed regression when at
+            least two speeds, else per-speed derivative. The v->0 profile always
+            uses regression.
         prefer_v0 : bool
             Include the v→0 extrapolated profile (when *all_speeds* is True) or
             prefer it over per-speed profiles (when *all_speeds* is False).
@@ -1378,6 +1406,10 @@ class KramersEstimator:
         if speed_override is not None:
             all_speeds = False
 
+        if friction_source_work not in ("auto", "derivative", "regression"):
+            raise ValueError(
+                f"friction_source_work must be auto|derivative|regression, "
+                f"got {friction_source_work!r}")
         if boundary_method not in ("pmf_peak", "force_plateau", "end"):
             raise ValueError(f"[Kramers] unknown boundary_method={boundary_method!r}")
         records = []
@@ -1386,12 +1418,12 @@ class KramersEstimator:
                 if all_speeds:
                     profile_list = self._iter_profiles(
                         mixture_pmfs, friction_df, dG_extrapolated,
-                        est_name, prefer_v0,
+                        est_name, prefer_v0, friction_source_work,
                     )
                 else:
                     profile, source, speed = self._select_profile(
                         mixture_pmfs, friction_df, dG_extrapolated,
-                        est_name, prefer_v0, speed_override,
+                        est_name, prefer_v0, speed_override, friction_source_work,
                     )
                     profile_list = [(profile, source, speed)]
             except (RuntimeError, ValueError) as exc:
