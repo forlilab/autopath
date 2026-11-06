@@ -51,6 +51,7 @@ from autopath.metadynamics import (
     funnel_z_ang,
 )
 from autopath.pulling import SMDData, SMDAnalysis
+from autopath.pulling.SMDData import resolve_smd_dcd
 from autopath.pulling.Convergence import (tail_converged, validate_autostop_options,
                                           round_robin_order)
 from autopath.pulling.PathModel import DTWPathModel, NullPathModel
@@ -248,7 +249,7 @@ class AutoPath:
         ``sMD_autostop_min_displacement``, ``sMD_converge_speeds``,
         ``sMD_time``, ``sMD_steps_per_move``, ``sMD_dx_per_move``,
         ``sMD_spring_cte``, ``sMD_ligand_anchor_mode``, ``sMD_max_replicas``,
-        ``sMD_run_analysis``, ``sMD_clust_selection``, ``sMD_features``,
+        ``sMD_run_analysis``, ``sMD_align_trajs``, ``sMD_clust_selection``, ``sMD_features``,
         ``sMD_log_geom_features``, ``sMD_plateau_frac``,
         ``sMD_cluster_to_boundary``, ``sMD_boundary_buffer_frac``,
         ``sMD_kramers_abs``, ``sMD_kramers_bound``,
@@ -334,6 +335,7 @@ class AutoPath:
         sMD_ligand_anchor_mode: str = 'murcko',
         sMD_max_replicas: int = 50,  # max replicas per speed in convergence mode
         sMD_run_analysis: bool = True,
+        sMD_align_trajs: bool = True,  # False: keep raw sMD DCDs (<stem>.dcd), skip wrap/align
         sMD_clust_selection:str = None,
         sMD_path_model: str = 'dtw',   # 'dtw' | 'null' ('null' = no clustering: one path)
         sMD_n_paths: int | None = None,  # fixed number of paths; None = silhouette-selected
@@ -430,6 +432,7 @@ class AutoPath:
         self.sMD_ligand_anchor_mode = sMD_ligand_anchor_mode
         self.sMD_max_replicas = sMD_max_replicas
         self.sMD_run_analysis = sMD_run_analysis
+        self.sMD_align_trajs = sMD_align_trajs
         self.sMD_clust_selection = sMD_clust_selection
         self.sMD_path_model = str(sMD_path_model).lower()
         self.sMD_n_paths = sMD_n_paths
@@ -455,6 +458,9 @@ class AutoPath:
         self.n_milestones = n_milestones
         # Metadynamics
         self.run_metadynamics = run_metadynamics
+        if run_metadynamics and not sMD_align_trajs:
+            # The funnel axis and the learned CVs are fitted on superposed/imaged sMD frames.
+            raise ValueError("run_metadynamics=True needs sMD_align_trajs=True")
         self.mMD_use_funnel_potential = mMD_use_funnel_potential
         self.mMD_bias_factor = mMD_bias_factor
         self.mMD_bias_frequency = mMD_bias_frequency
@@ -981,14 +987,19 @@ class AutoPath:
         # Load and align sMD trajectories
         sMD_trajs = glob(f"{sMD_traj_outdir}/sMD_replica-*_*_*.dcd")
         sMD_trajs = [f for f in sMD_trajs if "aligned" not in f]  # only process unaligned trajectories
-        logger.info(f"Found {len(sMD_trajs)} sMD trajectories to align.")        
-        wrap_align_save_traj(sMD_trajs, solvated_system_pdb, is_membrane=self.is_membrane)
+        if self.sMD_align_trajs:
+            logger.info(f"Found {len(sMD_trajs)} sMD trajectories to align.")
+            wrap_align_save_traj(sMD_trajs, solvated_system_pdb, is_membrane=self.is_membrane)
+        else:
+            logger.info(f"sMD_align_trajs=False: keeping {len(sMD_trajs)} raw sMD trajectories (<stem>.dcd).")
                                 
         ##############################################################################################
         ######################################### sMD Analysis #######################################
         ##############################################################################################        
         
         sMD_trajs = glob(f"{sMD_traj_outdir}/sMD_replica-*_*_*_aligned.dcd")
+        if not self.sMD_align_trajs:
+            sMD_trajs = [f for f in glob(f"{sMD_traj_outdir}/sMD_replica-*_*_*.dcd") if "aligned" not in f]
 
         if self.sMD_run_analysis:
             
@@ -1843,5 +1854,5 @@ class AutoPath:
         str
             Absolute or relative path to ``<sMD_outdir>/trajectories/<name>_aligned.dcd``.
         """
-        dcd_name = trajname.replace("log", "traj") + "_aligned.dcd"
-        return os.path.join(self.sMD_outdir, "trajectories", dcd_name)
+        return resolve_smd_dcd(os.path.join(self.sMD_outdir, "trajectories",
+                                            trajname.replace("log", "traj")))

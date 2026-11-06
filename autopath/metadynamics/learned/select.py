@@ -8,6 +8,8 @@ from scipy.cluster.hierarchy import fcluster, linkage
 from scipy.spatial.distance import squareform
 from scipy.stats import rankdata
 
+from autopath.pulling.SMDData import resolve_smd_dcd
+
 BIN_NM, MIN_PULLS, RHO_PRUNE, FISHER_FLOOR, BULK_NM = 0.05, 20, 0.8, 0.5, 0.3
 MAX_KEPT = 30
 MOSAIC_RES = 0.5
@@ -16,7 +18,7 @@ MOSAIC_RES = 0.5
 def find_pulls(traj_dir, direction="forward"):
     out = []
     for dat in sorted(glob.glob(os.path.join(traj_dir, f"sMD_*_{direction}.dat"))):
-        dcd = dat.replace(".dat", "_aligned.dcd")
+        dcd = resolve_smd_dcd(dat[:-len(".dat")])
         if os.path.exists(dcd):
             out.append((dat, dcd))
     return out

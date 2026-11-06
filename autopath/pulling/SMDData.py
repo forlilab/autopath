@@ -78,6 +78,21 @@ def frame_log_index(log_file: str, n_frames: int) -> tuple[np.ndarray, np.ndarra
     return steps, log["time"].to_numpy()[steps]
 
 
+
+def resolve_smd_dcd(stem: str) -> str:
+    """DCD of an sMD replica from its path stem (no extension).
+
+    ``<stem>_aligned.dcd`` (sMD_align_trajs=True) wins over the raw ``<stem>.dcd``
+    (sMD_align_trajs=False). If neither exists the aligned name is returned, so
+    callers keep their usual missing-file error.
+    """
+    aligned, raw = f"{stem}_aligned.dcd", f"{stem}.dcd"
+    if os.path.exists(aligned):
+        return aligned
+    if os.path.exists(raw):
+        return raw
+    return aligned
+
 class SMDData:
     """Container and preprocessor for steered MD log files.
 
@@ -479,7 +494,7 @@ class SMDData:
         # File name only: a directory containing "log" must not be rewritten.
         folder, base = os.path.split(log_path)
         root, _ = os.path.splitext(base)
-        return os.path.join(folder, root.replace('log', 'traj') + '_aligned.dcd')
+        return resolve_smd_dcd(os.path.join(folder, root.replace('log', 'traj')))
         
     def get_trace_features(self, 
                            features: list[str]=[ 'work', 'lag', 'r_before'],
