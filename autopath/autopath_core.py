@@ -489,6 +489,7 @@ class AutoPath:
                 topology=topology,
                 groupA_atoms=ligand_atoms_indices,
                 groupB_atoms=pocket_atom_indices,
+                ligand_atoms=ligand_total_hatoms,  # NC autostop + geom features: whole ligand
                 restart_velocities=True,
                 timestep=self.timestep,
                 temperature=self.temperature,

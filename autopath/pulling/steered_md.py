@@ -20,6 +20,12 @@ import logging
 logger = logging.getLogger("autopath")
 
 
+
+def _feature_atoms(smd):
+    """Whole-ligand heavy atoms if set on *smd*, else its groupA (anchor) atoms."""
+    lig = getattr(smd, "ligand_atoms", None)
+    return smd.groupA_atoms if lig is None or len(lig) == 0 else lig
+
 class SteeredMD:
     """Steered molecular dynamics: pull a ligand along a COM-COM reaction
     coordinate using a moving harmonic restraint.
@@ -79,6 +85,7 @@ class SteeredMD:
         topology: str = None,
         groupA_atoms: list[int] = None,
         groupB_atoms: list[int] = None,
+        ligand_atoms: list[int] = None,   # all ligand heavy atoms: NC autostop, pocket, geom features (None = groupA)
         restrained_atoms: list[int] = None,
         restart_velocities: bool = False,
         timestep: float = 0.004, #  # 4 fs timestep
@@ -110,6 +117,7 @@ class SteeredMD:
         self.temperature = temperature * openmmunit.kelvin
         self.groupA_atoms = groupA_atoms # ligand atoms
         self.groupB_atoms = groupB_atoms # pocket atoms
+        self.ligand_atoms = ligand_atoms # whole-ligand heavy atoms; groupA (anchor) is only the pulled COM
         self.restrained_atoms = restrained_atoms
         self.restart_velocities = restart_velocities
 
@@ -600,7 +608,7 @@ class SteeredMD:
         if shape_feats:
             from autopath.pulling.geom_kernel import ShapeDescriptorCalculator
             atoms = list(self.topology.atoms())
-            self._lig_heavy_idx = [i for i in self.groupA_atoms
+            self._lig_heavy_idx = [i for i in self._feature_atoms()
                                    if atoms[i].element is not None
                                    and atoms[i].element.symbol != "H"]
             elements = [atoms[i].element.symbol for i in self._lig_heavy_idx]
@@ -724,7 +732,7 @@ class SteeredMD:
         if "nc" in feats and pocket_ok:
             row["nc"] = self._compute_nc(positions_nm)
         if "mindist" in feats and pocket_ok:
-            lig = positions_nm[self.groupA_atoms]
+            lig = positions_nm[self._feature_atoms()]
             poc = positions_nm[self.subset_protein_CA]
             diff = lig[:, np.newaxis, :] - poc[np.newaxis, :, :]
             d2 = np.einsum('ijk,ijk->ij', diff, diff)
@@ -795,7 +803,7 @@ class SteeredMD:
             self._set_exit_reference(positions_nm)   # first frame becomes the reference
         ref_pocket, ref_axes = self._exit_ref
 
-        lig = positions_nm[self.groupA_atoms]
+        lig = positions_nm[self._feature_atoms()]
         poc = positions_nm[self.subset_protein_CA]
         cA = lig.mean(0)
         cB = poc.mean(0)
@@ -819,6 +827,14 @@ class SteeredMD:
         e = (u @ R) @ ref_axes
         return float(e[0]), float(e[1]), float(e[2])
 
+    def _feature_atoms(self):
+        """Ligand atoms for NC autostop, pocket selection and geom features.
+
+        The whole-ligand heavy atoms when given; groupA (the pulled anchor) otherwise.
+        The anchor defines only the pulled COM.
+        """
+        return _feature_atoms(self)
+
     def _compute_nc(self, positions_nm, threshold_nm=0.5):
         """Compute number of contacts via switching function 1/(1+(d/threshold)^6) using positions only.
         Similar to what CVPack does.
@@ -827,7 +843,7 @@ class SteeredMD:
         sqrt inside the norm is skipped (the result is immediately raised to
         the 6th power). Numerically identical to the norm form.
         """
-        lig_pos = positions_nm[self.groupA_atoms]
+        lig_pos = positions_nm[self._feature_atoms()]
         pocket_pos = positions_nm[self.subset_protein_CA]
         diff = lig_pos[:, np.newaxis, :] - pocket_pos[np.newaxis, :, :]
         d2 = np.einsum('ijk,ijk->ij', diff, diff)
@@ -835,7 +851,7 @@ class SteeredMD:
         return float(np.sum(1.0 / (1.0 + x2**3)))
 
     def _get_pocket_atoms(self, simulation, cutoff=0.6):
-        """Return protein heavy atoms within *cutoff* nm of any ligand atom.
+        """Return protein alpha carbons within *cutoff* nm of any ligand feature atom.
 
         Solvent, ions, and unknown residues are excluded. Used both for
         verbose NC monitoring and for the NC-based autostop criterion.
@@ -853,7 +869,7 @@ class SteeredMD:
 
         # Exclude the pulled group's own residues so a protein-protein/peptide
         # pull (e.g. CA-anchored) can't select itself as its own pocket.
-        groupA_atom_set = set(self.groupA_atoms)
+        groupA_atom_set = set(_feature_atoms(self))
         groupA_residues = {atom.residue.index for atom in self.topology.atoms()
                            if atom.index in groupA_atom_set}
 
@@ -866,10 +882,10 @@ class SteeredMD:
             logger.warning("_get_pocket_atoms: no alpha carbons remain after excluding "
                             "groupA's own residues; the pulled group may span the entire protein.")
 
-        # Find a subset of protein_CA that are cutoff nm away from groupA_atoms
+        # Find a subset of protein_CA that are cutoff nm away from the ligand feature atoms
         state = simulation.context.getState(getPositions=True, getVelocities=False)
         positions = state.getPositions(asNumpy=True) / openmmunit.nanometers
-        ligand_pos = positions[self.groupA_atoms]
+        ligand_pos = positions[_feature_atoms(self)]
         pocket_pos = positions[protein_CA]
 
         diff = ligand_pos[:, np.newaxis, :] - pocket_pos[np.newaxis, :, :]
