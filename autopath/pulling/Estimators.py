@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 import pandas as pd
 from abc import ABC, abstractmethod
@@ -193,7 +195,12 @@ class FrictionEstimator(BaseEstimator):
         smooth_polyorder: int = 3,
         speeds: list[float] | None = None,
         realized_speed_map: dict | None = None,
+        friction_model: str = 'ols',
     ):
+        if friction_model not in ('ols', 'mixed'):
+            raise ValueError(
+                f"friction_model must be 'ols' or 'mixed', got {friction_model!r}")
+        self.friction_model = friction_model
         self.w_col = w_col
         self.use_spline = use_spline
         self.smooth_window = smooth_window
@@ -414,6 +421,7 @@ class FrictionEstimator(BaseEstimator):
             param=self.w_col,
             speeds=self.speeds,
             realized_speed_map=self.realized_speed_map,
+            model=self.friction_model,
         )
 
         if v0_df is None or v0_df.empty:
@@ -493,7 +501,8 @@ class FrictionEstimator(BaseEstimator):
             return pd.DataFrame()
 
         v0 = extrapolate_to_v0(results=fbar, param='Fbar', speeds=self.speeds,
-                               realized_speed_map=self.realized_speed_map)
+                               realized_speed_map=self.realized_speed_map,
+                               model=self.friction_model)
         if v0 is None or v0.empty:
             return pd.DataFrame()
 
@@ -2179,12 +2188,50 @@ def monotone_z_filter(z: np.ndarray) -> np.ndarray:
             keep[i] = True; last = zi
     return keep
 
+def _mixed_step_rows(sub: pd.DataFrame, param: str, estimator: str,
+                     step_r_coord: pd.Series) -> list[dict]:
+    """Per-step intercept and slope from one grouped mixed-effects fit.
+
+    Raises on a failed or non-converged fit.  statsmodels names the random
+    intercept ``'Group'``, not ``'Intercept'``.
+    """
+    import statsmodels.formula.api as smf
+
+    sub = sub[sub.groupby('step')['speed'].transform('nunique') >= 2]
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        res = smf.mixedlm(f"{param} ~ _xspeed", sub, groups=sub['step'],
+                          re_formula="~_xspeed").fit(reml=False)
+    if not res.converged:
+        raise RuntimeError("mixedlm did not converge")
+    fe_int = res.fe_params['Intercept']
+    fe_slope = res.fe_params['_xspeed']
+    n_sp = sub.groupby('step')['speed'].nunique()
+    rows = []
+    for step, re_ in res.random_effects.items():
+        rows.append({
+            "step": step,
+            "r_coord": step_r_coord.loc[step],
+            "estimator": estimator,
+            param: fe_int + re_['Group'],
+            f"{param}_slope": fe_slope + re_['_xspeed'],
+            f"{param}_se": np.nan,
+            f"{param}_slope_se": np.nan,
+            "R2": np.nan,
+            "n_speeds": n_sp.loc[step],
+            "model": "mixedlm",
+            "speed": 0.0,
+        })
+    return rows
+
+
 def extrapolate_to_v0(
     results: pd.DataFrame,
     param: str = 'dG_weighted',
     speeds: list[float] | None = None,
     min_speeds: int = 2,
     realized_speed_map: dict | None = None,
+    model: str = 'ols',
 ) -> pd.DataFrame:
     """
     Extrapolate a single parameter to zero pulling speed (v → 0)
@@ -2211,6 +2258,13 @@ def extrapolate_to_v0(
         for a linear fit).  Setting this lower than the total number of
         speeds lets the extrapolated PMF extend beyond where the fastest
         speed's profile ends.
+    model : {'ols', 'mixed'}
+        ``'ols'``: independent linear fit per step.  ``'mixed'``: one
+        mixed-effects fit per estimator (groups = step, random intercept and
+        slope on speed); the per-step slope is fixed + random slope.  On a
+        failed fit the estimator falls back to OLS and its rows carry
+        ``model = 'ols_fallback'``.  Shrinks the profile, so use it for
+        friction slopes only, not for free energies.
 
     Returns
     -------
@@ -2230,6 +2284,8 @@ def extrapolate_to_v0(
     trimmed: with few points the fit is unconstrained and the intercept spikes.
     """
 
+    if model not in ('ols', 'mixed'):
+        raise ValueError(f"model must be 'ols' or 'mixed', got {model!r}")
     df = results.copy()
 
     if param not in df.columns:
@@ -2269,6 +2325,18 @@ def extrapolate_to_v0(
         # Mean r_coord per step across speeds (should be nearly identical)
         step_r_coord = sub.groupby('step')['r_coord'].mean()
 
+        ols_label = 'linear'
+        if model == 'mixed':
+            try:
+                out_rows.extend(_mixed_step_rows(sub, param, estimator, step_r_coord))
+                continue
+            except Exception as exc:
+                logger.warning(
+                    "[extrapolate_to_v0] mixed-effects fit failed for estimator=%s "
+                    "param=%s (%s: %s); using OLS for this estimator.",
+                    estimator, param, type(exc).__name__, exc)
+                ols_label = 'ols_fallback'
+
         for step, g in sub.groupby("step"):
             if g['speed'].nunique() < 2:
                 continue
@@ -2285,7 +2353,7 @@ def extrapolate_to_v0(
                 f"{param}_slope_se": lr.stderr,
                 "R2": lr.rvalue ** 2,
                 "n_speeds": g['speed'].nunique(),
-                "model": "linear",
+                "model": ols_label,
                 "speed": 0.0,
             })
 

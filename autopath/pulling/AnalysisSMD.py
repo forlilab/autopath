@@ -113,6 +113,9 @@ class SMDAnalysis:
         2023, Eq. 21) with ``Wdiss = <W> - dG``; ``'linear'`` is the p_eq-weighted
         mean of each column. Per-speed force profiles are always mixed linearly;
         with ``'eq21'`` the force v->0 dG comes from :func:`force_v0_dG`.
+    friction_model : {'ols', 'mixed'}, optional
+        Regression used for the friction slopes (force and Wdiss across
+        speeds); free energies always use per-step OLS.
     """
 
     def __init__(self,
@@ -138,6 +141,7 @@ class SMDAnalysis:
         replica_imbalance_threshold: float = 3.0,
         hummer_szabo: dict | None = None,
         path_combination: str = 'eq21',
+        friction_model: str = 'ols',
     ):
         self.sysname = sysname
         self.n_paths = n_paths
@@ -158,6 +162,7 @@ class SMDAnalysis:
         self.replica_imbalance_threshold = replica_imbalance_threshold
         self.hummer_szabo = hummer_szabo
         self.path_combination = validate_path_combination(path_combination)
+        self.friction_model = friction_model
         self.hs_result = None
         self.support_policy = SupportPolicy(
             min_samples_per_step=self.min_samples_per_step,
@@ -657,7 +662,8 @@ class SMDAnalysis:
             self._run_hummer_szabo(hs_view)
 
         friction_est = FrictionEstimator(use_spline=False,
-                                         realized_speed_map=sMDDdata.realized_speed_map)
+                                         realized_speed_map=sMDDdata.realized_speed_map,
+                                         friction_model=self.friction_model)
         df = self.mixture_pmfs.copy()
 
         friction_deriv_results = []

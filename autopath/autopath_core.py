@@ -338,6 +338,7 @@ class AutoPath:
         sMD_path_model: str = 'dtw',   # 'dtw' | 'null' ('null' = no clustering: one path)
         sMD_n_paths: int | None = None,  # fixed number of paths; None = silhouette-selected
         sMD_max_frac_neg_dG_first_half: float = 0.25,  # pass-3 binding-well filter; <=0 disables
+        sMD_friction_model: str = 'ols',  # 'ols' | 'mixed' friction slope regression
         sMD_path_combination: str = 'eq21',  # 'eq21' (Wolf, Post & Stock 2023, Eq. 21) | 'linear' (p_eq mean)
         sMD_features: list | None = None,
         sMD_log_geom_features: bool | list = True,  # hybrid: log geom during pulling + merge into clustering
@@ -433,6 +434,7 @@ class AutoPath:
         self.sMD_n_paths = sMD_n_paths
         self.sMD_max_frac_neg_dG_first_half = float(sMD_max_frac_neg_dG_first_half)
         self.sMD_path_combination = validate_path_combination(sMD_path_combination)
+        self.sMD_friction_model = sMD_friction_model
         if self.sMD_path_model not in ('dtw', 'null'):
             raise ValueError(f"sMD_path_model must be 'dtw' or 'null', got {sMD_path_model!r}")
         self.sMD_features = sMD_features
@@ -1026,6 +1028,7 @@ class AutoPath:
                                     max_frac_neg_dG_first_half=self.sMD_max_frac_neg_dG_first_half,
                                     min_speeds_for_extrapolation=2,
                                     path_combination=self.sMD_path_combination,
+                                    friction_model=self.sMD_friction_model,
                                     )
 
             smd_data = smdanalysis.run(smd_data,
@@ -1780,7 +1783,8 @@ class AutoPath:
                                   ligand_select=lig_sel,
                                   pocket_select=self.pocket_selection,
                                   n_paths=self.sMD_n_paths,
-                                  path_combination=self.sMD_path_combination)
+                                  path_combination=self.sMD_path_combination,
+                                  friction_model=self.sMD_friction_model)
         conv_df, traces_df = smdanalysis.check_convergence(
             logs=logs, speeds=speeds,
             min_replicas=min_replicas,
