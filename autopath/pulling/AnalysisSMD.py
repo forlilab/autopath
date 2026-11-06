@@ -17,6 +17,7 @@ from autopath.pulling.Estimators import (
     JarzynskiEstimator,
     CumulantEstimator,
     ForceEstimator,
+    FrictionSourceError,
     KramersEstimator,
     ESTIMATOR_REGISTRY,
     trim_results_by_n_samples_support,
@@ -113,12 +114,13 @@ class SMDAnalysis:
         2023, Eq. 21) with ``Wdiss = <W> - dG``; ``'linear'`` is the p_eq-weighted
         mean of each column. Per-speed force profiles are always mixed linearly;
         with ``'eq21'`` the force v->0 dG comes from :func:`force_v0_dG`.
-    friction_model : {'ols', 'mixed'}, optional
-        Regression used for the friction slopes (force and Wdiss across
-        speeds); free energies always use per-step OLS.
-    friction_source_work : {'auto', 'derivative', 'regression'}, optional
-        Friction the Kramers MFPT pairs with cumulant/jarzynski per-speed
-        profiles; ``'auto'`` uses the across-speed regression with >=2 speeds.
+    friction_model : {'mixed', 'ols'}, optional
+        Regression for the force friction slope (default ``'mixed'``); the
+        W_diss regression and free energies always use OLS.
+    friction_source_work : {'auto', 'derivative', 'force', 'regression'}, optional
+        Friction the Kramers MFPT uses for all estimators. ``'auto'``: force
+        friction with >=2 speeds (needs the force estimator), else per-speed
+        derivative.
     """
 
     def __init__(self,
@@ -144,7 +146,7 @@ class SMDAnalysis:
         replica_imbalance_threshold: float = 3.0,
         hummer_szabo: dict | None = None,
         path_combination: str = 'eq21',
-        friction_model: str = 'ols',
+        friction_model: str = 'mixed',
         friction_source_work: str = 'auto',
     ):
         self.sysname = sysname
@@ -729,6 +731,8 @@ class SMDAnalysis:
             if not _koff_df.empty:
                 _koff_df.to_csv(os.path.join(self.outdir, 'koff_kramers.csv'), index=False)
                 logger.info(f"[Kramers] koff_kramers.csv written ({len(_koff_df)} rows)")
+        except FrictionSourceError:
+            raise
         except Exception as _exc:
             logger.warning(f"[Kramers] k_off estimation skipped: {_exc}")
 

@@ -338,8 +338,8 @@ class AutoPath:
         sMD_path_model: str = 'dtw',   # 'dtw' | 'null' ('null' = no clustering: one path)
         sMD_n_paths: int | None = None,  # fixed number of paths; None = silhouette-selected
         sMD_max_frac_neg_dG_first_half: float = 0.25,  # pass-3 binding-well filter; <=0 disables
-        sMD_friction_model: str = 'ols',  # 'ols' | 'mixed' friction slope regression
-        sMD_friction_source_work: str = 'auto',  # 'auto'|'derivative'|'regression' Kramers friction
+        sMD_friction_model: str = 'mixed',  # 'mixed' | 'ols' force friction slope regression
+        sMD_friction_source_work: str = 'auto',  # 'auto'|'derivative'|'force'|'regression' Kramers friction
         sMD_path_combination: str = 'eq21',  # 'eq21' (Wolf, Post & Stock 2023, Eq. 21) | 'linear' (p_eq mean)
         sMD_features: list | None = None,
         sMD_log_geom_features: bool | list = True,  # hybrid: log geom during pulling + merge into clustering

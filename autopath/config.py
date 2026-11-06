@@ -67,8 +67,8 @@ class Config(object):
         sMD_path_model: str = "dtw",  # "dtw" | "null" ("null" = no clustering: one path)
         sMD_n_paths: int = None,  # fixed number of paths; None = silhouette-selected
         sMD_max_frac_neg_dG_first_half: float = 0.25,  # pass-3 binding-well filter; <=0 disables
-        sMD_friction_model: str = "ols",  # "ols" | "mixed" friction slope regression
-        sMD_friction_source_work: str = "auto",  # "auto" | "derivative" | "regression"
+        sMD_friction_model: str = "mixed",  # "mixed" | "ols" force friction slope regression
+        sMD_friction_source_work: str = "auto",  # "auto" | "derivative" | "force" | "regression"
         sMD_path_combination: str = "eq21",  # "eq21" | "linear" per-path profile recombination
         sMD_features: list = None,
         sMD_log_geom_features: bool = True,  # log geom features during pulling + merge into clustering
@@ -267,13 +267,13 @@ class Config(object):
             path's ΔG trace allowed to be negative before the path is discarded.
             Values ``<= 0`` disable the filter.  Default ``0.25``.
         sMD_friction_model : str, optional
-            ``"ols"`` (default) or ``"mixed"``: regression for the friction
-            slopes only; free energies always use per-step OLS.
+            ``"mixed"`` (default) or ``"ols"``: regression for the force
+            friction slope; the W_diss regression and free energies use OLS.
         sMD_friction_source_work : str, optional
-            Friction the Kramers MFPT uses for cumulant/jarzynski per-speed
-            profiles: ``"auto"`` (default; across-speed regression when at least
-            two speeds, else per-speed derivative), ``"derivative"`` or
-            ``"regression"``.
+            Friction the Kramers MFPT uses for all estimators: ``"auto"``
+            (default; force friction with at least two speeds, which needs the
+            force estimator, else per-speed derivative), ``"derivative"``,
+            ``"force"`` or ``"regression"`` (W_diss across speeds, OLS).
         sMD_path_combination : str, optional
             How per-path profiles are combined: ``"eq21"`` (free-energy
             exponential average weighted by trajectory fraction; Wolf, Post &

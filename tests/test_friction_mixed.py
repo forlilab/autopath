@@ -43,9 +43,33 @@ def test_ols_default_unchanged():
         assert row["Wdiss_slope"] == pytest.approx(lr.slope)
         assert row["Wdiss"] == pytest.approx(lr.intercept)
         assert row["model"] == "linear"
-    fe = FrictionEstimator(use_spline=False)
-    assert fe.friction_model == "ols"
+    fe = FrictionEstimator(use_spline=False, friction_model="ols")
     assert (fe.gamma_from_wdiss_regression(df, estimator="jarzynski")["model"] == "linear").all()
+
+
+def _force_table(seed=0):
+    rng = np.random.default_rng(seed)
+    rows = [(s, 1.0 + 0.01 * s, v, "force", "p0", 1.0,
+             50 + (300 + 60 * np.sin(s / 5)) * v + rng.normal(0, 2))
+            for s in range(N_STEP) for v in SPEEDS]
+    return pd.DataFrame(rows, columns=["step", "r_coord", "speed", "estimator",
+                                       "path", "n_samples", "Fmean"])
+
+
+def test_default_is_mixed():
+    assert FrictionEstimator().friction_model == "mixed"
+
+
+def test_model_changes_force_friction_not_wdiss_regression():
+    wd, _ = _table()
+    fr = _force_table()
+    w = {m: FrictionEstimator(use_spline=False, friction_model=m) for m in ("ols", "mixed")}
+    wr = {m: w[m].gamma_from_wdiss_regression(wd, estimator="jarzynski") for m in w}
+    assert (wr["mixed"]["model"] == "linear").all()
+    np.testing.assert_allclose(wr["mixed"]["Gamma"], wr["ols"]["Gamma"])
+    fo = {m: w[m].gamma_from_force_regression(fr, {}) for m in w}
+    assert (fo["mixed"]["model"] == "mixedlm").all()
+    assert not np.allclose(fo["mixed"]["Gamma"], fo["ols"]["Gamma"])
 
 
 def test_mixed_failure_falls_back_to_ols(monkeypatch, caplog):
@@ -67,6 +91,6 @@ def test_friction_estimator_mixed_and_bad_value():
     df, _ = _table()
     out = FrictionEstimator(use_spline=False, friction_model="mixed") \
         .gamma_from_wdiss_regression(df, estimator="jarzynski")
-    assert (out["model"] == "mixedlm").all() and np.isfinite(out["Gamma"]).all()
+    assert (out["model"] == "linear").all() and np.isfinite(out["Gamma"]).all()
     with pytest.raises(ValueError):
         FrictionEstimator(friction_model="bogus")

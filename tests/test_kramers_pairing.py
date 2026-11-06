@@ -99,9 +99,10 @@ def test_no_per_speed_row_at_v0_and_force_only_at_v0():
 def test_force_without_v0_is_skipped_not_run_per_speed():
     pmf, fric, _ = _tables(with_v0=False)
     k = KramersEstimator(temperature=300)
-    out = k.compute(pmf, fric, dG_extrapolated=None, abs_r=1.9)
+    kw = dict(dG_extrapolated=None, abs_r=1.9, friction_source_work="derivative")
+    out = k.compute(pmf, fric, **kw)
     assert "force" not in set(out.estimator)
-    out1 = k.compute(pmf, fric, dG_extrapolated=None, abs_r=1.9, all_speeds=False)
+    out1 = k.compute(pmf, fric, all_speeds=False, **kw)
     assert "force" not in set(out1.estimator)
     assert set(out1.source) == {"per_speed(v=0.001)"}
 
