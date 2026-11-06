@@ -93,6 +93,7 @@ class SteeredMD:
         autostop_nc: float | None = 0.1,  # fraction of NC_initial to stop at; None disables
         autostop_nc_window: int = 2,      # consecutive NC samples below threshold to confirm detachment
         autostop_min_displacement: float = 0.5,  # nm — don't fire before this displacement from r0
+        autostop_unbound_nm: float | None = None,  # also require min ligand–protein heavy-atom distance >= this (nm)
         sMD_max_r_offset: float = 3.0,   # max displacement offset (nm): cap pull at r0 + offset nm (also capped by PBC half-box minus pbc_safety_nm)
         pbc_safety_nm: float = 0.5,      # nm — safety margin subtracted from the per-axis PBC half-box cap (raise for large proteins)
         use_NVT: bool = False,  # Use NVT ensemble
@@ -129,6 +130,8 @@ class SteeredMD:
         self.autostop_nc        = float(autostop_nc) if autostop_nc is not None else None
         self.autostop_nc_window = int(autostop_nc_window)
         self.autostop_min_displacement = float(autostop_min_displacement)
+        self.autostop_unbound_nm = float(autostop_unbound_nm) if autostop_unbound_nm is not None else None
+        self._protein_heavy = None
         self.sMD_max_r_offset    = float(sMD_max_r_offset)
         self.pbc_safety_nm       = float(pbc_safety_nm)
         self.use_NVT = use_NVT
@@ -299,7 +302,11 @@ class SteeredMD:
         # autostop_nc × NC_initial for autostop_nc_window consecutive samples
         # after the min-displacement guard is satisfied.
         _nc_buf: deque[float] = deque(maxlen=self.autostop_nc_window)
+        _mind_buf: deque[float] = deque(maxlen=self.autostop_nc_window)
         _nc_initial = None
+        _unbound_nm = getattr(self, "autostop_unbound_nm", None)
+        if _unbound_nm is not None and getattr(self, "_protein_heavy", None) is None:
+            self._protein_heavy = self._protein_heavy_atoms()
         if self.autostop_nc is not None and self.subset_protein_CA is not None:
             pos_nm_init = simulation.context.getState(getPositions=True).getPositions(asNumpy=True) / openmmunit.nanometers
             _nc_initial = self._compute_nc(pos_nm_init)
@@ -404,6 +411,8 @@ class SteeredMD:
                     pos_nm = simulation.context.getState(getPositions=True).getPositions(asNumpy=True) / openmmunit.nanometers
                     if self.subset_protein_CA is not None:
                         nc = self._compute_nc(pos_nm)
+                        if _unbound_nm is not None:
+                            _mind_buf.append(self._min_ligand_protein_nm(pos_nm))
                     if geom_fh is not None:
                         grow = self._compute_geom_row(pos_nm)
                         geom_buf.append(f"{i},{time_before}," +
@@ -416,7 +425,10 @@ class SteeredMD:
                     current_displacement_nm = (i + 1) * dx_nm
                     nc_ready = (self.autostop_min_displacement <= 0.0 or
                                 current_displacement_nm >= self.autostop_min_displacement)
-                    if (nc_ready and len(_nc_buf) == self.autostop_nc_window and
+                    unbound = (_unbound_nm is None or
+                               (len(_mind_buf) == self.autostop_nc_window and
+                                min(_mind_buf) >= _unbound_nm))
+                    if (nc_ready and unbound and len(_nc_buf) == self.autostop_nc_window and
                             all(v < self.autostop_nc * _nc_initial for v in _nc_buf)):
                         _buf.append(_row)
                         f.write(''.join(_buf))
@@ -425,7 +437,10 @@ class SteeredMD:
                             f"[Autostop/NC] Stopping at move {i}: NC={nc:.2f} "
                             f"< {self.autostop_nc:.0%} × NC_initial={_nc_initial:.2f} "
                             f"for {self.autostop_nc_window} consecutive samples "
-                            f"(displacement={current_displacement_nm:.3f} nm)."
+                            f"(displacement={current_displacement_nm:.3f} nm"
+                            + (f", ligand-protein heavy-atom gap {_mind_buf[-1]:.3f} nm "
+                               f">= {_unbound_nm:.2f} nm" if _unbound_nm is not None else "")
+                            + ")."
                         )
                         break
 
@@ -834,6 +849,26 @@ class SteeredMD:
         The anchor defines only the pulled COM.
         """
         return _feature_atoms(self)
+
+    def _protein_heavy_atoms(self):
+        """Protein heavy atoms (no solvent, ions, ligand or the pulled group's residues)."""
+        skip = {"HOH", "WAT", "SOL", "NA", "CL", "K", "MG", "UNK"}
+        lig = set(_feature_atoms(self))
+        own = {a.residue.index for a in self.topology.atoms() if a.index in lig}
+        return np.array([a.index for a in self.topology.atoms()
+                         if a.residue.name not in skip and a.residue.index not in own
+                         and a.element is not None and a.element.symbol != "H"], dtype=int)
+
+    def _min_ligand_protein_nm(self, positions_nm):
+        """Smallest ligand heavy-atom to protein heavy-atom distance (nm), same image.
+
+        Positions are continuous (no PBC wrapping) and every replica starts co-imaged,
+        so the direct distance is the physical one while the ligand is near the protein.
+        """
+        lig = positions_nm[_feature_atoms(self)]
+        prot = positions_nm[self._protein_heavy]
+        diff = lig[:, None, :] - prot[None, :, :]
+        return float(np.sqrt(np.einsum('ijk,ijk->ij', diff, diff).min()))
 
     def _compute_nc(self, positions_nm, threshold_nm=0.5):
         """Compute number of contacts via switching function 1/(1+(d/threshold)^6) using positions only.

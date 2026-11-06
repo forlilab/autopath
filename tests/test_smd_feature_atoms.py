@@ -25,3 +25,10 @@ def test_nc_counts_non_anchor_contacts():
     anchor_only = _smd([2, 3], None)._compute_nc(pos)
     whole = _smd([2, 3], [1, 2, 3])._compute_nc(pos)
     assert anchor_only < 1e-3 < 0.5 < whole
+
+
+def test_min_ligand_protein_distance_uses_all_heavy_atoms():
+    smd = _smd([2], [1, 2])
+    smd._protein_heavy = np.array([0])
+    pos = np.array([[0.0, 0, 0], [0.4, 0, 0], [3.0, 0, 0]])
+    assert abs(smd._min_ligand_protein_nm(pos) - 0.4) < 1e-9   # non-anchor atom sets the gap

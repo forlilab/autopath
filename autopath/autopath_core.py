@@ -79,7 +79,7 @@ class AutoPath:
         ``run_sMDpulling``, ``sMD_outdir``, ``sMD_pulling_dir``,
         ``sMD_pulling_speeds``, ``sMD_max_pulling_dist``, ``sMD_max_r_offset``,
         ``sMD_autostop_nc``, ``sMD_autostop_nc_window``,
-        ``sMD_autostop_min_displacement``, ``sMD_converge_speeds``,
+        ``sMD_autostop_min_displacement``, ``sMD_autostop_unbound_nm``, ``sMD_converge_speeds``,
         ``sMD_time``, ``sMD_steps_per_move``, ``sMD_dx_per_move``,
         ``sMD_spring_cte``, ``sMD_ligand_anchor_mode``, ``sMD_max_replicas``,
         ``sMD_run_analysis``, ``sMD_align_trajs``, ``sMD_clust_selection``, ``sMD_features``,
@@ -125,6 +125,7 @@ class AutoPath:
         sMD_autostop_nc: float | None = 0.01,  # fraction of NC_initial; None disables
         sMD_autostop_nc_window: int = 5,
         sMD_autostop_min_displacement: float = 0.5,
+        sMD_autostop_unbound_nm: float | None = None,  # NC stop also needs ligand-protein heavy-atom gap >= this (nm)
         sMD_converge_speeds: bool = True,
         sMD_conv_window: int = 5,
         sMD_conv_streak: int = 3,
@@ -190,6 +191,7 @@ class AutoPath:
         self.sMD_autostop_nc = sMD_autostop_nc
         self.sMD_autostop_nc_window = sMD_autostop_nc_window
         self.sMD_autostop_min_displacement = sMD_autostop_min_displacement
+        self.sMD_autostop_unbound_nm = sMD_autostop_unbound_nm
         for _name, _val in (("sMD_time", sMD_time), ("sMD_steps_per_move", sMD_steps_per_move)):
             if _val is not None:
                 raise ValueError(f"{_name} is not supported; set sMD_pulling_speeds and sMD_dx_per_move instead.")
@@ -502,6 +504,7 @@ class AutoPath:
                 autostop_nc=self.sMD_autostop_nc,
                 autostop_nc_window=self.sMD_autostop_nc_window,
                 autostop_min_displacement=self.sMD_autostop_min_displacement,
+                autostop_unbound_nm=self.sMD_autostop_unbound_nm,
                 save_freq=5,
                 force_n_samples=self.sMD_force_n_samples,
                 force_sample_stride=self.sMD_force_sample_stride,
