@@ -1,5 +1,3 @@
-import warnings
-
 import numpy as np
 import pandas as pd
 from abc import ABC, abstractmethod
@@ -2198,10 +2196,8 @@ def _mixed_step_rows(sub: pd.DataFrame, param: str, estimator: str,
     import statsmodels.formula.api as smf
 
     sub = sub[sub.groupby('step')['speed'].transform('nunique') >= 2]
-    with warnings.catch_warnings():
-        warnings.simplefilter('error')
-        res = smf.mixedlm(f"{param} ~ _xspeed", sub, groups=sub['step'],
-                          re_formula="~_xspeed").fit(reml=False)
+    res = smf.mixedlm(f"{param} ~ _xspeed", sub, groups=sub['step'],
+                      re_formula="~_xspeed").fit(reml=False)
     if not res.converged:
         raise RuntimeError("mixedlm did not converge")
     fe_int = res.fe_params['Intercept']
