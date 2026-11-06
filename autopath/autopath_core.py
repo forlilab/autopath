@@ -711,13 +711,12 @@ class AutoPath:
                 else:
                     n_done = len(glob(f"{sMD_traj_outdir}/sMD_*_v{speed}_{self.sMD_pulling_dir}.dat"))
                     logger.info(f"Running sMD for speed {speed} nm/ps: {reps} replicas requested, {n_done} on disk.")
-                    for i in range(max(0, reps - n_done)):
+                    # A failed pull (e.g. NaN) writes no .dat; retry it so the speed still
+                    # ends with `reps` replicas. Consecutive failures abort the speed.
+                    consecutive_failures, MAX_CONSECUTIVE_FAILURES = 0, 5
+                    while True:
                         existing = glob(f"{sMD_traj_outdir}/sMD_*_v{speed}_{self.sMD_pulling_dir}.dat")
-                        if len(existing) >= self.sMD_max_replicas:
-                            logger.warning(
-                                f"Reached maximum replicas ({self.sMD_max_replicas}) for speed {speed} nm/ps "
-                                f"(folder already has {len(existing)}). Stopping."
-                            )
+                        if len(existing) >= min(reps, self.sMD_max_replicas):
                             break
                         try:
                             sMD.run(
@@ -726,9 +725,16 @@ class AutoPath:
                                 pulling_speed=speed,  # nm/ps
                                 pulling_direction=self.sMD_pulling_dir,
                             )
+                            consecutive_failures = 0
                         except Exception as e:
-                            logger.error(f"Error during sMD pulling for speed {speed} nm/ps, replica {i+1}: {e}")
-                            continue
+                            consecutive_failures += 1
+                            logger.error(f"Error during sMD pulling for speed {speed} nm/ps, replica "
+                                         f"{len(existing) + 1}: {e} (consecutive failure "
+                                         f"{consecutive_failures}/{MAX_CONSECUTIVE_FAILURES}; retrying)")
+                            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                                logger.error(f"Aborting sMD for speed {speed} nm/ps after "
+                                             f"{consecutive_failures} consecutive failures.")
+                                break
 
         # Load and align sMD trajectories
         sMD_trajs = glob(f"{sMD_traj_outdir}/sMD_replica-*_*_*.dcd")
