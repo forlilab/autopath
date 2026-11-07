@@ -2,6 +2,8 @@
 import os
 import time
 import numpy as np
+import openmm as _openmm
+from contextlib import contextmanager, nullcontext
 from typing import Union, List
 
 # OpenMM imports
@@ -29,6 +31,93 @@ from autopath.utils import assign_bondOrders, add_variants, save_pdb, save_syste
 
 import logging
 logger = logging.getLogger("autopath.preparation")
+
+# Water models whose residue carries an extra site beyond O/H/H.
+FOUR_SITE_WATER_MODELS = ("tip4pew", "tip5p", "swm4ndp")
+
+# 3-site stand-in for each extra-site water XML, used only to place a membrane.
+THREE_SITE_WATER_XML = {
+    "opc.xml": "opc3.xml",
+    "tip4pew.xml": "tip3p.xml",
+    "tip4pfb.xml": "tip3pfb.xml",
+    "tip5p.xml": "tip3p.xml",
+    "swm4ndp.xml": "tip3p.xml",
+}
+
+
+def substitute_three_site_water(forcefield_files: list) -> tuple[list, list]:
+    """Replace extra-site water XMLs in a force field list with 3-site counterparts.
+
+    The directory prefix is preserved, so the substitute comes from the same force field
+    release as the original.
+
+    Parameters
+    ----------
+    forcefield_files : list of str
+        OpenMM ForceField XML paths.
+
+    Returns
+    -------
+    files : list of str
+        The input list with every extra-site water XML substituted.
+    swapped : list of tuple
+        The ``(original, substitute)`` pairs that were applied.
+    """
+    files = []
+    swapped = []
+    for xml in forcefield_files:
+        directory, name = os.path.split(xml)
+        substitute = THREE_SITE_WATER_XML.get(name)
+        if substitute is None:
+            files.append(xml)
+            continue
+        files.append(os.path.join(directory, substitute))
+        swapped.append((xml, files[-1]))
+    return files, swapped
+
+
+@contextmanager
+def relaxed_membrane_packing(min_iterations: int = 200):
+    """Minimise between ``addMembrane``'s solute re-expansion increments.
+
+    ``Modeller.addMembrane`` packs lipids by compressing the solute to 50% in x/y,
+    discarding the lipids that overlap it, then re-expanding it over ~10*max(x,y)
+    increments with 20 fs of Langevin dynamics in between. It minimises once, for 30
+    iterations, before the loop and never again. For a large channel that is far too
+    little for the lipids to get out of the way
+
+    Patching is scoped to the ``addMembrane`` call: the only Context created and the only
+    integrator stepping inside that window belong to addMembrane itself. Costs roughly
+    20 min on a 500k-atom system, against ~2 min for the unrelaxed path.
+    """
+    captured = {}
+    orig_ctx_init = _openmm.Context.__init__
+    orig_min = _openmm.LocalEnergyMinimizer.minimize
+    orig_step = _openmm.LangevinIntegrator.step
+
+    def ctx_init(self, *args, **kwargs):
+        orig_ctx_init(self, *args, **kwargs)
+        captured["context"] = self
+
+    def patched_min(context, tolerance=10.0, maxIterations=0, reporter=None):
+        return orig_min(context, tolerance, max(maxIterations, min_iterations))
+
+    def patched_step(self, steps):
+        context = captured.get("context")
+        if context is not None:
+            orig_min(context, 10.0, min_iterations)
+        return orig_step(self, steps)
+
+    _openmm.Context.__init__ = ctx_init
+    _openmm.LocalEnergyMinimizer.minimize = patched_min
+    _openmm.LangevinIntegrator.step = patched_step
+    try:
+        yield
+    finally:
+        _openmm.Context.__init__ = orig_ctx_init
+        _openmm.LocalEnergyMinimizer.minimize = orig_min
+        _openmm.LangevinIntegrator.step = orig_step
+
 
 class SystemPreparation:
     """Prepare a solvated or membrane-embedded simulation system for OpenMM MD.
@@ -69,6 +158,11 @@ class SystemPreparation:
     lipid_type : str, optional
         Lipid residue name (e.g. ``"POPC"``) or path to a custom PDB patch.
         Required when ``is_membrane=True``.
+    membrane_relax_iterations : int, optional
+        Minimisation iterations run after each of ``addMembrane``'s solute
+        re-expansion increments. Stock OpenMM minimises only once for 30 iterations,
+        which is not enough for a large membrane protein and lets the lipids blow up
+        (see :func:`relaxed_membrane_packing`). Set to 0 for stock behaviour.
     out_dir : str, optional
         Directory where all output files are written.
     """
@@ -84,11 +178,15 @@ class SystemPreparation:
         hydrogenMass: float = 1.5,  # in amu; 1.5 enables 4 fs timestep via HMR
         boxShape: str = "dodecahedron",
         padding: float = 1.2,
+        # OPC has the same topology as TIP4P-Ew (O, H1, H2, M + one virtual site), so pass water_model="tip4pew" to
+        # build the right topology and let opc.xml supply the parameters. ff19SB is parameterised for OPC, so the two go together.
+        water_model: str = "tip3p",
         num_solvent: int = None,
         ionicStrength: float = 0.15,
         ions: tuple[str] = ("Na+", "Cl-"),  # positiveIon, negativeIon
         is_membrane: bool = False,
         lipid_type: str = 'POPC',
+        membrane_relax_iterations: int = 0, #200
         out_dir: str = "system",
     ) -> None:
 
@@ -97,12 +195,15 @@ class SystemPreparation:
         self.out_dir = out_dir
         os.makedirs(out_dir, exist_ok=True)
 
+        self.forcefield_files = list(forcefield)
         self.forcefield = ForceField(*forcefield)
+        self._template_generators = []
 
         self.hydrogenMass = (hydrogenMass * openmmunit.amu if hydrogenMass is not None else None)
         self.boxShape = boxShape  # cube, dodecahedron
 
         self.padding = padding
+        self.water_model = water_model
         self.num_solvent = num_solvent
         if self.padding is not None:
             self.padding = self.padding * openmmunit.nanometers
@@ -121,6 +222,8 @@ class SystemPreparation:
 
         self.is_membrane = is_membrane
         self.lipid_type = lipid_type
+        # 0 disables the relaxation and restores stock addMembrane behaviour
+        self.membrane_relax_iterations = membrane_relax_iterations
         self._available_lipids = [
             "POPC",
             "POPE",
@@ -193,6 +296,44 @@ class SystemPreparation:
                 f"Supported: openff-*, espaloma-*, gaff-*."
             )
         return lig_ff, family_aliases[family_prefix]
+
+    def _three_site_forcefield(self) -> ForceField:
+        """Rebuild the force field with its extra-site water swapped for a 3-site one.
+
+        ``Modeller.addMembrane`` takes no water-model argument and parametrizes both its
+        bundled lipid patch and the solute with the force field it is handed, so an
+        extra-site water model fails there before any virtual site could be added. The
+        substitute only places lipids, waters and ions; every particle is parametrized
+        afterwards from the real force field.
+
+        Returns
+        -------
+        openmm.app.ForceField
+            The configured force field with 3-site water, carrying the same ligand
+            template generators.
+
+        Raises
+        ------
+        ValueError
+            If no file in the force field list is a known extra-site water XML.
+        """
+        files, swapped = substitute_three_site_water(self.forcefield_files)
+        if not swapped:
+            raise ValueError(
+                f"Water model {self.water_model!r} needs an extra site, but none of "
+                f"{self.forcefield_files} is a known extra-site water XML "
+                f"({sorted(THREE_SITE_WATER_XML)}), so no 3-site force field can be "
+                "derived to build the membrane with."
+            )
+
+        logger.info(
+            "Building the membrane with 3-site water "
+            f"({', '.join(f'{a} -> {b}' for a, b in swapped)}).."
+        )
+        forcefield = ForceField(*files)
+        for generator in self._template_generators:
+            forcefield.registerTemplateGenerator(generator)
+        return forcefield
 
     def _ligand_to_mol(self, lig_fname: str = None, lig_smiles: str = None, lig_from_xray: bool = False):
         """Load a ligand file and return an OpenFF ``Molecule``.
@@ -296,6 +437,7 @@ class SystemPreparation:
             )
 
         self.forcefield.registerTemplateGenerator(template_generator.generator)
+        self._template_generators.append(template_generator.generator)
 
         ligand_off_topology = offTopology.from_molecules(molecules=[ligand])
         ligand_omm_topology = ligand_off_topology.to_openmm()
@@ -323,9 +465,8 @@ class SystemPreparation:
 
         Parameters
         ----------
-        protein : str, optional
-            Path to the prepared protein PDB file. If ``None``, a
-            ligand-only or membrane-only system is built.
+        protein : str
+            Path to the prepared protein PDB file. Required.
         variants : dict, optional
             Residue variant map passed to ``add_variants()`` (e.g. to
             specify HIS protonation states or CYS oxidation).
@@ -349,6 +490,8 @@ class SystemPreparation:
             Re-raised if the protein PDB cannot be loaded.
         """
 
+        if protein is None:
+            raise ValueError("protein=None is not supported; pass a protein PDB.")
         start_time = time.monotonic()
 
         if protein is not None:
@@ -391,51 +534,82 @@ class SystemPreparation:
                         used_chains.add(chr(chain_id))
                         chain_id += 1
 
-        # CASE: Ligand and membrane only (no protein)
-        max_length = 0.0 * openmmunit.angstroms
-        if protein is None and self.is_membrane:
 
-            # Centre ligand at the origin before translating it into the membrane.
-            lig_com = np.mean(ligand_positions, axis=0)
-            for i, xyz_i in enumerate(ligand_positions):
-                ligand_positions[i] = xyz_i - lig_com
-
-            pairwise_distances = np.linalg.norm(
-                ligand_positions[:, None] - ligand_positions, axis=2
-            )
-            max_length = np.max(pairwise_distances) * openmmunit.angstroms
-
-            translation_distance = 3.0
-
-            translation_vector = np.array([0, 0, translation_distance])
-            ligand_positions += translation_vector * openmmunit.nanometers
-
-            modeller = Modeller(ligand_topology, ligand_positions)
+        # A 4-site water model needs its virtual site on EVERY water, including the
+        # crystallographic ones carried in from the input. On the solvation path that has to
+        # happen BEFORE addSolvent, which computes the neutralising charge and therefore
+        # requires every residue to match a template. addMembrane cannot take a 4-site force
+        # field at all, so on the membrane path the promotion is deferred until after it.
+        needs_extra_particles = self.water_model in FOUR_SITE_WATER_MODELS
+        if needs_extra_particles and not self.is_membrane:
+            logger.info(f"Adding extra particles for the {self.water_model} water model..")
+            modeller.addExtraParticles(self.forcefield)
 
         if self.is_membrane:
+            # Drop a unit cell that is smaller than the solute it supposedly encloses.
+            # OpenMM's PDBFile writes a placeholder "CRYST1 1.000 1.000 1.000" for any
+            # topology that has no box, so reading such a file back yields a real 0.1 nm
+            # cell. addMembrane then sizes the box from it (boxSizeZ = max(patch_z, cell_z + 2*minimumPadding)) and never consults the
+            # solute's own z-extent, so a tall membrane protein ends up taller than its
+            # box
+            cell = modeller.topology.getUnitCellDimensions()
+            if cell is not None:
+                cell_nm = np.array(cell.value_in_unit(openmmunit.nanometer))
+                solute = np.array(
+                    modeller.positions.value_in_unit(openmmunit.nanometer)
+                )
+                extent = solute.max(axis=0) - solute.min(axis=0)
+                if np.any(cell_nm < extent):
+                    logger.warning(
+                        f"Ignoring unit cell {np.round(cell_nm, 3)} nm: smaller than the "
+                        f"solute extent {np.round(extent, 3)} nm, so it cannot be a real "
+                        "periodic box. Letting addMembrane size the box from the solute."
+                    )
+                    modeller.topology.setPeriodicBoxVectors(None)
+
             logger.info(f"Adding a {os.path.basename(self.lipid_type)} membrane to the system..")
+            membrane_forcefield = (
+                self._three_site_forcefield() if needs_extra_particles else self.forcefield
+            )
             if os.path.exists(self.lipid_type):
                 lipid_patch = PDBFile(self.lipid_type)
             else:
                 lipid_patch = self.lipid_type
             try:
-                modeller.addMembrane(
-                    forcefield=self.forcefield,
-                    lipidType=lipid_patch,
-                    neutralize=True,
-                    ionicStrength=self.ionicStrength,
-                    positiveIon=self.ions[0],
-                    negativeIon=self.ions[1],
-                    minimumPadding=self.padding + max_length,
-                )
+                if self.membrane_relax_iterations:
+                    logger.info(
+                        "Relaxing the lipid packing between solute re-expansion "
+                        f"increments ({self.membrane_relax_iterations} minimisation "
+                        "iterations each); this is slow but keeps large membrane "
+                        "proteins from blowing up."
+                    )
+                    packing = relaxed_membrane_packing(self.membrane_relax_iterations)
+                else:
+                    packing = nullcontext()
+
+                with packing:
+                    modeller.addMembrane(
+                        forcefield=membrane_forcefield,
+                        lipidType=lipid_patch,
+                        neutralize=True,
+                        ionicStrength=self.ionicStrength,
+                        positiveIon=self.ions[0],
+                        negativeIon=self.ions[1],
+                        minimumPadding=self.padding,
+                    )
 
             except OpenMMException as e:
                 raise RuntimeError(f"Something went wrong while building the membrane.\n{e}") from e
+
+            if needs_extra_particles:
+                logger.info(f"Adding extra particles for the {self.water_model} water model..")
+                modeller.addExtraParticles(self.forcefield)
 
         else:
             logger.info(f"Solvating the system..")
             modeller.addSolvent(
                 self.forcefield,
+                model=self.water_model,
                 neutralize=True,
                 numAdded=self.num_solvent,
                 ionicStrength=self.ionicStrength,

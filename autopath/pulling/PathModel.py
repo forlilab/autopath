@@ -9,7 +9,7 @@ import seaborn as sns
 import kmedoids
 from dtaidistance import dtw_ndim
 
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import silhouette_score
 from sklearn.decomposition import PCA
 
@@ -19,6 +19,14 @@ from abc import ABC, abstractmethod
 
 import logging
 logger = logging.getLogger("autopath.PathModel")
+
+# Trace features whose magnitude scales with the pulling speed. Reported when
+# clustering across speeds, where that offset would otherwise swamp the pathway
+# signal (see the per-speed standardization in DTWPathModel.fit_transform).
+SPEED_DEPENDENT_FEATURES = frozenset({
+    "work", "lag", "force", "dW_protocol", "U_cvpack",
+})
+
 
 class PathModel(ABC):
     """Abstract base class for path models in pulling."""
@@ -58,8 +66,12 @@ class DTWPathModel(PathModel):
                  seed: int = 42,
                  do_plots: bool = True,
                  outdir: str = 'path_analysis',
-                 n_geom_pcs: int | None = 2,
-                 geom_feature_prefix: str = 'dist_',
+                 n_geom_pcs: int | None = 3,
+                 geom_feature_prefix: str | tuple[str, ...] = ('dist_', 'geom_'),
+                 pca_all_features: bool = True,
+                 viz_output_format: str = "pse",
+                 viz_n_lig_conformations: int = 5,
+                 viz_stick_transparency_ladder: tuple[float, float] | None = None,
                  ):
 
         self.seed = seed
@@ -68,17 +80,30 @@ class DTWPathModel(PathModel):
         self.do_plots = do_plots
         self._use_silhouette = True
         self.n_geom_pcs = n_geom_pcs
+        # Prefix(es) of the geometric column block PCA-reduced before DTW
+        # (pocket distances dist_* and inline geom features geom_*).
         self.geom_feature_prefix = geom_feature_prefix
+        # Hybrid default: PCA the whole standardized matrix (trace + geom)
+        # together. If False, only the geom-prefixed block is PCA'd and trace
+        # features pass through raw.
+        self.pca_all_features = pca_all_features
+        # Unbinding-paths figure settings, forwarded to
+        # make_unbinding_paths_visualization. Defaults reproduce the legacy
+        # session (self-contained .pse, 5 snapshots, uniform stick alpha).
+        self.viz_output_format = viz_output_format
+        self.viz_n_lig_conformations = viz_n_lig_conformations
+        self.viz_stick_transparency_ladder = viz_stick_transparency_ladder
     
     def fit_transform(self,
                     feature_df: pd.DataFrame,
                     r_range: tuple = None,  # e.g., (0, 1.5)
                     n_paths: int = None,
-                    cluster_across_speeds: bool = False,
+                    cluster_across_speeds: bool = True,
                     reference_pdb: str = None,
                     ligand_select: str = None,
                     pocket_select: str = None,
                     trajectory_files: dict = None,
+                    persist_medoids: bool = True,
                     ) -> dict:
         """
         Fit and transform trajectory clustering.
@@ -91,8 +116,9 @@ class DTWPathModel(PathModel):
             clustering (e.g. 0.8 uses the first 80% of frames). Plots always reflect the
             full trajectory regardless.
         cluster_across_speeds : bool
-            If True, cluster all trajectories together regardless of speed.
-            If False, cluster trajectories independently per speed.
+            If True (default), cluster all trajectories together, standardising
+            features within each speed; labels are ``path-k``. If False, cluster
+            each speed independently; labels are ``path-k_v{speed}``.
         reference_pdb : str, optional
             Path to reference PDB file for unbinding path visualization.
         ligand_select : str, optional
@@ -100,11 +126,16 @@ class DTWPathModel(PathModel):
         trajectory_files : dict, optional
             Dictionary mapping trajectory names to (topology, trajectory) tuples
             for unbinding path visualization.
+        persist_medoids : bool, optional
+            Merge this call's medoids into ``path_analysis/medoid_info.json``
+            (default). False leaves the file untouched and exposes only this
+            call's medoids on the instance.
 
         Returns
         -------
         dict
-            Mapping of trajectory name → path label (e.g. ``"path-0_v0.001"``).
+            Mapping of trajectory name → path label (``"path-0"``, or
+            ``"path-0_v0.001"`` per speed).
             ``paths_`` in downstream SMDData contains only medoid trajectories
             (one representative per cluster), not all trajectories.
 
@@ -144,21 +175,16 @@ class DTWPathModel(PathModel):
             if c not in ['trajname', 'time', 'step', 'speed', 'path']
         ]
         
-        # NaN values occasionally appear in DTW feature matrices, likely from
-        # trajectory frames with undefined geometry (e.g., PBC artifacts or
-        # extreme conformations). Drop them to avoid distance computation failures.
+        # NaN values occasionally appear (e.g. PBC artifacts, undefined geometry);
+        # drop them to avoid DTW distance computation failures.
         logger.info(f'Features used for clustering: {feature_cols}')
         if feature_df[feature_cols].isnull().any().any():
             logger.warning(
             "NaN values detected in features. "
             "DTW distance matrix will be unreliable. Please check your data."
             )
-            #drop rows with NaN values in feature columns
             feature_df = feature_df.dropna(subset=feature_cols)
-                                 
-        # logger.info(f"Feature matrix shape after NaN removal: {feature_df.shape}")
-              
-        # Decide grouping strategy
+
         if cluster_across_speeds:
             grouping_iter = [(None, feature_df)]
         else:
@@ -167,6 +193,11 @@ class DTWPathModel(PathModel):
         all_path_mappings = {}
         all_medoid_names = set()  # Track medoids across all speeds
         medoid_to_path = {}  # Map medoid trajectory name -> path ID
+        # Per-speed breakdown, keyed by speed string ('all' if cluster_across_speeds);
+        # with persist_medoids, per-speed calls accumulate in medoid_info.json and a
+        # change of clustering mode replaces the stored entries (see below).
+        medoids_by_speed = {}
+        dtw_groups = {}
 
         for speed_key, speed_df in grouping_iter:
             speed_df_full = speed_df
@@ -201,26 +232,71 @@ class DTWPathModel(PathModel):
             trajnames = list(data_struct.keys())
             vectors_stacked = [data_struct[name] for name in trajnames]
 
-            # Scale features across all frames / trajectories
-            scaler = StandardScaler(with_mean=True, with_std=True)
-            scaler.fit(np.vstack(vectors_stacked))
+            # Scale features across all frames / trajectories.
+            #
+            # When clustering ACROSS speeds, standardize within each speed group
+            # instead. Speed-dependent features carry a large systematic offset
+            # between speeds (<F> = Feq + Gamma*v, so work/force/lag all scale with
+            # v).Per-speed standardization removes the offset (and equalizes
+            # the within-speed scale)
+            traj_speed = (
+                speed_df_cluster.groupby('trajname')['speed'].first().to_dict()
+                if 'speed' in speed_df_cluster.columns else {}
+            )
+            speeds_present = {traj_speed.get(n) for n in trajnames}
+            per_speed_scaling = (
+                speed_key is None
+                and len(speeds_present) > 1
+                and None not in speeds_present
+            )
+
+            scaler = None
+            scalers = None
+            if per_speed_scaling:
+                scalers = {}
+                for sp in sorted(speeds_present):
+                    idx = [i for i, n in enumerate(trajnames)
+                           if traj_speed.get(n) == sp]
+                    sc = StandardScaler(with_mean=True, with_std=True)
+                    sc.fit(np.vstack([vectors_stacked[i] for i in idx]))
+                    scalers[sp] = sc
+                sd_present = sorted(set(feature_cols) & SPEED_DEPENDENT_FEATURES)
+                logger.info(
+                    f"Cross-speed clustering: standardizing features within each of "
+                    f"{len(scalers)} speed groups ({sorted(speeds_present)}) rather than "
+                    f"globally, so speed-dependent features do not dominate the DTW "
+                    f"metric. Speed-dependent features present: "
+                    f"{sd_present if sd_present else 'none'}."
+                )
+            else:
+                scaler = StandardScaler(with_mean=True, with_std=True)
+                scaler.fit(np.vstack(vectors_stacked))
+
+            def _scale(trajname, arr):
+                """Standardize one trajectory with its speed-matched scaler."""
+                if scalers is not None:
+                    return scalers[traj_speed[trajname]].transform(arr)
+                return scaler.transform(arr)
+
             vectors_stacked_scaled = [
-                scaler.transform(arr) for arr in vectors_stacked
+                _scale(name, arr) for name, arr in zip(trajnames, vectors_stacked)
             ]
 
-            # Equalize geom vs trace feature contribution (see fit_transform Notes).
-            # PCA is applied whenever geometric (distance) features are present and
-            # n_geom_pcs is set — both in merged mode (geom + trace) and in
-            # distance-only mode (geom only, other_idx empty). An empty other_idx
-            # makes arr[:, other_idx] shape (n, 0), which np.hstack absorbs cleanly.
-            geom_idx = [
-                i for i, c in enumerate(feature_cols)
-                if c.startswith(self.geom_feature_prefix)
-            ]
-            other_idx = [
-                i for i, c in enumerate(feature_cols)
-                if not c.startswith(self.geom_feature_prefix)
-            ]
+            # Equalize geom vs trace feature contribution (see fit_transform docstring).
+            # An empty other_idx makes arr[:, other_idx] shape (n, 0), which
+            # np.hstack absorbs cleanly.
+            if self.pca_all_features:
+                geom_idx = list(range(len(feature_cols)))
+                other_idx = []
+            else:
+                geom_idx = [
+                    i for i, c in enumerate(feature_cols)
+                    if c.startswith(self.geom_feature_prefix)
+                ]
+                other_idx = [
+                    i for i, c in enumerate(feature_cols)
+                    if not c.startswith(self.geom_feature_prefix)
+                ]
             if geom_idx and self.n_geom_pcs is not None:
                 n_components = min(self.n_geom_pcs, len(geom_idx))
                 logger.info(
@@ -248,12 +324,16 @@ class DTWPathModel(PathModel):
             )
 
             #choose number of clusters
-            if n_paths is None:
+            if n_paths is None and len(trajnames) < 3:
+                # silhouette needs 2 <= k <= n-1: too few trajectories to split
+                K = 1
+                scores = {}
+                logger.info(
+                    f"{'Global' if speed_key is None else f'Speed {speed_key}'}: "
+                    f"{len(trajnames)} trajectories, using a single path"
+                )
+            elif n_paths is None:
                 K_MAX = min(6, len(trajnames))
-                if K_MAX < 2:
-                    raise RuntimeError(
-                        "Not enough trajectories to form at least 2 clusters."
-                    )
 
                 scores = {}
                 for k in range(2, K_MAX):
@@ -298,9 +378,20 @@ class DTWPathModel(PathModel):
                 for trajname, cluster_id in zip(trajnames, cluster_model.labels)
             }
             all_path_mappings.update(path_mapping_dic)
+            dtw_groups[str(speed_key) if speed_key is not None else "all"] = {
+                "trajnames": list(trajnames),
+                "dist": np.asarray(distmatrix),
+                "medoids": [int(i) for i in cluster_model.medoids],
+                "labels": [path_mapping_dic[t] for t in trajnames],
+            }
 
             # Medoid → path is just the subset of path_mapping_dic for medoid trajectories
-            medoid_to_path.update({name: path_mapping_dic[name] for name in speed_medoid_names})
+            speed_medoid_to_path = {name: path_mapping_dic[name] for name in speed_medoid_names}
+            medoid_to_path.update(speed_medoid_to_path)
+
+            # Recorded per-speed for merging into medoid_info.json; the cross-speed
+            # union (medoid names as keys) is derived from this on demand.
+            medoids_by_speed[str(speed_key) if speed_key is not None else "all"] = speed_medoid_to_path
 
             # Set per-speed attribute used by plot_clusters_PCA below
             self.medoid_names = speed_medoid_names
@@ -329,7 +420,8 @@ class DTWPathModel(PathModel):
                         .sort_values('step')[feature_cols].to_numpy()
                         for name in trajnames
                     ]
-                    vectors_plot = [scaler.transform(arr) for arr in vectors_full]
+                    vectors_plot = [_scale(name, arr)
+                                    for name, arr in zip(trajnames, vectors_full)]
                     if geom_idx and self.n_geom_pcs is not None:
                         vectors_plot = [
                             np.hstack([
@@ -343,20 +435,24 @@ class DTWPathModel(PathModel):
                     vectors_plot = vectors_stacked_scaled
                     speed_df_for_plot = speed_df_full
 
+                # When the geom PCA already reduced the whole vector (pca_all),
+                # the plot must NOT PCA again — pass the fitted PCA so the scatter
+                # uses its scores directly and loadings map the ORIGINAL features.
+                _plot_pca = (pca_geom if (self.pca_all_features and geom_idx
+                                          and self.n_geom_pcs is not None) else None)
                 self.plot_clusters_PCA(
                     feature_df=speed_df_for_plot,
                     path_mapping_dic=path_mapping_dic,
                     vectors_stacked_scaled=vectors_plot,
                     feature_names=plot_feature_names,
+                    pca_model=_plot_pca,
+                    pca_feature_names=feature_cols,
                 )
 
-        # Generate unbinding paths visualization if trajectories and reference PDB are available
+        # Unbinding paths visualization: one representative (medoid) per path.
         if self.do_plots and trajectory_files is not None and reference_pdb is not None and ligand_select is not None:
-            # Build paths dictionary: path_id -> [(topology, trajectory), ...] 
-            # Only include medoid trajectories (one representative per path)
             paths_dict = {}
             for trajname, path_id in all_path_mappings.items():
-                # Only include if this trajectory is a medoid
                 if trajname not in all_medoid_names:
                     continue
                 if path_id not in paths_dict:
@@ -371,29 +467,125 @@ class DTWPathModel(PathModel):
                         reference_pdb=reference_pdb,
                         ligand_select=ligand_select,
                         outdir=os.path.join(self.outdir, "path_analysis"),
-                        pocket_select=pocket_select
+                        pocket_select=pocket_select,
+                        output_format=self.viz_output_format,
+                        n_lig_conformations=self.viz_n_lig_conformations,
+                        stick_transparency_ladder=self.viz_stick_transparency_ladder,
                     )
                     logger.info(f"Unbinding paths visualization generated in {self.outdir}")
                 except Exception as e:
                     logger.warning(f"Could not generate unbinding paths visualization: {e}")
 
-        # Persist medoid information as instance attributes (all speeds)
-        self.all_medoid_names = list(all_medoid_names)
-        self.medoid_names = self.all_medoid_names
-        self.medoid_to_path = medoid_to_path
-
-        # Save medoid info to disk for downstream use (e.g., milestone extraction)
-        medoid_info = {
-            "medoid_names": self.all_medoid_names,
-            "medoid_to_path": self.medoid_to_path,
-        }
+        # Per-speed calls accumulate their speeds; a cross-speed ("all") call
+        # covers every speed, so the two layouts never coexist in the file.
         medoid_info_path = os.path.join(self.outdir, "path_analysis", "medoid_info.json")
-        with open(medoid_info_path, "w") as f:
-            json.dump(medoid_info, f, indent=2)
-        logger.info(f"Saved medoid info to {medoid_info_path}")
+        by_speed = {}
+        if persist_medoids and os.path.exists(medoid_info_path):
+            try:
+                with open(medoid_info_path) as f:
+                    by_speed = json.load(f).get("by_speed", {}) or {}
+            except (json.JSONDecodeError, OSError) as e:
+                logger.warning(f"Could not read existing {medoid_info_path} ({e}); overwriting.")
+        if "all" in medoids_by_speed:
+            dropped = [k for k in by_speed if k != "all"]
+            by_speed = {}
+        else:
+            dropped = ["all"] if "all" in by_speed else []
+            by_speed.pop("all", None)
+        if dropped:
+            logger.info(f"Clustering mode changed: dropped stored medoid entries {sorted(dropped)} "
+                        f"from {medoid_info_path}.")
+        by_speed.update(medoids_by_speed)
+
+        # Cross-speed union, derived (not stored) — for consumers that want a
+        # single flat medoid → path map (e.g. autopath_core milestone extraction).
+        union_to_path = {}
+        for mapping in by_speed.values():
+            union_to_path.update(mapping)
+
+        self.medoids_by_speed = by_speed
+        self.dtw_groups_ = dtw_groups
+        self.medoid_to_path = union_to_path
+        self.all_medoid_names = sorted(union_to_path)
+        self.medoid_names = self.all_medoid_names
+
+        if persist_medoids:
+            os.makedirs(os.path.dirname(medoid_info_path), exist_ok=True)
+            with open(medoid_info_path, "w") as f:
+                json.dump({"by_speed": by_speed}, f, indent=2)
+            logger.info(
+                f"Saved medoid info to {medoid_info_path} "
+                f"({len(union_to_path)} medoids across {len(by_speed)} speed group(s))."
+            )
 
         return all_path_mappings
     
+    def merge_small_paths(self, path_mappings: dict, min_pulls: int,
+                          speeds: dict = None):
+        """Merge small (speed, path) groups into surviving paths.
+
+        A group with fewer than ``min_pulls`` pulls at a speed moves, pull by
+        pull, to the path with at least ``min_pulls`` pulls at that speed whose
+        medoid is nearest in DTW distance. If none qualifies, all pulls at that
+        speed go to the largest path.
+
+        Parameters
+        ----------
+        path_mappings : dict
+            trajname -> path label, as returned by :meth:`fit_transform`.
+        min_pulls : int
+            Minimum pulls per speed for a path to survive.
+        speeds : dict, optional
+            trajname -> speed. Needed when paths were clustered across speeds;
+            without it each clustering group counts as one speed.
+
+        Returns
+        -------
+        mappings : dict
+            Updated trajname -> path label.
+        merges : list of dict
+            Records with keys ``speed``, ``from_path``, ``to_path``, ``n_pulls``.
+        """
+        out = dict(path_mappings)
+        merges = []
+        for key, g in getattr(self, "dtw_groups_", {}).items():
+            names, dist, labels = g["trajnames"], g["dist"], g["labels"]
+            med = {labels[m]: m for m in g["medoids"]}
+            sp = [speeds.get(n) if speeds else None for n in names]
+            for s in dict.fromkeys(sp):
+                idx = [i for i, v in enumerate(sp) if v == s]
+                counts = pd.Series([labels[i] for i in idx]).value_counts()
+                small = set(counts.index[counts < min_pulls])
+                if not small:
+                    continue
+                surv = {p: m for p, m in med.items()
+                        if counts.get(p, 0) >= min_pulls}
+                if not surv:
+                    big = counts.idxmax()
+                    small.discard(big)
+                    surv = {big: None}
+                cand = {p: m for p, m in surv.items() if m is not None}
+                moved = {}
+                for i in idx:
+                    lab = labels[i]
+                    if lab not in small:
+                        continue
+                    dest = (min(cand, key=lambda p: dist[i, cand[p]])
+                            if cand else next(iter(surv)))
+                    out[names[i]] = dest
+                    moved.setdefault(lab, {}).setdefault(dest, 0)
+                    moved[lab][dest] += 1
+                tag = key if s is None else s
+                for lab, dests in moved.items():
+                    for dest, n in dests.items():
+                        merges.append({"speed": tag, "from_path": lab,
+                                       "to_path": dest, "n_pulls": n})
+                        logger.warning(
+                            f"Merged small path {lab} (speed={tag}, {n} pulls < "
+                            f"{min_pulls}) into {dest}."
+                        )
+        return out, merges
+
     def plot_distance_matrix(self, distmatrix: np.ndarray = None):
         """Plot and save the pairwise DTW distance matrix as a heatmap.
 
@@ -409,8 +601,7 @@ class DTWPathModel(PathModel):
         plt.savefig(os.path.join(self.outdir, "path_analysis", f'cluster_dtw_heatmap_v{self.speed_name}.png'))
         plt.tight_layout()
         plt.close()
-        return
-    
+
     def plot_elbow(self, scores: dict, K: int):
         """Plot and save the elbow/silhouette curve used to select the number of clusters.
 
@@ -433,13 +624,15 @@ class DTWPathModel(PathModel):
         plt.tight_layout()
         plt.savefig(os.path.join(self.outdir, "path_analysis", f"cluster_elbowplot_v{self.speed_name}.png"))
         plt.close()
-        return
-        
+
+
     def plot_clusters_PCA(self,
                           feature_df: pd.DataFrame = None,
                           path_mapping_dic: dict = None,
                           vectors_stacked_scaled: list = None,
                           feature_names: list = None,
+                          pca_model=None,
+                          pca_feature_names: list = None,
                           ):
         """Project scaled trajectory features onto 2-D PCA and colour by cluster.
 
@@ -467,9 +660,6 @@ class DTWPathModel(PathModel):
         vectors_trimmed = [arr[:min_len, :] for arr in vectors_stacked_scaled]
         X = np.vstack(vectors_trimmed)   # (N_traj * min_len, d)
 
-        pca = PCA(n_components=2)
-        X_pca = pca.fit_transform(X)
-
         traj_order = [name for name, _ in feature_df.groupby('trajname')]
         if len(traj_order) != len(vectors_trimmed):
             raise ValueError(
@@ -478,12 +668,27 @@ class DTWPathModel(PathModel):
                 f"trajectories in feature_df are present in vectors_stacked_scaled."
             )
 
-        has_loadings = feature_names is not None
+        # Avoid a PCA-of-PCA: when the clustering vectors are already PCA scores
+        # (pca_model provided), plot the first two components directly and take the
+        # loadings from that PCA over the ORIGINAL features. Otherwise reduce here.
+        if pca_model is not None and X.shape[1] >= 2:
+            X2 = X[:, :2]
+            evr = pca_model.explained_variance_ratio_
+            load1, load2 = pca_model.components_[0], pca_model.components_[1]
+            load_names = pca_feature_names if pca_feature_names is not None else feature_names
+        else:
+            _pca = PCA(n_components=2)
+            X2 = _pca.fit_transform(X)
+            evr = _pca.explained_variance_ratio_
+            load1, load2 = _pca.components_[0], _pca.components_[1]
+            load_names = feature_names
+
+        has_loadings = load_names is not None
         fig, axes = plt.subplots(1, 2 if has_loadings else 1,
                                  figsize=(12, 5) if has_loadings else (6, 5))
         ax_scatter = axes[0] if has_loadings else axes
 
-        ax_scatter.scatter(X_pca[:, 0], X_pca[:, 1],
+        ax_scatter.scatter(X2[:, 0], X2[:, 1],
                            alpha=0.75, color='lightgray', s=50, linewidth=0)
 
         used_labels = set()
@@ -495,27 +700,27 @@ class DTWPathModel(PathModel):
             path_label = path_mapping_dic[trajname]
             label = f'{str(path_label).split("_")[0]}' if path_label not in used_labels else None
             used_labels.add(path_label)
-            ax_scatter.scatter(X_pca[start:end, 0], X_pca[start:end, 1],
+            ax_scatter.scatter(X2[start:end, 0], X2[start:end, 1],
                                s=20, alpha=0.9, label=label)
 
         if used_labels:
             ax_scatter.legend(frameon=False)
-        ax_scatter.set_xlabel(f"PC1 ({pca.explained_variance_ratio_[0]*100:.1f}%)")
-        ax_scatter.set_ylabel(f"PC2 ({pca.explained_variance_ratio_[1]*100:.1f}%)")
+        ax_scatter.set_xlabel(f"PC1 ({evr[0]*100:.1f}%)")
+        ax_scatter.set_ylabel(f"PC2 ({evr[1]*100:.1f}%)")
         ax_scatter.set_title(f"PCA space - speed={self.speed_name} nm/ps")
 
         # ── Feature loadings panel ─────────────────────────────────────────
         if has_loadings:
             ax_load = axes[1]
-            n_feats = len(feature_names)
+            n_feats = len(load_names)
             y = np.arange(n_feats)
             w = 0.35
-            ax_load.barh(y + w / 2, pca.components_[0], w,
-                         label=f"PC1 ({pca.explained_variance_ratio_[0]*100:.1f}%)")
-            ax_load.barh(y - w / 2, pca.components_[1], w,
-                         label=f"PC2 ({pca.explained_variance_ratio_[1]*100:.1f}%)")
+            ax_load.barh(y + w / 2, load1[:n_feats], w,
+                         label=f"PC1 ({evr[0]*100:.1f}%)")
+            ax_load.barh(y - w / 2, load2[:n_feats], w,
+                         label=f"PC2 ({evr[1]*100:.1f}%)")
             ax_load.set_yticks(y)
-            ax_load.set_yticklabels(feature_names)
+            ax_load.set_yticklabels(load_names)
             ax_load.axvline(0, color='black', lw=0.8)
             ax_load.set_xlabel("Loadings")
             ax_load.set_title("Feature contributions to PCs")
@@ -524,4 +729,3 @@ class DTWPathModel(PathModel):
         plt.tight_layout()
         plt.savefig(os.path.join(self.outdir, "path_analysis", f"cluster_pca_v{self.speed_name}.png"), dpi=150)
         plt.close()
-        return

@@ -11,14 +11,9 @@ import openmm.unit as openmmunit
 
 # AutoPath imports
 from autopath.utils import *
-from autopath.customForces import add_flatbottom_COM_restraints, add_harmonic_restraints, print_current_forces
+from autopath.customForces import add_flatbottom_COM_restraints, add_harmonic_restraints, print_current_forces, remove_openmm_force
 from autopath.equilibration import warm_up_system
 
-try:
-    from openmmtools.integrators import LangevinSplittingGirsanov
-    from reweightingreporter import ReweightingReporter
-except ImportError:
-    logger.warning("Please install openmmtools to use Girsanov reweighting.")
 
 class RelaxMD:
     """Short equilibration / relaxation MD runner.
@@ -51,16 +46,10 @@ class RelaxMD:
     platform : str, optional
         OpenMM platform name or ``"fastest"`` to auto-select the best
         available platform.
-    use_GReweighting : bool, optional
-        When True, the Girsanov-reweighted Langevin integrator
-        (``LangevinSplittingGirsanov``) from openmmtools is used. Requires
-        optional dependencies ``openmmtools`` and ``reweightingreporter``.
 
     Note
     ----
-    Force-group 19 is reserved for the temporary harmonic ligand restraints
-    added during this stage. This is offset by 15 relative to other AutoPath
-    force groups to avoid collisions.
+    Force group 19 is reserved for the temporary ligand restraints.
     """
 
     def __init__(
@@ -73,7 +62,6 @@ class RelaxMD:
         timestep: float = 0.004,  # 4 fs timestep — safe with HMR
         temp: float = 300,
         platform: str = "fastest",
-        use_GReweighting: bool = False,
     ) -> None:
 
         os.makedirs(out_dir, exist_ok=True)
@@ -90,14 +78,6 @@ class RelaxMD:
 
         self.platform = select_platform(platform)
 
-        self.use_GReweighting = use_GReweighting
-        if self.use_GReweighting:
-            try:
-                from openmmtools.integrators import LangevinSplittingGirsanov
-                from reweightingreporter import ReweightingReporter
-            except ImportError:
-                raise ImportError("Please install openmmtools to use Girsanov reweighting.")
-
         return None
 
     def run(
@@ -105,15 +85,14 @@ class RelaxMD:
         system: str = None,
         checkpoint_file: str = None,
         pdb_file: str = None,
+        state_xml_file: str = None,
         run_id: str = None,
-        npt_steps: int = 25000,
+        npt_steps: int = 12500,
     ) -> System:
         """Run relaxation MD: minimize, warm up, and perform a short NPT run.
 
-        Applies temporary harmonic positional restraints to the ligand,
-        runs energy minimization and a gradual temperature ramp, then
-        integrates an NPT ensemble. Restraints are removed before writing
-        output so the returned system is unrestrained.
+        The ligand is harmonically restrained during the run; the restraints
+        are removed before the outputs are written.
 
         Parameters
         ----------
@@ -122,16 +101,20 @@ class RelaxMD:
             in-place (barostat added, temporary restraints removed).
         checkpoint_file : str, optional
             Path to a binary OpenMM checkpoint file from a previous run.
-            Takes precedence over ``pdb_file`` when both are supplied.
+            Takes precedence over ``state_xml_file`` and ``pdb_file`` when
+            more than one is supplied.
         pdb_file : str, optional
             Path to a PDB file used to set initial positions when no
             checkpoint is available.
+        state_xml_file : str, optional
+            Path to a portable OpenMM ``State`` XML. Only box, positions and
+            velocities are applied, not its global parameters.
         run_id : str, optional
             Label used as a prefix for all output files written to
             ``self.out_dir``.
         npt_steps : int, optional
             Number of integration steps for both the warm-up phase and the
-            NPT run. At the default 4 fs timestep, 25 000 steps ≈ 0.1 ns.
+            NPT run.
 
         Returns
         -------
@@ -144,28 +127,25 @@ class RelaxMD:
         start_time = time.monotonic()
 
         logger.debug("Setting up the integrator..")
-        if self.use_GReweighting:
-            integrator = LangevinSplittingGirsanov(
-                nstxout=100000000,  # output frequency irrelevant for this short stage
-                temperature=self.temperature,
-                collision_rate=1.0 / openmmunit.picoseconds,
-                timestep=self.timestep,
-                splitting="R V O V R",       # ABOBA splitting — required for Girsanov reweighting
-                constraint_tolerance=1.0e-6,
-            )
-        else:
-            integrator = LangevinMiddleIntegrator(self.temperature,
-                                                  1.0 / openmmunit.picoseconds,
-                                                  self.timestep)
+        integrator = LangevinMiddleIntegrator(self.temperature, 1.0 / openmmunit.picoseconds, self.timestep)
 
         simulation = Simulation(self.topology, system, integrator, self.platform)
 
         if checkpoint_file is not None:
             logger.debug("Loading simulation checkpoint..")
             simulation.loadCheckpoint(checkpoint_file)
+        elif state_xml_file is not None:
+            logger.info(f"Setting state from portable XML state file {state_xml_file}")
+            with open(state_xml_file) as f:
+                state = XmlSerializer.deserialize(f.read())
+            simulation.context.setPeriodicBoxVectors(*state.getPeriodicBoxVectors())
+            simulation.context.setPositions(state.getPositions())
+            simulation.context.setVelocities(state.getVelocities())
         else:
-            initial_positions = PDBFile(pdb_file).positions
-            simulation.context.setPositions(initial_positions)
+            simulation.context.setPositions(PDBFile(pdb_file).positions)
+
+        # Restraint reference, whichever branch set the positions.
+        initial_positions = simulation.context.getState(getPositions=True).getPositions()
 
         startdist = get_COM_dist(simulation, self.ligand_atoms, self.pocket_atoms)
 
@@ -177,18 +157,18 @@ class RelaxMD:
             self.ligand_atoms,
             restraint_force=5,
             force_name="k_harmonic_restrain",
-            force_group=19,  # offset by 15 to avoid overlap with other AutoPath force groups
+            force_group=19,
         )
 
         simulation.context.reinitialize(preserveState=True)
 
         logger.debug("Minimizing..")
-        simulation.minimizeEnergy(maxIterations=1000)
+        simulation.minimizeEnergy() # till convergence
 
         logger.debug("Warming up the system..")
         warm_up_system(simulation, integrator,
                        warming_steps=npt_steps,
-                       timestep=0.004 * openmmunit.picoseconds,  # lower timestep for warming
+                       timestep=self.timestep,
                        Tend=self.temperature.value_in_unit(openmmunit.kelvin))
 
         logger.debug("Running short NPT..")
@@ -202,18 +182,38 @@ class RelaxMD:
         simulation.context.reinitialize(preserveState=True)
         logger.debug(f"Stepsize set to {integrator.getStepSize()}")
 
-        simulation.step(npt_steps)  # 0.1 ns at default settings
+        simulation.step(npt_steps)
 
-        # Remove temporary harmonic restraints before returning the system.
-        forces_to_remove = []
-        for f_idx in range(system.getNumForces()):
-            force = system.getForce(f_idx)
-            if force.getName().startswith("k_harmonic_restrain"):
-                logger.info(f"Removing force {force.getName()} at index {f_idx}.")
-                forces_to_remove.append(f_idx)
+        simulation, system = self._save_outputs(simulation, system, run_id)
 
-        for f_idx in sorted(forces_to_remove, reverse=True):
-            system.removeForce(f_idx)
+        finaldist = get_COM_dist(simulation, self.ligand_atoms, self.pocket_atoms)
+
+        logger.info(f"{run_id} - Initial:{startdist:.3f} nm - Final:{finaldist:.3f} nm")
+
+        simulation_time = time.monotonic() - start_time
+        logger.info(f"Finished {run_id} relaxation in {simulation_time/60:.2f} min.")
+        return system
+
+    def _save_outputs(self, simulation, system: System, run_id: str):
+        """Remove the temporary restraints and write the relaxation outputs.
+
+        Parameters
+        ----------
+        simulation : openmm.app.Simulation
+            Simulation at the end of the NPT run.
+        system : System
+            System the run was carried out on; the restraints are removed in-place.
+        run_id : str
+            Prefix of the checkpoint, state, system XML and PDB written to ``self.out_dir``.
+
+        Returns
+        -------
+        tuple
+            The simulation holding the final state and the restraint-free system.
+        """
+        system = remove_openmm_force(system, "k_harmonic_restrain")
+        # The context keeps a removed force's global parameters; rebuild so saved states drop them.
+        simulation = rebuild_simulation(simulation, system)
 
         final_positions = simulation.context.getState(getPositions=True).getPositions()
         # Persist correct box vectors to the PDB so downstream tools read the right unit cell.
@@ -224,10 +224,8 @@ class RelaxMD:
         save_system(system, f"{self.out_dir}/{run_id}_relax_system.xml")
         save_pdb(self.topology, final_positions, f"{self.out_dir}/{run_id}_relax.pdb")
 
-        finaldist = get_COM_dist(simulation, self.ligand_atoms, self.pocket_atoms)
+        _st = simulation.context.getState(getPositions=True, getVelocities=True)
+        with open(f"{self.out_dir}/{run_id}_relax_state.xml", "w") as _f:
+            _f.write(XmlSerializer.serialize(_st))
 
-        logger.info(f"{run_id} - Initial:{startdist:.3f} nm - Final:{finaldist:.3f} nm")
-
-        simulation_time = time.monotonic() - start_time
-        logger.info(f"Finished {run_id} relaxation in {simulation_time/60:.2f} min.")
-        return system
+        return simulation, system

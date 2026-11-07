@@ -1,6 +1,8 @@
 import os
+import math
 import time
 import json
+import numpy as np
 from dataclasses import dataclass
 from typing import List, Dict, Any
 
@@ -10,10 +12,11 @@ import openmm.unit as openmmunit
 
 from autopath.utils import *
 from autopath.customForces import *
+from autopath.customForces import _FG_COMPONENTS, _FG_COMPONENTS_LAST
 import datetime
 
 import logging
-logger = logging.getLogger("autopath")
+logger = logging.getLogger("autopath.equilibration")
 
 @dataclass
 class EquilibrationStep:
@@ -98,18 +101,22 @@ def warm_up_system(
     logger.debug(f"Timestep set to {integrator.getStepSize()}")
     simulation.context.reinitialize(preserveState=True)
 
-    # Calculate the number of temperature steps
-    nT = int((Tend - Tstart) / Tstep)
+    # Temperature increments, inclusive of both endpoints.
+    nT = max(1, math.ceil((Tend - Tstart) / Tstep) + 1) if Tend > Tstart else 1
 
     # Set initial velocities and temperature
     simulation.context.setVelocitiesToTemperature(Tstart)
 
-    # Warm up the system gradually
-    for i in range(nT + 1):
-        temperature = Tstart + i * Tstep
+    # Warm up the system gradually. Steps are apportioned cumulatively so the ramp
+    # spends exactly warming_steps rather than nT * int(warming_steps / nT).
+    taken = 0
+    for i in range(nT):
+        temperature = min(Tstart + i * Tstep, Tend)
         integrator.setTemperature(temperature)
         logger.debug(f"Temperature set to {temperature} K.")
-        simulation.step(int(warming_steps / nT))
+        target = round(warming_steps * (i + 1) / nT)
+        simulation.step(target - taken)
+        taken = target
 
     return None
 
@@ -145,6 +152,94 @@ def update_force_constants(
 
     return None
 
+def _check_forces_parallel(
+    forces: List[float],
+    components: List[str],
+    where: str,
+    fname: str,
+) -> None:
+    """Raise unless *forces* is parallel to *components*.
+
+    Force constants are paired with components by ``zip``, which truncates
+    silently; protocols are checked once at load time instead.
+    """
+    if len(forces) != len(components):
+        raise ValueError(
+            f"{fname}: {where} declares {len(forces)} force constants but there "
+            f"are {len(components)} components ({list(components)}); the lists "
+            "must be parallel."
+        )
+
+    return None
+
+
+def read_force_constants(
+    simulation,
+    components: List[str],
+) -> Dict[str, float]:
+    """Read back the restraint force constants currently active in the context.
+
+    Returns the values the context actually holds, which can differ from the
+    defaults the forces were constructed with, converted to kcal/mol/Å².
+
+    Parameters
+    ----------
+    simulation : openmm.app.Simulation
+        The active simulation to query.
+    components : list of str
+        Restrained component names; each is looked up as ``k_<name>``.
+
+    Returns
+    -------
+    dict
+        Mapping of component name → active force constant in kcal/mol/Å².
+        Components with no matching global parameter are logged and omitted.
+    """
+    internal_unit = openmmunit.kilojoule_per_mole / openmmunit.nanometer**2
+    protocol_unit = openmmunit.kilocalories_per_mole / openmmunit.angstroms**2
+
+    constants = {}
+    for component in components:
+        try:
+            value = simulation.context.getParameter(f"k_{component}")
+        except Exception:
+            logger.warning(f"No k_{component} parameter in the context; skipping.")
+            continue
+        constants[component] = (value * internal_unit).value_in_unit(protocol_unit)
+
+    return constants
+
+
+RESTRAINT_TYPES = {"harmonic": add_harmonic_restraints, "harmonic_z": add_harmonic_z_restraints}
+
+
+def add_component_restraint(
+    system,
+    spec: Dict[str, Any],
+    positions,
+    topology,
+    atom_idx_list,
+    force_name: str,
+    force_group: int,
+) -> None:
+    """Add the restraint a component spec asks for.
+
+    ``spec["type"]`` selects from :data:`RESTRAINT_TYPES`; the force constant is a
+    placeholder that the protocol stages overwrite.
+    """
+    RESTRAINT_TYPES[spec["type"]](
+        system,
+        positions,
+        topology,
+        atom_idx_list,
+        restraint_force=15,
+        force_name=force_name,
+        force_group=force_group,
+    )
+
+    return None
+
+
 def run_restrained_minimization(
     simulation,
     components: List[str],
@@ -153,8 +248,10 @@ def run_restrained_minimization(
     """Perform energy minimization in multiple stages with progressively relaxed restraints.
 
     Each stage sets new force constants and runs minimization to convergence
-    (``maxIterations=0``), allowing heavy atoms to be released before lighter
-    atoms in subsequent stages to avoid clashes.
+    (``maxIterations=0``). The staging axis is the restrained component, not atomic
+    mass: no hydrogen is restrained by any shipped selection, and water and ions are
+    never restrained, so the first stage relaxes solvent against a held solute.
+    Constants are pushed with ``context.setParameter`` and need no ``reinitialize``.
 
     Parameters
     ----------
@@ -226,6 +323,10 @@ def run_restrained_md(
             simulation, components, step.forces, prev_constants
         )
 
+        if npt_prev and not step.npt_flag:
+            remove_openmm_force(system, "MonteCarlo")  # any barostat type
+            simulation.context.reinitialize(preserveState=True)
+
         if step.npt_flag != npt_prev and step.npt_flag:
             add_barostat(system, temp, is_membrane)
             simulation.context.reinitialize(preserveState=True)
@@ -241,6 +342,60 @@ def run_restrained_md(
         stepsize_prev = step.stepsize
 
     return None
+
+
+def free_window_start(state_csv: str, protocol, component: str = "ligand", n_frames: int = None):
+    """First frame of the trailing window in which ``component`` is unrestrained.
+
+    The window length is the summed duration of the last equilibration stages
+    whose force constant for ``component`` is zero; its start is located on the
+    ``Time (ps)`` column of the equilibration state CSV, which has one row per
+    trajectory frame.
+
+    Parameters
+    ----------
+    state_csv : str
+        ``equilibration_<run_id>.csv`` written next to the trajectory.
+    protocol : str or dict
+        Equilibration protocol (JSON path or loaded dict) used for the run.
+    component : str
+        Key of ``components_lookup`` (default ``"ligand"``).
+    n_frames : int, optional
+        Number of trajectory frames; checked against the CSV rows when given.
+
+    Returns
+    -------
+    int or None
+        Index of the first frame of the unrestrained window; None (with a
+        warning) if ``component`` is not in the protocol or is restrained in
+        the last stage.
+
+    Raises
+    ------
+    ValueError
+        If the CSV does not match ``n_frames``.
+    """
+    import pandas as pd
+    if isinstance(protocol, str):
+        with open(protocol) as f:
+            protocol = json.load(f)
+    components = list(protocol["components_lookup"])
+    if component not in components:
+        logger.warning(f"Component {component!r} is not in the protocol ({components}): no free window.")
+        return None
+    k = components.index(component)
+    tail_ps = 0.0
+    for stage in reversed(protocol["equilibration"]):
+        if stage["forces"][k] != 0:
+            break
+        tail_ps += stage["nsteps"] * stage["stepsize"]
+    if tail_ps == 0:
+        logger.warning(f"Component {component!r} is restrained until the end: no free window.")
+        return None
+    t = pd.read_csv(state_csv)["Time (ps)"].to_numpy()
+    if n_frames is not None and len(t) != n_frames:
+        raise ValueError(f"{state_csv} has {len(t)} rows but the trajectory has {n_frames} frames.")
+    return int(np.argmax(t >= t[-1] - tail_ps + 1e-6))
 
 
 class Equilibration:
@@ -286,7 +441,7 @@ class Equilibration:
         out_dir: str = "equilibration",
         restrained_minimization: bool = True,
         restrained_minimization_only: bool = False,
-        protocol_fname: str = "autopath/data/equilibration.json",
+        protocol_fname: str = "autopath/data/eq_lig-prot_5ns_4fs.json",
         save_freq: int = 6250,  # 12500 is 0.05 ns at 4 fs timestep
         is_membrane: bool = False,
         platform: str = "fastest",
@@ -352,7 +507,20 @@ class Equilibration:
             raise
 
         # Initialize the variables
-        self.components_lookup = protocol['components_lookup']  # Components lookup
+        # A component is either a bare selection string (harmonic) or a dict with
+        # "selection" and an optional "type" from RESTRAINT_TYPES.
+        self.component_specs = {}
+        self.components_lookup = {}
+        for name, value in protocol['components_lookup'].items():
+            spec = {"selection": value} if isinstance(value, str) else dict(value)
+            spec.setdefault("type", "harmonic")
+            if spec["type"] not in RESTRAINT_TYPES:
+                raise ValueError(
+                    f"{fname}: component '{name}' has unknown restraint type "
+                    f"'{spec['type']}'; expected one of {sorted(RESTRAINT_TYPES)}."
+                )
+            self.component_specs[name] = spec
+            self.components_lookup[name] = spec["selection"]
         self.minimization_scheme = protocol['minimization']  # Minimization scheme
         self.equilibration_scheme = protocol['equilibration']  # Equilibration scheme
         self.equilibration_steps = sum([int(v["nsteps"]) for v in self.equilibration_scheme])
@@ -363,6 +531,27 @@ class Equilibration:
         self.temp_steps = self.warmup_scheme["T_step"]
         self.warm_up_steps = int(self.warmup_scheme["nsteps"])
         self.warm_up_timestep = self.warmup_scheme["stepsize"]
+
+        # Warm-up restraints; protocols predating this key fall back to 15.
+        components = list(self.components_lookup)
+        self.warmup_forces = self.warmup_scheme.get("forces", [15.0] * len(components))
+
+        n_groups = _FG_COMPONENTS_LAST - _FG_COMPONENTS + 1
+        if len(components) > n_groups:
+            raise ValueError(
+                f"{fname}: {len(components)} components exceeds the {n_groups} "
+                f"force groups reserved for them ({_FG_COMPONENTS}-{_FG_COMPONENTS_LAST})."
+            )
+
+        for section in ("minimization", "equilibration"):
+            for stage in protocol[section]:
+                _check_forces_parallel(
+                    stage["forces"],
+                    components,
+                    f"{section} stage {stage['name']!r}",
+                    fname,
+                )
+        _check_forces_parallel(self.warmup_forces, components, "'warmup'", fname)
 
         self.total_steps = self.warm_up_steps + self.equilibration_steps
 
@@ -413,8 +602,11 @@ class Equilibration:
         2. Add harmonic positional restraints for each component in
            ``components_lookup``.
         3. Run restrained energy minimization (staged or single-pass).
-        4. Remove and re-add restraints anchored to the minimized geometry.
-        5. Warm up from ``T_initial`` to ``T_final`` in NVT.
+        4. Remove and re-add restraints anchored to the minimized geometry, then
+           explicitly apply the ``warmup`` force constants (the re-added forces'
+           construction defaults do not survive the context reinitialize; see the
+           comment at the call site).
+        5. Warm up from ``T_initial`` to ``T_final`` in NVT, restrained.
         6. Run the staged restrained equilibration (NVT → NPT).
         7. Remove all restraint forces and save outputs.
 
@@ -442,8 +634,9 @@ class Equilibration:
                                         self.timestep)
         
         pdb = PDBFile(pdb_file)
+        prmtop = f"{os.path.splitext(pdb_file)[0]}.prmtop"
         initial_positions = pdb.positions
-        u = mda.Universe(pdb_file)
+        u = mda.Universe(prmtop)
 
         simulation = Simulation(self.topology, self.system, integrator, self.platform)
         simulation.context.setPositions(initial_positions)
@@ -462,19 +655,19 @@ class Equilibration:
             restrain_idxs = u.select_atoms(selection).indices
             if len(restrain_idxs) > 0:
                 restrain_names = [u.atoms[idx].name for idx in restrain_idxs]
-                logger.info(f"Adding {len(restrain_idxs)} harmonic restraints to {name}..")
+                logger.info(f"Adding {len(restrain_idxs)} {self.component_specs[name]['type']} restraints to {name}..")
                 logger.debug(f"The following {name} atoms will be restrained: {', '.join(restrain_names)}")
             else:
                 logger.warning(f"Skipping harmonic restraints for {name}: No atoms found for selection '{selection}'")
 
-            add_harmonic_restraints(
+            add_component_restraint(
                 self.system,
+                self.component_specs[name],
                 initial_positions,
                 self.topology,
                 restrain_idxs,
-                restraint_force=15,  # default; overridden by minimization/equilibration stages
-                force_name=f"k_{name}",
-                force_group=num + 15,  # offset of 15 keeps each component in a distinct group; see customForces._FG_FUNNEL
+                f"k_{name}",
+                _FG_COMPONENTS + num,
             )
         
         simulation.context.reinitialize(preserveState=True)
@@ -508,26 +701,46 @@ class Equilibration:
         # than the original input coordinates. The old forces were removed above.
         for num, (name, selection) in enumerate(self.components_lookup.items()):
             restrain_idxs = u.select_atoms(selection).indices
-            logger.info(f"Re-adding {len(restrain_idxs)} harmonic restraints to {name} after minimization.")
+            logger.info(f"Re-adding {len(restrain_idxs)} restraints to {name} after minimization.")
 
-            add_harmonic_restraints(
+            add_component_restraint(
                 self.system,
+                self.component_specs[name],
                 minimized_positions,
                 self.topology,
                 restrain_idxs,
-                restraint_force=15,  # default; overridden by equilibration stages
-                force_name=f"k_{name}",
-                force_group=num + 15,  # offset of 15 keeps each component in a distinct group; see customForces._FG_FUNNEL
+                f"k_{name}",
+                _FG_COMPONENTS + num,
             )
 
         simulation.context.reinitialize(preserveState=True)
         # print_current_forces(self.system)
+
+        # reinitialize(preserveState=True) restores global parameters by name, so the
+        # restraint_force defaults above are overwritten by the zeros minimization
+        # left behind. Only an explicit push sets the warm-up constants.
+        warmup_constants = dict(
+            zip(self.components_lookup.keys(), self.warmup_forces)
+        )
+        update_force_constants(simulation, warmup_constants)
+
+        active = read_force_constants(simulation, list(self.components_lookup.keys()))
+        logger.info(
+            "Warm-up force constants (kcal/mol/A^2): "
+            + ", ".join(f"{name}={k:.2f}" for name, k in active.items())
+        )
+        if active and not any(k > 0 for k in active.values()):
+            logger.warning(
+                "All warm-up restraints are zero: the temperature ramp will run "
+                "unrestrained and the first equilibration stage may shock the system."
+            )
 
         logger.info(f"Warming up the system from {self.temp_init} K to {self.temperature} K..")
         warm_up_system(simulation, integrator, 
                        Tstart=self.temp_init, 
                        Tend=self.temperature, 
                        Tstep=self.temp_steps,
+                       timestep=self.warm_up_timestep,
                        warming_steps=self.warm_up_steps
                        )
         
@@ -544,7 +757,10 @@ class Equilibration:
 
         # remove the restraint forces after equilibration
         self.system = remove_openmm_force(self.system, "k_")
-        simulation.context.reinitialize(preserveState=True)
+        # reinitialize(preserveState=True) would keep the removed forces' global parameters
+        # in the context and write them into the saved state, which then cannot be loaded
+        # back against the saved system. A fresh simulation carries only what remains.
+        simulation = rebuild_simulation(simulation, self.system)
 
         final_positions = simulation.context.getState(getPositions=True).getPositions()
         self.topology.setPeriodicBoxVectors(simulation.context.getState(getPositions=True).getPeriodicBoxVectors()) #saves correct box vectors to the pdb

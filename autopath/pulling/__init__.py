@@ -31,7 +31,9 @@ from .LigandFeatures import LigandTrajectoryFeatures
 from .Estimators import (
     JarzynskiEstimator,
     CumulantEstimator,
+    ForceEstimator,
 )
+from .hummer_szabo import HummerSzaboEstimator, frame_steps, hs_frame_weights
 __all__ = [
             "SteeredMD",
             "SMDData",
@@ -41,4 +43,8 @@ __all__ = [
             "LigandTrajectoryFeatures",
             "JarzynskiEstimator",
             "CumulantEstimator",
+            "ForceEstimator",
+            "HummerSzaboEstimator",
+            "frame_steps",
+            "hs_frame_weights",
         ]

@@ -12,6 +12,8 @@ logger = logging.getLogger("autopath")
 _FG_CUSTOM_NB   = 14  # custom nonbonded (sterics/electrostatics)
 _FG_FUNNEL      = 15  # funnel metadynamics restraint
 _FG_FLAT_BOTTOM = 19  # flat-bottom position restraints
+_FG_COMPONENTS  = 20  # per-component harmonic restraints, one group each (20-29)
+_FG_COMPONENTS_LAST = 29
 _FG_BAROSTAT    = 30  # barostat (Monte Carlo)
 _FG_RESTRAINTS  = 31  # harmonic positional restraints
 
@@ -155,6 +157,62 @@ def add_harmonic_restraints(
     system.addForce(force)
 
     return
+
+def add_harmonic_z_restraints(
+    system: System = None,
+    positions: list = None,
+    topology: app.Topology = None,
+    atom_idx_list: list[int] = None,
+    restraint_force: int = 5,
+    force_name: str = "k",
+    force_group: int = _FG_COMPONENTS,
+):
+    """Restrain atoms to their reference *z* only, leaving x and y free.
+
+    ``U = k * periodicdistance(x, y, z, x, y, z0)^2``. Passing x and y twice makes
+    the expression the minimum-image displacement along z alone. Intended for lipid
+    headgroups: it holds leaflet registry and bilayer thickness while allowing the
+    lateral diffusion and area-per-lipid relaxation a semi-isotropic barostat needs.
+
+    Parameters
+    ----------
+    system : openmm.System
+        The system to which the restraint force is added.
+    positions : list
+        Reference positions (with units) for all atoms in the topology.
+    topology : app.Topology
+        OpenMM topology of the full system.
+    atom_idx_list : list of int
+        Atom indices to restrain.
+    restraint_force : int or float
+        Force constant in kcal/mol/Å².
+    force_name : str
+        Name of the force and of its global parameter.
+    force_group : int
+        OpenMM force group index.
+    """
+    atoms = topology.atoms()
+
+    force = CustomExternalForce(f"{force_name}*periodicdistance(x, y, z, x, y, z0)^2")
+    force.addGlobalParameter(
+        force_name,
+        restraint_force * openmmunit.kilocalories_per_mole / openmmunit.angstroms**2,
+    )
+    force.addPerParticleParameter("z0")
+
+    for i, (atom_crd, atom) in enumerate(zip(positions, atoms)):
+        if atom.index in atom_idx_list:
+            force.addParticle(
+                i, [atom_crd.value_in_unit(openmmunit.nanometers)[2]]
+            )
+
+    force.setName(force_name)
+    force.setForceGroup(force_group)
+
+    system.addForce(force)
+
+    return
+
 
 def add_flatbottom_COM_restraints(
     system: System = None,

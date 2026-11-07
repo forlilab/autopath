@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -e WTmetaD-3ptb.err
 #SBATCH -o WTmetaD-3ptb.out
-#SBATCH --gres=gpu#:rtxa6000:1
+#SBATCH --gres=gpu:rtxa6000:1
 #SBATCH --time=1-0
 #SBATCH --exclude=nodea0110,nodea0111,nodec0821,nodea0410
 #SBATCH --partition=forli-pro,alphafold,forli

@@ -28,6 +28,48 @@ plt.rcParams["axes.facecolor"] = 'white'
 import logging
 logger = logging.getLogger("autopath")
 
+#: Bulk environment removed from the LIE surroundings by default: ions, water and lipids.
+#: What is left is the biomolecular binding partner, which is what a single-trajectory
+#: LIE can actually report. See :func:`environment_resids` for why.
+DEFAULT_LIE_EXCLUDE = (
+    ':Na+,Cl-,NA,CL,K,K+,MG,Mg+,'                       # ions
+    'WAT,HOH,SOL,T3P,T4P,'                              # water
+    'POP,POPC,POPE,POPS,PA,OL,PC,PE,PS,CHL,DPPC'        # lipids
+)
+
+
+def environment_resids(topology,
+                       ligand_amber_selection: str = ":UNK",
+                       exclude_amber_selection: Optional[str] = DEFAULT_LIE_EXCLUDE,
+                       cutoff: float = 6.0) -> List[int]:
+    """Residues within *cutoff* of the ligand, as 1-based Amber residue numbers.
+
+    ``Atom.resid`` is 0-BASED while an Amber ``:N`` mask is 1-BASED, so the raw attribute
+    cannot be pasted into a mask without shifting the whole environment by one residue.
+
+    Bulk solvent, ions and lipids are excluded by default. Cannonical LIE relies on the
+    ligand-solvent term cancelling between the bound and free-ligand states; a
+    single-trajectory calculation has no free state, so keeping solvent in the mask only
+    adds a non-cancelling offset. cpptraj's ``lie`` defaults its second mask to "everything
+    else" but that is a fallback, not a recommendation -- the mask is the caller's choice.
+    Pass ``exclude_amber_selection=None`` to restore it, which is only correct if the free
+    ligand is also simulated.
+
+    :param topology: a pytraj Topology with a reference frame already set.
+    :param ligand_amber_selection: Amber mask for the ligand, e.g. ``":UNK"``.
+    :param exclude_amber_selection: Amber mask removed from the environment.
+        Defaults to :data:`DEFAULT_LIE_EXCLUDE` (ions + water + lipids).
+    :param cutoff: distance cutoff in Angstrom.
+    :return: sorted 1-based residue numbers, ready to paste into a ``:`` mask.
+    """
+    sel = f"({ligand_amber_selection}<:{cutoff})"
+    if exclude_amber_selection:
+        sel += f" & !({exclude_amber_selection})"
+    sel += f" & !({ligand_amber_selection})"
+    idx = topology.select(sel)
+    return sorted({topology[i].resid + 1 for i in idx})
+
+
 class ProteinLigandAnalyzer:
     """
     Simple analysis class for protein-ligand or protein-protein MD simulations.
@@ -91,6 +133,13 @@ class ProteinLigandAnalyzer:
         Trajectory slicing (``traj_start``/``traj_end``/``traj_step``) is not
         applied here; slicing is currently handled at the point of analysis.
         """
+        # A coordinate-only topology (PDB/GRO) gives MDAnalysis no atom types, so the
+        # RDKit conversion ProLIF depends on perceives the ligand poorly. Prefer a prmtop/psf.
+        if str(self.top).lower().endswith((".pdb", ".gro", ".cif")):
+            logger.warning(
+                f"Topology {os.path.basename(str(self.top))} carries no atom types; ProLIF "
+                "interaction detection will be incomplete. Use the .prmtop (or .psf) instead."
+            )
         self.replicas = {}
         for t in self.traj_paths:
             try:
@@ -169,7 +218,7 @@ class ProteinLigandAnalyzer:
             protein_sel: str = "protein",
             traj_slice: tuple = None,
             cutoff: float = 3.5,
-            fraction_persistence: float = 0.9,
+            fraction_persistence: float = 0.5,
             pdb_fname: str = None,
     ):
         """Identify persistent interfacial water molecules across a trajectory.
@@ -195,6 +244,8 @@ class ProteinLigandAnalyzer:
         fraction_persistence : float
             Minimum fraction of frames in which a water must be interfacial to be
             included in the returned set (e.g. 0.9 means present in >= 90% of frames).
+            Interfacial water exchanges fast enough that 0.9 can return nothing at
+            all; 0.5 keeps the structural core without admitting bulk.
         pdb_fname : str or None
             If provided, write a PDB containing the protein, ligand, and persistent
             waters from the last trajectory frame to this path.
@@ -244,11 +295,17 @@ class ProteinLigandAnalyzer:
         # print(counts)
         
         if pdb_fname is not None:
-            keep_water_str = " ".join(str(r) for r in persistent.keys())
-            persistent_water_sel = f"({WATER_SEL}) and resid {keep_water_str}"
-
-            # Final cleaned selection
-            final_sel_str = f"({protein_sel}) or ({ligand_sel}) or ({persistent_water_sel})"
+            parts = [f"({protein_sel})", f"({ligand_sel})"]
+            if persistent:
+                keep_water_str = " ".join(str(r) for r in persistent.keys())
+                parts.append(f"(({WATER_SEL}) and resid {keep_water_str})")
+            else:
+                # An empty resid list makes the selection string unparseable, and a
+                # site with no long-lived water is a normal result, not an error.
+                logger.warning(
+                    "No water reached %.2f persistence; writing %s without waters.",
+                    fraction_persistence, pdb_fname)
+            final_sel_str = " or ".join(parts)
 
             cleaned = u.select_atoms(final_sel_str)
 
@@ -286,6 +343,10 @@ class ProteinLigandAnalyzer:
         -------
         important_resids : list of int
             Sorted residue IDs whose interaction frequency exceeds ``frequency_cutoff``.
+            These are numbered as in the TOPOLOGY that was loaded. A prmtop renumbers
+            sequentially from 1, so they are generally offset from the original PDB author
+            numbering (e.g. 5 for a structure whose first modelled residue is 6) -- convert
+            before comparing against crystal-structure residue numbers.
         persistence_byRes : pd.DataFrame
             Interaction persistence grouped by residue (all interaction types merged).
         persistence_byRes_byType : pd.DataFrame
@@ -319,9 +380,10 @@ class ProteinLigandAnalyzer:
                 ligand_sel = u.select_atoms(self.ligand_mda_selection)
                 logger.info(f"Ligand selection has {ligand_sel.n_atoms} atoms.")
                 
+                # ProLIF's signature is run(traj, lig, prot)
                 fp = fp.run(u.trajectory,
-                            protein_sel,
                             ligand_sel,
+                            protein_sel,
                             n_jobs=n_jobs,
                             )
                 fp.to_pickle(fp_fname)
@@ -349,8 +411,10 @@ class ProteinLigandAnalyzer:
             
             # Filter residues by frequency
             selected_residues = persistence_byRes[persistence_byRes["%"] >= frequency_cutoff/100].index.tolist()
-            selected_resnames = [res[1] for res in selected_residues]
-            selected_resids = [int(res[3:]) for res in selected_resnames]
+            # groupby(level=["protein", "ligand"]) puts the protein residue first
+            selected_resnames = [res[0] for res in selected_residues]
+            selected_resids = [int(re.search(r"(\d+)", r).group(1))
+                               for r in selected_resnames if re.search(r"(\d+)", r)]
             important_resids.update(selected_resids)
 
         return sorted(list(important_resids)), persistence_byRes, persistence_byRes_byType
@@ -428,7 +492,7 @@ class ProteinLigandAnalyzer:
                     prmtop: Optional[str] = None,
                     use_residues: Optional[List[int]] = None,
                     ligand_amber_selection: str = ":UNK",
-                    exclude_amber_selection: Optional[str] = ':Na+,Cl-,NA,CL,K,K+',
+                    exclude_amber_selection: Optional[str] = DEFAULT_LIE_EXCLUDE,
                     cutoff: float = 6.0,
                     stride: int = 1,
                     lie_options:str = 'nopbc cutvdw 10.0 cutelec 10.0' # dielec 2
@@ -443,19 +507,36 @@ class ProteinLigandAnalyzer:
         - https://pubs.acs.org/doi/10.1021/acs.jcim.9b00609
         - https://pmc.ncbi.nlm.nih.gov/articles/PMC7311763/
 
+        .. important::
+           Bound state only, so what is returned is a ligand/partner interaction energy
+           suitable for *ranking*, not a binding free energy. Solvent, ions and lipids are
+           excluded from the surroundings by default (:data:`DEFAULT_LIE_EXCLUDE`); see
+           :func:`environment_resids`. Explicit solvent must still be present in the
+           trajectory.
+
+        .. note::
+           With ``use_residues=None`` the environment is picked once from frame 0 and held
+           fixed, which is only sound for residues that stay put. Passing ``use_residues``
+           explicitly avoids both the cutoff and the frame-0 dependence.
+
         Parameters
         ----------
         prmtop : str or None
             Amber PRMTOP topology for pytraj. Defaults to ``self.top``.
         use_residues : list of int or None
-            Explicit list of residue numbers to include in the LIE environment
-            mask. If None, residues within ``cutoff`` Å of the ligand are
-            selected automatically.
+            Explicit list of 1-based residue numbers to include in the LIE
+            environment mask. If None, residues within ``cutoff`` Å of the ligand
+            are selected automatically from frame 0. Passing the binding partner's
+            residues explicitly is the most defensible option: no cutoff, no
+            frame-0 dependence.
         ligand_amber_selection : str
             Amber mask for the ligand (e.g. ``":UNK"``).
         exclude_amber_selection : str or None
-            Amber mask of atoms to exclude from the auto-selected environment
-            (ions, counter-ions, etc.).
+            Amber mask removed from the auto-selected environment. Defaults to
+            :data:`DEFAULT_LIE_EXCLUDE` (ions + water + lipids), leaving the
+            biomolecular binding partner. Pass None to include everything else,
+            which is only correct if you also simulate the free ligand and
+            subtract. Ignored when ``use_residues`` is given.
         cutoff : float
             Distance cutoff (Å) used to auto-select environment residues when
             ``use_residues`` is None.
@@ -481,6 +562,12 @@ class ProteinLigandAnalyzer:
             run_name = os.path.basename(traj).split('.')[0]
 
             ptraj = pt.iterload(traj, prmtop, stride=stride)
+            # cpptraj can misread the unit cell (e.g. DCD); a wrong box silently corrupts every PBC energy
+            mda_box = mda.Universe(prmtop, traj).trajectory[0].dimensions
+            pt_box = np.asarray(ptraj[0].box.values, dtype=float)
+            if mda_box is None or not np.allclose(pt_box, mda_box, atol=0.5):
+                raise ValueError(f"pytraj box {pt_box} differs from MDAnalysis box {mda_box} for {traj}; "
+                                 "convert the trajectory to NetCDF before running LIE.")
 
             # LIE mask logic
             if use_residues is not None:
@@ -490,8 +577,12 @@ class ProteinLigandAnalyzer:
                 ref = pt.iterload(traj, prmtop)[0]
                 ptraj.top.set_reference(ref)
 
-                idx = ptraj.top.select(f"({ligand_amber_selection}<:{cutoff}) & !({exclude_amber_selection}) & !({ligand_amber_selection})")
-                resids = sorted({ptraj.top[i].resid for i in idx})
+                resids = environment_resids(
+                    ptraj.top,
+                    ligand_amber_selection=ligand_amber_selection,
+                    exclude_amber_selection=exclude_amber_selection,
+                    cutoff=cutoff,
+                )
                 res_string = ",".join(str(r) for r in resids)
 
             mask = f"LIE {ligand_amber_selection} :{res_string}"
@@ -536,9 +627,9 @@ class ProteinLigandAnalyzer:
         for component, ax in zip(["Total", "EELEC", "VDW"], axes.flatten()):
             mean_ = lie_df[component].mean()
             std_ = lie_df[component].std()
-            sns.lineplot(data=lie_df, x=lie_df.index, y=component, ax=ax, label=f"Mean: {mean_:.2f} kJ/mol\nStd: {std_:.2f} kJ/mol")
+            sns.lineplot(data=lie_df, x=lie_df.index, y=component, ax=ax, label=f"Mean: {mean_:.2f} kcal/mol\nStd: {std_:.2f} kcal/mol")
             ax.set_title(f"{component.upper()}")
-            ax.set_xlabel("Frame") ;    ax.set_ylabel("LIE Energy (kJ/mol)")
+            ax.set_xlabel("Frame") ;    ax.set_ylabel("LIE Energy (kcal/mol)")
             
         plt.tight_layout()
         plt.savefig(os.path.join(self.outdir, "LIE_components.png"))
@@ -676,7 +767,11 @@ class ProteinLigandAnalyzer:
         with open(mmpbsa_in, 'r') as file:
             mmpbsa_template = file.readlines()
         
-        u = mda.Universe(prmtop, traj_fname, in_memory=True)
+        # in_memory is only needed by the persistent-water search, which revisits frames
+        # repeatedly. Loading unconditionally costs ~15 GB on a 500k-atom membrane system
+        # with 2500 frames, purely to read len(u.trajectory).
+        u = mda.Universe(prmtop, traj_fname,
+                         in_memory=persistent_waters_cutoff is not None)
         start, end, step = None, None, None
 
         if traj_slice is not None:
@@ -1145,12 +1240,13 @@ def _replace_line(lines: list,
             break
     return lines
 
-def calculate_contact_frequency(u, ligand_selection: str, pocket_cutoff: float = 5.0, contact_cutoff: float = 3.5) -> np.ndarray:
+def calculate_contact_frequency(u, ligand_selection: str, pocket_cutoff: float = 5.0, contact_cutoff: float = 3.5,
+                                start: int = None, stop: int = None, step: int = None) -> np.ndarray:
     """Return per-atom contact frequency for ligand heavy atoms.
 
     A ligand atom is counted as "in contact" in a frame if any pocket atom
     lies within ``contact_cutoff`` Å of it.  Pocket atoms are protein heavy
-    atoms within ``pocket_cutoff`` Å of the ligand in the first frame.
+    atoms within ``pocket_cutoff`` Å of the ligand in the first analysed frame.
 
     Parameters
     ----------
@@ -1159,26 +1255,32 @@ def calculate_contact_frequency(u, ligand_selection: str, pocket_cutoff: float =
     ligand_selection : str
         MDAnalysis selection string for the ligand.
     pocket_cutoff : float
-        Distance (Å) used to define the pocket in the first frame.
+        Distance (Å) used to define the pocket in the first analysed frame.
     contact_cutoff : float
         Distance threshold (Å) for declaring a contact in each frame.
+    start, stop, step : int, optional
+        Frame slice to analyse (default: whole trajectory).
 
     Returns
     -------
     np.ndarray
-        Fraction of trajectory frames in which each ligand heavy atom is in
+        Fraction of analysed frames in which each ligand heavy atom is in
         contact with any pocket atom. Shape ``(n_ligand_heavy_atoms,)``.
     """
+    frames = range(*slice(start, stop, step).indices(len(u.trajectory)))
+    if len(frames) == 0:
+        raise ValueError(f"Empty frame window start={start}, stop={stop}, step={step}.")
     lig_ha = u.select_atoms(f'({ligand_selection}) and not name H*')
-    u.trajectory[0]
+    u.trajectory[frames[0]]
     pocket = u.select_atoms(f'protein and not name H* and around {pocket_cutoff} ({ligand_selection})')
     contact_counts = np.zeros(len(lig_ha))
-    for ts in u.trajectory:
-        dmat = distance_array(lig_ha.positions, pocket.positions)
+    for ts in u.trajectory[frames.start:frames.stop:frames.step]:
+        dmat = distance_array(lig_ha.positions, pocket.positions, box=ts.dimensions)
         contact_counts += (dmat < contact_cutoff).any(axis=1)
-    return contact_counts / len(u.trajectory)
+    return contact_counts / len(frames)
 
-def calculate_ligand_rmsf(u, ligand_selection: str = 'resname UNK') -> np.ndarray:
+def calculate_ligand_rmsf(u, ligand_selection: str = 'resname UNK',
+                          start: int = None, stop: int = None, step: int = None) -> np.ndarray:
     """Return per-atom RMSF values for ligand heavy atoms.
 
     Parameters
@@ -1187,15 +1289,158 @@ def calculate_ligand_rmsf(u, ligand_selection: str = 'resname UNK') -> np.ndarra
         MDAnalysis Universe with topology and trajectory loaded.
     ligand_selection : str
         MDAnalysis selection string for the ligand.
+    start, stop, step : int, optional
+        Frame slice to analyse (default: whole trajectory).
 
     Returns
     -------
     np.ndarray
-        RMSF (Å) for each ligand heavy atom over the full trajectory.
-        Shape ``(n_ligand_heavy_atoms,)``.
+        RMSF (Å) for each ligand heavy atom. Shape ``(n_ligand_heavy_atoms,)``.
     """
     lig_ha = u.select_atoms(f'({ligand_selection}) and not name H*')
-    return RMSF(atomgroup=lig_ha).run().rmsf
+    return RMSF(atomgroup=lig_ha).run(start=start, stop=stop, step=step).results.rmsf
+
+# Element sets of the cw-RMSF score; None = every heavy atom.
+CW_RMSF_ATOM_SETS = {
+    'polar': ('N', 'O', 'S'),
+    'nonpolar': ('C', 'F', 'Cl', 'Br', 'I'),
+    'all': None,
+}
+
+def ligand_rmsf_contacts(u, ligand_selection: str = 'resname UNK', start: int = None, stop: int = None,
+                         step: int = None, pocket_cutoff: float = 5.0, contact_cutoff: float = 3.5) -> pd.DataFrame:
+    """Per-atom RMSF and pocket-contact frequency of the ligand heavy atoms.
+
+    The trajectory must already be centred and superposed on the protein
+    (e.g. the ``*_aligned.dcd`` written by :func:`autopath.utils.wrap_align_save_traj`).
+
+    Parameters
+    ----------
+    u : mda.Universe
+        Universe with the aligned trajectory.
+    ligand_selection : str
+        MDAnalysis selection string for the ligand.
+    start, stop, step : int, optional
+        Frame slice to analyse (default: whole trajectory). The pocket is
+        defined on the first frame of the slice.
+    pocket_cutoff : float
+        Protein heavy atoms within this distance (Å) of the ligand define the pocket.
+    contact_cutoff : float
+        Ligand–pocket heavy-atom distance (Å) counted as a contact.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per ligand heavy atom with columns ``atom_name``, ``element``,
+        ``rmsf`` (Å) and ``contact_freq`` (fraction of analysed frames).
+    """
+    lig_ha = u.select_atoms(f'({ligand_selection}) and not name H*')
+    if len(lig_ha) == 0:
+        raise ValueError(f"Selection {ligand_selection!r} has no heavy atoms.")
+    contact_freq = calculate_contact_frequency(u, ligand_selection, pocket_cutoff=pocket_cutoff,
+                                               contact_cutoff=contact_cutoff, start=start, stop=stop, step=step)
+    return pd.DataFrame({
+        'atom_name': list(lig_ha.names),
+        'element': [a.element for a in lig_ha],
+        'rmsf': calculate_ligand_rmsf(u, ligand_selection, start=start, stop=stop, step=step),
+        'contact_freq': contact_freq,
+    })
+
+def cw_rmsf(per_atom: pd.DataFrame, atom_set='polar') -> float:
+    """Contact-weighted RMSF, sum(c_i * RMSF_i) / sum(c_i), over one set of ligand atoms.
+
+    Parameters
+    ----------
+    per_atom : pd.DataFrame
+        Columns ``element``, ``rmsf`` and ``contact_freq``, as returned by
+        :func:`ligand_rmsf_contacts` (or read from ``<sys>_RMSF.csv``).
+    atom_set : str or list of str
+        A key of ``CW_RMSF_ATOM_SETS`` (``'polar'``, ``'nonpolar'``, ``'all'``)
+        or an explicit list of element symbols.
+
+    Returns
+    -------
+    float
+        cw-RMSF in Å.
+
+    Raises
+    ------
+    ValueError
+        If no atom of the set is ever in contact with the pocket (score undefined).
+    """
+    if isinstance(atom_set, str):
+        if atom_set not in CW_RMSF_ATOM_SETS:
+            raise ValueError(f"Unknown atom set {atom_set!r}; use one of {list(CW_RMSF_ATOM_SETS)} or a list of elements.")
+        name, elements = atom_set, CW_RMSF_ATOM_SETS[atom_set]
+    else:
+        name, elements = '/'.join(atom_set), tuple(atom_set)
+    el = per_atom['element'].astype(str).str.capitalize()
+    sel = per_atom[el != 'H'] if elements is None else per_atom[el.isin([e.capitalize() for e in elements])]
+    weight = sel['contact_freq'].to_numpy(dtype=float)
+    if weight.sum() <= 0:
+        raise ValueError(f"cw-RMSF undefined: no {name} ligand atom contacts the pocket.")
+    return float(np.average(sel['rmsf'].to_numpy(dtype=float), weights=weight))
+
+def cw_rmsf_scores(per_atom: pd.DataFrame, atom_sets=tuple(CW_RMSF_ATOM_SETS), on_undefined: str = 'raise') -> dict:
+    """cw-RMSF for several atom sets (see :func:`cw_rmsf`).
+
+    Parameters
+    ----------
+    per_atom : pd.DataFrame
+        Output of :func:`ligand_rmsf_contacts`.
+    atom_sets : iterable of str
+        Keys of ``CW_RMSF_ATOM_SETS``.
+    on_undefined : {'raise', 'nan'}
+        For a set with no pocket contact: raise ``ValueError`` or report NaN (logged).
+
+    Returns
+    -------
+    dict
+        ``{'cw_rmsf_<set>': value}``.
+    """
+    if on_undefined not in ('raise', 'nan'):
+        raise ValueError(f"on_undefined must be 'raise' or 'nan', got {on_undefined!r}")
+    out = {}
+    for name in atom_sets:
+        try:
+            out[f'cw_rmsf_{name}'] = cw_rmsf(per_atom, name)
+        except ValueError as e:
+            if on_undefined == 'raise' or name not in CW_RMSF_ATOM_SETS:
+                raise
+            logger.warning(str(e))
+            out[f'cw_rmsf_{name}'] = float('nan')
+    return out
+
+def cw_rmsf_windows(u, ligand_selection: str, state_csv: str, protocol, component: str = 'ligand'):
+    """cw-RMSF over the whole run and over the free window of an equilibration.
+
+    Parameters
+    ----------
+    u : mda.Universe
+        Universe with the aligned equilibration trajectory.
+    ligand_selection : str
+        MDAnalysis selection string for the ligand.
+    state_csv, protocol, component
+        Passed to :func:`autopath.equilibration.free_window_start`.
+
+    Returns
+    -------
+    table : pd.DataFrame
+        Indexed by window (``'whole'``, ``'free'``) with ``first_frame`` and
+        ``cw_rmsf_<set>`` columns (NaN for a set with no pocket contact). The
+        ``'free'`` row is absent when the protocol has no free window.
+    per_atom : dict of pd.DataFrame
+        :func:`ligand_rmsf_contacts` output per window.
+    """
+    from autopath.equilibration import free_window_start  # openmm import, only needed here
+    windows = {'whole': 0}
+    free = free_window_start(state_csv, protocol, component=component, n_frames=len(u.trajectory))
+    if free is not None:
+        windows['free'] = free
+    per_atom = {w: ligand_rmsf_contacts(u, ligand_selection, start=s) for w, s in windows.items()}
+    table = pd.DataFrame([{'window': w, 'first_frame': s, **cw_rmsf_scores(per_atom[w], on_undefined='nan')}
+                          for w, s in windows.items()]).set_index('window')
+    return table, per_atom
 
 def plot_atomic_property(u, weights: np.ndarray, lig_resname: str = 'resname UNK',
                          outname: str = 'property.png', ref_mol=None,

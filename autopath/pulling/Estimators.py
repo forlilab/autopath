@@ -2,7 +2,6 @@ import numpy as np
 import pandas as pd
 from abc import ABC, abstractmethod
 
-import statsmodels.formula.api as smf
 from scipy import special
 from scipy.stats import linregress
 from scipy.signal import savgol_filter, find_peaks
@@ -92,8 +91,7 @@ class CumulantEstimator(BaseEstimator):
         if raw_W.size == 0:
             return None
         Wmean = float(raw_W.mean())
-        # ddof=1 variance is undefined for a single sample → NaN (propagates to dG);
-        # guard to avoid a spurious "Degrees of freedom <= 0" RuntimeWarning.
+        # ddof=1 variance is undefined for one sample; NaN without the RuntimeWarning.
         Wvar = float(raw_W.var(ddof=1)) if raw_W.size > 1 else np.nan
         dG = Wmean - (beta * Wvar) / 2.0
         return {'Wmean': Wmean, 'dG': dG, 'Wdiss': Wmean - dG}
@@ -126,6 +124,58 @@ class CumulantEstimator(BaseEstimator):
         return smd_data
 
 
+class ForceEstimator(BaseEstimator):
+    """Force / raw-work estimator.
+
+    Per-speed ``dG`` is the raw mean cumulative work ``Wmean`` (uncorrected);
+    its v→0 intercept via :func:`extrapolate_to_v0` is the reversible work = ΔG.
+    Also records ``Fmean`` (mean restraint force per step/speed/path) which the
+    force-based friction (``FrictionEstimator.gamma_from_force_*``) turns into
+    Γ = dF/dv.  Inherently multi-speed: a single speed gives no v→0 intercept.
+    """
+
+    @property
+    def name(self):
+        return 'force'
+
+    @staticmethod
+    def estimate_dG(raw_W: np.ndarray, beta: float, **kwargs) -> dict | None:
+        raw_W = np.asarray(raw_W, dtype=float)
+        if raw_W.size == 0:
+            return None
+        Wmean = float(raw_W.mean())
+        # Dissipation is removed only by the v→0 extrapolation; Wdiss is undefined here.
+        return {'Wmean': Wmean, 'dG': Wmean, 'Wdiss': np.nan}
+
+    def fit_transform(self, smd_data: SMDData) -> SMDData:
+        data = smd_data.raw_data.copy()
+        group_keys = ['step', 'speed', 'path']
+        results = []
+        for (step, speed, path), group in data.groupby(group_keys):
+            r_coord = smd_data.protocol_grids[speed].loc[
+                smd_data.protocol_grids[speed]['step'] == step,
+                'r_target_protocol'
+            ].values[0]
+
+            raw_W = group['work'].astype(float).values
+            result = self.estimate_dG(raw_W, smd_data.beta)
+            if result is None:
+                continue
+
+            results.append({
+                'r_coord': r_coord,
+                'step': step,
+                'speed': speed,
+                'path': path,
+                'n_samples': raw_W.size,
+                'Fmean': float(group['force'].astype(float).mean()),
+                **result,
+            })
+        results_df = pd.DataFrame(results)
+        smd_data.add_estimator_results(self.name, results_df)
+        return smd_data
+
+
 class FrictionEstimator(BaseEstimator):
     """Estimate friction profiles from Wdiss.
 
@@ -142,13 +192,28 @@ class FrictionEstimator(BaseEstimator):
         smooth_method: str = 'savgol',
         smooth_polyorder: int = 3,
         speeds: list[float] | None = None,
+        realized_speed_map: dict | None = None,
+        friction_model: str = 'mixed',
     ):
+        if friction_model not in ('ols', 'mixed'):
+            raise ValueError(
+                f"friction_model must be 'ols' or 'mixed', got {friction_model!r}")
+        self.friction_model = friction_model
         self.w_col = w_col
         self.use_spline = use_spline
         self.smooth_window = smooth_window
         self.smooth_method = smooth_method
         self.smooth_polyorder = smooth_polyorder
         self.speeds = speeds
+        # {nominal speed -> realized speed}: the physical v used in every /v and v->0
+        # regression, so steps_per_move rounding does not bias friction. None -> nominal.
+        self.realized_speed_map = realized_speed_map or None
+
+    def _realized(self, speed: float) -> float:
+        """Realized pulling speed for a nominal speed (identity if no map)."""
+        if not self.realized_speed_map:
+            return float(speed)
+        return float(self.realized_speed_map.get(float(speed), speed))
 
     @property
     def name(self):
@@ -250,12 +315,8 @@ class FrictionEstimator(BaseEstimator):
 
         Note
         ----
-        For backward pulling, r_coord decreases with step.  After sorting by
-        r_coord the step index is reversed: the small-r end (center) comes first
-        and carries the largest accumulated Wdiss, making dWdiss/dr negative.
-        The correct formula for backward pulling is γ = −dWdiss/dr / v (sign flip
-        because dr < 0 during the pull).  Direction is detected from the ``step``
-        column when available, otherwise from the sign of Wdiss[0] − Wdiss[−1].
+        Backward pulls (r decreasing with step) use γ = −dWdiss/dr / v. Direction is
+        taken from ``step`` when present, else from the sign of Wdiss[0] − Wdiss[−1].
         """
         if df is None or df.empty:
             return pd.DataFrame()
@@ -268,6 +329,8 @@ class FrictionEstimator(BaseEstimator):
             data = data[data['estimator'] == estimator]
         if self.speeds is not None:
             data = data[data['speed'].isin(self.speeds)]
+        # speed=0 rows are the v->0 extrapolation, not a measured speed
+        data = data[data['speed'] > 0]
 
         group_cols = ['estimator', 'speed']
         if 'path' in data.columns:
@@ -282,6 +345,7 @@ class FrictionEstimator(BaseEstimator):
             r = g['r_coord'].to_numpy(dtype=float)
             wdiss = g[self.w_col].to_numpy(dtype=float)
             speed = float(g['speed'].iloc[0])
+            v = self._realized(speed)  # physical velocity for dWdiss/dr / v
 
             # Detect pulling direction: if step at r_min > step at r_max, it's backward.
             if 'step' in g.columns:
@@ -290,7 +354,7 @@ class FrictionEstimator(BaseEstimator):
                 is_backward = wdiss[0] > wdiss[-1]
             direction_sign = -1.0 if is_backward else 1.0
 
-            gamma = self._compute_gamma_derivative(r, wdiss, speed) * direction_sign
+            gamma = self._compute_gamma_derivative(r, wdiss, v) * direction_sign
             gamma_int = self._cumulative_integral(r, gamma)
 
             out = g[['step', 'r_coord', 'speed']].copy() if 'step' in g.columns else g[['r_coord', 'speed']].copy()
@@ -318,10 +382,6 @@ class FrictionEstimator(BaseEstimator):
         :func:`extrapolate_to_v0`, then differentiates the resulting
         Gamma_integrated(r) = slope(r) to obtain the local friction Γ(r).
 
-        This cross-speed approach averages over pulling-speed noise and is
-        complementary to the per-speed derivative method
-        (:meth:`gamma_from_wdiss_derivative`).
-
         Parameters
         ----------
         df : pd.DataFrame
@@ -348,6 +408,8 @@ class FrictionEstimator(BaseEstimator):
             data = data[data['estimator'] == estimator]
         if self.speeds is not None:
             data = data[data['speed'].isin(self.speeds)]
+        # speed=0 rows are the v->0 extrapolation, not a measured speed
+        data = data[data['speed'] > 0]
 
         if 'estimator' not in data.columns:
             data['estimator'] = estimator if estimator is not None else 'unknown'
@@ -356,6 +418,8 @@ class FrictionEstimator(BaseEstimator):
             results=data,
             param=self.w_col,
             speeds=self.speeds,
+            realized_speed_map=self.realized_speed_map,
+            model='ols',  # friction_model applies to the force friction only
         )
 
         if v0_df is None or v0_df.empty:
@@ -399,6 +463,243 @@ class FrictionEstimator(BaseEstimator):
 
         return out
 
+    @staticmethod
+    def _mix_force(force_results: pd.DataFrame, weights: dict) -> pd.DataFrame:
+        """Path-mix Fmean into <F>(step, speed) using p_eq weights.
+
+        ``weights`` is ``{speed: {path: p_eq}}``.  For single-path systems this
+        reduces to the plain mean.  Returns columns
+        ``estimator, step, r_coord, speed, Fbar``.
+        """
+        rows = []
+        for (speed, step), g in force_results.groupby(['speed', 'step']):
+            sw = weights.get(speed, {}) if weights else {}
+            num = den = 0.0
+            rcoords = []
+            for _, row in g.iterrows():
+                w = sw.get(row['path'], 0.0) if sw else 1.0
+                if w <= 0:
+                    continue
+                num += w * float(row['Fmean'])
+                den += w
+                rcoords.append(float(row['r_coord']))
+            if den <= 0:
+                continue
+            rows.append(dict(estimator='force', step=step, speed=speed,
+                             r_coord=float(np.mean(rcoords)), Fbar=num / den))
+        return pd.DataFrame(rows)
+
+    def gamma_from_force_regression(self, force_results: pd.DataFrame,
+                                    weights: dict) -> pd.DataFrame:
+        """Γ(r) = dF/dv (slope) and Feq(r) (intercept) via across-speed OLS of <F>."""
+        if force_results is None or force_results.empty:
+            return pd.DataFrame()
+        fbar = self._mix_force(force_results, weights)
+        if fbar.empty or fbar['speed'].nunique() < 2:
+            return pd.DataFrame()
+
+        v0 = extrapolate_to_v0(results=fbar, param='Fbar', speeds=self.speeds,
+                               realized_speed_map=self.realized_speed_map,
+                               model=self.friction_model)
+        if v0 is None or v0.empty:
+            return pd.DataFrame()
+
+        out = v0.copy()
+        out['Feq'] = out['Fbar'].astype(float)          # intercept
+        out['Gamma'] = out['Fbar_slope'].astype(float)  # local friction dF/dv
+        out = out.sort_values('r_coord').reset_index(drop=True)
+        r = out['r_coord'].to_numpy(dtype=float)
+        out['Gamma_integrated'] = self._cumulative_integral(r, out['Gamma'].to_numpy(dtype=float))
+        out['method'] = 'regression'
+        out['estimator'] = 'force'
+        keep = ['r_coord', 'step', 'speed', 'Gamma', 'Gamma_integrated',
+                'Feq', 'method', 'estimator', 'model']
+        return out[[c for c in keep if c in out.columns]]
+
+    def gamma_from_force_derivative(self, force_results: pd.DataFrame,
+                                    weights: dict) -> pd.DataFrame:
+        """Per-speed friction Γ_sp(r) = (<F>(r;v) − Feq(r)) / v."""
+        if force_results is None or force_results.empty:
+            return pd.DataFrame()
+        fbar = self._mix_force(force_results, weights)
+        if fbar.empty or fbar['speed'].nunique() < 2:
+            return pd.DataFrame()
+
+        reg = self.gamma_from_force_regression(force_results, weights)
+        if reg.empty:
+            return pd.DataFrame()
+        feq_by_step = reg.set_index('step')['Feq'].to_dict()
+
+        rows = []
+        for speed, g in fbar.groupby('speed'):
+            if speed <= 0:
+                continue
+            v = self._realized(speed)  # physical velocity for the /v division
+            g = g.sort_values('r_coord')
+            # Drop steps without Feq; zero-filling would bias the cumulative integral.
+            g = g[g['step'].isin(feq_by_step.keys())]
+            if g.empty:
+                continue
+            r = g['r_coord'].to_numpy(dtype=float)
+            gamma = np.array([(fb - feq_by_step[st]) / v
+                              for fb, st in zip(g['Fbar'], g['step'])], dtype=float)
+            gamma_int = self._cumulative_integral(r, gamma)
+            rows.append(pd.DataFrame({
+                'r_coord': r, 'step': g['step'].to_numpy(), 'speed': speed,
+                'Gamma': gamma, 'Gamma_integrated': gamma_int,
+                'method': 'derivative', 'estimator': 'force',
+            }))
+        return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+
+    def per_path_feq(self, force_results: pd.DataFrame) -> pd.DataFrame:
+        """v->0 mean restraint force Feq(lambda) regressed across speeds, PER PATH, then smoothed."""
+        rows = []
+        for (path, step), g in force_results.groupby(['path', 'step']):
+            fps = g.groupby('speed')['Fmean'].mean()
+            if fps.index.nunique() < 2:
+                continue
+            xs = np.array([self._realized(s) for s in fps.index.values], dtype=float)
+            lr = linregress(xs, fps.values)
+            rows.append((path, step, float(g['r_coord'].mean()), float(lr.intercept)))
+        E = pd.DataFrame(rows, columns=['path', 'step', 'r_coord', 'Feq'])
+        if E.empty:
+            return E
+        out = []
+        for path, gp in E.groupby('path'):
+            gp = gp.sort_values('r_coord').copy()
+            gp['Feq'] = self._smooth_profile(gp['Feq'].to_numpy(dtype=float))
+            out.append(gp)
+        return pd.concat(out, ignore_index=True)
+
+    def meanforce_ti_pmf(self, force_results, weights, k,
+                         n_grid: int = 200, max_drop_frac: float = 0.3):
+        """Mean-force TI PMF G(z)=∫Feq dz on z=λ−Feq/k, per-path remap-then-mix.
+
+        Guards: sign check (Feq>0), monotone-z filter with λ fallback (never silent
+        sort), p_eq-weighted mix on a common z grid. Returns (mix_df[z,dG_z], diag);
+        (None, diag) with the reason logged at WARNING when no PMF can be built."""
+        if force_results is None or force_results.empty:
+            logger.warning("[meanforce_ti] not computed: no force rows")
+            return None, {}
+        E = self.per_path_feq(force_results)
+        if E.empty:
+            # Per-speed clustering labels every path with one speed; Feq(v->0) needs a path
+            # identity shared across speeds.
+            logger.warning("[meanforce_ti] not computed: no path has force rows at at least 2 speeds "
+                           "at any step (path labels are per speed unless clustered across speeds)")
+            return None, {}
+        paths = list(E['path'].unique())
+        if weights:
+            pw = {p: float(np.mean([weights.get(s, {}).get(p, 0.0) for s in weights])) for p in paths}
+        else:
+            pw = {p: 1.0 for p in paths}
+        tot = sum(pw.values()) or 1.0
+        pw = {p: w / tot for p, w in pw.items()}
+
+        per_path = []; fell_back = []
+        for path, gp in E.groupby('path'):
+            gp = gp.sort_values('r_coord')
+            lam = gp['r_coord'].to_numpy(dtype=float); Feq = gp['Feq'].to_numpy(dtype=float)
+            if np.nanmedian(Feq) <= 0:
+                raise ValueError(f"meanforce_ti_pmf: path {path} median Feq <= 0 — sign convention violated")
+            z = lam - Feq / k
+            keep = monotone_z_filter(z)
+            if keep.sum() < max(3, (1.0 - max_drop_frac) * len(z)):
+                logger.warning(f"[meanforce_ti] path {path}: z folded at "
+                               f"{100*(1-keep.mean()):.0f}% of steps — falling back to lambda")
+                z = lam; keep = np.ones(len(z), dtype=bool); fell_back.append(path)
+            zc = z[keep]; Fc = Feq[keep]
+            if len(zc) < 3:
+                continue
+            G = self._cumulative_integral(zc, Fc); G = G - G[0]
+            if G[-1] < G[0]:
+                logger.warning(f"[meanforce_ti] path {path}: G(z) falls outward — check signs")
+            per_path.append((path, zc, G))
+        if not per_path:
+            logger.warning("[meanforce_ti] not computed: no path has at least 3 usable z points")
+            return None, {'fell_back_paths': fell_back}
+
+        z_lo = max(zc[0] for _, zc, _ in per_path)
+        z_hi = min(zc[-1] for _, zc, _ in per_path)
+        if not (z_hi > z_lo):
+            logger.warning(f"[meanforce_ti] not computed: no common z range across paths "
+                           f"(max start {z_lo:.3f} nm >= min end {z_hi:.3f} nm)")
+            return None, {'fell_back_paths': fell_back}
+        zg = np.linspace(z_lo, z_hi, n_grid)
+        Gmix = np.zeros(n_grid)
+        for path, zc, G in per_path:
+            Gmix += pw[path] * np.interp(zg, zc, G)
+        Gmix = Gmix - Gmix[0]
+        mix_df = pd.DataFrame({'z': zg, 'dG_z': Gmix})
+
+        zdiv = (E.assign(_z=lambda d: d['r_coord'] - d['Feq'] / k)
+                  .groupby('step')['_z'].agg(lambda v: float(v.max() - v.min())))
+        diag = {'k': float(k), 'path_weights': pw, 'fell_back_paths': fell_back,
+                'z_divergence_nm_median': float(zdiv.median()) if len(zdiv) else 0.0,
+                'z_divergence_nm_max': float(zdiv.max()) if len(zdiv) else 0.0,
+                'dG_z_endpoint': float(Gmix[-1])}
+        return mix_df, diag
+
+
+def _smooth_profile(
+    dG: np.ndarray,
+    smooth: str = 'savgol',
+    smooth_window: int = 5,
+    smooth_polyorder: int = 3,
+) -> np.ndarray:
+    """Savitzky-Golay (default) or Gaussian smoothing of a 1D profile."""
+    arr = np.asarray(dG, dtype=float)
+    if smooth == 'savgol':
+        win = int(smooth_window)
+        if win % 2 == 0:
+            win += 1
+        win = min(win, len(arr) if len(arr) % 2 == 1 else len(arr) - 1)
+        if win < 3:
+            return arr
+        poly = max(min(int(smooth_polyorder), win - 1), 1)
+        return savgol_filter(arr, window_length=win, polyorder=poly, mode='interp')
+    return gaussian_filter1d(arr, sigma=float(smooth_window), mode='nearest')
+
+
+def _slope_se(x: np.ndarray, y: np.ndarray) -> tuple[float, float] | None:
+    """OLS slope of y(x) and its SE, or None if untestable.
+
+    SE is inflated by the residual lag-1 autocorrelation rho
+    (n_eff = n (1 - rho) / (1 + rho)); n_eff < 3 is untestable.
+    """
+    xc = x - x.mean()
+    sxx = float(xc @ xc)
+    if x.size < 3 or sxx <= 0:
+        return None
+    b = float(xc @ (y - y.mean())) / sxx
+    res = y - y.mean() - b * xc
+    ss = float(res @ res)
+    rho = min(max(float(res[1:] @ res[:-1]) / ss if ss > 0 else 0.0, 0.0), 0.999)
+    n_eff = x.size * (1.0 - rho) / (1.0 + rho)
+    if n_eff < 3:
+        return None
+    return b, float(np.sqrt(ss / (x.size - 2) / sxx * x.size / n_eff))
+
+
+def _plateau_onset(r: np.ndarray, dG: np.ndarray, n_cand: int = 200) -> int | None:
+    """Index of the earliest point where the rise has stopped (diagnostic).
+
+    Tail [i:] slope within 2 SE of zero, and the slope over the equally long
+    segment before i larger than it by more than 2 combined SE. Returns None
+    when no candidate qualifies. Candidates are *n_cand* evenly spaced indices.
+    """
+    n = r.size
+    for i in np.unique(np.linspace(1, n - 3, min(n_cand, n - 3)).astype(int)):
+        tail = _slope_se(r[i:], dG[i:])
+        j = max(0, 2 * i - n)
+        pre = _slope_se(r[j:i + 1], dG[j:i + 1])
+        if tail is None or pre is None:
+            continue
+        (bt, st), (bp, sp) = tail, pre
+        if abs(bt) <= 2.0 * st and bp - bt > 2.0 * np.hypot(sp, st):
+            return int(i)
+    return None
+
 
 def _find_pmf_peak(
     r: np.ndarray,
@@ -423,24 +724,8 @@ def _find_pmf_peak(
         window (odd int, auto-adjusted); for 'gaussian', it is σ in grid points.
     prominence_factor : float
         Peak prominence threshold as a multiple of kBT (default 0.5).
-
-    Both ``KramersEstimator.detect_ts`` and ``SMDAnalysis._compute_barrier_rts``
-    delegate to this function so the algorithm stays in one place.
     """
-    arr = dG.astype(float)
-    if smooth == 'savgol':
-        win = int(smooth_window)
-        if win % 2 == 0:
-            win += 1
-        win = min(win, len(arr) if len(arr) % 2 == 1 else len(arr) - 1)
-        if win >= 3:
-            poly = min(int(smooth_polyorder), win - 1)
-            poly = max(poly, 1)
-            smoothed = savgol_filter(arr, window_length=win, polyorder=poly, mode='interp')
-        else:
-            smoothed = arr
-    else:
-        smoothed = gaussian_filter1d(arr, sigma=float(smooth_window), mode='nearest')
+    smoothed = _smooth_profile(dG, smooth, smooth_window, smooth_polyorder)
 
     prominence = prominence_factor * kBT
     peak_idxs, props = find_peaks(smoothed, prominence=prominence)
@@ -450,14 +735,18 @@ def _find_pmf_peak(
     return float(r[best]), float(smoothed[best] - smoothed[0])
 
 
+# Estimators whose per-speed dG is not a free energy (force: raw mean work; ΔG only at v→0)
+NO_PER_SPEED_FREE_ENERGY = frozenset({"force"})
+
+
+class FrictionSourceError(ValueError):
+    """Requested Kramers friction source is unavailable."""
+
+
 class KramersEstimator:
     """Kramers/Pontryagin MFPT k_off from pre-computed PMF and friction profiles.
 
-    NOT a BaseEstimator subclass — operates on mixture_pmfs + friction DataFrames
-    produced by the sMD analysis pipeline rather than on raw per-step work values.
-
-    Called automatically at the end of ``SMDAnalysis.run()`` after ``mixture_pmfs.csv``
-    and ``friction.csv`` have been written.
+    Not a BaseEstimator: operates on mixture_pmfs + friction tables, not raw work.
 
     Output (one row per dG estimator present in *mixture_pmfs*) columns:
       estimator, source, speed_nm_per_ps, T_K, start_r_nm, abs_r_nm,
@@ -492,12 +781,8 @@ class KramersEstimator:
     ) -> pd.DataFrame:
         """Inner join of PMF and friction.
 
-        Merges on ``step`` (integer, protocol-anchored) when both DataFrames
-        carry the column, avoiding float jitter in ``r_coord`` that causes
-        spurious row drops after ``extrapolate_to_v0()`` end-trimming.
-        Falls back to ``r_coord`` for the per-path codepath where ``step``
-        is not available.  ``r_coord`` in the output always comes from
-        *pmf_df* (authoritative source).
+        Merges on integer ``step`` when both carry it (``r_coord`` float jitter
+        drops rows), else on ``r_coord``. Output ``r_coord`` comes from *pmf_df*.
         """
         use_step = "step" in pmf_df.columns and "step" in fric_df.columns
         key_label = "step" if use_step else "r_coord"
@@ -505,11 +790,10 @@ class KramersEstimator:
         if use_step:
             left = pmf_df[["step", "r_coord", "dG"]].copy()
             right = fric_df[["step", "Gamma"]].copy()
-            # Coerce to int64 defensively (float step can arise after CSV round-trip)
+            # step can become float after a CSV round-trip
             left["step"] = left["step"].astype("int64")
             right["step"] = right["step"].astype("int64")
             merged = pd.merge(left, right, on="step", how="inner")
-            # r_coord comes from pmf_df (left); no r_coord_x/r_coord_y ambiguity
         else:
             merged = pd.merge(
                 pmf_df[["r_coord", "dG"]],
@@ -535,22 +819,25 @@ class KramersEstimator:
         estimator_name: str,
         prefer_v0: bool,
         speed_override: float | None,
+        friction_source_work: str = "auto",
     ) -> tuple[pd.DataFrame, str, float]:
         """Choose the best (merged PMF+friction) profile for *estimator_name*.
 
         Preference order (when *prefer_v0* is True):
         1. v→0 extrapolated dG  +  regression friction  (source: ``v0_extrapolation``)
-        2. Slowest per-speed dG  +  derivative friction  (source: ``per_speed(v=…)``)
+        2. Slowest per-speed dG  +  derivative friction  (source: ``per_speed(v=…)``);
+           not for estimators without a per-speed free energy (``force``).
 
         Returns ``(merged_df, source_label, speed_value)``.
         """
         pmf_sub = pmf_df[pmf_df["estimator"] == estimator_name]
-        fric_sub = fric_df[fric_df["estimator"] == estimator_name]
 
         if pmf_sub.empty:
             raise RuntimeError(
                 f"[Kramers] Estimator '{estimator_name}' not found in mixture_pmfs."
             )
+        fric_sub, friction_source_work = KramersEstimator._friction_rows(
+            fric_df, pmf_sub, estimator_name, friction_source_work)
 
         # --- try v→0 extrapolation ---
         if prefer_v0 and dG_extrapolated is not None:
@@ -560,16 +847,26 @@ class KramersEstimator:
                 merged = KramersEstimator._merge_pmf_friction(v0_sub, fric_reg)
                 if not merged.empty:
                     return merged, "v0_extrapolation", 0.0
+            if estimator_name in NO_PER_SPEED_FREE_ENERGY:
+                raise RuntimeError(
+                    f"[Kramers] '{estimator_name}' has a free energy only at v→0 and "
+                    "the v→0 profile or regression friction is missing."
+                )
             logger.warning(
                 "[Kramers] v→0 profile empty or missing regression friction; "
                 "falling back to per-speed profile."
             )
+        elif estimator_name in NO_PER_SPEED_FREE_ENERGY:
+            raise RuntimeError(
+                f"[Kramers] '{estimator_name}' has a free energy only at v→0; "
+                "no per-speed profile is computed."
+            )
 
         # --- per-speed fallback ---
-        fric_deriv = fric_sub[fric_sub["method"] == "derivative"]
-        common_speeds = sorted(
-            set(pmf_sub["speed"].unique()) & set(fric_deriv["speed"].unique())
+        fric_deriv, common_speeds, fsrc = KramersEstimator._per_speed_candidates(
+            pmf_sub, fric_sub, estimator_name, friction_source_work
         )
+        logger.info(f"[Kramers] {estimator_name}: per-speed friction source = {fsrc}")
         if not common_speeds:
             raise RuntimeError(
                 f"[Kramers] No common (speed, estimator='{estimator_name}') "
@@ -584,7 +881,7 @@ class KramersEstimator:
 
         merged = KramersEstimator._merge_pmf_friction(
             pmf_sub[pmf_sub["speed"] == chosen],
-            fric_deriv[fric_deriv["speed"] == chosen],
+            KramersEstimator._fric_at(fric_deriv, chosen, fsrc),
         )
         if merged.empty:
             raise RuntimeError(
@@ -593,12 +890,83 @@ class KramersEstimator:
         return merged, f"per_speed(v={chosen})", float(chosen)
 
     @staticmethod
+    def _friction_rows(
+        fric_df: pd.DataFrame,
+        pmf_sub: pd.DataFrame,
+        estimator_name: str,
+        source: str,
+    ) -> tuple[pd.DataFrame, str]:
+        """Friction rows for *estimator_name* and the resolved source.
+
+        ``'auto'`` resolves to ``'force'`` with >=2 speeds, else ``'derivative'``.
+        ``'force'`` pairs every estimator with the force-estimator regression
+        friction (relabelled to *estimator_name*).
+        """
+        n_speeds = pmf_sub.loc[pmf_sub["speed"] > 0, "speed"].nunique()
+        if source == "auto":
+            source = "force" if n_speeds >= 2 else "derivative"
+        logger.info(f"[Kramers] {estimator_name}: friction source = {source}")
+        if source != "force":
+            return fric_df[fric_df["estimator"] == estimator_name], source
+        rows = fric_df[(fric_df["estimator"] == "force")
+                       & (fric_df["method"] == "regression")]
+        if rows.empty:
+            raise FrictionSourceError(
+                "force friction requested but no force-estimator friction is "
+                "available: enable the force estimator or set "
+                "friction_source_work='derivative'.")
+        return rows.assign(estimator=estimator_name), source
+
+    @staticmethod
+    def _per_speed_candidates(
+        pmf_sub: pd.DataFrame,
+        fric_sub: pd.DataFrame,
+        estimator_name: str,
+        source: str = "derivative",
+    ) -> tuple[pd.DataFrame, list[float], str]:
+        """Friction rows, usable speeds and resolved source for a per-speed profile.
+
+        *source* is ``'derivative'`` (per-speed Gamma), ``'regression'``/``'force'`` (the
+        across-speed Gamma, shared by all speeds); ``'auto'`` is resolved by the caller.
+
+        A per-speed profile pairs that speed's dG with the friction measured at the
+        same speed. Excluded: ``speed = 0`` (the v→0 extrapolation, paired only with
+        regression friction), speeds whose derivative Γ is all-NaN, and estimators
+        whose per-speed dG is not a free energy (``force``: raw mean work).
+        """
+        if estimator_name in NO_PER_SPEED_FREE_ENERGY:
+            return fric_sub.iloc[0:0], [], source
+        pmf_speeds = set(pmf_sub.loc[pmf_sub["speed"] > 0, "speed"].unique())
+        fric_reg = fric_sub[(fric_sub["method"] == "regression")
+                            & np.isfinite(fric_sub["Gamma"].astype(float))]
+        if source in ("regression", "force"):
+            return fric_reg, sorted(pmf_speeds) if not fric_reg.empty else [], source
+        fric_deriv = fric_sub[
+            (fric_sub["method"] == "derivative")
+            & (fric_sub["speed"] > 0)
+            & np.isfinite(fric_sub["Gamma"].astype(float))
+        ]
+        speeds = sorted(
+            set(pmf_sub.loc[pmf_sub["speed"] > 0, "speed"].unique())
+            & set(fric_deriv["speed"].unique())
+        )
+        return fric_deriv, speeds, source
+
+    @staticmethod
+    def _fric_at(fric: pd.DataFrame, speed: float, source: str) -> pd.DataFrame:
+        """Friction rows for *speed*; regression friction is shared by all speeds."""
+        if source in ("regression", "force"):
+            return fric
+        return fric[fric["speed"] == speed]
+
+    @staticmethod
     def _iter_profiles(
         pmf_df: pd.DataFrame,
         fric_df: pd.DataFrame,
         dG_extrapolated: pd.DataFrame | None,
         estimator_name: str,
         prefer_v0: bool,
+        friction_source_work: str = "auto",
     ) -> list[tuple[pd.DataFrame, str, float]]:
         """Return all available (merged, source_label, speed) profiles for *estimator_name*.
 
@@ -608,12 +976,13 @@ class KramersEstimator:
         """
         profiles: list[tuple[pd.DataFrame, str, float]] = []
         pmf_sub = pmf_df[pmf_df["estimator"] == estimator_name]
-        fric_sub = fric_df[fric_df["estimator"] == estimator_name]
 
         if pmf_sub.empty:
             raise RuntimeError(
                 f"[Kramers] Estimator '{estimator_name}' not found in mixture_pmfs."
             )
+        fric_sub, friction_source_work = KramersEstimator._friction_rows(
+            fric_df, pmf_sub, estimator_name, friction_source_work)
 
         # v→0 extrapolated profile
         if prefer_v0 and dG_extrapolated is not None:
@@ -625,14 +994,14 @@ class KramersEstimator:
                     profiles.append((merged, "v0_extrapolation", 0.0))
 
         # per-speed profiles (derivative friction)
-        fric_deriv = fric_sub[fric_sub["method"] == "derivative"]
-        common_speeds = sorted(
-            set(pmf_sub["speed"].unique()) & set(fric_deriv["speed"].unique())
+        fric_deriv, common_speeds, fsrc = KramersEstimator._per_speed_candidates(
+            pmf_sub, fric_sub, estimator_name, friction_source_work
         )
+        logger.info(f"[Kramers] {estimator_name}: per-speed friction source = {fsrc}")
         for speed in common_speeds:
             merged = KramersEstimator._merge_pmf_friction(
                 pmf_sub[pmf_sub["speed"] == speed],
-                fric_deriv[fric_deriv["speed"] == speed],
+                KramersEstimator._fric_at(fric_deriv, speed, fsrc),
             )
             if not merged.empty:
                 profiles.append((merged, f"per_speed(v={speed})", float(speed)))
@@ -659,19 +1028,11 @@ class KramersEstimator:
     ) -> float | None:
         """Absorbing boundary from the pulling restraint force (kinetics-motivated).
 
-        The mean |force| along the reaction coordinate peaks at the rupture and
-        decays as the ligand leaves the pocket. The boundary is placed where the
-        (speed-matched) mean |force| has decayed to *frac* of its peak past that
-        peak. Estimator-independent (raw pulling data), so it avoids the failure
-        mode of :meth:`detect_ts` where a noisy/monotonic reconstructed PMF has no
-        clean interior barrier (jarzynski) or a spurious far peak (cumulant at
-        higher speed). Returns ``None`` when it cannot be located, in which case
-        the caller should fall back to :meth:`detect_ts`.
-
-        Validated on the HSP90 kinetics set (koff↔pKoff): with ``frac=0.3`` it
-        rescues the cumulant boundary failures and matches jarzynski. NOTE: this is
-        a *kinetic* boundary for the Kramers MFPT — it is not a thermodynamic
-        affinity readout (use max/end dG for that).
+        Placed where the speed-matched mean |force| has decayed to *frac* of its
+        peak, past the peak. Independent of the dG estimator, so it does not need a
+        clean PMF barrier. A kinetic boundary only, not an affinity readout.
+        Returns ``None`` when it cannot be located (caller falls back to
+        :meth:`detect_ts`).
 
         Parameters
         ----------
@@ -686,6 +1047,24 @@ class KramersEstimator:
         frac : float
             Decay fraction of the peak mean |force| defining the boundary.
         """
+        prof = KramersEstimator._binned_mean_abs_force(force_df, speed, start_r, r_max)
+        if prof is None:
+            return None
+        r_bc, mF, pk = prof
+        after = np.where(mF[pk:] < frac * mF[pk])[0]
+        if len(after) == 0:
+            return None
+        return float(min(r_bc[pk + after[0]], r_max - 1e-6))
+
+    @staticmethod
+    def _binned_mean_abs_force(force_df, speed, start_r, r_max):
+        """Shared binning for the force-based boundaries.
+
+        Returns ``(r_centers, smoothed_mean_abs_force, peak_index)`` with
+        ``r_centers`` in absolute reaction-coordinate units
+        (``start_r`` + displacement), or ``None`` when the force profile is
+        unusable (missing columns, too few frames, degenerate range).
+        """
         if force_df is None or not {"r_coord", "force", "speed"}.issubset(force_df.columns):
             return None
         speeds = sorted(force_df["speed"].dropna().unique())
@@ -696,7 +1075,20 @@ class KramersEstimator:
         if len(d) < 100:
             return None
         disp = d["r_coord"].to_numpy(dtype=np.float64) - float(d["r_coord"].min())
-        F = np.abs(d["force"].to_numpy(dtype=np.float64))
+        prof = KramersEstimator._binned_smoothed(
+            disp, np.abs(d["force"].to_numpy(dtype=np.float64)))
+        if prof is None:
+            return None
+        bc, mF, pk = prof
+        return (start_r + bc, mF, pk)
+
+    @staticmethod
+    def _binned_smoothed(disp, F):
+        """Bin F over displacement *disp* (59 bins to its 98th percentile), fill
+        empty bins, smooth with a centred 5-bin rolling mean.
+
+        Returns ``(bin_centres, smoothed_F, peak_index)`` or ``None``.
+        """
         hi = float(np.quantile(disp, 0.98))
         if hi <= 0:
             return None
@@ -711,11 +1103,43 @@ class KramersEstimator:
         mF = np.interp(np.arange(len(bc)), np.where(ok)[0], mF[ok])
         mF = pd.Series(mF).rolling(5, center=True, min_periods=1).mean().to_numpy()
         pk = int(np.argmax(mF))
-        after = np.where(mF[pk:] < frac * mF[pk])[0]
-        if len(after) == 0:
+        return (bc, mF, pk)
+
+    @staticmethod
+    def force_peak_r(force_df, speed, start_r, r_max):
+        """Reaction coordinate (nm) of the mean|force| peak — the rupture / TS.
+
+        This is the barrier the ligand crosses; the Kramers absorbing boundary
+        (:meth:`force_plateau_boundary`) sits past it. ``None`` if the force
+        profile is unusable.
+        """
+        prof = KramersEstimator._binned_mean_abs_force(force_df, speed, start_r, r_max)
+        if prof is None:
             return None
-        abs_r = start_r + float(bc[pk + after[0]])
-        return float(min(abs_r, r_max - 1e-6))
+        r_bc, _mF, pk = prof
+        return float(r_bc[pk])
+
+    @staticmethod
+    def _mirror_mass(rs, beta_dF, start_r, r_b):
+        """∫ exp(−βΔF) over [start_r, r_b]: the mirrored bound-state mass below start_r.
+
+        Canonical ascending frame; *beta_dF* is βΔF on grid *rs*.
+        """
+        w = (rs >= start_r - 1e-9) & (rs <= r_b + 1e-9)
+        x, y = rs[w], beta_dF[w]
+        if x.size < 3:
+            raise ValueError("[Kramers] fewer than 3 points between start and barrier "
+                             "for the bound-state extension")
+        return float(np.trapz(np.exp(-y), x))
+
+    @staticmethod
+    def plateau_reached(r: np.ndarray, dG: np.ndarray) -> bool:
+        """Diagnostic: the profile tail has stopped rising (:func:`_plateau_onset`)."""
+        order = np.argsort(r)
+        r = np.asarray(r, dtype=np.float64)[order]
+        dG = np.asarray(dG, dtype=np.float64)[order]
+        ok = np.isfinite(r) & np.isfinite(dG)
+        return _plateau_onset(r[ok], dG[ok]) is not None
 
     @staticmethod
     def kramers_mfpt(
@@ -725,6 +1149,7 @@ class KramersEstimator:
         reflect_r: float | None,
         kBT: float,
         gamma_floor: float,
+        bound_extension: str = "none",
     ) -> dict:
         """Compute the mean first-passage time (MFPT) via the Pontryagin/Kramers double integral.
 
@@ -749,28 +1174,36 @@ class KramersEstimator:
             Thermal energy in kJ/mol.
         gamma_floor : float
             Minimum allowed Γ value (kJ·ps/mol/nm²); clips non-physical negatives.
+        bound_extension : {"none", "mirror"}
+            Bound-state population on the far side of *start_r*, which a pull
+            starting at the well minimum does not sample. ``"none"``: reflecting
+            wall at *reflect_r*. ``"mirror"``: the well is symmetric about
+            *start_r*; ∫ exp(−βΔF) between start and the profile maximum in
+            [start_r, abs_r] is added to the inner integral. Requires ``reflect_r``
+            at *start_r*.
 
         Returns
         -------
         dict
             Diagnostics dictionary with keys:
-            ``tau_ps`` (MFPT in ps), ``barrier_kjmol``, ``barrier_r_nm``,
-            ``max_beta_dF``, ``reflect_r_canon``, ``mirrored``, ``start_r_input``.
+            ``tau_ps`` (MFPT in ps), ``barrier_kjmol`` (max ΔF in [start_r, abs_r]
+            with ΔF(start_r) = 0), ``barrier_r_nm``, ``min_dF_kjmol`` (min ΔF in
+            [reflect_r, abs_r]; < 0 when the profile dips below the start),
+            ``max_beta_dF`` (β·span of ΔF in [reflect_r, abs_r]),
+            ``n_gamma_clipped`` / ``n_gamma_points`` (Γ values floored within
+            [start_r, abs_r]), ``bound_ext_frac`` (fraction of the bound-state
+            population, up to the barrier, contributed by *bound_extension*),
+            ``reflect_r_canon``, ``mirrored``, ``start_r_input``.
 
         Note
         ----
-        ΔF is first shifted so ΔF(start_r) = 0, then shifted again so its
-        minimum is ≥ 0 (to clip noise-induced dips below zero).  This second
-        shift is valid because the Pontryagin MFPT integral is invariant to a
-        constant shift of ΔF — the constant cancels between the exp(+βΔF) and
-        exp(−βΔF) factors in the double integral.
-
-        A soft warning is emitted when max(β·ΔF) > 100 (precision degrades).
-        A hard guard triggers at max(β·ΔF) ≈ 708 (float64 overflow); in that
-        case ``tau_ps = inf`` is returned.
+        Barriers are reported with ΔF(start_r) = 0. For integration ΔF is offset to a
+        zero minimum in [reflect_r, abs_r]; the constant cancels, so τ is unchanged.
+        A β·ΔF span > 100 warns; > ~708 (float64 overflow) returns ``tau_ps = inf``.
         """
         df = (
-            profile_df.sort_values("r_coord")
+            profile_df.dropna(subset=["r_coord", "dG", "Gamma"])
+            .sort_values("r_coord")
             .drop_duplicates("r_coord")
             .reset_index(drop=True)
         )
@@ -792,8 +1225,16 @@ class KramersEstimator:
         if abs(abs_r - start_r) < 1e-6:
             raise ValueError("[Kramers] start_r and abs_r coincide — MFPT is trivially zero")
 
+        if bound_extension not in ("none", "mirror"):
+            raise ValueError(f"[Kramers] unknown bound_extension={bound_extension!r}")
         if reflect_r is None:
-            reflect_r = r_min if abs_r > start_r else r_max
+            reflect_r = start_r if bound_extension != "none" else (
+                r_min if abs_r > start_r else r_max)
+        if bound_extension != "none" and abs(reflect_r - start_r) > 1e-9:
+            raise ValueError(
+                f"[Kramers] bound_extension={bound_extension!r} needs reflect_r at "
+                f"start_r (got reflect={reflect_r}, start={start_r})"
+            )
         if (abs_r > start_r and reflect_r > start_r) or (
             abs_r < start_r and reflect_r < start_r
         ):
@@ -802,20 +1243,8 @@ class KramersEstimator:
                 f"(start={start_r}, abs={abs_r}, reflect={reflect_r})"
             )
 
-        n_neg = int((G < gamma_floor).sum())
-        if n_neg:
-            logger.warning(
-                f"[Kramers] clipped {n_neg}/{G.size} Γ values to floor={gamma_floor}"
-            )
-        G = np.clip(G, gamma_floor, None)
-
-        # Reference ΔF so ΔF(start_r) = 0
+        # Reference ΔF to the starting (bound) coordinate: barriers are reported from here
         dF = dF - float(np.interp(start_r, r, dF))
-
-        # Shift dF so its minimum is ≥ 0 (clips noise-induced dips below zero).
-        dF_min = float(np.nanmin(dF))
-        if dF_min < 0.0:
-            dF = dF - dF_min
 
         # Canonical ascending form: mirror if absorbing boundary is to the left
         mirrored = abs_r < start_r
@@ -826,81 +1255,102 @@ class KramersEstimator:
             reflect_r = 2.0 * start_r - reflect_r
             abs_r = 2.0 * start_r - abs_r
 
-        beta_dF = dF / kBT
-        max_bdg = float(np.nanmax(beta_dF))
-
-        # Compute mask and barrier early so the early-return path can populate them
-        mask = (r >= start_r) & (r <= abs_r)
+        # Only [reflect_r, abs_r] enters the double integral, and Γ only [start_r, abs_r]
+        eps = 1e-9
+        win = (r >= reflect_r - eps) & (r <= abs_r + eps)
+        mask = (r >= start_r - eps) & (r <= abs_r + eps)
         if mask.sum() < 2:
             raise RuntimeError(
                 "[Kramers] Fewer than 2 grid points between start_r and abs_r"
             )
-        barrier_mask_dF = dF[mask]
-        barrier_kjmol = float(np.max(barrier_mask_dF))
-        barrier_r = float(r[mask][int(np.argmax(barrier_mask_dF))])
+
+        n_points = int(mask.sum())
+        n_neg = int((G[mask] < gamma_floor).sum())
+        if n_neg:
+            logger.warning(
+                f"[Kramers] clipped {n_neg}/{n_points} Γ values in [start_r, abs_r] "
+                f"to floor={gamma_floor}"
+            )
+        G = np.clip(G, gamma_floor, None)
+
+        barrier_kjmol = float(np.max(dF[mask]))
+        barrier_r = float(r[mask][int(np.argmax(dF[mask]))])
         if mirrored:
             barrier_r = 2.0 * start_r - barrier_r
+        min_dF = float(np.min(dF[win]))
 
-        # Soft warning: precision degrades for β·ΔF > 100
+        # τ depends on ΔF only through exp(±βΔF) inside the window, i.e. on its span
+        max_bdg = float((np.max(dF[win]) - min_dF) / kBT)
         if max_bdg > 100.0:
             logger.warning(
-                f"[Kramers] max(β·ΔF) = {max_bdg:.1f} — exp(β·ΔF) may overflow; "
-                "τ estimate may be unreliable."
+                f"[Kramers] β·ΔF span in [reflect_r, abs_r] = {max_bdg:.1f} — τ is "
+                "exponentially sensitive to ΔF errors (δlnτ = β·δΔF)."
             )
 
-        # Hard guard: float64 saturates at exp(≈709); beyond this τ = ∞
-        _FLOAT64_MAX_EXP = np.log(np.finfo(np.float64).max) - 1.0  # ≈ 708.4
-        if max_bdg > _FLOAT64_MAX_EXP:
-            logger.warning(
-                f"[Kramers] max(β·ΔF) = {max_bdg:.1f} exceeds float64 limit "
-                f"({_FLOAT64_MAX_EXP:.0f}); τ = ∞. "
-                "Use more replicas or slower pulling speeds."
-            )
-            return {
-                "tau_ps": float("inf"),
-                "barrier_kjmol": barrier_kjmol,
-                "barrier_r_nm": barrier_r,
-                "max_beta_dF": max_bdg,
-                "reflect_r_canon": reflect_r,
-                "mirrored": mirrored,
-                "start_r_input": start_r,
-            }
+        # One grid point either side so the endpoints interpolate inside the slice
+        i0 = max(int(np.searchsorted(r, reflect_r - eps)) - 1, 0)
+        i1 = min(int(np.searchsorted(r, abs_r + eps, side="right")) + 1, r.size)
+        rs, Gs = r[i0:i1], G[i0:i1]
+        dFs = dF[i0:i1] - float(np.min(dF[i0:i1]))   # constant offset: τ unchanged
 
-        exp_neg = np.exp(-beta_dF)
-        exp_pos = np.exp(+beta_dF)
-        D = kBT / G  # nm²/ps
+        beta_dF = dFs / kBT
+        bound_mass = 0.0
+        ext_frac = 0.0
+        if bound_extension != "none":
+            r_b = barrier_r if not mirrored else 2.0 * start_r - barrier_r
+            bound_mass = KramersEstimator._mirror_mass(rs, beta_dF, start_r, r_b)
+            ext_frac = 0.5
 
-        # Inner cumulative integral: I_inner(r_i) = ∫_{reflect_r}^{r_i} exp(-βΔF) dr'
-        dr = np.diff(r)
-        inner_cum = np.concatenate(
-            ([0.0], np.cumsum(0.5 * (exp_neg[:-1] + exp_neg[1:]) * dr))
-        )
-        inner_cum -= float(np.interp(reflect_r, r, inner_cum))
-
-        # Outer integrand: exp(+βΔF)/D · I_inner
-        outer = exp_pos / D * inner_cum
-
-        # Integrate from start_r to abs_r
-        r_int = r[mask]
-        outer_int = outer[mask]
-        if r_int[0] > start_r + 1e-9:
-            r_int = np.concatenate(([start_r], r_int))
-            outer_int = np.concatenate(([float(np.interp(start_r, r, outer))], outer_int))
-        if r_int[-1] < abs_r - 1e-9:
-            r_int = np.concatenate((r_int, [abs_r]))
-            outer_int = np.concatenate((outer_int, [float(np.interp(abs_r, r, outer))]))
-
-        tau_ps = float(np.trapz(outer_int, r_int))
-
-        return {
-            "tau_ps": tau_ps,
+        diag = {
             "barrier_kjmol": barrier_kjmol,
             "barrier_r_nm": barrier_r,
+            "min_dF_kjmol": min_dF,
             "max_beta_dF": max_bdg,
+            "n_gamma_clipped": n_neg,
+            "n_gamma_points": n_points,
+            "bound_extension": bound_extension,
+            "bound_ext_frac": ext_frac,
             "reflect_r_canon": reflect_r,
             "mirrored": mirrored,
             "start_r_input": start_r,
         }
+
+        # Hard guard: float64 saturates at exp(≈709); beyond this τ = ∞
+        _FLOAT64_MAX_EXP = np.log(np.finfo(np.float64).max) - 1.0  # ≈ 708.4
+        if float(np.max(dFs)) / kBT > _FLOAT64_MAX_EXP:
+            logger.warning(
+                f"[Kramers] β·ΔF span exceeds float64 limit ({_FLOAT64_MAX_EXP:.0f}); τ = ∞. "
+                "Use more replicas or slower pulling speeds."
+            )
+            return {"tau_ps": float("inf"), **diag}
+
+        exp_neg = np.exp(-beta_dF)
+        exp_pos = np.exp(+beta_dF)
+        D = kBT / Gs  # nm²/ps
+
+        # Inner cumulative integral: I_inner(r_i) = ∫_{reflect_r}^{r_i} exp(-βΔF) dr'
+        dr = np.diff(rs)
+        inner_cum = np.concatenate(
+            ([0.0], np.cumsum(0.5 * (exp_neg[:-1] + exp_neg[1:]) * dr))
+        )
+        inner_cum -= float(np.interp(reflect_r, rs, inner_cum))
+        inner_cum += bound_mass
+
+        # Outer integrand: exp(+βΔF)/D · I_inner, integrated from start_r to abs_r
+        outer = exp_pos / D * inner_cum
+        m = (rs >= start_r - eps) & (rs <= abs_r + eps)
+        r_int = rs[m]
+        outer_int = outer[m]
+        if r_int[0] > start_r + eps:
+            r_int = np.concatenate(([start_r], r_int))
+            outer_int = np.concatenate(([float(np.interp(start_r, rs, outer))], outer_int))
+        if r_int[-1] < abs_r - eps:
+            r_int = np.concatenate((r_int, [abs_r]))
+            outer_int = np.concatenate((outer_int, [float(np.interp(abs_r, rs, outer))]))
+
+        tau_ps = float(np.trapz(outer_int, r_int))
+
+        return {"tau_ps": tau_ps, **diag}
 
     # -----------------------------------------------------------------------
     # Main entry point
@@ -920,6 +1370,8 @@ class KramersEstimator:
         force_df: pd.DataFrame | None = None,
         boundary_method: str = "pmf_peak",
         plateau_frac: float = 0.3,
+        bound_extension: str = "none",
+        friction_source_work: str = "auto",
     ) -> pd.DataFrame:
         """Run Kramers MFPT for every dG estimator present in *mixture_pmfs*.
 
@@ -950,13 +1402,25 @@ class KramersEstimator:
             ``"pmf_peak"`` (default) → :meth:`detect_ts` (highest-prominence PMF
             peak, falling back to ``r_coord.max()``);
             ``"force_plateau"`` → :meth:`force_plateau_boundary` (restraint-force
-            decay; falls back to ``detect_ts`` if the force profile is unusable).
-            Force-plateau (``plateau_frac=0.3``) is validated on HSP90 kinetics to
-            rescue cumulant boundary failures; it is a *kinetic* boundary only.
+            decay; falls back to ``detect_ts`` if the force profile is unusable);
+            ``"end"`` → end of the merged profile (r_max).
         plateau_frac : float
             Decay fraction for ``boundary_method="force_plateau"`` (default 0.3).
+        bound_extension : {"none", "mirror"}
+            Bound-state population below the pull start; see :meth:`kramers_mfpt`.
+
+        Every row carries ``plateau_reached`` (:meth:`plateau_reached`), a
+        diagnostic that does not affect the boundary.
         reflect_r : float or None
             Explicit reflecting boundary (nm); ``None`` → same as *start_r*.
+        friction_source_work : {'auto', 'derivative', 'force', 'regression'}
+            Friction paired with every estimator's profiles. ``'force'``: the
+            force-estimator across-speed regression friction. ``'auto'``:
+            ``'force'`` with at least two speeds, else per-speed derivative.
+            ``'regression'``: the estimator's own W_diss across-speed regression.
+            The v->0 profile pairs with the regression-type friction of the
+            resolved source. ``'auto'``/``'force'`` need force friction rows
+            (ValueError otherwise).
         prefer_v0 : bool
             Include the v→0 extrapolated profile (when *all_speeds* is True) or
             prefer it over per-speed profiles (when *all_speeds* is False).
@@ -977,18 +1441,28 @@ class KramersEstimator:
         if speed_override is not None:
             all_speeds = False
 
+        if friction_source_work not in ("auto", "derivative", "force", "regression"):
+            raise ValueError(
+                f"friction_source_work must be auto|derivative|force|regression, "
+                f"got {friction_source_work!r}")
+        if boundary_method not in ("pmf_peak", "force_plateau", "end"):
+            raise ValueError(f"[Kramers] unknown boundary_method={boundary_method!r}")
+        for est_name in mixture_pmfs["estimator"].unique():  # fail loudly, no skip
+            self._friction_rows(friction_df,
+                                mixture_pmfs[mixture_pmfs["estimator"] == est_name],
+                                est_name, friction_source_work)
         records = []
         for est_name in mixture_pmfs["estimator"].unique():
             try:
                 if all_speeds:
                     profile_list = self._iter_profiles(
                         mixture_pmfs, friction_df, dG_extrapolated,
-                        est_name, prefer_v0,
+                        est_name, prefer_v0, friction_source_work,
                     )
                 else:
                     profile, source, speed = self._select_profile(
                         mixture_pmfs, friction_df, dG_extrapolated,
-                        est_name, prefer_v0, speed_override,
+                        est_name, prefer_v0, speed_override, friction_source_work,
                     )
                     profile_list = [(profile, source, speed)]
             except (RuntimeError, ValueError) as exc:
@@ -1000,9 +1474,16 @@ class KramersEstimator:
                 dG_arr = profile["dG"].to_numpy(dtype=np.float64)
 
                 _start_r = start_r if start_r is not None else float(r_arr.min())
+                ok = np.isfinite(profile[["r_coord", "dG", "Gamma"]].to_numpy(dtype=float)).all(1)
+                if ok.sum() < 2:
+                    logger.warning(f"[Kramers] {est_name}, speed={speed}: fewer than 2 "
+                                   "finite (r, dG, Gamma) points; not computable, skipped.")
+                    continue
 
                 if abs_r is not None:
                     _abs_r = abs_r
+                elif boundary_method == "end":
+                    _abs_r = float(r_arr[ok].max())
                 elif boundary_method == "force_plateau" and force_df is not None:
                     _abs_r = self.force_plateau_boundary(
                         force_df, speed, _start_r, float(r_arr.max()), plateau_frac
@@ -1039,7 +1520,8 @@ class KramersEstimator:
 
                 try:
                     res = self.kramers_mfpt(
-                        profile, _start_r, _abs_r, reflect_r, self.kBT, self.gamma_floor
+                        profile, _start_r, _abs_r, reflect_r, self.kBT, self.gamma_floor,
+                        bound_extension=bound_extension,
                     )
                 except (RuntimeError, ValueError) as exc:
                     logger.warning(
@@ -1087,12 +1569,19 @@ class KramersEstimator:
                         "start_r_nm": _start_r,
                         "abs_r_nm": _abs_r,
                         "reflect_r_nm": reflect_r_out,
+                        "abs_method": boundary_method if abs_r is None else "explicit",
+                        "plateau_reached": self.plateau_reached(r_arr, dG_arr),
+                        "bound_extension": bound_extension,
+                        "bound_ext_frac": res["bound_ext_frac"],
                         "tau_mfpt_ps": tau_ps,
                         "tau_mfpt_ns": tau_ps / 1e3,
                         "k_off_per_s": k_off,
                         "barrier_kjmol": res["barrier_kjmol"],
                         "barrier_r_nm": res["barrier_r_nm"],
+                        "min_dF_kjmol": res["min_dF_kjmol"],
                         "max_beta_dF": res["max_beta_dF"],
+                        "n_gamma_clipped": res["n_gamma_clipped"],
+                        "n_gamma_points": res["n_gamma_points"],
                         "attempt_time_ps": self.attempt_time_ps,
                         "dG_apparent_kjmol": dG_apparent,
                     }
@@ -1103,23 +1592,43 @@ class KramersEstimator:
     def compute_per_path(
         self,
         per_path_results: pd.DataFrame,
-        friction_df: pd.DataFrame,
         weights_by_estimator: dict,
+        realized_speed_map: dict | None = None,
+        boundary_method: str = "pmf_peak",
+        bound_extension: str = "none",
     ) -> pd.DataFrame:
         """Compute Kramers k_off for each (estimator, speed, path) independently.
 
-        Uses each path's own dG(r) profile for TS detection and MFPT integration.
-        Uses per-speed (derivative) friction pooled across all paths at that speed.
+        Pairs each path's own dG(r) with that path's own friction at the same
+        speed, Γ_p(r) = dWdiss_p/dr / v (:meth:`FrictionEstimator.gamma_from_wdiss_derivative`).
+        Estimators without a per-speed free energy (``force``) are skipped.
 
         Returns one row per (estimator, speed, path) with ``source='per_path'``,
         plus one combined row per (estimator, speed) with ``source='per_path_combined'``
         computed as ``k_off_total = Σ_k p_eq(k) × k_off(k)`` (parallel pathways).
-        """
-        _PS_PER_S = 1e12
-        fric_deriv = friction_df[friction_df["method"] == "derivative"]
-        rows: list[dict] = []
 
-        for (est_name, speed, path), grp in per_path_results.groupby(
+        *boundary_method* is ``"pmf_peak"`` (path's PMF peak, else its last point)
+        or ``"end"`` (end of the path's merged profile). *bound_extension* is
+        passed to :meth:`kramers_mfpt`.
+        """
+        if boundary_method not in ("pmf_peak", "end"):
+            raise ValueError(f"[Kramers/per-path] unknown boundary_method={boundary_method!r}")
+        _PS_PER_S = 1e12
+        rows: list[dict] = []
+        res_ok = per_path_results[
+            ~per_path_results["estimator"].isin(NO_PER_SPEED_FREE_ENERGY)
+            & (per_path_results["speed"] > 0)
+        ]
+        if res_ok.empty:
+            return pd.DataFrame()
+        fric_path = FrictionEstimator(
+            use_spline=False, realized_speed_map=realized_speed_map
+        ).gamma_from_wdiss_derivative(res_ok)
+        if fric_path.empty or "path" not in fric_path.columns:
+            return pd.DataFrame()
+        fric_path = fric_path[np.isfinite(fric_path["Gamma"].astype(float))]
+
+        for (est_name, speed, path), grp in res_ok.groupby(
             ["estimator", "speed", "path"]
         ):
             grp_s = grp.sort_values("r_coord").drop_duplicates("r_coord")
@@ -1128,32 +1637,36 @@ class KramersEstimator:
             if r_arr.size < 5:
                 continue
 
-            fric_sub = fric_deriv[
-                (fric_deriv["estimator"] == est_name) & (fric_deriv["speed"] == speed)
+            fric_sub = fric_path[
+                (fric_path["estimator"] == est_name)
+                & (fric_path["speed"] == speed)
+                & (fric_path["path"] == path)
             ]
             if fric_sub.empty:
                 logger.warning(
                     f"[Kramers/per-path] No friction for estimator={est_name} "
-                    f"speed={speed}; skipping path {path}"
+                    f"speed={speed} path={path}; skipped"
                 )
                 continue
 
-            pmf_mini = grp_s[["r_coord", "dG"]].copy()
-            try:
-                profile = KramersEstimator._merge_pmf_friction(pmf_mini, fric_sub)
-            except Exception:
-                continue
+            profile = KramersEstimator._merge_pmf_friction(
+                grp_s[[c for c in ("step", "r_coord", "dG") if c in grp_s.columns]], fric_sub
+            )
             if profile.empty:
                 continue
 
-            r_ts   = self.detect_ts(r_arr, dG_arr, self.kBT)
             start_r = float(r_arr[0])
-            abs_r   = r_ts if r_ts is not None else float(r_arr[-1])
-
             try:
+                if boundary_method == "end":
+                    pr = profile.dropna(subset=["r_coord", "dG", "Gamma"])
+                    abs_r = float(pr["r_coord"].max())
+                else:
+                    r_ts = self.detect_ts(r_arr, dG_arr, self.kBT)
+                    abs_r = r_ts if r_ts is not None else float(r_arr[-1])
                 res = KramersEstimator.kramers_mfpt(
                     profile, start_r, abs_r,
                     reflect_r=None, kBT=self.kBT, gamma_floor=self.gamma_floor,
+                    bound_extension=bound_extension,
                 )
             except Exception as exc:
                 logger.warning(
@@ -1179,13 +1692,17 @@ class KramersEstimator:
                 "p_eq":          p_eq,
                 "start_r_nm":    float(res["start_r_input"]),
                 "abs_r_nm":      abs_r,
+                "plateau_reached": self.plateau_reached(r_arr, dG_arr),
                 "reflect_r_nm":  float(res["reflect_r_canon"]),
                 "tau_mfpt_ps":   tau_ps,
                 "tau_mfpt_ns":   tau_ps / 1e3,
                 "k_off_per_s":   _PS_PER_S / tau_ps if tau_ps > 0 else float("nan"),
                 "barrier_kjmol": float(res["barrier_kjmol"]),
                 "barrier_r_nm":  float(res["barrier_r_nm"]),
+                "min_dF_kjmol":  float(res["min_dF_kjmol"]),
                 "max_beta_dF":   float(res["max_beta_dF"]),
+                "n_gamma_clipped": int(res["n_gamma_clipped"]),
+                "n_gamma_points":  int(res["n_gamma_points"]),
             })
 
         if not rows:
@@ -1225,6 +1742,7 @@ class KramersEstimator:
 ESTIMATOR_REGISTRY: dict[str, type[BaseEstimator]] = {
     'jarzynski': JarzynskiEstimator,
     'cumulant': CumulantEstimator,
+    'force': ForceEstimator,
 }
 
 
@@ -1340,11 +1858,215 @@ def trim_results_by_n_samples_support(
     return out
 
 
+PATH_COMBINATIONS = ("eq21", "linear")
+
+
+def validate_path_combination(path_combination: str) -> str:
+    """Return ``path_combination`` if allowed, else raise ValueError.
+
+    Parameters
+    ----------
+    path_combination : str
+        ``'eq21'`` or ``'linear'``.
+
+    Returns
+    -------
+    str
+    """
+    if path_combination not in PATH_COMBINATIONS:
+        raise ValueError(
+            f"path_combination must be one of {PATH_COMBINATIONS}, "
+            f"got {path_combination!r}"
+        )
+    return path_combination
+
+
+def effective_path_combination(estimator: str, path_combination: str) -> str:
+    """Rule actually applied to ``estimator``'s per-path profiles.
+
+    Parameters
+    ----------
+    estimator : str
+        Estimator name.
+    path_combination : str
+        Requested rule (``'eq21'`` or ``'linear'``).
+
+    Returns
+    -------
+    str
+        ``'linear'`` for the force estimator (its dG is the raw mean work),
+        otherwise ``path_combination``.
+    """
+    validate_path_combination(path_combination)
+    return "linear" if estimator == "force" else path_combination
+
+
+def combine_paths_eq21(
+    dG: np.ndarray,
+    Wmean: np.ndarray,
+    p_neq: np.ndarray,
+    beta: float,
+) -> tuple[float, float]:
+    """Combine per-path profiles at one grid point (Wolf, Post & Stock 2023, Eq. 21).
+
+    Parameters
+    ----------
+    dG : np.ndarray
+        Per-path free energies (kJ/mol).
+    Wmean : np.ndarray
+        Per-path mean work (kJ/mol).
+    p_neq : np.ndarray
+        Per-path trajectory fractions; renormalised over the paths given.
+    beta : float
+        Inverse thermal energy (mol/kJ).
+
+    Returns
+    -------
+    dG_mix : float
+        ``-(1/beta) ln sum_k p_k exp(-beta dG_k)``.
+    Wmean_mix : float
+        ``sum_k p_k Wmean_k`` (pooled mean work).
+    """
+    dG = np.asarray(dG, dtype=float)
+    Wmean = np.asarray(Wmean, dtype=float)
+    p = np.asarray(p_neq, dtype=float)
+    if dG.size == 0 or p.sum() <= 0:
+        return np.nan, np.nan
+    p = p / p.sum()
+    dG_mix = float(-special.logsumexp(-beta * dG, b=p) / beta)
+    Wmean_mix = float(np.sum(p * Wmean))
+    return dG_mix, Wmean_mix
+
+
+def force_v0_dG(
+    force_results: pd.DataFrame,
+    p_neq_by_speed: dict,
+    beta: float,
+    min_trajs_per_path: int,
+    min_speeds: int = 2,
+    realized_speed_map: dict | None = None,
+) -> pd.DataFrame:
+    """v->0 force free-energy profile for ``path_combination='eq21'``.
+
+    Per path k, ``Fmean`` is regressed across speeds (``<F> = F_eq,k + Gamma_k v``),
+    ``F_eq,k`` is integrated over ``r_coord`` to ``dG_k`` (0 at the first common
+    step) and paths are combined by Wolf, Post & Stock 2023, Eq. 21 with ``w_k``
+    the trajectory fraction at the slowest speed. If no path label spans two
+    speeds (per-speed clustering), the trajectory-count-weighted mean force of
+    all paths is regressed and integrated instead.
+
+    Parameters
+    ----------
+    force_results : pd.DataFrame
+        Force-estimator rows with ``step, speed, path, r_coord, n_samples, Fmean``.
+    p_neq_by_speed : dict
+        ``{speed: {path: trajectory fraction}}``.
+    beta : float
+        Inverse thermal energy (mol/kJ).
+    min_trajs_per_path : int
+        Paths with fewer trajectories (median ``n_samples``) at any speed, or
+        absent at a speed, are excluded with a warning.
+    min_speeds : int
+        Passed to :func:`extrapolate_to_v0`.
+    realized_speed_map : dict | None
+        Nominal -> realized speed, passed to :func:`extrapolate_to_v0`.
+
+    Returns
+    -------
+    pd.DataFrame
+        ``step, r_coord, estimator, dG, dG_se, R2, n_speeds, n_paths, model,
+        speed`` (``speed = 0``); ``R2`` is the worst per-path force-fit R2.
+        Empty if no path is usable.
+    """
+    cols = ['step', 'r_coord', 'estimator', 'dG', 'dG_se', 'R2',
+            'n_speeds', 'n_paths', 'model', 'speed']
+    df = force_results.dropna(subset=['Fmean'])
+    speeds = sorted(df['speed'].unique())
+    if len(speeds) < 2:
+        logger.warning("[force v0] not computed: fewer than two speeds")
+        return pd.DataFrame(columns=cols)
+    x2 = dict(min_speeds=min_speeds, realized_speed_map=realized_speed_map)
+
+    if (df.groupby('path')['speed'].nunique() < 2).all():
+        logger.info("[force v0] path labels are speed-specific: per-path regression "
+                    "undefined, using the pooled ensemble mean force")
+        pooled = (df.assign(_wF=df['Fmean'] * df['n_samples'])
+                    .groupby(['speed', 'step'], as_index=False)
+                    .agg(_wF=('_wF', 'sum'), n=('n_samples', 'sum'),
+                         r_coord=('r_coord', 'mean')))
+        pooled['Fmean'] = pooled['_wF'] / pooled['n']
+        pooled['estimator'] = 'force'
+        v0 = extrapolate_to_v0(pooled, param='Fmean', **x2)
+        if v0.empty:
+            return pd.DataFrame(columns=cols)
+        v0 = v0.sort_values('step')
+        r = v0['r_coord'].to_numpy(dtype=float)
+        return pd.DataFrame({
+            'step': v0['step'].to_numpy(), 'r_coord': r, 'estimator': 'force',
+            'dG': FrictionEstimator._cumulative_integral(r, v0['Fmean'].to_numpy(dtype=float)),
+            'dG_se': np.nan, 'R2': v0['R2'].to_numpy(), 'n_speeds': v0['n_speeds'].to_numpy(),
+            'n_paths': df['path'].nunique(), 'model': 'pooled', 'speed': 0.0,
+        })[cols]
+
+    slowest = speeds[0]
+    p_slow = p_neq_by_speed.get(slowest, {})
+    n_rep = df.groupby(['path', 'speed'])['n_samples'].median()
+    per_path = {}
+    for path in sorted(df['path'].unique()):
+        reason = None
+        for sp in speeds:
+            if (path, sp) not in n_rep.index:
+                reason = f"no rows at speed={sp} (absent or removed by path filtering)"
+                break
+            n = int(n_rep[(path, sp)])
+            if n < min_trajs_per_path:
+                reason = f"{n} trajectories < {min_trajs_per_path} at speed={sp}"
+                break
+        if reason is None and p_slow.get(path, 0.0) <= 0:
+            reason = f"no trajectory fraction at slowest speed={slowest}"
+        if reason is None:
+            v0 = extrapolate_to_v0(df[df['path'] == path].assign(estimator='force'),
+                                   param='Fmean', **x2)
+            if v0.empty:
+                reason = "no step with a v->0 force fit"
+        if reason is not None:
+            logger.warning(f"[force v0] excluding path '{path}' from the force readout: {reason}")
+            continue
+        per_path[path] = v0.set_index('step')
+
+    if not per_path:
+        logger.warning("[force v0] not computed: no path usable for per-path regression")
+        return pd.DataFrame(columns=cols)
+    steps = sorted(set.intersection(*(set(v.index) for v in per_path.values())))
+    if not steps:
+        logger.warning("[force v0] not computed: paths share no fitted step")
+        return pd.DataFrame(columns=cols)
+
+    paths = list(per_path)
+    w = np.array([p_slow[p] for p in paths], dtype=float)
+    w = w / w.sum()
+    r = np.mean([per_path[p].loc[steps, 'r_coord'].to_numpy(dtype=float) for p in paths], axis=0)
+    dG_k = np.array([FrictionEstimator._cumulative_integral(
+        r, per_path[p].loc[steps, 'Fmean'].to_numpy(dtype=float)) for p in paths])
+    dG = -special.logsumexp(-beta * dG_k, b=w[:, None], axis=0) / beta
+    R2 = np.min([per_path[p].loc[steps, 'R2'].to_numpy(dtype=float) for p in paths], axis=0)
+    n_sp = np.min([per_path[p].loc[steps, 'n_speeds'].to_numpy() for p in paths], axis=0)
+    logger.info(f"[force v0] eq21 over {len(paths)} path(s), weights at speed={slowest}: "
+                + ", ".join(f"{p}={wk:.3f}" for p, wk in zip(paths, w)))
+    return pd.DataFrame({
+        'step': steps, 'r_coord': r, 'estimator': 'force', 'dG': dG, 'dG_se': np.nan,
+        'R2': R2, 'n_speeds': n_sp, 'n_paths': len(paths), 'model': 'eq21_per_path',
+        'speed': 0.0,
+    })[cols]
+
+
 def calculate_weighted_pmf(
     smd_data: SMDData,
     weight_cols: list[str] = ['dG', 'Wdiss'],
     grid_col: str = "step",
     weights_by_estimator: dict | None = None,
+    path_combination: str = "eq21",
+    p_neq_by_speed: dict | None = None,
 ) -> pd.DataFrame:
     """Build weighted PMFs over paths for each estimator and speed.
 
@@ -1359,14 +2081,25 @@ def calculate_weighted_pmf(
     weights_by_estimator : dict
         Pre-computed weights ``{estimator: {speed: {path: p_eq}}}``.
         Obtain these from :meth:`SMDAnalysis.compute_p_eq`.
+    path_combination : str
+        ``'eq21'``: ``dG = -(1/beta) ln sum_k p_neq,k exp(-beta dG_k)``
+        (Wolf, Post & Stock 2023, Eq. 21), ``Wmean`` the p_neq-weighted mean
+        and ``Wdiss = Wmean - dG``; supports ``weight_cols`` in
+        {'dG', 'Wdiss', 'Wmean'}. ``'linear'``: p_eq-weighted mean of every
+        column. The force estimator is always mixed linearly here; its eq21 v->0
+        readout is :func:`force_v0_dG`.
+    p_neq_by_speed : dict | None
+        ``{speed: {path: p_neq}}`` for ``'eq21'``; defaults to
+        ``smd_data.get_p_neq(byspeed=True)``.
 
     Note
     ----
-    The grid is restricted to the shortest path's last step so that all paths
-    contribute at every grid point.  Without this restriction, when a shorter
-    path terminates the p_eq renormalization denominator changes abruptly,
-    producing a visible discontinuity in the weighted PMF.
+    The grid stops at the shortest path's last step, so the normalisation
+    does not jump where a path ends. Paths contribute only where their p_eq is
+    in ``weights_by_estimator`` (``'eq21'``: with p_eq > 0), and p_neq is
+    renormalised over the paths present at each grid point.
     """
+    validate_path_combination(path_combination)
 
     results = smd_data.results.copy()
     if results is None or results.empty:
@@ -1386,6 +2119,15 @@ def calculate_weighted_pmf(
     for estimator in estimators:
         df_est = results[results['estimator'] == estimator]
         est_weights = weights_by_estimator.get(estimator, {})
+        mode = effective_path_combination(estimator, path_combination)
+        if mode == "eq21":
+            unsupported = set(weight_cols) - {"dG", "Wdiss", "Wmean"}
+            if unsupported:
+                raise ValueError(
+                    f"path_combination='eq21' does not support columns {sorted(unsupported)}"
+                )
+            if p_neq_by_speed is None:
+                p_neq_by_speed = smd_data.get_p_neq(byspeed=True)
 
         for speed, speedg in df_est.groupby('speed'):
             speed_weights = est_weights.get(speed, {})
@@ -1395,50 +2137,33 @@ def calculate_weighted_pmf(
             path_last = speedg.groupby("path")[grid_col].max()
             max_grid_step = path_last.min()
             grid_vals = sorted(speedg.loc[speedg[grid_col] <= max_grid_step, grid_col].dropna().unique())
-            
+
             rows = []
 
             for gval in grid_vals:
-                vals_per_col = {col: [] for col in weight_cols}
-                w_per_col = {col: [] for col in weight_cols}
-
                 slice_g = speedg[speedg[grid_col] == gval]
+                if mode == "eq21":
+                    mixed = _mix_slice_eq21(
+                        slice_g, speed_weights, p_neq_by_speed.get(speed, {}),
+                        smd_data.beta, weight_cols,
+                    )
+                else:
+                    mixed = _mix_slice_linear(slice_g, speed_weights, weight_cols)
+                if mixed is None:
+                    continue
 
-                for path, g in slice_g.groupby('path'):
-                    if path not in speed_weights:
-                        continue
-
-                    w = speed_weights[path]
-
-                    for col in weight_cols:
-                        if col in g.columns:
-                            v = g[col].values[0]
-                            if pd.notna(v):
-                                vals_per_col[col].append(v)
-                                w_per_col[col].append(w)
-
-                if any(len(vals_per_col[col]) > 0 for col in weight_cols):
-                    row = {
-                        "step": gval,
-                        "speed": speed,
-                        "estimator": estimator,
-                        # protocol-anchored coordinate
-                        "r_coord": smd_data.protocol_grids[speed].loc[
-                            smd_data.protocol_grids[speed]["step"] == gval,
-                            "r_target_protocol"
-                        ].values[0],
-                    }
-
-                    for col in weight_cols:
-                        if len(vals_per_col[col]) > 0 and np.sum(w_per_col[col]) > 0:
-                            row[f"{col}"] = (
-                                np.sum(np.array(vals_per_col[col]) * np.array(w_per_col[col]))
-                                / np.sum(w_per_col[col])
-                            )
-                        else:
-                            row[f"{col}"] = np.nan
-
-                    rows.append(row)
+                row = {
+                    "step": gval,
+                    "speed": speed,
+                    "estimator": estimator,
+                    # protocol-anchored coordinate
+                    "r_coord": smd_data.protocol_grids[speed].loc[
+                        smd_data.protocol_grids[speed]["step"] == gval,
+                        "r_target_protocol"
+                    ].values[0],
+                }
+                row.update(mixed)
+                rows.append(row)
 
             if rows:
                 weighted_pmfs.append(pd.DataFrame(rows))
@@ -1447,23 +2172,140 @@ def calculate_weighted_pmf(
         return pd.DataFrame()
 
     return pd.concat(weighted_pmfs, ignore_index=True)
-    
+
+
+def _mix_slice_linear(slice_g: pd.DataFrame, speed_weights: dict,
+                      weight_cols: list[str]) -> dict | None:
+    """p_eq-weighted mean of each column over the paths at one grid point."""
+    vals_per_col = {col: [] for col in weight_cols}
+    w_per_col = {col: [] for col in weight_cols}
+
+    for path, g in slice_g.groupby('path'):
+        if path not in speed_weights:
+            continue
+
+        w = speed_weights[path]
+
+        for col in weight_cols:
+            if col in g.columns:
+                v = g[col].values[0]
+                if pd.notna(v):
+                    vals_per_col[col].append(v)
+                    w_per_col[col].append(w)
+
+    if not any(len(vals_per_col[col]) > 0 for col in weight_cols):
+        return None
+
+    out = {}
+    for col in weight_cols:
+        if len(vals_per_col[col]) > 0 and np.sum(w_per_col[col]) > 0:
+            out[f"{col}"] = (
+                np.sum(np.array(vals_per_col[col]) * np.array(w_per_col[col]))
+                / np.sum(w_per_col[col])
+            )
+        else:
+            out[f"{col}"] = np.nan
+    return out
+
+
+def _mix_slice_eq21(slice_g: pd.DataFrame, speed_weights: dict, p_neq: dict,
+                    beta: float, weight_cols: list[str]) -> dict | None:
+    """Eq. 21 mix of the paths at one grid point (see :func:`calculate_weighted_pmf`)."""
+    dG, Wmean, p = [], [], []
+    for path, g in slice_g.groupby('path'):
+        if speed_weights.get(path, 0.0) <= 0 or p_neq.get(path, 0.0) <= 0:
+            continue
+        v = g['dG'].values[0]
+        if pd.isna(v):
+            continue
+        dG.append(float(v))
+        Wmean.append(float(g['Wmean'].values[0]) if 'Wmean' in g.columns else np.nan)
+        p.append(float(p_neq[path]))
+
+    if not dG:
+        return None
+
+    dG_mix, Wmean_mix = combine_paths_eq21(dG, Wmean, p, beta)
+    mixed = {"dG": dG_mix, "Wmean": Wmean_mix, "Wdiss": Wmean_mix - dG_mix}
+    return {col: mixed[col] for col in weight_cols}
+
+
+def recover_spring_constant(raw_data: pd.DataFrame, logged_k: float | None = None) -> float:
+    """Per-ligand SMD spring constant.
+
+    Prefers ``logged_k`` (from the .dat header); otherwise recovers k from
+    force = -k*(r_before - r_target), which holds only for logs whose ``force``
+    is the pre-step sample rather than a within-move mean.
+    """
+    if logged_k is not None and np.isfinite(logged_k) and logged_k > 0:
+        return float(logged_k)
+    # Logs without a header k: `force` is the pre-step sample, so the identity is exact.
+    d = raw_data.dropna(subset=['force', 'r_before', 'r_target'])
+    delta = (d['r_before'] - d['r_target']).to_numpy(dtype=float)
+    f = d['force'].to_numpy(dtype=float)
+    m = np.abs(delta) > 1e-12
+    if not m.any():
+        raise ValueError("recover_spring_constant: no rows with r_before != r_target")
+    return float(np.median(-f[m] / delta[m]))
+
+def monotone_z_filter(z: np.ndarray) -> np.ndarray:
+    """Greedy mask: keep points whose z strictly exceeds the last kept z (drops folds/NaN)."""
+    z = np.asarray(z, dtype=float)
+    keep = np.zeros(len(z), dtype=bool); last = -np.inf
+    for i, zi in enumerate(z):
+        if np.isfinite(zi) and zi > last:
+            keep[i] = True; last = zi
+    return keep
+
+def _mixed_step_rows(sub: pd.DataFrame, param: str, estimator: str,
+                     step_r_coord: pd.Series) -> list[dict]:
+    """Per-step intercept and slope from one grouped mixed-effects fit.
+
+    Raises on a failed or non-converged fit.  statsmodels names the random
+    intercept ``'Group'``, not ``'Intercept'``.
+    """
+    import statsmodels.formula.api as smf
+
+    sub = sub[sub.groupby('step')['speed'].transform('nunique') >= 2]
+    res = smf.mixedlm(f"{param} ~ _xspeed", sub, groups=sub['step'],
+                      re_formula="~_xspeed").fit(reml=False)
+    if not res.converged:
+        raise RuntimeError("mixedlm did not converge")
+    fe_int = res.fe_params['Intercept']
+    fe_slope = res.fe_params['_xspeed']
+    n_sp = sub.groupby('step')['speed'].nunique()
+    rows = []
+    for step, re_ in res.random_effects.items():
+        rows.append({
+            "step": step,
+            "r_coord": step_r_coord.loc[step],
+            "estimator": estimator,
+            param: fe_int + re_['Group'],
+            f"{param}_slope": fe_slope + re_['_xspeed'],
+            f"{param}_se": np.nan,
+            f"{param}_slope_se": np.nan,
+            "R2": np.nan,
+            "n_speeds": n_sp.loc[step],
+            "model": "mixedlm",
+            "speed": 0.0,
+        })
+    return rows
+
+
 def extrapolate_to_v0(
     results: pd.DataFrame,
     param: str = 'dG_weighted',
     speeds: list[float] | None = None,
-    mixed_models: bool = False,
     min_speeds: int = 2,
+    realized_speed_map: dict | None = None,
+    model: str = 'ols',
 ) -> pd.DataFrame:
     """
     Extrapolate a single parameter to zero pulling speed (v → 0)
     using per-step regression across speeds.
 
-    Because dx_per_move is fixed across all pulling speeds, the
-    protocol step index maps to the same r_target regardless of
-    speed.  The natural join key is therefore ``step``, not
-    ``r_coord`` (which may carry tiny r₀ jitter between speeds).
-    Only steps present at **all** included speeds are used.
+    dx_per_move is speed-independent, so steps are joined on ``step`` rather
+    than ``r_coord`` (which jitters with r₀).
 
     Parameters
     ----------
@@ -1477,15 +2319,19 @@ def extrapolate_to_v0(
     speeds : list[float] | None
         Optional subset of speeds to include.  If *None*, all speeds
         are used.
-    mixed_models : bool
-        If *True*, fit a mixed-effects linear model (random
-        intercept + slope per step); otherwise simple OLS per step.
     min_speeds : int
         Minimum number of distinct speeds required at a step to include
         it in the extrapolation.  Default 2 (need at least two points
         for a linear fit).  Setting this lower than the total number of
         speeds lets the extrapolated PMF extend beyond where the fastest
         speed's profile ends.
+    model : {'ols', 'mixed'}
+        ``'ols'``: independent linear fit per step.  ``'mixed'``: one
+        mixed-effects fit per estimator (groups = step, random intercept and
+        slope on speed); the per-step slope is fixed + random slope.  On a
+        failed fit the estimator falls back to OLS and its rows carry
+        ``model = 'ols_fallback'``.  Shrinks the profile, so use it for
+        friction slopes only, not for free energies.
 
     Returns
     -------
@@ -1501,19 +2347,12 @@ def extrapolate_to_v0(
 
     Note
     ----
-    **Step selection trade-off (min_speeds):** requiring all speeds (equivalent
-    to setting ``min_speeds`` equal to the total number of speeds) cuts the
-    extrapolated PMF to whichever speed has the shortest profile.  Allowing
-    fewer speeds via a lower ``min_speeds`` lets the tail extend further at the
-    cost of a less constrained fit (fewer data points per step).
-
-    **Edge trimming:** after the per-step regressions, leading and trailing steps
-    where fewer than the maximum number of available speeds contributed are
-    stripped.  Edge rows with only ``min_speeds`` data points have R²=1.0
-    trivially (zero degrees of freedom) and produce unconstrained intercept
-    spikes.
+    Leading/trailing steps with fewer than the maximum number of speeds are
+    trimmed: with few points the fit is unconstrained and the intercept spikes.
     """
 
+    if model not in ('ols', 'mixed'):
+        raise ValueError(f"model must be 'ols' or 'mixed', got {model!r}")
     df = results.copy()
 
     if param not in df.columns:
@@ -1522,10 +2361,17 @@ def extrapolate_to_v0(
             f"Available: {list(df.columns)}"
         )
 
-    # Optional speed filtering
+    # Optional speed filtering (uses the nominal speed label)
     if speeds is not None:
         speeds = [float(s) for s in speeds]
         df = df[df['speed'].isin(speeds)]
+
+    # Regress against the realized speed; nominal is only a label.
+    if realized_speed_map:
+        df['_xspeed'] = df['speed'].map(
+            lambda s: float(realized_speed_map.get(float(s), s))).astype(float)
+    else:
+        df['_xspeed'] = df['speed'].astype(float)
 
     if df['speed'].nunique() < 2:
         logger.error("Need at least two distinct speeds for extrapolation.")
@@ -1546,52 +2392,37 @@ def extrapolate_to_v0(
         # Mean r_coord per step across speeds (should be nearly identical)
         step_r_coord = sub.groupby('step')['r_coord'].mean()
 
-        if mixed_models:
-            model = smf.mixedlm(
-                f"{param} ~ speed",
-                sub,
-                groups=sub["step"],
-                re_formula="~speed",
-            )
-            res = model.fit(reml=False)
+        ols_label = 'linear'
+        if model == 'mixed':
+            try:
+                out_rows.extend(_mixed_step_rows(sub, param, estimator, step_r_coord))
+                continue
+            except Exception as exc:
+                logger.warning(
+                    "[extrapolate_to_v0] mixed-effects fit failed for estimator=%s "
+                    "param=%s (%s: %s); using OLS for this estimator.",
+                    estimator, param, type(exc).__name__, exc)
+                ols_label = 'ols_fallback'
 
-            fe_int = res.fe_params["Intercept"]
-            fe_slope = res.fe_params["speed"]
+        for step, g in sub.groupby("step"):
+            if g['speed'].nunique() < 2:
+                continue
 
-            for step, re in res.random_effects.items():
-                out_rows.append({
-                    "step": step,
-                    "r_coord": step_r_coord.loc[step],
-                    "estimator": estimator,
-                    param: fe_int + re.get("Intercept", 0.0),
-                    f"{param}_slope": fe_slope + re.get("speed", 0.0),
-                    f"{param}_se": np.nan,
-                    f"{param}_slope_se": np.nan,
-                    "R2": np.nan,
-                    "n_speeds": n_speeds_total,
-                    "model": "mixedlm",
-                    "speed": 0.0,
-                })
-        else:
-            for step, g in sub.groupby("step"):
-                if g['speed'].nunique() < 2:
-                    continue
+            lr = linregress(g['_xspeed'].values, g[param].values)
 
-                lr = linregress(g['speed'].values, g[param].values)
-
-                out_rows.append({
-                    "step": step,
-                    "r_coord": step_r_coord.loc[step],
-                    "estimator": estimator,
-                    param: lr.intercept,
-                    f"{param}_slope": lr.slope,
-                    f"{param}_se": lr.intercept_stderr,
-                    f"{param}_slope_se": lr.stderr,
-                    "R2": lr.rvalue ** 2,
-                    "n_speeds": g['speed'].nunique(),
-                    "model": "linear",
-                    "speed": 0.0,
-                })
+            out_rows.append({
+                "step": step,
+                "r_coord": step_r_coord.loc[step],
+                "estimator": estimator,
+                param: lr.intercept,
+                f"{param}_slope": lr.slope,
+                f"{param}_se": lr.intercept_stderr,
+                f"{param}_slope_se": lr.stderr,
+                "R2": lr.rvalue ** 2,
+                "n_speeds": g['speed'].nunique(),
+                "model": ols_label,
+                "speed": 0.0,
+            })
 
     v0_df = pd.DataFrame(out_rows)
     if not v0_df.empty:

@@ -1,15 +1,21 @@
 scratch/*
 examples/*/3ptb/*
+analysis/*
+tests/cfs_hsp90/
 *.err
 *.out
 
 *.dcd
 *.xtc
-.github/
+.github/*
+!.github/workflows/
+.superpowers/
 
 # Byte-compiled / optimized / DLL files
 *.pyc
 */__pycache__/
+*/*/__pycache__/
+__pycache__/
 *.py[cod]
 *$py.class
 ./claude

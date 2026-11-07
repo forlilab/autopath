@@ -19,8 +19,8 @@ from pymol import cmd
 from rdkit import Chem
 from rdkit.Chem import AllChem
 
-from molscrub import Scrub
-
+#TODO Add there the function to crop and cap a binding site from a PDB file, 
+# given a ligand or x,y,z coords and a radius. Capping can use the chain vector to place ACE/NME caps, or use the PDBPreprocessor's _apply_caps method.
 
 class PDBPreprocessor:
     """Prepare a PDB for MD simulation using PDBFixer and MDAnalysis.
@@ -31,12 +31,24 @@ class PDBPreprocessor:
 
     Parameters
     ----------
-    pdbfile : str
-        Path to the input PDB file.
+    pdbfile : str or file-like, optional
+        Path to the input PDB file, or an already-open file object / StringIO.
+    pdbxfile : str or file-like, optional
+        Same for PDBx/mmCIF input. Mutually exclusive with *pdbfile*.
     """
 
-    def __init__(self, pdbfile: str):
-        self.fixer = PDBFixer(str(pdbfile))
+    def __init__(self, pdbfile=None, pdbxfile=None):
+        if (pdbfile is None) == (pdbxfile is None):
+            raise ValueError("supply exactly one of pdbfile or pdbxfile")
+        # PDBFixer takes a path positionally but needs a FILE OBJECT for its pdbfile/pdbxfile
+        # keywords, so route by input type. str() on a StringIO would yield a repr, not content.
+        if pdbxfile is not None:
+            src = pdbxfile if hasattr(pdbxfile, "read") else open(pdbxfile)
+            self.fixer = PDBFixer(pdbxfile=src)
+        elif hasattr(pdbfile, "read"):
+            self.fixer = PDBFixer(pdbfile=pdbfile)
+        else:
+            self.fixer = PDBFixer(str(pdbfile))
 
     # ------------------------------------------------------------------
     # Public API
@@ -143,61 +155,128 @@ class PDBPreprocessor:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _get_ace_pos(end_residue):
+    def _place_atom(prev_pos, base_pos, bond, angle_deg, others, n_steps=72):
+        """Position an atom bonded to base_pos, at `bond` A and `angle_deg` from prev_pos.
+
+        The torsion about prev->base is unconstrained for a cap, so it is spent on clash
+        avoidance: every rotamer is scored by its closest approach to `others` and the
+        roomiest is taken.
+
+        This replaces straight-line extrapolation along a backbone axis, which is what the
+        earlier code did (a 180 deg bond angle). Whenever a terminus folded back against its
+        own chain the cap was extruded into it: across 8 PDE6D crystal forms that put ACE/NME
+        methyl carbons 1.57-2.17 A from unrelated residues in 6 of them, close enough that
+        meeko refused the receptor and only energy minimisation pulled the MD systems apart
+        again.
+        """
+        u = base_pos - prev_pos
+        u = u / np.linalg.norm(u)
+        ref = np.array([1.0, 0.0, 0.0]) if abs(u[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+        p1 = np.cross(u, ref)
+        p1 /= np.linalg.norm(p1)
+        p2 = np.cross(u, p1)
+        th = np.radians(angle_deg)
+
+        best, best_score = None, -np.inf
+        for phi in np.linspace(0.0, 2.0 * np.pi, n_steps, endpoint=False):
+            w = np.cos(phi) * p1 + np.sin(phi) * p2
+            pos = base_pos + bond * (-np.cos(th) * u + np.sin(th) * w)
+            score = (np.linalg.norm(others - pos, axis=1).min()
+                     if others is not None and len(others) else np.inf)
+            if score > best_score:
+                best, best_score = pos, score
+        return best
+
+    # Atom names whose position relative to a cap is fixed by the cap's own bond geometry,
+    # so they carry no information for the torsion scan. Everything else in the capped
+    # residue does move relative to the cap and must stay in the clash set -- including
+    # proline's CD, which is bonded to N and sits exactly where ACE wants to go.
+    _ACE_FIXED_TO_C   = ("N", "CA", "H", "HN", "H1", "H2", "H3", "HN1", "HN2", "HN3")
+    _ACE_FIXED_TO_O   = ("N", "H", "HN", "H1", "H2", "H3", "HN1", "HN2", "HN3")
+    _NME_FIXED_TO_CH3 = ("C", "OXT")
+
+    @staticmethod
+    def _own_residue_others(end_residue, keep_out_of):
+        """Positions of the capped residue's own atoms that the cap must still avoid."""
+        mask = [i for i, n in enumerate(end_residue.names) if n not in keep_out_of]
+        return end_residue.positions[mask] if mask else np.empty((0, 3))
+
+    @staticmethod
+    def _get_ace_pos(end_residue, others=None):
         """Return (C, CH3, O) positions for an ACE cap at the N-terminus.
 
-        Geometry is derived deterministically from the CA–N backbone axis
-        and the CA–N–C1 plane, avoiding random perpendicular vectors.
+        The carbonyl carbon sits at a real CA-N-C angle (121 deg), not collinear with CA-N,
+        and its torsion is chosen to keep the cap out of the protein. O and CH3 then follow
+        from sp2 geometry at that carbon, again with the remaining rotation spent on clearance.
+
+        `others` excludes the capped residue (the caller cannot know which of its atoms are
+        legitimately close), so the subset that the cap can still collide with is added back
+        here. Rotating about CA-N leaves the cap's distance to N and CA fixed but not its
+        distance to the other N substituent, so on an N-terminal proline the scan was blind
+        to CD and put the carbonyl O 0.97 A inside the pyrrolidine ring.
         """
         ca_pos = end_residue.positions[np.where(end_residue.names == "CA")[0][0]]
         n_pos  = end_residue.positions[np.where(end_residue.names == "N" )[0][0]]
 
-        v_can = (n_pos - ca_pos) / np.linalg.norm(n_pos - ca_pos)
-        C1_pos = n_pos + 1.36 * v_can  # ACE carbonyl C
+        base = others if others is not None else np.empty((0, 3))
+        others_c = np.vstack([base, PDBPreprocessor._own_residue_others(
+            end_residue, PDBPreprocessor._ACE_FIXED_TO_C)])
+        others_o = np.vstack([base, PDBPreprocessor._own_residue_others(
+            end_residue, PDBPreprocessor._ACE_FIXED_TO_O)])
 
-        # Deterministic in-plane perpendicular via CA–N–C1 normal
-        v_c1n  = (n_pos  - C1_pos) / np.linalg.norm(n_pos  - C1_pos)
-        v_c1ca = (ca_pos - C1_pos) / np.linalg.norm(ca_pos - C1_pos)
-        n_plane = np.cross(v_c1n, v_c1ca)
-        if np.linalg.norm(n_plane) < 1e-6:  # degenerate: fall back to any perpendicular
-            ref = np.array([1., 0., 0.]) if abs(v_c1n[0]) < 0.9 else np.array([0., 1., 0.])
-            n_plane = np.cross(v_c1n, ref)
-        n_plane /= np.linalg.norm(n_plane)
-        v_perp = np.cross(n_plane, v_c1n)
-        v_perp /= np.linalg.norm(v_perp)
+        C1_pos = PDBPreprocessor._place_atom(ca_pos, n_pos, 1.36, 121.0, others_c)
+        others = others_o
 
-        # sp2: O and CH3 at ±120° from C1–N axis; correct bond lengths
-        O_pos   = C1_pos + 1.23 * (-0.5 * v_c1n + 0.866 * v_perp)  # C=O  1.23 Å
-        CH3_pos = C1_pos + 1.52 * (-0.5 * v_c1n - 0.866 * v_perp)  # C–CH3 1.52 Å
+        # sp2 at C1: O and CH3 are coplanar with N, 120 deg apart on either side
+        v_c1n = (n_pos - C1_pos) / np.linalg.norm(n_pos - C1_pos)
+        ref = np.array([1.0, 0.0, 0.0]) if abs(v_c1n[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+        q1 = np.cross(v_c1n, ref)
+        q1 /= np.linalg.norm(q1)
+        q2 = np.cross(v_c1n, q1)
+
+        best, best_score = None, -np.inf
+        for phi in np.linspace(0.0, 2.0 * np.pi, 72, endpoint=False):
+            perp = np.cos(phi) * q1 + np.sin(phi) * q2
+            o = C1_pos + 1.23 * (-0.5 * v_c1n + 0.866 * perp)
+            ch3 = C1_pos + 1.52 * (-0.5 * v_c1n - 0.866 * perp)
+            if others is not None and len(others):
+                score = min(np.linalg.norm(others - o, axis=1).min(),
+                            np.linalg.norm(others - ch3, axis=1).min())
+            else:
+                score = np.inf
+            if score > best_score:
+                best, best_score = (o, ch3), score
+        O_pos, CH3_pos = best
 
         return C1_pos, CH3_pos, O_pos  # order matches ace_names = ["C", "CH3", "O"]
 
     @staticmethod
-    def _get_nme_pos(end_residue):
-        """Return (N, C) positions for an NME cap at the C-terminus.
+    def _get_nme_pos(end_residue, others=None):
+        """Return (N, CH3) positions for an NME cap at the C-terminus.
 
-        When OXT is present it is used as a guide (original behaviour).
-        When OXT is absent, sp2 geometry at the carbonyl C is used instead
-        of the less accurate midpoint(O, CA) fallback.
+        The amide N is fully determined by sp2 geometry at the terminal carbonyl carbon: it
+        is the third substituent, anti to both O and CA. OXT is deliberately NOT used as a
+        guide even when present.
         """
-        if "OXT" in end_residue.names:
-            oxt_pos = end_residue.positions[np.where(end_residue.names == "OXT")[0][0]]
-            c_pos   = end_residue.positions[np.where(end_residue.names == "C"  )[0][0]]
-            vector  = (oxt_pos - c_pos) / np.linalg.norm(oxt_pos - c_pos)
-            N_position = oxt_pos
-            C_position = N_position + vector * 1.47  # NME CH3 along C–N axis
-        else:
-            # sp2 geometry: NME N is placed symmetrically to the carbonyl O
-            # relative to the terminal C (mirrors OXT placement logic).
-            c_pos  = end_residue.positions[np.where(end_residue.names == "C" )[0][0]]
-            o_pos  = end_residue.positions[np.where(end_residue.names == "O" )[0][0]]
-            ca_pos = end_residue.positions[np.where(end_residue.names == "CA")[0][0]]
-            v_co  = (o_pos  - c_pos) / np.linalg.norm(o_pos  - c_pos)
-            v_cca = (ca_pos - c_pos) / np.linalg.norm(ca_pos - c_pos)
-            n_dir = -(v_co + v_cca)
-            n_dir /= np.linalg.norm(n_dir)
-            N_position = c_pos + 1.36 * n_dir
-            C_position = N_position + 1.47 * n_dir   # NME CH3 along C–N axis
+        c_pos  = end_residue.positions[np.where(end_residue.names == "C" )[0][0]]
+        o_pos  = end_residue.positions[np.where(end_residue.names == "O" )[0][0]]
+        ca_pos = end_residue.positions[np.where(end_residue.names == "CA")[0][0]]
+
+        v_co  = (o_pos  - c_pos) / np.linalg.norm(o_pos  - c_pos)
+        v_cca = (ca_pos - c_pos) / np.linalg.norm(ca_pos - c_pos)
+        n_dir = -(v_co + v_cca)
+        n_dir /= np.linalg.norm(n_dir)
+        N_position = c_pos + 1.33 * n_dir            # amide C-N
+
+        # As in _get_ace_pos, the capped residue's own atoms are added back to the clash
+        # set: rotating the methyl about C-N keeps it equidistant from C but not from O,
+        # CA or the side chain.
+        base = others if others is not None else np.empty((0, 3))
+        others = np.vstack([base, PDBPreprocessor._own_residue_others(
+            end_residue, PDBPreprocessor._NME_FIXED_TO_CH3)])
+
+        # methyl at a real 120 deg C-N-CH3 angle; torsion chosen for clearance
+        C_position = PDBPreprocessor._place_atom(c_pos, N_position, 1.45, 120.0, others)
         return N_position, C_position
 
     @staticmethod
@@ -268,9 +347,14 @@ class PDBPreprocessor:
 
             parts = []
 
+            # everything the cap must not run into (its own residue excluded, since the cap
+            # is bonded to it and is legitimately close)
+            all_pos = protein_u.atoms.positions
+
             if not skip_ace:
                 first_res    = seg.residues[0].atoms
-                ace_positions = self._get_ace_pos(first_res)
+                ace_positions = self._get_ace_pos(
+                    first_res, np.delete(all_pos, first_res.indices, axis=0))
                 ace_names    = ["C", "CH3", "O"]
                 ace_universe = self._create_cap_universe(
                     n_atoms=len(ace_positions),
@@ -285,7 +369,12 @@ class PDBPreprocessor:
             parts.append(Chain)
 
             if not skip_nme:
-                nme_positions = self._get_nme_pos(last_res)
+                nme_positions = self._get_nme_pos(
+                    last_res, np.delete(all_pos, last_res.indices, axis=0))
+                # "C" for the methyl carbon is PDBFixer's own NME naming, and fix() re-runs
+                # PDBFixer after capping, so any other name here is silently normalised back
+                # to this one. Tools that expect the Amber name must
+                # rename downstream -- it cannot be fixed from here.
                 nme_names    = ["N", "C"]
                 nme_universe = self._create_cap_universe(
                     n_atoms=len(nme_names),
@@ -349,21 +438,30 @@ def fetch_smiles(ligand_name: str) -> str:
     """
     url = f"https://data.rcsb.org/rest/v1/core/chemcomp/{ligand_name}"
     response = requests.get(url)
-    if response.status_code == 200:
-        data = response.json()
-        smiles = data['rcsb_chem_comp_descriptor']['smiles']
-        logger.debug(f"SMILES for {ligand_name}: {smiles}")
-    else:
+    if response.status_code != 200:
         response.raise_for_status()
-
+    data = response.json()
+    desc = data.get("rcsb_chem_comp_descriptor", {})
+    # RCSB returns SMILES / SMILES_stereo (upper case).
+    # SMILES_stereo is preferred: it carries the stereochemistry.
+    smiles = None
+    for key in ("SMILES_stereo", "SMILES", "smiles_stereo", "smiles"):
+        if desc.get(key):
+            smiles = desc[key]
+            break
+    if not smiles:
+        raise KeyError(
+            f"no SMILES for {ligand_name} in rcsb_chem_comp_descriptor "
+            f"(keys: {sorted(desc)})")
+    logger.debug(f"SMILES for {ligand_name}: {smiles}")
     return smiles
 
 
 def get_scrubbed_smile(ligand_name: str) -> str:
-    """Fetch a CCD SMILES and return the dominant tautomer/protonation state at pH 7.4.
+    """Fetch a CCD SMILES and return the FIRST protonation/tautomer state at pH 7.4.
 
-    Uses ``molscrub.Scrub`` to enumerate protonation states and selects the first
-    (highest-scoring) tautomer, which is appropriate for physiological conditions.
+    Uses ``molscrub.Scrub``. Be careful cuause this will just give you the first protonmer/tautomer
+    No guarantee that this is the most relevant one for your system.
 
     Parameters
     ----------
@@ -375,6 +473,11 @@ def get_scrubbed_smile(ligand_name: str) -> str:
     str
         Canonical SMILES of the dominant protonation state at pH 7.4.
     """
+    # Imported here rather than at module scope: molscrub is only needed by this one function,
+    # and a top-level import made PDBPreprocessor unimportable in other places.
+    # #TODO consider chainging this
+    from molscrub import Scrub
+
     smiles = fetch_smiles(ligand_name)
     scrub = Scrub(ph_low=7.4, ph_high=7.4)
     scrubbed_mol = scrub(Chem.MolFromSmiles(smiles))[0]
@@ -772,3 +875,265 @@ def assign_bondOrders(mol: Chem.Mol = None, template_smiles: str = None):
         return mol
 
     return new_mol
+
+
+def align_structures_on_site(
+    structures: List[str],
+    site_resid: int,
+    site_chain: str = None,
+    site_resname: str = None,
+    site_anchor_xyz: dict = None,
+    radius: float = 14.0,
+    reference: str = None,
+    out_dir: str = None,
+    suffix: str = "_aligned",
+    require_same_resname: bool = True,
+) -> List[dict]:
+    """Superpose several structures of the same protein onto a common *site* frame.
+
+    ``align_trajectory_pytraj`` and ``wrap_align_save_traj`` align frames of one trajectory;
+    this handles the other case -- a set of separate crystal forms of the same protein that
+    must share one coordinate frame so that a single docking box, and a pose docked into any
+    of them, is transferable across the whole ensemble.
+    Matching purely on residue number silently superposes non-identical sequences
+
+    Parameters
+    ----------
+    structures : list of str
+        Paths to the PDB files to align. All must contain the site residue.
+    site_resid : int
+        Residue number of the site (author/PDB numbering).
+    site_chain : str, optional
+        Preferred chain of the site residue. Treated as a HINT, not a requirement: PDBFixer
+        and OpenMM relabel chains on write (a site on chain ``B``, or on a multi-character
+        mmCIF chain such as ``BBB``, comes back as ``A``), so insisting on the original label
+        makes the lookup fail on structures that are otherwise fine. If the hint does not
+        match, any chain carrying the residue is used and a warning is logged.
+    site_resname : str, optional
+        Expected residue name (e.g. ``"THR"``). Used to disambiguate when the chain hint fails
+        and several chains contain the residue number -- and to catch the case where the
+        numbering does not mean what the caller thinks it does.
+    site_anchor_xyz : dict, optional
+        ``{structure_path: (x, y, z)}`` giving the approximate site CA position in each
+        structure's own frame; the nearest CA is used as the anchor. This is the ROBUST way to
+        identify the site, because neither chain labels nor residue numbers reliably survive
+        preparation. Chains are relabelled on write (a site on chain ``B``, or on a
+        multi-character mmCIF chain ``BBB``, returns as ``A``), and residue numbers above 9999
+        overflow the 4-character PDB column -- MAPK14 5WJJ comes back numbered 9996-10360, so
+        its V102 is parsed as resid 10102. Coordinates survive both, since fixing only adds
+        atoms. Falls back to the resid/resname lookup when not supplied.
+    radius : float
+        Residues with a CA within this distance of the site residue's CA define the fit.
+        The default of 14 A matches the reach of a typical small-molecule probe.
+    reference : str, optional
+        Structure to align onto. Defaults to the first entry of ``structures``.
+    out_dir : str, optional
+        Where to write the aligned copies. Defaults to alongside each input.
+    suffix : str
+        Appended to the output stem.
+    require_same_resname : bool
+        Only use positions where both structures agree on the residue name.
+
+    Returns
+    -------
+    list of dict
+        One record per structure: ``path``, ``n_fit_atoms``, ``n_resname_mismatch``,
+        ``rmsd`` (site RMSD to the reference, A) and ``is_reference``.
+    """
+    from MDAnalysis.analysis import align as mda_align
+
+    def _same_segment(near, anchor):
+        """Keep only fit residues from the anchor's OWN chain.
+
+        The fit must not include partner chains.
+        Apo entries have no partner, so complexed and apo structures would be
+        fitted on different atom sets and their RMSDs would not be comparable. Matching on
+        segindex rather than segid because ids are not unique after preparation.
+        """
+        try:
+            return near[near.segindices == anchor.segindices[0]]
+        except Exception:
+            return near
+
+    if not structures:
+        return []
+    reference = reference or structures[0]
+
+    def site_map(u, path=None):
+        """{resid offset: (CA position, resname)} for residues near the site."""
+        # geometric anchor first: immune to chain relabelling and resid overflow
+        if site_anchor_xyz and path and path in site_anchor_xyz:
+            cas = u.select_atoms("name CA")
+            if len(cas):
+                ref_xyz = np.asarray(site_anchor_xyz[path], dtype=float)
+                d = np.linalg.norm(cas.positions - ref_xyz, axis=1)
+                j = int(np.argmin(d))
+                if d[j] <= 2.0:                     # same atom, allowing for added atoms
+                    anchor = cas[j:j + 1]
+                    near = u.select_atoms(
+                        f"name CA and point {anchor.positions[0][0]} "
+                        f"{anchor.positions[0][1]} {anchor.positions[0][2]} {radius}")
+                    near = _same_segment(near, anchor)
+                    off = anchor.resids[0]
+                    return {a.resid - off: (a.position, a.resname) for a in near}, anchor
+                logger.warning("nearest CA is %.1f A from the supplied anchor in %s", d[j], path)
+        base = f"resid {site_resid} and name CA"
+        if site_resname:
+            base += f" and resname {site_resname}"
+        anchor = None
+        for sel in ([f"{base} and segid {site_chain}",
+                     f"{base} and chainID {site_chain}"] if site_chain else []):
+            try:
+                hit = u.select_atoms(sel)
+            except Exception:
+                continue
+            if len(hit):
+                anchor = hit
+                break
+        if anchor is None or len(anchor) == 0:
+            # chain hint failed -- PDBFixer/OpenMM relabel chains, so fall back to any chain
+            anchor = u.select_atoms(base)
+            if len(anchor) > 1 and site_chain:
+                logger.warning(
+                    "chain %s not found for resid %s; using chain %s instead",
+                    site_chain, site_resid, anchor.chainIDs[0]
+                    if hasattr(anchor, "chainIDs") else "?")
+            if len(anchor) > 1:
+                anchor = anchor[:1]                # first copy; NCS mates are equivalent
+        if len(anchor) == 0:
+            return None, None
+        near = u.select_atoms(
+            f"name CA and point {anchor.positions[0][0]} {anchor.positions[0][1]} "
+            f"{anchor.positions[0][2]} {radius}")
+        near = _same_segment(near, anchor)      # partner chains must not enter the fit
+        return {a.resid - site_resid: (a.position, a.resname) for a in near}, anchor
+
+    ref_u = mda.Universe(reference)
+    ref_map, ref_anchor = site_map(ref_u, reference)
+    if ref_map is None:
+        raise ValueError(f"site residue {site_resid} not found in reference {reference}")
+
+    out = []
+    for path in structures:
+        is_ref = os.path.abspath(path) == os.path.abspath(reference)
+        u = mda.Universe(path)
+        here, _ = site_map(u, path)
+        if here is None:
+            logger.warning("site residue %s not found in %s, skipped", site_resid, path)
+            continue
+
+        shared = [k for k in here if k in ref_map]
+        if require_same_resname:
+            good = [k for k in shared if here[k][1] == ref_map[k][1]]
+        else:
+            good = shared
+        n_mismatch = len(shared) - len(good)
+        if len(good) < 3:
+            logger.warning("%s: only %d identity-matched site residues, skipped",
+                           path, len(good))
+            continue
+
+        rmsd = 0.0
+        if not is_ref:
+            mob = np.array([here[k][0] for k in good], dtype=np.float64)
+            ref = np.array([ref_map[k][0] for k in good], dtype=np.float64)
+            mob_c, ref_c = mob.mean(axis=0), ref.mean(axis=0)
+            R, rmsd = mda_align.rotation_matrix(mob - mob_c, ref - ref_c)
+            # applied to EVERY atom, not just the fitted subset
+            u.atoms.translate(-mob_c)
+            u.atoms.rotate(R)
+            u.atoms.translate(ref_c)
+
+        stem = Path(path).stem + suffix + ".pdb"
+        dest = str(Path(out_dir) / stem) if out_dir else str(Path(path).with_name(stem))
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        u.atoms.write(dest)
+        out.append(dict(path=dest, source=path, n_fit_atoms=len(good),
+                        n_resname_mismatch=n_mismatch, rmsd=float(rmsd),
+                        is_reference=is_ref))
+        logger.info("%s: fitted on %d site residues (%d rejected), site RMSD %.2f A",
+                    Path(path).name, len(good), n_mismatch, rmsd)
+    return out
+
+
+def normalize_ids_for_pdb(topology, warn: bool = True) -> dict:
+    """Make chain and residue identifiers survive a round trip through PDB format.
+
+    Two identifiers are silently corrupted when an OpenMM topology is written to PDB, and
+    both break any later ``resid X and segid Y`` lookup against the written file:
+
+    **Residue numbers outside 1-9999.** ``PDBPreprocessor.fix`` defaults to
+    ``ignore_terminal_missing_residues=False``, so PDBFixer models in unresolved terminal
+    residues -- typically an expression tag. Those are numbered downwards from the first
+    observed residue and go non-positive, and the PDB writer emits them modulo 10000.
+
+    **Multi-character chain ids.** mmCIF allows them (7Q9Q uses ``BBB``); PDB has one column,
+    so they are truncated or replaced, and distinct chains can collide onto one letter.
+
+    This renumbers offending residues into a safe range and remaps chains to unique single
+    characters, returning the mapping so the original identity is recoverable rather than
+    lost. Call it before writing; the topology is modified in place.
+
+    Returns
+    -------
+    dict
+        ``{"residues": {(new_chain, new_resid): (old_chain, old_resid)}, "chains":
+        {new: old}, "n_renumbered": int, "n_rechained": int}``
+    """
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    chain_map, res_map = {}, {}
+    used = set()
+    n_renum = n_rechain = 0
+
+    for i, chain in enumerate(topology.chains()):
+        old_cid = chain.id
+        cid = old_cid if (len(str(old_cid)) == 1 and str(old_cid) not in used) else None
+        if cid is None:
+            cid = next((c for c in alphabet if c not in used), "X")
+            n_rechain += 1
+        used.add(cid)
+        chain.id = cid
+        chain_map[cid] = old_cid
+
+        # find the smallest id so the whole chain can be shifted rather than renumbered
+        ids = []
+        for res in chain.residues():
+            try:
+                ids.append(int(res.id))
+            except (TypeError, ValueError):
+                ids.append(None)
+        numeric = [v for v in ids if v is not None]
+        # Undo the modulo-10000 wrap first. PDBFixer numbers modelled terminal residues
+        # downwards from the first observed one, so an expression tag becomes -4..0 and is
+        # stored as 9996..9999 -- which sits BEFORE residue 1 in the chain and is therefore
+        # non-monotonic rather than out of range, so a plain min/max check misses it.
+        if len(numeric) > 1:
+            tail = [v for v in numeric[1:] if v < 1000]
+            if tail and numeric[0] >= 9000 and numeric[0] > max(tail):
+                for k, v in enumerate(ids):
+                    if v is not None and v >= 9000:
+                        ids[k] = v - 10000
+                numeric = [v for v in ids if v is not None]
+        shift = 0
+        if numeric and (min(numeric) < 1 or max(numeric) > 9999):
+            # keep the spacing (and therefore any author gaps) but move into range
+            shift = 1 - min(numeric) if min(numeric) < 1 else 0
+            if max(numeric) + shift > 9999:
+                shift = 1 - min(numeric)          # last resort: start the chain at 1
+        for res, old in zip(chain.residues(), ids):
+            if old is None:
+                continue
+            new = old + shift
+            if new != old:
+                n_renum += 1
+            res.id = str(new)
+            res_map[(cid, new)] = (old_cid, old)
+
+    if warn and (n_renum or n_rechain):
+        logger.warning(
+            "normalize_ids_for_pdb: renumbered %d residues and relabelled %d chains so they "
+            "survive PDB format; use the returned map to recover original identifiers",
+            n_renum, n_rechain)
+    return {"residues": res_map, "chains": chain_map,
+            "n_renumbered": n_renum, "n_rechained": n_rechain}

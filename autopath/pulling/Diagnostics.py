@@ -191,6 +191,8 @@ def plot_profile(df: pd.DataFrame,
                  outfname: str | None = None,
                  mask_negative_dG: bool = False,
                  sharey: bool = True,
+                 ts_line: float | None = None,
+                 abs_line: float | None = None,
                  ):
     """Plot a single quantity vs reaction coordinate, faceted by speed.
 
@@ -270,6 +272,16 @@ def plot_profile(df: pd.DataFrame,
         y_label = ylabel if ylabel else value_col
         g.set_axis_labels('r_coord (nm)', y_label)
 
+        # Mark the transition state (force peak) and the Kramers absorbing
+        # boundary (force-plateau decay point) as dashed vertical lines.
+        for _x, _lab, _c in [(ts_line, "TS", "0.25"),
+                             (abs_line, "abs", "firebrick")]:
+            if _x is not None:
+                g.refline(x=_x, color=_c, linestyle="--", linewidth=1.2)
+                for ax in g.axes.flat:
+                    ax.text(_x, 0.98, _lab, transform=ax.get_xaxis_transform(),
+                            va="top", ha="right", rotation=90, fontsize=8, color=_c)
+
         if hue or style:
             g.add_legend(bbox_to_anchor=(1.01, 0.8), loc='upper left')
 
@@ -283,6 +295,8 @@ def plot_profile(df: pd.DataFrame,
 
 def plot_friction(df: pd.DataFrame,
                   outdir: str = 'analysis',
+                  ts_line: float | None = None,
+                  abs_line: float | None = None,
                   ):
     """Plot friction profiles from FrictionEstimator output.
 
@@ -312,6 +326,8 @@ def plot_friction(df: pd.DataFrame,
             outdir=outdir,
             outfname=os.path.join(outdir, 'Gamma_local.svg'),
             sharey=False,
+            ts_line=ts_line,
+            abs_line=abs_line,
         )
 
         # Plot 2: cumulative Γ — both methods combined (where available)
@@ -326,6 +342,8 @@ def plot_friction(df: pd.DataFrame,
                 outdir=outdir,
                 outfname=os.path.join(outdir, 'Gamma_cumulative.svg'),
                 sharey=False,
+                ts_line=ts_line,
+                abs_line=abs_line,
             )
         return
 
@@ -366,6 +384,10 @@ def plot_convergence_traces(smd_conv_traces: list[str], outdir: str):
             logger.warning(f"Skipping empty traces file: {f}")
             continue
         all_data.append(df)
+
+    if not all_data:
+        logger.warning("No convergence traces data available for plotting.")
+        return
 
     traces_df = pd.concat(all_data, ignore_index=True)
 
@@ -408,6 +430,8 @@ def plot_convergence_traces(smd_conv_traces: list[str], outdir: str):
 
                     for n_rep, gg in g_path.groupby("n_replicas"):
                         color = cmap(norm(n_rep))
+                        # Plot in ascending r order.
+                        gg = gg.sort_values("r_coord")
 
                         ax.plot(
                             gg["r_coord"],
@@ -485,7 +509,7 @@ def plot_convergence_metrics(smd_conv_metrics: list[str], outdir: str, tolerance
     # metrics to plot
     metrics = [
         c for c in metrics_df.columns
-        if c not in ['speed', 'path', 'n_replicas', 'converged', 'decision_quantity', 'n_common_points', 'reason']
+        if c not in ['speed', 'path', 'n_replicas', 'converged', 'decision_quantity', 'n_common_points', 'reason', 'estimator']
     ]
 
     if len(metrics) == 0:
@@ -568,6 +592,8 @@ def plot_extrapolated_param(df: pd.DataFrame = None,
                             param: str = 'dG',
                             outfname: str = None,
                             mask_negative_dG: bool = False,
+                            ts_line: float | None = None,
+                            abs_line: float | None = None,
                             ):
     """Plot the v→0 extrapolated parameter vs r_coord with R² color mapping and error bands.
     
@@ -641,6 +667,13 @@ def plot_extrapolated_param(df: pd.DataFrame = None,
                     yerri = yerr[i:i+2]
                     ax.fill_between(xi, yi - yerri, yi + yerri, color=color, alpha=0.25)
 
+            for _x, _lab, _c in [(ts_line, "TS", "0.25"),
+                                 (abs_line, "abs", "firebrick")]:
+                if _x is not None:
+                    ax.axvline(_x, color=_c, linestyle="--", linewidth=1.2)
+                    ax.text(_x, 0.98, _lab, transform=ax.get_xaxis_transform(),
+                            va="top", ha="right", rotation=90, fontsize=8, color=_c)
+
             ax.set_xlabel('r_coord (nm)')
             # ax.set_ylabel(f'{param.split("_")[0]} (kJ/mol)')
             title = est_val if est_val is not None else 'combined'
@@ -699,9 +732,13 @@ def _get_friction_profile_for_path(
         return None
     path_speed = _parse_speed_from_path(path_name)
     if path_speed is None:
-        path_speed = friction_speed_override
-    if path_speed is None:
-        path_speed = max(friction_profiles)
+        path_speed = (friction_speed_override if friction_speed_override is not None
+                      else max(friction_profiles))
+        how = "override" if friction_speed_override is not None else "fastest available"
+        logger.warning(
+            f"Path '{path_name}' has no speed suffix; colouring by friction at "
+            f"speed={path_speed} nm/ps ({how})."
+        )
     if path_speed in friction_profiles:
         return friction_profiles[path_speed]
     # nearest speed fallback
@@ -775,17 +812,32 @@ def _build_friction_grid(dens, friction_profile: pd.Series, center_pos_nm: np.nd
     return gridData.Grid(gamma_grid, origin=dens.origin, delta=dens.delta)
 
 
+def _transparency_ladder(first: float, last: float, n: int) -> List[float]:
+    """Linear stick-transparency ramp across *n* conformations.
+
+    Returns *n* values running from *first* (earliest snapshot) to *last*
+    (final snapshot) inclusive. A single conformation gets *last*, so the
+    fully-rendered end state is never dropped.
+    """
+    if n <= 0:
+        return []
+    if n == 1:
+        return [last]
+    return [first + (last - first) * i / (n - 1) for i in range(n)]
+
+
 def make_unbinding_paths_visualization(
     paths: Dict[str, List[Tuple[str, str]]],
     reference_pdb: str,
     ligand_select: str,
     outdir: str = "path_analysis",
     align_sel: str = "protein and backbone",
-    grid_spacing: float = 0.5,
+    grid_spacing: float = 0.375,
     cartoon_color: str = "grey90",
     sample_stride: int = 2,
     pocket_select: str = None,
-    n_lig_conformations: int = 20,
+    n_lig_conformations: int = 5,
+    stick_transparency_ladder: Optional[Tuple[float, float]] = None,
     output_format: str = "pse",
     color_by_friction: bool = False,
     friction_csv: str = None,
@@ -796,6 +848,18 @@ def make_unbinding_paths_visualization(
     """Generate ligand-path density maps as a PyMOL session or script.
 
     Args:
+        n_lig_conformations: Number of ligand snapshots sampled evenly along each
+            path's medoid trajectory.
+        stick_transparency_ladder: ``None`` (default) keeps the legacy behaviour —
+            all conformations go into one multi-state object at a single
+            ``stick_transparency``, so PyMOL shows only state 1 unless
+            ``all_states`` is enabled.  Pass a ``(first, last)`` pair such as
+            ``(0.9, 0.0)`` to instead emit **one object per conformation**, all
+            displayed simultaneously, with stick transparency interpolated
+            linearly from *first* (earliest snapshot, most transparent) to *last*
+            (final snapshot, most opaque).  This renders the unbinding
+            progression as a fading trail.  Values are PyMOL transparencies in
+            ``[0, 1]``; the per-path objects are collected into a PyMOL group.
         output_format: ``"pse"`` saves a portable, self-contained session file;
             ``"pml"`` writes a script + auxiliary .dx files next to it.
             PSE is self-contained (all data embedded); PML references
@@ -838,10 +902,25 @@ def make_unbinding_paths_visualization(
     if output_format not in ("pse", "pml"):
         raise ValueError(f"output_format must be 'pse' or 'pml', got '{output_format}'")
 
+    if stick_transparency_ladder is not None:
+        if len(stick_transparency_ladder) != 2:
+            raise ValueError(
+                "stick_transparency_ladder must be a (first, last) pair, got "
+                f"{stick_transparency_ladder!r}"
+            )
+        if not all(0.0 <= float(v) <= 1.0 for v in stick_transparency_ladder):
+            raise ValueError(
+                "stick_transparency_ladder values must lie in [0, 1] (PyMOL "
+                f"transparency), got {stick_transparency_ladder!r}"
+            )
+        stick_transparency_ladder = (
+            float(stick_transparency_ladder[0]), float(stick_transparency_ladder[1])
+        )
+
     level = 0.000002
-    surface_transparency = 0.45
-    cartoon_transparency = 0.25
-    stick_transparency = 0.25
+    surface_transparency = 0.2
+    cartoon_transparency = 0.1
+    stick_transparency = 0.15
 
     os.makedirs(outdir, exist_ok=True)
     outdir = Path(outdir)
@@ -949,6 +1028,8 @@ def make_unbinding_paths_visualization(
         dx_files: Dict[str, str] = {}
         friction_dx_files: Dict[str, str] = {}
         lig_pdb_files: Dict[str, str] = {}
+        # path -> [per-conformation pdb, ...]; only populated for the ladder mode
+        lig_conf_files: Dict[str, List[str]] = {}
 
         for path_name, traj_list in paths.items():
             if not traj_list:
@@ -1008,12 +1089,26 @@ def make_unbinding_paths_visualization(
             else:
                 frame_indices = [int(i * n_frames / n_lig_conformations) for i in range(n_lig_conformations)]
 
+            # Legacy layout: one multi-state PDB per path.
             lig_pdb = str(tmpdir / f"{path_name}_lig.pdb")
             with mda.Writer(lig_pdb, multiframe=True, n_atoms=lig.n_atoms) as W:
                 for idx in frame_indices:
                     u.trajectory[idx]
                     W.write(lig)
             lig_pdb_files[path_name] = lig_pdb
+
+            # Ladder layout: one single-state PDB per conformation, so each can
+            # carry its own stick transparency and all are shown at once (a
+            # multi-state object would display only state 1).
+            if stick_transparency_ladder is not None:
+                conf_paths = []
+                for i, idx in enumerate(frame_indices):
+                    conf_pdb = str(tmpdir / f"{path_name}_lig_c{i:02d}.pdb")
+                    u.trajectory[idx]
+                    with mda.Writer(conf_pdb, n_atoms=lig.n_atoms) as W:
+                        W.write(lig)
+                    conf_paths.append(conf_pdb)
+                lig_conf_files[path_name] = conf_paths
 
         # Determine friction colour range (shared ramp, 5th–95th percentile).
         friction_ramp_vals: Optional[List[float]] = None
@@ -1065,7 +1160,7 @@ def make_unbinding_paths_visualization(
                 cmd = pymol.cmd
                 cmd.bg_color("white")
                 cmd.set("antialias", 2)
-                cmd.set("specular", 0.2)
+                cmd.set("specular", 0.3)
                 cmd.set("ray_shadow", 0)
                 cmd.set("ray_opaque_background", 0)
                 cmd.set("cartoon_transparency", cartoon_transparency)
@@ -1131,11 +1226,28 @@ def make_unbinding_paths_visualization(
                     else:
                         cmd.color(col, surf_obj)
 
-                    cmd.load(lig_pdb_files[path_name], lig_obj)
-                    cmd.hide("everything", lig_obj)
-                    cmd.show("sticks", lig_obj)
-                    cmd.color(col, lig_obj)
-                    cmd.set("stick_transparency", stick_transparency, lig_obj)
+                    if stick_transparency_ladder is not None:
+                        conf_paths = lig_conf_files.get(path_name, [])
+                        ladder = _transparency_ladder(
+                            *stick_transparency_ladder, len(conf_paths)
+                        )
+                        member_objs = []
+                        for i, (conf_pdb, alpha) in enumerate(zip(conf_paths, ladder)):
+                            conf_obj = f"{lig_obj}_c{i:02d}"
+                            cmd.load(conf_pdb, conf_obj)
+                            cmd.hide("everything", conf_obj)
+                            cmd.show("sticks", conf_obj)
+                            cmd.color(col, conf_obj)
+                            cmd.set("stick_transparency", alpha, conf_obj)
+                            member_objs.append(conf_obj)
+                        if member_objs:
+                            cmd.group(lig_obj, " ".join(member_objs))
+                    else:
+                        cmd.load(lig_pdb_files[path_name], lig_obj)
+                        cmd.hide("everything", lig_obj)
+                        cmd.show("sticks", lig_obj)
+                        cmd.color(col, lig_obj)
+                        cmd.set("stick_transparency", stick_transparency, lig_obj)
 
                 if cmd.count_atoms(f"({ligand_select}) and prot") > 0:
                     cmd.create("lig_ref", f"({ligand_select}) and prot")
@@ -1156,6 +1268,14 @@ def make_unbinding_paths_visualization(
             dest = str(outdir / f"{path_name}_lig.pdb")
             shutil.copy2(lig_pdb, dest)
             lig_pdb_files[path_name] = dest
+
+        for path_name, conf_paths in lig_conf_files.items():
+            dests = []
+            for i, conf_pdb in enumerate(conf_paths):
+                dest = str(outdir / f"{path_name}_lig_c{i:02d}.pdb")
+                shutil.copy2(conf_pdb, dest)
+                dests.append(dest)
+            lig_conf_files[path_name] = dests
 
         # Copy the reference PDB into outdir for portability
         prot_copy = outdir / os.path.basename(reference_pdb)
@@ -1215,18 +1335,38 @@ def make_unbinding_paths_visualization(
                 else:
                     pml.write(f"color {col}, {surf_obj}\n")
 
-                pml.write(f"load {os.path.basename(lig_pdb_files[path_name])}, {lig_obj}\n")
-                pml.write(f"hide everything, {lig_obj}\n")
-                pml.write(f"show sticks, {lig_obj}\n")
-                pml.write(f"color {col}, {lig_obj}\n")
-                pml.write(f"set stick_transparency, {stick_transparency:.2f}, {lig_obj}\n")
+                if stick_transparency_ladder is not None:
+                    conf_paths = lig_conf_files.get(path_name, [])
+                    ladder = _transparency_ladder(
+                        *stick_transparency_ladder, len(conf_paths)
+                    )
+                    member_objs = []
+                    for i, (conf_pdb, alpha) in enumerate(zip(conf_paths, ladder)):
+                        conf_obj = f"{lig_obj}_c{i:02d}"
+                        pml.write(f"load {os.path.basename(conf_pdb)}, {conf_obj}\n")
+                        pml.write(f"hide everything, {conf_obj}\n")
+                        pml.write(f"show sticks, {conf_obj}\n")
+                        pml.write(f"color {col}, {conf_obj}\n")
+                        pml.write(f"set stick_transparency, {alpha:.3f}, {conf_obj}\n")
+                        member_objs.append(conf_obj)
+                    if member_objs:
+                        pml.write(f"group {lig_obj}, {' '.join(member_objs)}\n")
+                else:
+                    pml.write(f"load {os.path.basename(lig_pdb_files[path_name])}, {lig_obj}\n")
+                    pml.write(f"hide everything, {lig_obj}\n")
+                    pml.write(f"show sticks, {lig_obj}\n")
+                    pml.write(f"color {col}, {lig_obj}\n")
+                    pml.write(f"set stick_transparency, {stick_transparency:.2f}, {lig_obj}\n")
 
-            pml.write(f"select lig_ref_sel, ({ligand_select}) and prot\n")
-            pml.write("if cmd.count_atoms('lig_ref_sel') > 0:\n")
-            pml.write("    create lig_ref, lig_ref_sel\n")
-            pml.write("    hide everything, lig_ref\n")
-            pml.write("    show sticks, lig_ref\n")
-            pml.write("    color yellow, lig_ref\n")
+            # `@script.pml` runs line-by-line, so a multi-line Python `if` block
+            # raises IndentationError and its body executes unconditionally
+            # anyway. Resolve the condition here instead and only emit the
+            # commands when the reference PDB actually carries the ligand.
+            if u_ref.select_atoms(ligand_select).n_atoms > 0:
+                pml.write(f"create lig_ref, ({ligand_select}) and prot\n")
+                pml.write("hide everything, lig_ref\n")
+                pml.write("show sticks, lig_ref\n")
+                pml.write("color yellow, lig_ref\n")
             pml.write("zoom prot, 10.0\n")
 
         return pml_path

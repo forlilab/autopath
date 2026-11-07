@@ -12,4 +12,5 @@ nvidia-smi
 source ~/.bashrc
 micromamba activate autopath
 
-python ap_sMD.py --sysname 3ptb\
+python ap_sMD.py --sysname 3ptb --lig ../data/3ptb.sdf --reps 10
+python analyze_sMD.py --sysname 3ptb --lig ../data/3ptb.sdf

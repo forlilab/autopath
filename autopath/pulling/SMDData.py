@@ -1,7 +1,9 @@
+import json
 import os
+from datetime import datetime, timedelta
+
 import numpy as np
 import pandas as pd
-from dataclasses import dataclass, field
 from scipy.integrate import cumulative_trapezoid
 
 import MDAnalysis as mda
@@ -11,6 +13,85 @@ import tqdm
 import logging
 logger = logging.getLogger("autopath.pulling.SMDData")
 from collections import defaultdict
+
+
+def frame_steps(n_rows: int, n_frames: int, save_freq: int) -> np.ndarray:
+    """Log step each DCD frame corresponds to.
+
+    Frame j is the state at the end of row ``(j + 1) * save_freq - 1``.
+
+    Parameters
+    ----------
+    n_rows : int
+        Rows in the pull's log.
+    n_frames : int
+        Frames in its DCD.
+    save_freq : int
+        Moves per saved frame.
+
+    Returns
+    -------
+    numpy.ndarray
+        Step per frame.
+    """
+    if n_frames != n_rows // save_freq:
+        raise ValueError(f"not supported: {n_frames} frames for {n_rows} rows at save_freq={save_freq}; "
+                         f"expected {n_rows // save_freq}")
+    return (np.arange(n_frames) + 1) * save_freq - 1
+
+
+def frame_log_index(log_file: str, n_frames: int) -> tuple[np.ndarray, np.ndarray]:
+    """Log ``step`` and ``time`` of each DCD frame of one pull.
+
+    Frame j is saved after log row ``(j + 1) * save_freq - 1``; the returned
+    ``time`` is that log row's ``time`` column, not the DCD header time.
+
+    ``save_freq`` is ``n_rows // n_frames``; counts that admit no or more than
+    one ``save_freq`` are refused.
+
+    Parameters
+    ----------
+    log_file : str
+        sMD log of the pull.
+    n_frames : int
+        Frames in its DCD.
+
+    Returns
+    -------
+    steps, times : numpy.ndarray
+        Per frame.
+    """
+    log = pd.read_csv(log_file, comment="#", usecols=["step", "time"])
+    n_rows = len(log)
+    if not np.array_equal(log["step"].to_numpy(), np.arange(n_rows)):
+        raise ValueError(f"not supported: {log_file} log steps are not 0..n_rows-1 in order")
+    if not 0 < n_frames <= n_rows:
+        raise ValueError(f"not supported: {n_frames} frames for {n_rows} rows in {log_file}")
+    save_freq = n_rows // n_frames
+    if save_freq > 1 and n_rows // (save_freq - 1) == n_frames:
+        raise ValueError(f"not supported: save_freq ambiguous for {n_frames} frames, "
+                         f"{n_rows} rows in {log_file}")
+    try:
+        steps = frame_steps(n_rows, n_frames, save_freq)
+    except ValueError as e:
+        raise ValueError(f"{e} ({log_file})") from None
+    return steps, log["time"].to_numpy()[steps]
+
+
+
+def resolve_smd_dcd(stem: str) -> str:
+    """DCD of an sMD replica from its path stem (no extension).
+
+    ``<stem>_aligned.dcd`` (sMD_align_trajs=True) wins over the raw ``<stem>.dcd``
+    (sMD_align_trajs=False). If neither exists the aligned name is returned, so
+    callers keep their usual missing-file error.
+    """
+    aligned, raw = f"{stem}_aligned.dcd", f"{stem}.dcd"
+    if os.path.exists(aligned):
+        return aligned
+    if os.path.exists(raw):
+        return raw
+    return aligned
 
 class SMDData:
     """Container and preprocessor for steered MD log files.
@@ -75,6 +156,16 @@ class SMDData:
 
         raw_data = self.load_logs()
 
+        # Logged per-ligand spring constant (median over replicas that recorded a
+        # header); None when no log carried one (older data -> derived downstream).
+        _ks = [m['spring_constant_kJ_mol_nm2'] for m in self.log_metadata.values()
+               if isinstance(m.get('spring_constant_kJ_mol_nm2'), (int, float))]
+        self.spring_constant = float(np.median(_ks)) if _ks else None
+        # nominal (filename) speed -> realized speed, for v->0 / dF/dv regressions.
+        self.realized_speed_map = (
+            raw_data.groupby('speed')['realized_speed'].median().to_dict()
+            if raw_data is not None else {})
+
         # Build protocol grids before any filtering so all speeds are captured.
         self.protocol_grids = self.build_protocol_grids(raw_data)
 
@@ -109,12 +200,11 @@ class SMDData:
         raw_data = self.build_analysis_coord(raw_data)
 
         raw_data['path'] = 1  # default single path
-                
+
         self.raw_data = raw_data
         self.results = None
-        
-        return None
-        
+
+
     def load_logs(self) -> pd.DataFrame:
         """Read all log files and return a concatenated DataFrame.
 
@@ -129,12 +219,21 @@ class SMDData:
         """
         count = 0
         raw_data = []
+        self.log_metadata = {}
         for fn in self.log_files:
             try:
                 df = pd.read_csv(fn, comment='#')
-                df['trajname'] = os.path.basename(fn)[:-4]  # remove .dat extension
-                df['speed'] = self._speed_from_log(fn)
+                trajname = os.path.basename(fn)[:-4]  # remove .dat extension
+                df['trajname'] = trajname
+                nominal_speed = self._speed_from_log(fn)
+                df['speed'] = nominal_speed
                 df['repid'] = self._replica_idx_from_log(fn)
+                meta = self.parse_log_metadata(fn)
+                self.log_metadata[trajname] = meta
+                # realized pulling speed (steps_per_move rounding). Falls back to the
+                # nominal filename speed for logs written before k/speed logging.
+                df['realized_speed'] = float(
+                    meta.get('realized_speed_nm_per_ps', nominal_speed))
                 raw_data.append(df)
                 count += 1
             except Exception as e:
@@ -164,17 +263,15 @@ class SMDData:
         protocol_grids = {}
 
         for speed, g in raw_data.groupby("speed"):
-            # Use first trajectory as reference
-            ref = g.sort_values("step").iloc[0]
-
-            # Identify protocol parameters
             step0 = g["step"].min()
             stepN = g["step"].max()
+            # Median across replicas, not the first row: r_target at step0 is
+            # not perfectly reproducible across replicas (see
+            # build_analysis_coord below), and .iloc[0] would make the grid
+            # depend on the arbitrary order log files were concatenated in.
+            r0 = g.loc[g["step"] == step0, "r_target"].median()
 
-            # Initial r0 from first step
-            r0 = g.loc[g["step"] == step0, "r_target"].iloc[0]
-
-            # Infer dx_per_move robustly
+            # Median step-to-step increment across replicas (robust to outliers).
             dx_vals = (
                 g.groupby("trajname")["r_target"]
                 .diff()
@@ -194,11 +291,11 @@ class SMDData:
         return protocol_grids
     
     def build_analysis_coord(self, raw_data: pd.DataFrame) -> pd.DataFrame:
-        """
-        Attach an analysis coordinate r_coord derived from r_target,
-        without redefining the protocol grid. In theory r_target should be the same
-        across replicas for a given speed, but in practice there are tiny numerical differences,
-        mostly because r0 is not exactly the same. Here we just take the median
+        """Attach r_coord: the per-(speed, step) median of r_target.
+
+        r_target should in theory match across replicas at a given speed, but
+        tiny numerical differences (mostly from r0 not being exact) mean it
+        doesn't; the median gives one shared coordinate for analysis/plotting.
         """
         df = raw_data.copy()
 
@@ -231,6 +328,8 @@ class SMDData:
         if work_mode == 'auto':
             resolved_mode = 'protocol' if protocol_work_column in raw_data.columns else 'force_dx'
 
+        # unique labels so work goes back to the time-sorted rows it was computed for
+        raw_data = raw_data.reset_index(drop=True)
         grouped = raw_data.groupby('trajname')
         for traj, group in grouped:
             group = group.sort_values(by='time')
@@ -249,7 +348,7 @@ class SMDData:
                     initial=0.0,
                 )
 
-            raw_data.loc[raw_data['trajname'] == traj, 'work'] = work
+            raw_data.loc[group.index, 'work'] = work
 
         if resolved_mode == 'protocol':
             logger.info(
@@ -276,10 +375,38 @@ class SMDData:
         """
 
         logger.warning(f'Filtering data by x-range: {r_range}')
-        self.raw_data = self.raw_data[(self.raw_data[r_column] >= r_range[0]) & 
+        self.raw_data = self.raw_data[(self.raw_data[r_column] >= r_range[0]) &
                                         (self.raw_data[r_column] <= r_range[1])]
-        return
-        
+
+
+    @staticmethod
+    def parse_log_metadata(fn) -> dict:
+        """Parse leading ``# key=value`` comment lines from an sMD .dat file.
+
+        These carry per-replica constants written by
+        :class:`SteeredMD` (spring_constant_kJ_mol_nm2, requested/realized
+        speed, steps_per_move, force_n_samples). Values are coerced to float
+        where possible. Returns an empty dict for older logs without a header.
+        """
+        meta = {}
+        try:
+            with open(fn) as fh:
+                for line in fh:
+                    if not line.startswith('#'):
+                        break  # header block ends at the first data/column line
+                    body = line[1:].strip()
+                    if '=' not in body:
+                        continue
+                    key, _, val = body.partition('=')
+                    key, val = key.strip(), val.strip()
+                    try:
+                        meta[key] = float(val)
+                    except ValueError:
+                        meta[key] = val
+        except OSError:
+            pass
+        return meta
+
     @staticmethod
     def _speed_from_log(fn):
         # Example log name: sMD_replica-182557_v0.005_forward.dat
@@ -302,6 +429,53 @@ class SMDData:
         return int(rep.split("-")[1])
 
     @staticmethod
+    def _replica_start_datetime(fn):
+        """Chronological sort key for a replica log: its start ``datetime``.
+
+        Why the filesystem is needed
+        ----------------------------
+        The replica ID in the filename is a bare ``HHMMSS`` clock time with
+        **no date**, and the log header records only physical parameters --
+        neither carries a calendar date.  So ``_replica_idx_from_log`` is a
+        valid *identifier* but not a valid *ordering*: for any cell whose
+        replicas were produced over more than one day it sorts by time of
+        day, so "the first k replicas" becomes "the k with the earliest
+        wall-clock time of day" rather than "the k run first".
+
+        The missing date is recovered from the file's mtime, which marks
+        when the replica finished writing.  Combining that date with the
+        ``HHMMSS`` start time from the filename reconstructs the start
+        instant (rolling back one day if the run crossed midnight).  This
+        mirrors ``scratch/paper_figures/wdr5_conv_lib.py:_wall_seconds``.
+
+        Caveat
+        ------
+        This relies on mtimes being preserved.  Copy sMD data with ``cp -a``
+        / ``rsync -a``; a plain ``cp`` restamps every log to the copy time
+        and collapses the ordering back to time-of-day within that instant.
+
+        Falls back to the plain integer ID (as a ``datetime`` offset from the
+        epoch, so the key type stays comparable) if the mtime cannot be read.
+        """
+        try:
+            idx = SMDData._replica_idx_from_log(fn)
+            hh, mm, ss = idx // 10000, (idx // 100) % 100, idx % 100
+            datetime.min.replace(hour=hh, minute=mm, second=ss)
+        except (ValueError, IndexError) as exc:
+            raise ValueError(
+                f"Cannot order replica log {fn}: not supported, expected "
+                "'sMD_replica-HHMMSS..._v<speed>_<dir>.dat' with a valid HHMMSS run id"
+            ) from exc
+        try:
+            end = datetime.fromtimestamp(os.path.getmtime(fn))
+        except OSError:
+            return datetime.fromtimestamp(0) + timedelta(seconds=idx)
+        start = end.replace(hour=hh, minute=mm, second=ss, microsecond=0)
+        if start > end:  # the run crossed midnight
+            start -= timedelta(days=1)
+        return start
+
+    @staticmethod
     def _traj_to_log_name(traj_path: str) -> str:
         """
         Map a trajectory file path to the corresponding trajname used in raw_data.
@@ -317,9 +491,10 @@ class SMDData:
         """
         Map a log file path to the corresponding trajectory file name.
         """
-        traj_name = log_path.replace('log', 'traj')
-        traj_name = traj_name.replace('.dat', '_aligned.dcd')
-        return traj_name
+        # File name only: a directory containing "log" must not be rewritten.
+        folder, base = os.path.split(log_path)
+        root, _ = os.path.splitext(base)
+        return resolve_smd_dcd(os.path.join(folder, root.replace('log', 'traj')))
         
     def get_trace_features(self, 
                            features: list[str]=[ 'work', 'lag', 'r_before'],
@@ -372,14 +547,112 @@ class SMDData:
         
         return df
     
-    def calculate_pocket_distances(self, 
+    @staticmethod
+    def _speed_tag_from_trajname(traj_name: str) -> str:
+        """Speed token embedded in a trajectory name, e.g. 'v0.015'.
+
+        Trajectory names follow ``sMD_replica-<id>_v<speed>_<direction>``, so the
+        speed tag is the second-to-last underscore field (mirrors the parsing used
+        when building distance rows).
+        """
+        return traj_name.split("_")[-2]
+
+    def _pocket_distances_for_trajs(self, trajs, group_A, group_B, stride):
+        """Compute pocket→ligand distance rows for a list of trajectory files.
+
+        Both selections are periodic-image "no-jump" corrected before distances
+        are computed. sMD DCDs are written wrapped into the primary cell, so when
+        the ligand crosses a box face during unbinding its whole COM is teleported
+        by one lattice vector; without correction every pocket–ligand distance
+        would jump discontinuously (a pure PBC artifact, not real geometry). We
+        undo it by tracking each selection's COM and, whenever it moves more than
+        half the smallest box edge between consecutive frames, subtracting that
+        *observed* step from all later frames. Subtracting the observed step
+        (rather than a box-frame lattice vector, or relying on
+        ``distance_array(box=...)`` / MDAnalysis ``NoJump``) keeps it correct even
+        when the DCD is RMSD-aligned (rotated) with an unrotated triclinic box,
+        where box-based min-image is inconsistent. Both groups are corrected
+        because callers pass group_A/group_B in either order (e.g. run() passes
+        group_A=ligand, group_B=pocket); the static group's correction stays ~0,
+        and since the two groups start co-located (bound) staying continuous from
+        frame 0 keeps them in a common periodic image. No-wrap trajs are unchanged.
+
+        Rows carry the DCD ``frame`` plus the ``step`` and ``time`` of the log
+        row that frame was saved after (:func:`frame_log_index`).
+        """
+        def _nojump(u, atoms):
+            """Per-frame cumulative shift undoing periodic-image teleports of `atoms`
+            (a COM step > half the min box edge is a wrap, not real motion here)."""
+            corr = np.zeros(3); prev = None; out = {}
+            for ts in u.trajectory:
+                box = ts.dimensions[:3]
+                half = 0.5 * float(np.min(box)) if np.all(box > 0) else np.inf
+                com = atoms.center_of_mass()
+                if prev is None:
+                    out[ts.frame] = corr.copy(); prev = com + corr; continue
+                cur = com + corr
+                if np.linalg.norm(cur - prev) > half:
+                    corr = corr - (cur - prev); cur = com + corr
+                out[ts.frame] = corr.copy(); prev = cur
+            return out
+
+        log_of = dict(zip(self.traj_files, self.log_files))
+        all_rows = []
+        for traj in tqdm.tqdm(trajs, desc="Calculating distances.."):
+            u = mda.Universe(self.reference_pdb, traj)
+
+            atoms_A = u.select_atoms(group_A)
+            atoms_B = u.select_atoms(group_B)
+            if atoms_A.n_atoms == 0 or atoms_B.n_atoms == 0:
+                print(f"Warning: No atoms found for selection in trajectory {traj}. Skipping.")
+                continue
+
+            traj_name = self._traj_to_log_name(traj)
+            speed = self._speed_tag_from_trajname(traj_name).strip("v")
+
+            steps, times = frame_log_index(log_of[traj], len(u.trajectory))
+
+            corrA = _nojump(u, atoms_A)
+            corrB = _nojump(u, atoms_B)
+
+            for ts in u.trajectory[::stride]:
+                A_pos = atoms_A.positions + corrA[ts.frame]
+                B_pos = atoms_B.positions + corrB[ts.frame]
+                distances = distance_array(A_pos, B_pos)
+                dist_flat = distances.flatten() / 10.0  # nm
+
+                row = {
+                    "trajname": traj_name,
+                    "speed": float(speed),
+                    "frame": ts.frame,
+                    "step": int(steps[ts.frame]),
+                    "time": float(times[ts.frame]),
+                }
+                for i, v in enumerate(dist_flat):
+                    row[f"dist_{i}"] = v
+                all_rows.append(row)
+
+        return pd.DataFrame(all_rows)
+
+    def calculate_pocket_distances(self,
                           group_A: str = None,
                           group_B: str = None,
                           recompute: bool = False,
                           stride: int = 2,
                           ) -> pd.DataFrame:
-        """
-        Compute (or load) distance features between pocket and ligand.
+        """Compute (or load) pocket-ligand distance features.
+
+        Persisted **per speed** to ``{outdir}/{sysname}_pocketDistances_v{speed}.csv``
+        — check_convergence calls this once per speed with per-speed SMDData
+        instances sharing the same outdir. Results for all requested speeds are
+        concatenated on return.
+
+        Each cache starts with a ``#`` JSON header recording the selections,
+        stride and trajectory names it was computed for. A cache is reused only
+        when all of these match the request; otherwise (including caches written
+        before the header existed, whose ``step`` is the DCD frame index, and the
+        legacy combined ``{sysname}_pocketDistances.csv``) it is recomputed with
+        a warning.
 
         Parameters
         ----------
@@ -388,95 +661,87 @@ class SMDData:
         group_B : str
             MDAnalysis selection string for the **ligand** atoms.
         recompute : bool, optional
-            If False (default), load from cache if available.
+            If False (default), reuse each speed's cache file when it matches
+            and only compute the rest. If True, recompute and overwrite all.
         stride : int, optional
             Frame stride for trajectory reading (default 2).
-
-        Returns a DataFrame with columns:
-            ['trajname', 'step', 'time'] + dist_* feature columns
-
-        'step' is the frame index; 'time' is taken from the trajectory if available,
-        otherwise time = step.
-        """
-        
-        distance_file = f"{self.outdir}/{self.sysname}_pocketDistances.csv"
-
-        if (not recompute) and os.path.exists(distance_file):
-            df = pd.read_csv(distance_file)
-            return df
-
-        all_rows = []
-
-        for traj in tqdm.tqdm(self.traj_files, desc="Calculating distances.."):
-            u = mda.Universe(self.reference_pdb, traj)
-            
-            pocket_atoms = u.select_atoms(group_A)
-            ligand_atoms = u.select_atoms(group_B)
-            if ligand_atoms.n_atoms == 0 or pocket_atoms.n_atoms == 0:
-                print(f"Warning: No atoms found for selection in trajectory {traj}. Skipping.")
-                continue
-            
-            traj_name = self._traj_to_log_name(traj)
-            speed = traj_name.split("_")[-2].strip("v")
-        
-            for ts in u.trajectory[::stride]:
-                distances = distance_array(
-                    pocket_atoms, ligand_atoms,
-                    result=np.ndarray((len(pocket_atoms), len(ligand_atoms)))
-                )
-                dist_flat = distances.flatten() / 10.0  # nm
-                time_ps = getattr(ts, "time", ts.frame)  # ts.time in ps
-
-                row = {
-                    "trajname": traj_name,
-                    "speed": float(speed),
-                    "step": ts.frame,   # index within this trajectory
-                    "time": time_ps,
-                }
-                for i, v in enumerate(dist_flat):
-                    row[f"dist_{i}"] = v
-                all_rows.append(row)
-
-        df = pd.DataFrame(all_rows)
-        df.to_csv(distance_file, index=False)
-        return df
-
-    @staticmethod
-    def merge_feature_sets(*feature_dfs: pd.DataFrame,
-                           tolerance_ps: float | None = None) -> pd.DataFrame:
-        """
-        Merge N feature DataFrames using a nearest-time asof merge per trajectory.
-
-        The first DataFrame is the reference (left side); subsequent DataFrames
-        are merged onto it one by one.  This allows combining any number of
-        feature sources — e.g. trace features, pocket distances, 3D ligand
-        descriptors — into a single feature table for downstream clustering.
-
-        All DataFrames must contain ``trajname`` and ``time`` columns.
-        Metadata columns shared with the reference (trajname, step, speed, …)
-        are taken from the reference to avoid duplicate columns.
-
-        Parameters
-        ----------
-        *feature_dfs : pd.DataFrame
-            Two or more feature DataFrames.  The first is the reference.
-        tolerance_ps : float or None
-            Maximum allowed time gap (ps) for the asof match.  *None* always
-            keeps the nearest match.
 
         Returns
         -------
         pd.DataFrame
-            One row per reference frame, augmented with columns from all
-            subsequent DataFrames.
+            Columns ``['trajname', 'speed', 'step', 'time'] + dist_*``; ``step``
+            and ``time`` are the log row's step and time for the row each frame
+            was saved after.
+        """
+        trajs_by_speed = defaultdict(list)
+        for traj in self.traj_files:
+            speed_tag = self._speed_tag_from_trajname(self._traj_to_log_name(traj))
+            trajs_by_speed[speed_tag].append(traj)
 
-        Raises
-        ------
-        ValueError
-            If fewer than two DataFrames are provided, or required columns
-            are missing.
-        RuntimeError
-            If no trajectories could be merged.
+        legacy_file = f"{self.outdir}/{self.sysname}_pocketDistances.csv"
+        if (not recompute) and os.path.exists(legacy_file):
+            logger.warning(f"Ignoring {legacy_file}: its steps are DCD frame indices; recomputing.")
+
+        frames = []
+        for speed_tag, trajs in trajs_by_speed.items():
+            per_speed_file = f"{self.outdir}/{self.sysname}_pocketDistances_{speed_tag}.csv"
+            meta = {"convention": "log_step", "group_A": group_A, "group_B": group_B,
+                    "stride": int(stride),
+                    "trajnames": sorted(self._traj_to_log_name(t) for t in trajs)}
+
+            if (not recompute) and os.path.exists(per_speed_file):
+                reason = self._pocket_cache_mismatch(per_speed_file, meta)
+                if reason is None:
+                    frames.append(pd.read_csv(per_speed_file, comment="#"))
+                    continue
+                logger.warning(f"{per_speed_file}: {reason}; recomputing.")
+
+            df_speed = self._pocket_distances_for_trajs(trajs, group_A, group_B, stride)
+            if not df_speed.empty:
+                with open(per_speed_file, "w") as f:
+                    f.write("# " + json.dumps(meta) + "\n")
+                    df_speed.to_csv(f, index=False)
+            frames.append(df_speed)
+
+        if not frames:
+            return pd.DataFrame()
+        out = pd.concat(frames, ignore_index=True)
+        # frame is cache metadata, not a clustering feature
+        return out.drop(columns="frame", errors="ignore")
+
+    @staticmethod
+    def _pocket_cache_mismatch(path: str, meta: dict) -> str | None:
+        """Why the cache at ``path`` cannot serve ``meta``; None if it can."""
+        with open(path) as f:
+            first = f.readline()
+        if not first.startswith("# "):
+            return "frame-index steps (old convention) or unknown parameters"
+        try:
+            cached = json.loads(first[2:])
+        except json.JSONDecodeError:
+            return "unreadable header"
+        if cached.get("convention") != meta["convention"]:
+            return "frame-index steps (old convention)"
+        diff = [k for k in ("group_A", "group_B", "stride") if cached.get(k) != meta[k]]
+        if diff:
+            return f"computed with different {', '.join(diff)}"
+        if cached.get("trajnames") != meta["trajnames"]:
+            return "covers a different set of trajectories"
+        return None
+
+    @staticmethod
+    def merge_feature_sets(*feature_dfs: pd.DataFrame,
+                           tolerance_ps: float | None = None) -> pd.DataFrame:
+        """Merge N feature DataFrames via a nearest-time asof merge per trajectory.
+
+        The first DataFrame is the reference (left side); the rest are merged
+        onto it one by one, e.g. combining trace features, pocket distances,
+        and ligand shape descriptors into one feature table for clustering.
+        All DataFrames must have ``trajname`` and ``time`` columns; shared
+        metadata columns are taken from the reference to avoid duplicates.
+
+        ``tolerance_ps`` caps the allowed asof time gap (ps); ``None`` always
+        keeps the nearest match regardless of gap size.
         """
         if len(feature_dfs) < 2:
             raise ValueError("merge_feature_sets requires at least two DataFrames.")
@@ -549,6 +814,47 @@ class SMDData:
         """
         return SMDData.merge_feature_sets(geom_df, trace_df, tolerance_ps=tolerance_ps)
 
+    @staticmethod
+    def merge_geom_features(trace_df: pd.DataFrame,
+                            geom_df: pd.DataFrame,
+                            mode: str = "impute") -> pd.DataFrame:
+        """Merge geom sidecar features onto trace features.
+
+        mode='impute'  : merge_feature_sets nearest-fill (no NaN, full rows).
+        mode='aligned' : keep only exact (trajname, time) matches.
+        """
+        if mode == "impute":
+            return SMDData.merge_feature_sets(trace_df, geom_df)
+        if mode == "aligned":
+            geom_cols = [c for c in geom_df.columns if c.startswith("geom_")]
+            right = geom_df[["trajname", "time"] + geom_cols]
+            return trace_df.merge(right, on=["trajname", "time"], how="inner")
+        raise ValueError(f"geom_merge mode must be 'impute' or 'aligned', got {mode!r}")
+
+    def load_geom_features(self) -> pd.DataFrame:
+        """Load per-run geom sidecars (``sMD_*_geom.dat``) for the loaded logs.
+
+        Returns an empty DataFrame when no sidecars are present; never raises
+        on missing files. Columns: trajname, speed, step, time, geom_*.
+        """
+        rows = []
+        for log_fn in self.log_files:
+            geom_fn = log_fn[:-4] + "_geom.dat"      # replace trailing '.dat'
+            if not os.path.exists(geom_fn):
+                continue
+            try:
+                g = pd.read_csv(geom_fn, comment='#')
+            except Exception as e:
+                logger.warning(f"Could not read geom sidecar {geom_fn}: {e}")
+                continue
+            g["trajname"] = os.path.basename(log_fn)[:-4]
+            g["speed"] = self._speed_from_log(log_fn)
+            rows.append(g)
+        if not rows:
+            logger.info("No geom sidecars (_geom.dat) found; geom features unavailable.")
+            return pd.DataFrame()
+        return pd.concat(rows, ignore_index=True)
+
     def add_estimator_results(self, estimator_name: str, results_df: pd.DataFrame):
         """Append per-(speed, path, step) estimator output to ``self.results``.
 
@@ -560,7 +866,6 @@ class SMDData:
             self.results = pd.DataFrame()
         results_df['estimator'] = estimator_name
         self.results = pd.concat([self.results, results_df], ignore_index=True)
-        return None    
 
     @staticmethod
     def _compute_p_neq(path_traj_counts: dict) -> dict:
@@ -594,7 +899,6 @@ class SMDData:
 
         data = self.raw_data.copy()
 
-        # decide grouping strategy
         if byspeed:
             grouping_iter = data.groupby("speed")
         else:
@@ -611,12 +915,16 @@ class SMDData:
 
     @staticmethod
     def _choose_estimator_for_weights(results: pd.DataFrame, estimator: str = 'auto') -> str:
-        """Resolve which estimator to use for p_eq computation.
+        """Resolve which estimator's dG to use for p_eq computation.
 
-        When ``estimator='auto'`` (default), preference order is
-        ``'cumulant'`` > ``'jarzynski'`` > first available.  Raises
-        ``ValueError`` if no estimator results are present or the
-        explicitly requested estimator is not in ``results``.
+        ``estimator='auto'`` selects by ROBUSTNESS: among genuine free-energy
+        candidates (all available estimators EXCLUDING ``'force'``, whose
+        ``dG=Wmean`` is non-negative by construction), pick the one with the
+        smallest fraction of negative-dG bins — those are exactly the bins
+        masked to 0 in ``_compute_p_eq`` and what destabilises the p_eq integral.
+        Ties resolve to the order ``['cumulant','jarzynski']`` then first
+        available.  An explicitly named estimator is returned as-is (raises if
+        not present).
         """
         if 'estimator' not in results.columns:
             raise ValueError("results must include an 'estimator' column.")
@@ -625,16 +933,31 @@ class SMDData:
         if len(available_estimators) == 0:
             raise ValueError("No estimator results available to compute p_eq.")
 
-        if estimator == 'auto':
-            preferred_estimators = ['cumulant', 'jarzynski']
-            for est in preferred_estimators:
-                if est in available_estimators:
-                    return est
-            return available_estimators[0]
+        if estimator != 'auto':
+            if estimator not in available_estimators:
+                raise ValueError(
+                    f"Estimator '{estimator}' not available in results. "
+                    f"Available: {sorted(available_estimators)}"
+                )
+            return estimator
 
-        if estimator not in available_estimators:
-            raise ValueError(
-                f"Estimator '{estimator}' not available in results. "
-                f"Available: {sorted(available_estimators)}"
-            )
-        return estimator
+        candidates = [e for e in available_estimators if e != 'force']
+        if not candidates:
+            raise ValueError("No non-force estimator available to weight paths.")
+
+        def neg_frac(est: str) -> float:
+            dG = results.loc[results['estimator'] == est, 'dG'].to_numpy(dtype=float)
+            dG = dG[np.isfinite(dG)]
+            return float((dG < 0).mean()) if dG.size else 1.0
+
+        preference = {'cumulant': 0, 'jarzynski': 1}
+        # sort by (neg fraction asc, preference asc, name) -> deterministic
+        best = min(candidates, key=lambda e: (neg_frac(e),
+                                              preference.get(e, 2),
+                                              e))
+        return best
+
+    @staticmethod
+    def choose_reference_estimator(results: pd.DataFrame) -> str:
+        """Robustness-selected reference estimator for shared p_eq weighting."""
+        return SMDData._choose_estimator_for_weights(results, 'auto')

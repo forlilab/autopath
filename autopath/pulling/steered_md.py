@@ -10,21 +10,23 @@ from datetime import datetime
 
 from autopath.utils import *
 from autopath.customForces import (add_harmonic_restraints, remove_openmm_force)
+from autopath.pulling.pbc import reduction_identity_limit, triclinic_minimum_image, com_reduction_margin
 
 from openmm.app import *
+from openmm import XmlSerializer
 import openmm.unit as openmmunit
 
 import cvpack
 import logging
 logger = logging.getLogger("autopath")
 
-try:
-    from openmmtools.integrators import LangevinSplittingGirsanov
-    from reweightingreporter import ReweightingReporter
-except ImportError:
-    girsanov = False
-    logger.warning("Please install openmmtools to use Girsanov reweighting.")
-    
+
+
+def _feature_atoms(smd):
+    """Whole-ligand heavy atoms if set on *smd*, else its groupA (anchor) atoms."""
+    lig = getattr(smd, "ligand_atoms", None)
+    return smd.groupA_atoms if lig is None or len(lig) == 0 else lig
+
 class SteeredMD:
     """Steered molecular dynamics: pull a ligand along a COM-COM reaction
     coordinate using a moving harmonic restraint.
@@ -84,6 +86,7 @@ class SteeredMD:
         topology: str = None,
         groupA_atoms: list[int] = None,
         groupB_atoms: list[int] = None,
+        ligand_atoms: list[int] = None,   # all ligand heavy atoms: NC autostop, pocket, geom features (None = groupA)
         restrained_atoms: list[int] = None,
         restart_velocities: bool = False,
         timestep: float = 0.004, #  # 4 fs timestep
@@ -91,17 +94,20 @@ class SteeredMD:
         autostop_nc: float | None = 0.1,  # fraction of NC_initial to stop at; None disables
         autostop_nc_window: int = 2,      # consecutive NC samples below threshold to confirm detachment
         autostop_min_displacement: float = 0.5,  # nm — don't fire before this displacement from r0
-        sMD_max_r_offset: float = 3.0,   # max displacement offset (nm): cap pull at r0 + offset nm (also capped by PBC half-box minus pbc_safety_nm)
+        autostop_unbound_nm: float | None = None,  # also require min ligand–protein heavy-atom distance >= this (nm)
+        sMD_max_r_offset: float = 3.0,   # max displacement offset (nm): cap pull at r0 + offset nm (also capped by the PBC per-axis half-box limit minus pbc_safety_nm)
         pbc_safety_nm: float = 0.5,      # nm — safety margin subtracted from the per-axis PBC half-box cap (raise for large proteins)
         use_NVT: bool = False,  # Use NVT ensemble
-        use_GReweighting: bool = False,
         out_dir: str = None,
         platform: str = "fastest",
         dx_per_move: float = 0.001,        # nm — RC grid spacing (held constant across speeds)
         max_displacement: float = 3.5,     # nm — total RC range
         sMD_spring_cte: float = 10000,     # kJ/mol/nm^2
         save_freq: int = 5,                # writes DCD every save_freq*steps_per_move
+        force_n_samples: int = 10,         # cap on restraint-force samples averaged per move (>=1)
+        force_sample_stride: int = 5,      # MD steps between force samples; n_samples adapts to move length
         verbose: int = 0,
+        log_geom_features: bool | list[str] = False,  # log per-frame geom scalars to a sidecar
     ):
 
         self.system = system
@@ -113,26 +119,25 @@ class SteeredMD:
         self.temperature = temperature * openmmunit.kelvin
         self.groupA_atoms = groupA_atoms # ligand atoms
         self.groupB_atoms = groupB_atoms # pocket atoms
+        self.ligand_atoms = ligand_atoms # whole-ligand heavy atoms; groupA (anchor) is only the pulled COM
         self.restrained_atoms = restrained_atoms
         self.restart_velocities = restart_velocities
 
         self.verbose = verbose
+        self.log_geom_features = log_geom_features
+        self._shape_calc = None    # ShapeDescriptorCalculator, built once in run()
+        self._lig_heavy_idx = None # ligand heavy-atom indices for shape descriptors
+        self._exit_ref = None      # (centred pocket geometry, its principal axes)
         self.autostop_nc        = float(autostop_nc) if autostop_nc is not None else None
         self.autostop_nc_window = int(autostop_nc_window)
         self.autostop_min_displacement = float(autostop_min_displacement)
+        self.autostop_unbound_nm = float(autostop_unbound_nm) if autostop_unbound_nm is not None else None
+        self._protein_heavy = None
         self.sMD_max_r_offset    = float(sMD_max_r_offset)
         self.pbc_safety_nm       = float(pbc_safety_nm)
         self.use_NVT = use_NVT
 
         self.integrator_friction = 1.0 / openmmunit.picoseconds  # Friction coefficient for Langevin integrator
-        self.use_GReweighting = use_GReweighting
-        if self.use_GReweighting:
-            if not girsanov:
-                logger.error("Disabled Girsanov reweighting because openmmtools is not installed.")
-                self.use_GReweighting = False
-            else:
-                logger.info("Using Girsanov reweighting for steered MD.")
-
         self.platform = select_platform(platform)
 
         # Sweep-fixed parameters: identical for every replica/speed in a sweep,
@@ -141,6 +146,8 @@ class SteeredMD:
         self.dx_per_move = float(dx_per_move) * openmmunit.nanometers                                   # Quantity
         self.sMD_spring_cte = float(sMD_spring_cte) * openmmunit.kilojoules_per_mole / openmmunit.nanometer**2
         self.save_freq = int(save_freq)
+        self.force_n_samples = max(1, int(force_n_samples))
+        self.force_sample_stride = max(1, int(force_sample_stride))
         self.sMD_moves = int(math.ceil(self.max_displacement / float(dx_per_move)))
 
         kB_kJ_per_mol_K = 0.0083144621
@@ -166,17 +173,18 @@ class SteeredMD:
 
     def pull_single_direction(self, 
                               simulation, 
-                              run_id: int, 
+                              run_id: int,
                               direction: str = "forward",
+                              lambda0=None,
                              ):
         """Main pulling loop for a single replica in one direction.
 
         Advances the spring centre r0 by ``dx_per_move`` each iteration and
         integrates ``steps_per_move`` MD steps. At each move the method records
-        instantaneous force, the incremental protocol work ``dW_protocol``
-        (energy change due to the r0 shift *before* MD relaxation — distinct
-        from the cumulative work), the lag (r0 - r_after), and, every
-        ``save_freq`` moves, the soft contact count NC.
+        the within-move time-averaged restraint force ``force`` (with its SEM),
+        the incremental protocol work ``dW_protocol`` (energy change due to the
+        r0 shift *before* MD relaxation — distinct from the cumulative work),
+        and, every ``save_freq`` moves, the soft contact count NC.
 
         NC autostop: the loop halts early when NC drops below
         ``autostop_nc × NC_initial`` for ``autostop_nc_window`` consecutive
@@ -185,9 +193,27 @@ class SteeredMD:
 
         Output
         ------
-        Writes ``{out_dir}/sMD_{run_id}.dat`` with columns:
-        step, time, r_target, r_before, r_after, force, U_cvpack,
-        dW_protocol, lag_nm
+        The spring schedule starts at ``lambda0`` (a length Quantity, required), the spring
+        centre the replica was equilibrated at by ``run``.
+
+        Writes ``{out_dir}/sMD_{run_id}.dat`` with a ``# key=value`` metadata
+        header (spring_constant, requested/realized speed, steps_per_move,
+        force_n_samples, lambda0_nm, r_start_nm) followed by columns:
+        step, time, r_target, r_before, r_after, force, force_sem,
+        U_cvpack, dW_protocol
+
+        ``force`` is the coherent quantity for the estimators: the within-move
+        mean restraint force sampled from the dynamics under the current
+        r_target (with ``force_sem`` its standard error). This is what feeds
+        Feq / friction / the mean-force-TI PMF. The pre-step "kick"
+        ``-k*(r_before - r_target)`` is intentionally NOT logged (it is the
+        wrong ensemble for the mean force, and is trivially reconstructable
+        from r_before, r_target and the header spring_constant if needed).
+
+        The instantaneous lag ``r_target - r_after`` is likewise not logged: it
+        is a finite-speed, single-endpoint quantity (equilibrium lag + friction
+        drag γv/k + thermal noise), derivable from the two position columns. The
+        coordinate deconvolution uses the equilibrium lag ``Feq/k`` instead.
         """
                     
         add_reporters(simulation, self.out_dir, f"sMD_{run_id}",
@@ -196,33 +222,22 @@ class SteeredMD:
             verbose=0 #verbose level
         )
 
-        if self.use_GReweighting:
-            # NOTE: 'unperturebed' and 'firtsPertubation' are the canonical parameter names in
-            # ReweightingReporter.__init__ (autopath/reweightingreporter.py) — the
-            # misspellings are in the class definition itself and must be matched here.
-            simulation.reporters.append(ReweightingReporter(f"{self.out_dir}/sMD_{run_id}.dat",
-                                                            self.steps_per_move,
-                                                            simulation.integrator,
-                                                            unperturebed=True,
-                                                            firtsPertubation=True,
-                                                            ))
-
-        # Set the initial r0 parameter
-        initial_r0 = self.com_dist.getValue(simulation.context, allowReinitialization=False)
-        logger.info(f"Initial COM distance: {initial_r0}")
+        # The schedule starts at lambda0; r_start is where the replica actually is.
+        if lambda0 is None:
+            raise ValueError("lambda0 is required: the spring centre the replica was equilibrated at")
+        initial_r0 = lambda0
+        r_start = self.com_dist.getValue(simulation.context, allowReinitialization=False)
+        r_start_nm = r_start.value_in_unit(openmmunit.nanometers)
+        logger.info(f"Spring start lambda0: {initial_r0}; COM distance at pull start: {r_start}")
         simulation.context.setParameter("r0_smd", initial_r0)
 
         # ── Move count cap: box safety + r0 factor ─────────────────────────────
-        # PBC cap: cvpack uses pbc=True, so the COM-COM distance is the
-        # minimum image. The scalar becomes ill-defined once any component of
-        # the COM-COM vector exceeds L_axis/2. Per-axis limit on r:
-        #     r_max_i = (L_i / 2) * |v| / |v_i|
-        # The binding axis dominates; for a box elongated along the pull
-        # direction this gives ~L_long/2, not the more conservative min(L)/2.
-        # WARNING: minimum-image wrap (line below) is orthorhombic only.
+        # PBC cap: per-axis (L_i/2)|v|/|v_i| is the identity region of OpenMM's
+        # c->b->a delta reduction used by the pbc=True CV (valid on triclinic boxes).
         initial_r0_nm = initial_r0.value_in_unit(openmmunit.nanometers)
         dx_nm = float(self.dx_per_move.value_in_unit(openmmunit.nanometers))
         n_moves = self.sMD_moves
+        _guard_w = None   # COM weights for the in-loop PBC guard (set with the t=0 cap)
         if direction == "forward" and self.sMD_max_r_offset > 0:
             state    = simulation.context.getState(getPositions=True)
             box_vecs = state.getPeriodicBoxVectors()
@@ -230,16 +245,6 @@ class SteeredMD:
                 [box_vecs[i][j].value_in_unit(openmmunit.nanometers) for j in range(3)]
                 for i in range(3)
             ])
-            off_diag_max = float(np.abs(box_arr - np.diag(np.diag(box_arr))).max())
-            if off_diag_max > 1e-3:
-                logger.warning(
-                    f"PBC move-capping: non-orthorhombic box detected "
-                    f"(max off-diagonal element = {off_diag_max:.4f} nm). "
-                    f"Minimum-image wrapping assumes orthorhombic geometry and may be incorrect "
-                    f"for triclinic boxes."
-                )
-            L = np.diag(box_arr)
-
             positions = state.getPositions(asNumpy=True).value_in_unit(openmmunit.nanometers)
             weigh_by_mass = not (len(self.groupA_atoms) == 1 or len(self.groupB_atoms) == 1)
             if weigh_by_mass:
@@ -253,26 +258,25 @@ class SteeredMD:
             com_A = np.average(positions[self.groupA_atoms], axis=0, weights=masses_A)
             com_B = np.average(positions[self.groupB_atoms], axis=0, weights=masses_B)
             v = com_A - com_B
-            v -= np.round(v / L) * L  # minimum-image (orthorhombic only; triclinic triggers a warning above)
+            v = triclinic_minimum_image(v, box_arr)
             v_norm = float(np.linalg.norm(v))
-            if abs(v_norm - initial_r0_nm) > 0.05:
-                logger.warning(
-                    f"PBC cap: |v|={v_norm:.3f} nm differs from cvpack initial_r0="
-                    f"{initial_r0_nm:.3f} nm. Check that protein/ligand are not split "
-                    f"across a periodic boundary at t=0; cap may be unreliable."
+            if abs(v_norm - r_start_nm) > 0.05:
+                raise RuntimeError(
+                    f"PBC cap: |v|={v_norm:.3f} nm differs from cvpack COM distance "
+                    f"{r_start_nm:.3f} nm. Check that protein/ligand are not split "
+                    f"across a periodic boundary at t=0; cap would be unreliable."
                 )
-            abs_v = np.abs(v)
-            with np.errstate(divide='ignore', invalid='ignore'):
-                r_max_per_axis = np.where(abs_v > 1e-6, (L / 2.0) * v_norm / abs_v, np.inf)
-            r_max_pbc      = float(np.min(r_max_per_axis)) - self.pbc_safety_nm
-            r_max_offset   = initial_r0_nm + self.sMD_max_r_offset
+            r_red, red_axis = reduction_identity_limit(v / v_norm, box_arr)
+            _guard_w = (masses_A / masses_A.sum(), masses_B / masses_B.sum())
+            r_max_pbc      = r_red - self.pbc_safety_nm
+            r_max_offset   = v_norm + self.sMD_max_r_offset
             r_max          = min(r_max_pbc, r_max_offset)
-            moves_safe     = max(1, int((r_max - initial_r0_nm) / dx_nm))
+            moves_safe     = max(1, int((r_max - v_norm) / dx_nm))
             if n_moves > moves_safe:
                 if r_max == r_max_pbc:
-                    dom_axis = int(np.argmin(r_max_per_axis))
-                    reason = (f"PBC axis-{('xyz')[dom_axis]} half-box "
-                              f"(L={L[dom_axis]:.2f} nm, |v|/|v_{('xyz')[dom_axis]}|={v_norm/max(abs_v[dom_axis],1e-12):.2f}, "
+                    ax = "xyz"[red_axis]
+                    reason = (f"PBC axis-{ax} half-box (L={box_arr[red_axis, red_axis]:.2f} nm, "
+                              f"|v|/|v_{ax}|={v_norm / max(abs(v[red_axis]), 1e-12):.2f}, "
                               f"safety={self.pbc_safety_nm:.2f} nm)")
                 else:
                     reason = f"r0+{self.sMD_max_r_offset:.1f}nm offset"
@@ -292,8 +296,12 @@ class SteeredMD:
         # autostop_nc × NC_initial for autostop_nc_window consecutive samples
         # after the min-displacement guard is satisfied.
         _nc_buf: deque[float] = deque(maxlen=self.autostop_nc_window)
+        _mind_buf: deque[float] = deque(maxlen=self.autostop_nc_window)
         _nc_initial = None
-        if self.autostop_nc is not None and self.subset_protein_HA is not None:
+        _unbound_nm = getattr(self, "autostop_unbound_nm", None)
+        if _unbound_nm is not None and getattr(self, "_protein_heavy", None) is None:
+            self._protein_heavy = self._protein_heavy_atoms()
+        if self.autostop_nc is not None and self.subset_protein_CA is not None:
             pos_nm_init = simulation.context.getState(getPositions=True).getPositions(asNumpy=True) / openmmunit.nanometers
             _nc_initial = self._compute_nc(pos_nm_init)
             logger.info(
@@ -304,8 +312,46 @@ class SteeredMD:
 
         _buf: list[str] = []
 
-        with open(f"{self.out_dir}/sMD_{run_id}.dat", "w") as f:
-            f.write("step,time,r_target,r_before,r_after,force,U_cvpack,dW_protocol,lag_nm\n")
+        # ── Inline geom-feature sidecar (opt-in) ───────────────────────────────
+        # Sampled at the same save_freq cadence as NC / DCD frames. Pocket-
+        # dependent features (nc/mindist) are skipped if pocket atoms are absent.
+        geom_feats = self._resolve_geom_features()
+        geom_cols = [f for f in geom_feats
+                     if f not in self._GEOM_POCKET or self.subset_protein_CA is not None]
+        geom_dropped = set(geom_feats) - set(geom_cols)
+        if geom_dropped:
+            logger.warning(
+                f"[geom] pocket atoms unavailable; skipping {sorted(geom_dropped)}."
+            )
+        geom_buf: list[str] = []
+        geom_fh = None
+        if geom_cols:
+            geom_fh = open(f"{self.out_dir}/sMD_{run_id}_geom.dat", "w")
+            geom_fh.write("step,time," + ",".join(f"geom_{c}" for c in geom_cols) + "\n")
+
+        # Number of force samples averaged per move: adapt to the move length so
+        # short (fast-speed) moves take few samples (low overhead) and long
+        # (slow-speed) moves take up to the cap. Constant across a replica.
+        n_sub = min(self.force_n_samples,
+                    max(1, self.steps_per_move // self.force_sample_stride))
+
+        # Per-replica constants recorded as `# key=value` comment lines. pandas
+        # read_csv(comment='#') skips them; SMDData.parse_log_metadata reads them
+        # so downstream estimators can use the logged k and realized speed
+        # instead of re-deriving them.
+        _k_spring_val = self.sMD_spring_cte.value_in_unit(
+            openmmunit.kilojoules_per_mole / openmmunit.nanometer**2)
+        # Write to .part and rename at the end: a crashed pull leaves no .dat to count as a replica
+        dat_path = f"{self.out_dir}/sMD_{run_id}.dat"
+        with open(dat_path + ".part", "w") as f:
+            f.write(f"# spring_constant_kJ_mol_nm2={_k_spring_val:.10g}\n")
+            f.write(f"# requested_speed_nm_per_ps={getattr(self, '_requested_speed', float('nan')):.10g}\n")
+            f.write(f"# realized_speed_nm_per_ps={getattr(self, '_realized_speed', float('nan')):.10g}\n")
+            f.write(f"# steps_per_move={self.steps_per_move}\n")
+            f.write(f"# force_n_samples={n_sub}\n")
+            f.write(f"# lambda0_nm={initial_r0_nm:.10g}\n")
+            f.write(f"# r_start_nm={r_start_nm:.10g}\n")
+            f.write("step,time,r_target,r_before,r_after,force,force_sem,U_cvpack,dW_protocol\n")
 
             # Loop over the number of moves
             for i in range(n_moves):
@@ -324,37 +370,86 @@ class SteeredMD:
 
                 simulation.context.setParameter("r0_smd", r_target)
 
-                delta = r_before - r_target
-                force = -self.sMD_spring_cte * delta
-
                 U_cvpack = self.com_force.getValue(simulation.context, allowReinitialization=False)
                 dW_protocol = U_cvpack - U_pre_old
 
-                simulation.step(self.steps_per_move)
+                # Integrate the move in n_sub chunks, sampling the restraint force over the
+                # move so the logged `force` is the time-averaged pulling force (much lower
+                # variance than a single pre-step sample -> cleaner Feq / friction / mean-force TI).
+                # Splitting step(N) into chunks summing to N is trajectory-identical in OpenMM.
+                _kunit = openmmunit.kilojoules_per_mole / openmmunit.nanometer
+                base, rem = divmod(self.steps_per_move, n_sub)
+                _fs = []
+                _r_last = None
+                for _j in range(n_sub):
+                    simulation.step(base + (1 if _j < rem else 0))
+                    _r_last = self.com_dist.getValue(simulation.context, allowReinitialization=False)
+                    _fs.append((-self.sMD_spring_cte * (_r_last - r_target)).value_in_unit(_kunit))
+                _fs = np.asarray(_fs, dtype=float)
+                force_kjmnm = float(_fs.mean())
+                force_sem   = float(_fs.std(ddof=1) / math.sqrt(_fs.size)) if _fs.size > 1 else 0.0
 
-                r_after_nm  = self.com_dist.getValue(simulation.context, allowReinitialization=False).value_in_unit(openmmunit.nanometers)
+                r_after_nm  = _r_last.value_in_unit(openmmunit.nanometers)
                 r_target_nm = r_target.value_in_unit(openmmunit.nanometers)
                 r_before_nm = r_before.value_in_unit(openmmunit.nanometers)
-                force_kjmnm      = force.value_in_unit(openmmunit.kilojoules_per_mole / openmmunit.nanometer)
                 U_cvpack_kjm     = U_cvpack.value_in_unit(openmmunit.kilojoules_per_mole)
                 dW_protocol_kjm  = dW_protocol.value_in_unit(openmmunit.kilojoules_per_mole)
-                lag_nm = r_target_nm - r_after_nm
                 _row   = (f"{i},{time_before},{r_target_nm},{r_before_nm},"
-                          f"{r_after_nm},{force_kjmnm},"
-                          f"{U_cvpack_kjm},{dW_protocol_kjm},{lag_nm:.5f}\n")
+                          f"{r_after_nm},{force_kjmnm},{force_sem},"
+                          f"{U_cvpack_kjm},{dW_protocol_kjm}\n")
 
-                # ── NC autostop (every save_freq moves) ───────────────────
+                # ── Sampled-frame diagnostics (every save_freq moves) ─────
+                # One positions fetch shared by NC autostop and the geom sidecar.
                 nc = None
-                if self.subset_protein_HA is not None and i % self.save_freq == 0:
-                    pos_nm = simulation.context.getState(getPositions=True).getPositions(asNumpy=True) / openmmunit.nanometers
-                    nc = self._compute_nc(pos_nm)
+                grow = None
+                pbc_stop = None
+                if i % self.save_freq == 0 and (self.subset_protein_CA is not None
+                                                or geom_fh is not None or _guard_w is not None):
+                    _st = simulation.context.getState(getPositions=True)
+                    pos_nm = _st.getPositions(asNumpy=True) / openmmunit.nanometers
+                    if _guard_w is not None:
+                        # The t=0 cap assumed the starting direction; the COM-COM vector
+                        # rotates during the pull. Stop cleanly before the pbc=True CV
+                        # leaves the identity region (it would jump to another image).
+                        _box = np.asarray(_st.getPeriodicBoxVectors(asNumpy=True)
+                                          .value_in_unit(openmmunit.nanometers))
+                        d_nm, lim_nm = com_reduction_margin(
+                            np.asarray(pos_nm), _box, self.groupA_atoms, _guard_w[0],
+                            self.groupB_atoms, _guard_w[1])
+                        if r_target_nm >= lim_nm - self.pbc_safety_nm:
+                            pbc_stop = (f"target r={r_target_nm:.3f} nm within {self.pbc_safety_nm:.2f} nm "
+                                        f"of the reduction limit {lim_nm:.3f} nm for the current direction")
+                        elif abs(d_nm - r_after_nm) > 0.05:
+                            pbc_stop = (f"COM distance {d_nm:.3f} nm != CV {r_after_nm:.3f} nm "
+                                        f"(CV on another periodic image)")
+                    if self.subset_protein_CA is not None:
+                        nc = self._compute_nc(pos_nm)
+                        if _unbound_nm is not None:
+                            _mind_buf.append(self._min_ligand_protein_nm(pos_nm))
+                    if geom_fh is not None:
+                        grow = self._compute_geom_row(pos_nm)
+                        geom_buf.append(f"{i},{time_before}," +
+                                        ",".join(f"{grow[c]:.5f}" for c in geom_cols) + "\n")
+                        if len(geom_buf) >= self.save_freq:
+                            geom_fh.write(''.join(geom_buf)); geom_buf.clear()
+
+                if pbc_stop is not None:
+                    _buf.append(_row)
+                    f.write(''.join(_buf))
+                    _buf.clear()
+                    logger.warning(f"[PBC guard] Stopping at move {i}: {pbc_stop} "
+                                   f"(displacement={(i + 1) * dx_nm:.3f} nm).")
+                    break
 
                 if self.autostop_nc is not None and nc is not None and _nc_initial is not None:
                     _nc_buf.append(nc)
                     current_displacement_nm = (i + 1) * dx_nm
                     nc_ready = (self.autostop_min_displacement <= 0.0 or
                                 current_displacement_nm >= self.autostop_min_displacement)
-                    if (nc_ready and len(_nc_buf) == self.autostop_nc_window and
+                    unbound = (_unbound_nm is None or
+                               (len(_mind_buf) == self.autostop_nc_window and
+                                min(_mind_buf) >= _unbound_nm))
+                    if (nc_ready and unbound and len(_nc_buf) == self.autostop_nc_window and
                             all(v < self.autostop_nc * _nc_initial for v in _nc_buf)):
                         _buf.append(_row)
                         f.write(''.join(_buf))
@@ -363,12 +458,16 @@ class SteeredMD:
                             f"[Autostop/NC] Stopping at move {i}: NC={nc:.2f} "
                             f"< {self.autostop_nc:.0%} × NC_initial={_nc_initial:.2f} "
                             f"for {self.autostop_nc_window} consecutive samples "
-                            f"(displacement={current_displacement_nm:.3f} nm)."
+                            f"(displacement={current_displacement_nm:.3f} nm"
+                            + (f", ligand-protein heavy-atom gap {_mind_buf[-1]:.3f} nm "
+                               f">= {_unbound_nm:.2f} nm" if _unbound_nm is not None else "")
+                            + ")."
                         )
                         break
 
                 # ── Progress reporting ─────────────────────────────────────
                 if i % print_interval == 0:
+                    lag_nm = r_target_nm - r_after_nm  # diagnostic only; not logged
                     if nc is not None and self.verbose > 0:
                         print(f"Move {i+1}/{n_moves}: r={r_after_nm:.3f} nm  lag={lag_nm:.4f} nm  NC={nc:.2f}")
                     else:
@@ -381,6 +480,12 @@ class SteeredMD:
 
             if _buf:
                 f.write(''.join(_buf))
+        os.replace(dat_path + ".part", dat_path)
+
+        if geom_fh is not None:
+            if geom_buf:
+                geom_fh.write(''.join(geom_buf))
+            geom_fh.close()
 
         # Save final positions
         final_positions = simulation.context.getState(getPositions=True).getPositions()
@@ -395,8 +500,14 @@ class SteeredMD:
         run_id: str = None,
         checkpoint_file: str = None,
         pdb_file: str = None,
+        state_xml_file: str = None,
+        lambda0_nm: float | None = None,
     ):
         """Run one steered MD replica at the requested speed.
+
+        The replica is equilibrated for 50 ps with the spring held at lambda0 and then pulled from
+        lambda0. lambda0_nm=None uses the COM distance of the input structure, which is shared by
+        replicas started from the same structure; pass it explicitly when starting structures differ.
 
         Sweep-fixed parameters (dx_per_move, max_displacement, sMD_spring_cte,
         save_freq) are set in __init__. Only the speed-dependent bookkeeping
@@ -424,6 +535,11 @@ class SteeredMD:
         steps_per_move_float = dx_nm / pulling_speed / dt_ps
         self.steps_per_move = max(1, int(round(steps_per_move_float)))
         realized_speed = dx_nm / (self.steps_per_move * dt_ps)
+        # Recorded in the .dat header so downstream estimators regress on the
+        # realized pulling speed (steps_per_move rounding makes it differ from
+        # the requested speed), not the nominal request.
+        self._requested_speed = pulling_speed
+        self._realized_speed = realized_speed
 
         if steps_per_move_float < 1.5:
             logger.warning(
@@ -453,31 +569,32 @@ class SteeredMD:
             self._params_logged_speeds.add(pulling_speed)
         ########################################################################################
         
-        if self.use_GReweighting:
-            integrator = LangevinSplittingGirsanov(
-                nstxout = self.steps_per_move,   
-                temperature = self.temperature,
-                collision_rate = self.integrator_friction,
-                timestep = self.timestep,
-                splitting = "R V O V R",        # ABOBA – reweightable
-                constraint_tolerance = 1.0e-6,
-            )
-        else:
-            # This is the default openMM but do not track work
-            # dicussion https://github.com/openmm/openmm/issues/2520
-            integrator = LangevinMiddleIntegrator(self.temperature, 
-                                                self.integrator_friction, 
-                                                self.timestep
-                                                # constraint_tolerance = 1.0e-6
-                                                )
+        # The OpenMM default; it does not track work (discussion https://github.com/openmm/openmm/issues/2520)
+        integrator = LangevinMiddleIntegrator(self.temperature, self.integrator_friction, self.timestep)
                     
         system = deepcopy(self.system)  # Create a copy of the system to avoid modifying the original
         simulation = Simulation(self.topology, system, integrator, self.platform)
 
         #If the systems was equilibrated with a different integrator I get NaNs (even with same splitting)
         # so Im using the PDB instead of the checkpoint file
-        if checkpoint_file is None and pdb_file is None:
-            logger.error("Either pdb_file or checkpoint_file must be provided to set initial positions.")
+        if state_xml_file is not None:
+            # Portable OpenMM State (positions+velocities+box, XML-serialized) —
+            # unlike the binary .chk, this isn't tied to the Platform/GPU that
+            # created it, so it loads safely on any node. Prefer this over
+            # checkpoint_file when both are given.
+            logger.info(f"Setting state from portable XML state file {state_xml_file}")
+            with open(state_xml_file) as f:
+                state = XmlSerializer.deserialize(f.read())
+            # Restore positions/velocities/box only — not state.getParameters():
+            # those include equilibration-only restraint globals (e.g. k_ligand)
+            # that may no longer exist as Context parameters on the production
+            # system, which setState() restores unconditionally and errors on.
+            simulation.context.setPositions(state.getPositions())
+            simulation.context.setVelocities(state.getVelocities())
+            simulation.context.setPeriodicBoxVectors(*state.getPeriodicBoxVectors())
+            simulation.integrator = integrator  # Replace the integrator with the new one
+        elif checkpoint_file is None and pdb_file is None:
+            logger.error("Either pdb_file, checkpoint_file, or state_xml_file must be provided to set initial positions.")
             exit(1)
         elif checkpoint_file is None and pdb_file is not None:
             logger.info(f"Setting positions from PDB file {pdb_file}")
@@ -509,34 +626,43 @@ class SteeredMD:
         # system.setDefaultPeriodicBoxVectors(*PDBFile(pdb_file).topology.getPeriodicBoxVectors())
         # simulation.context.reinitialize(preserveState=True)
         
-        # Pocket atoms needed for NC autostop or verbose monitoring
-        if self.verbose > 0 or self.autostop_nc is not None:
-            self.subset_protein_HA, _ = self._get_pocket_atoms(simulation, cutoff=0.5)
+        # Pocket atoms needed for NC autostop, verbose monitoring, or geom
+        # features that depend on the pocket (nc/mindist).
+        geom_feats = self._resolve_geom_features()
+        needs_pocket = (self.verbose > 0 or self.autostop_nc is not None
+                        or bool(set(geom_feats) & self._GEOM_POCKET))
+        if needs_pocket:
+            self.subset_protein_CA, _ = self._get_pocket_atoms(simulation, cutoff=0.6)
+            if any(f in geom_feats for f in self._GEOM_EXIT):
+                _st = simulation.context.getState(getPositions=True)
+                self._set_exit_reference(
+                    _st.getPositions(asNumpy=True) / openmmunit.nanometers)
         else:
-            self.subset_protein_HA = None
+            self.subset_protein_CA = None
+
+        # Build the RDKit shape calculator once (elements-only, no SDF/bonds) for
+        # any requested shape descriptors. Heavy atoms only, matching the
+        # post-processing LigandFeatures convention. masses come from the elements.
+        self._shape_calc = None
+        self._lig_heavy_idx = None
+        shape_feats = [f for f in geom_feats if f not in self._GEOM_POCKET]
+        if shape_feats:
+            from autopath.pulling.geom_kernel import ShapeDescriptorCalculator
+            atoms = list(self.topology.atoms())
+            self._lig_heavy_idx = [i for i in self._feature_atoms()
+                                   if atoms[i].element is not None
+                                   and atoms[i].element.symbol != "H"]
+            elements = [atoms[i].element.symbol for i in self._lig_heavy_idx]
+            self._shape_calc = ShapeDescriptorCalculator(elements, shape_feats)
 
         # Reset velocities to temperature. Check https://github.com/openmm/openmm/pull/259
         if self.restart_velocities:
             simulation.context.setVelocitiesToTemperature(self.temperature)
         
         if self.use_NVT:
-            # Remove existing MonteCarloBarostat to run NVT
-            system = remove_openmm_force(system, "MonteCarloBarostat")
+            # Prefix match also covers the membrane/anisotropic barostats.
+            system = remove_openmm_force(system, "MonteCarlo")
 
-        # Reinitialize the simulation context with the updated system
-        simulation.context.reinitialize(preserveState=True)
-
-        #run a super short simulation to ensure the system is stable after temp reset
-        simulation.step(50/self.timestep.value_in_unit(openmmunit.picoseconds))  # 50 ps
-        
-        # try:
-        #     simulation.integrator.reset()  # Reset the integrator. Only openmmtools integrators have this method    
-        # except AttributeError:
-        #     logger.warning("Integrator does not have reset method. This is expected for standard OpenMM integrators.")
-
-        simulation.context.setTime(0)  # reset simulation time
-        simulation.context.setStepCount(0)  # reset step count
-        
         weighByMass = True
         if len(self.groupA_atoms) == 1 or len(self.groupB_atoms) == 1:
             weighByMass = False  # avoid problems with single DUM massless atom
@@ -567,11 +693,24 @@ class SteeredMD:
         
         self.com_dist.setForceGroup(3)  # Use a separate force group for the CV GROUP 3
         system.addForce(self.com_dist)
+        # cvpack CVs are real forces (U = r): read group 3, never integrate it
+        simulation.integrator.setIntegrationForceGroups(set(range(32)) - {3})
 
         simulation.context.reinitialize(preserveState=True)
 
+        # Jarzynski/HS need every replica to start equilibrated with the spring at one shared lambda0
+        # and to follow the same schedule, so the spring is on during the pre-pull run.
+        if lambda0_nm is None:
+            lambda0 = self.com_dist.getValue(simulation.context, allowReinitialization=False)
+        else:
+            lambda0 = float(lambda0_nm) * openmmunit.nanometers
+        simulation.context.setParameter("r0_smd", lambda0)
+        simulation.step(int(round(50 / self.timestep.value_in_unit(openmmunit.picoseconds))))  # 50 ps
+        simulation.context.setTime(0)
+        simulation.context.setStepCount(0)
+
         # Run the actual pulling
-        self.pull_single_direction(simulation, run_id, direction=pulling_direction)
+        self.pull_single_direction(simulation, run_id, direction=pulling_direction, lambda0=lambda0)
 
         # Logging the total time for all replicas
         simulation_time = time.monotonic() - simulation_start_time
@@ -591,43 +730,228 @@ class SteeredMD:
         v = dx_target_nm * gammaL_ps / m_eff_dalton  # in nm/ps
         return min(max(v, v_min), v_max)
     
+    # Bare feature names supported by the geom-logging sidecar.
+    # Exit-direction (exit_1/2/3) = ligand->pocket COM unit vector projected onto
+    # the pocket's principal axes (rotation-invariant); captures the unbinding
+    # route, the strongest discriminator for rigid ligands where shape is flat.
+    _GEOM_EXIT = ("exit_1", "exit_2", "exit_3")
+    _GEOM_DEFAULT = ["nc", "mindist", "rog", "npr1", "npr2", "spherocity", "pbf",
+                     "exit_1", "exit_2", "exit_3"]
+    _GEOM_POCKET = {"nc", "mindist", "exit_1", "exit_2", "exit_3"}
+
+    def _resolve_geom_features(self) -> list[str]:
+        """Ordered list of geom feature names to log (empty when disabled)."""
+        from autopath.pulling.geom_kernel import SHAPE_FEATURES
+        if not self.log_geom_features:
+            return []
+        if self.log_geom_features is True:
+            feats = list(self._GEOM_DEFAULT)
+        else:
+            feats = list(self.log_geom_features)
+        allowed = set(SHAPE_FEATURES) | self._GEOM_POCKET
+        bad = sorted(set(feats) - allowed)
+        if bad:
+            raise ValueError(
+                f"Unsupported geom features {bad}. "
+                f"Supported: {sorted(allowed)}"
+            )
+        return feats
+
+    def _compute_geom_row(self, positions_nm) -> dict[str, float]:
+        """Compute the requested geom scalars for one frame.
+
+        positions_nm : (Natoms, 3) in nm. Shape descriptors need Angstrom, so
+        ligand heavy-atom coords are scaled by 10 before the RDKit calculator;
+        mindist stays in nm.
+        """
+        feats = self._resolve_geom_features()
+        row: dict[str, float] = {}
+        pocket_ok = self.subset_protein_CA is not None
+        if "nc" in feats and pocket_ok:
+            row["nc"] = self._compute_nc(positions_nm)
+        if "mindist" in feats and pocket_ok:
+            lig = positions_nm[self._feature_atoms()]
+            poc = positions_nm[self.subset_protein_CA]
+            diff = lig[:, np.newaxis, :] - poc[np.newaxis, :, :]
+            d2 = np.einsum('ijk,ijk->ij', diff, diff)
+            row["mindist"] = float(np.sqrt(d2.min()))
+        if any(f in feats for f in self._GEOM_EXIT) and pocket_ok:
+            e = self._exit_direction(positions_nm)
+            if e is not None:
+                row["exit_1"], row["exit_2"], row["exit_3"] = e
+        if self._shape_calc is not None:
+            lig_ang = positions_nm[self._lig_heavy_idx] * 10.0
+            row.update(self._shape_calc.compute(lig_ang))
+        return row
+
+    def _set_exit_reference(self, positions_nm):
+        """Freeze the pocket frame used by :meth:`_exit_direction`.
+
+        Called once during setup, from the same context positions that select
+        the pocket atoms. Storing one reference geometry (and one set of axes)
+        for the whole run is what makes the exit vector continuous in time and
+        comparable across replicas: every frame is expressed in *this* frame,
+        so no per-frame sign choice is ever made.
+
+        The eigenvector signs of the reference itself are still arbitrary, but
+        they are chosen exactly once, and every replica starts from the same
+        equilibrated structure, so the choice agrees run to run.
+        """
+        poc = np.asarray(positions_nm, dtype=float)[self.subset_protein_CA]
+        cB = poc.mean(0)
+        Xp = poc - cB
+        _, V = np.linalg.eigh(Xp.T @ Xp)      # columns: pocket principal axes
+        for j in range(3):                    # one-off deterministic sign pick
+            k = int(np.argmax(np.abs(V[:, j])))
+            if V[k, j] < 0:
+                V[:, j] = -V[:, j]
+        self._exit_ref = (Xp, V)
+
+    def _exit_direction(self, positions_nm):
+        """Ligand->pocket COM unit vector in the *reference* pocket frame.
+
+        Returns (e1, e2, e3): the unit exit vector rotated into the pocket
+        reference frame captured by :meth:`_set_exit_reference` and projected
+        onto that reference's principal axes. Direction only — the magnitude
+        (~r) is already carried by r_before. Returns None if the ligand and
+        pocket COMs coincide, or if the pocket is too small to superpose.
+
+        Purely per-frame: it uses only the coordinates handed to it, so it runs
+        inside the pulling loop with no trajectory and no second pass.
+
+        Why not diagonalise per frame
+        -----------------------------
+        Eigenvectors are defined up to a sign. The previous implementation
+        diagonalised the pocket every frame and fixed the sign by making the
+        largest *Cartesian* component positive. That rule lives in the lab
+        frame, so it is not rotation invariant — rotating the whole system,
+        which changes no physics, flipped the reported signs. Since the protein
+        tumbles freely during a pull, the convention flipped mid-trajectory:
+        the feature became bimodal with a hard gap at zero and took single-step
+        jumps of ~1.4 in a unit-vector component, which showed up downstream as
+        a spurious detached cluster in the path PCA.
+
+        Rotating each frame onto a fixed reference removes the choice entirely
+        rather than trying to make it deterministic. Cost is one 3x3 SVD,
+        replacing the 3x3 eigendecomposition it supersedes.
+        """
+        # getattr, not attribute access: instances built without __init__ (the
+        # geom-logging tests do this) must still self-heal rather than raise.
+        if getattr(self, '_exit_ref', None) is None:
+            self._set_exit_reference(positions_nm)   # first frame becomes the reference
+        ref_pocket, ref_axes = self._exit_ref
+
+        lig = positions_nm[self._feature_atoms()]
+        poc = positions_nm[self.subset_protein_CA]
+        cA = lig.mean(0)
+        cB = poc.mean(0)
+        v = cA - cB
+        nrm = float(np.sqrt(v @ v))
+        if nrm < 1e-9:
+            return None
+        u = v / nrm
+
+        Xp = poc - cB
+        if Xp.shape[0] < 3:
+            return None
+
+        # Kabsch: proper rotation R with (Xp @ R) ~= reference pocket.
+        H = Xp.T @ ref_pocket
+        U, _, Wt = np.linalg.svd(H)
+        D = np.eye(3)
+        D[2, 2] = np.sign(np.linalg.det(U @ Wt)) or 1.0
+        R = U @ D @ Wt
+
+        e = (u @ R) @ ref_axes
+        return float(e[0]), float(e[1]), float(e[2])
+
+    def _feature_atoms(self):
+        """Ligand atoms for NC autostop, pocket selection and geom features.
+
+        The whole-ligand heavy atoms when given; groupA (the pulled anchor) otherwise.
+        The anchor defines only the pulled COM.
+        """
+        return _feature_atoms(self)
+
+    def _protein_heavy_atoms(self):
+        """Protein heavy atoms (no solvent, ions, ligand or the pulled group's residues)."""
+        skip = {"HOH", "WAT", "SOL", "NA", "CL", "K", "MG", "UNK"}
+        lig = set(_feature_atoms(self))
+        own = {a.residue.index for a in self.topology.atoms() if a.index in lig}
+        return np.array([a.index for a in self.topology.atoms()
+                         if a.residue.name not in skip and a.residue.index not in own
+                         and a.element is not None and a.element.symbol != "H"], dtype=int)
+
+    def _min_ligand_protein_nm(self, positions_nm):
+        """Smallest ligand heavy-atom to protein heavy-atom distance (nm), same image.
+
+        Positions are continuous (no PBC wrapping) and every replica starts co-imaged,
+        so the direct distance is the physical one while the ligand is near the protein.
+        """
+        lig = positions_nm[_feature_atoms(self)]
+        prot = positions_nm[self._protein_heavy]
+        diff = lig[:, None, :] - prot[None, :, :]
+        return float(np.sqrt(np.einsum('ijk,ijk->ij', diff, diff).min()))
+
     def _compute_nc(self, positions_nm, threshold_nm=0.5):
         """Compute number of contacts via switching function 1/(1+(d/threshold)^6) using positions only.
-        Similar to what CVPack does
+        Similar to what CVPack does.
+
+        Uses squared distances: 1/(1+(d/r0)^6) = 1/(1+(d^2/r0^2)^3), so the
+        sqrt inside the norm is skipped (the result is immediately raised to
+        the 6th power). Numerically identical to the norm form.
         """
-        lig_pos = positions_nm[self.groupA_atoms]
-        pocket_pos = positions_nm[self.subset_protein_HA]
-        d = np.linalg.norm(lig_pos[:, np.newaxis, :] - pocket_pos[np.newaxis, :, :], axis=2)
-        x = d / threshold_nm
-        return float(np.sum(1.0 / (1.0 + x**6)))
+        lig_pos = positions_nm[self._feature_atoms()]
+        pocket_pos = positions_nm[self.subset_protein_CA]
+        diff = lig_pos[:, np.newaxis, :] - pocket_pos[np.newaxis, :, :]
+        d2 = np.einsum('ijk,ijk->ij', diff, diff)
+        x2 = d2 / (threshold_nm * threshold_nm)
+        return float(np.sum(1.0 / (1.0 + x2**3)))
 
     def _get_pocket_atoms(self, simulation, cutoff=0.6):
-        """Return protein heavy atoms within *cutoff* nm of any ligand atom.
+        """Return protein alpha carbons within *cutoff* nm of any ligand feature atom.
 
         Solvent, ions, and unknown residues are excluded. Used both for
         verbose NC monitoring and for the NC-based autostop criterion.
 
         Returns
         -------
-        subset_protein_HA : np.ndarray of int
-            Indices of pocket heavy atoms within cutoff of the ligand.
+        subset_protein_CA : np.ndarray of int
+            Atom indices of the pocket alpha carbons within cutoff of the ligand.
         subset_protein_residues : list of Residue
             Corresponding residue objects.
         """
 
         protein_atoms = [atom for atom in self.topology.atoms() if atom.residue.name not in ["HOH", "WAT", "SOL", "NA", "CL", "K","MG", 'UNK']]
-        protein_HA = [atom.index for atom in protein_atoms if atom.element.symbol != "H"]  # Exclude hydrogens
-        
-        # Find a subset of protein_HA that are cutoff nm away from groupA_atoms
+        # protein_HA = [atom.index for atom in protein_atoms if atom.element.symbol != "H"]  # Exclude hydrogens
+
+        # Exclude the pulled group's own residues so a protein-protein/peptide
+        # pull (e.g. CA-anchored) can't select itself as its own pocket.
+        groupA_atom_set = set(_feature_atoms(self))
+        groupA_residues = {atom.residue.index for atom in self.topology.atoms()
+                           if atom.index in groupA_atom_set}
+
+        # Only alpha carbons. The element check rejects Ca2+ ions, which are also named "CA".
+        protein_CA = np.array([atom.index for atom in self.topology.atoms()
+                               if atom.name == "CA" and atom.element is not None
+                               and atom.element.symbol == "C"
+                               and atom.residue.index not in groupA_residues], dtype=int)
+        if protein_CA.size == 0:
+            logger.warning("_get_pocket_atoms: no alpha carbons remain after excluding "
+                            "groupA's own residues; the pulled group may span the entire protein.")
+
+        # Find a subset of protein_CA that are cutoff nm away from the ligand feature atoms
         state = simulation.context.getState(getPositions=True, getVelocities=False)
         positions = state.getPositions(asNumpy=True) / openmmunit.nanometers
-        ligand_pos = positions[self.groupA_atoms]
-        pocket_pos = positions[protein_HA]
+        ligand_pos = positions[_feature_atoms(self)]
+        pocket_pos = positions[protein_CA]
 
-        distances = np.linalg.norm(ligand_pos[:, np.newaxis, :] - pocket_pos[np.newaxis, :, :], axis=2)
-        close_indices = np.any(distances < cutoff, axis=0)
-        subset_protein_HA = np.array(protein_HA)[close_indices]
-        subset_protein_residues = [atom.residue for atom in protein_atoms if atom.index in subset_protein_HA]
-        
-        return subset_protein_HA, subset_protein_residues
+        diff = ligand_pos[:, np.newaxis, :] - pocket_pos[np.newaxis, :, :]
+        d2 = np.einsum('ijk,ijk->ij', diff, diff)
+        close_indices = np.any(d2 < cutoff * cutoff, axis=0)
+        subset_protein_CA = protein_CA[close_indices]
+        _subset = set(subset_protein_CA.tolist())
+        subset_protein_residues = [atom.residue for atom in protein_atoms if atom.index in _subset]
+
+        return subset_protein_CA, subset_protein_residues
 

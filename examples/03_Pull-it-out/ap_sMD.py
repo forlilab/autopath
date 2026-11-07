@@ -1,107 +1,124 @@
 import os
-import logging
 import argparse
+from glob import glob
 
 import MDAnalysis as mda
+from rdkit import Chem
+from openmm.app import PDBFile
 
 from autopath import SteeredMD
-from autopath.utils import load_system, setup_logging, wrap_align_save_traj
-from openmm.app import PDBFile, AmberPrmtopFile
+from autopath.utils import (load_system, setup_logging, wrap_align_save_traj,
+                            get_pocket_atoms_idxs, get_ligand_anchor_atoms)
 
 
 def cmd_lineparser():
     parser = argparse.ArgumentParser(
-        description="Runs steered molecular dynamics simulation (sMD) for a protein-ligand complex.",
+        description="Runs steered molecular dynamics (sMD) pulls for an equilibrated protein-ligand complex.",
         epilog="""
         COPYRIGHT
                 Copyright (C) 2026 Forli Lab, Center for Computational Structural Biology,
                              Scripps Research.""",
     )
-
-    parser.add_argument(
-        "-s",
-        "--sysname",
-        dest="sysname",
-        required=True,
-        action="store",
-        help="name for the system, all output will be stored in a folder with this name",
-    )
-    
+    parser.add_argument("-s", "--sysname", dest="sysname", required=True,
+                        help="system name; outputs go to <sysname>/sMD")
+    parser.add_argument("--eqdir", default=None,
+                        help="folder of the equilibrated system (default: ../01_Build_and_Equilibrate/<sysname>)")
+    parser.add_argument("-l", "--lig", default=None,
+                        help="ligand SDF, only used to draw the anchor atoms (optional)")
+    parser.add_argument("--ligand_sel", default="resname UNK", help="MDAnalysis selection of the ligand")
+    parser.add_argument("--pocket_sel", default=None,
+                        help="MDAnalysis selection of the pocket atoms, in system.pdb numbering "
+                             "(default: CA atoms of residues within 8 A of the ligand)")
+    parser.add_argument("--anchor", default="murcko",
+                        choices=["murcko", "lig_ha", "lig_com", "pocket_com", "contacts", "inertia"],
+                        help="ligand atoms pulled by the restraint (default: murcko)")
+    parser.add_argument("--speeds", type=float, nargs="+", default=[0.005, 0.010, 0.015],
+                        help="pulling speeds in nm/ps (0.001 nm/ps = 1 m/s; default: 5, 10, 15 m/s)")
+    parser.add_argument("--reps", type=int, default=10, help="replicas per speed")
     return parser.parse_args()
+
 
 def main():
 
     args = cmd_lineparser()
     sys_name = args.sysname
-        
-    DATADIR = f'/gpfs/home/mllanos/forlilab/autopath/examples/01_Build_and_Equilibrate/{sys_name}'
-    N_REPS = 10 # how many pulling replicates to run
-    DIRECTION = 'forward' # 'forward' or 'backward'
-    SPEED = 0.01 #nm/ps
-    DX_PER_MOVE = 0.001 #nm, how often to update the reference position for the spring
-    SPRING_CTE = 50 * 4.184  # KJ/mol/nm2/atom, converted from kcal. This affects thermal fluctuations
-    
-    # Setup logging
-    logger = setup_logging(f"{sys_name}/autopath.log", log_level="INFO")
-    logger.info(f"Starting steered MD simulations for {sys_name} with {N_REPS} replicates in {DIRECTION} direction.")
-    
-    ligand_resname = "UNK"  # Change this to your ligand residue name
-    pocket_residues = [134, 135, 136, 137, 138, 139, 140, 157, 158, 159, 160, 161, 162, 180,
-                       181, 182, 183, 211, 212, 213, 214, 215, 226, 227, 228, 229]
-    
-    checkpoint = f'{DATADIR}/equilibration/checkpoint_equil_{sys_name}.chk'
-    system_fname = f'{DATADIR}/equilibration/system_equil_{sys_name}.xml'
-    system = load_system(system_fname)
-    prmtop_fname = f'{DATADIR}/system.prmtop'
-    pdb_fname = f'{DATADIR}/equilibration/{sys_name}_equilibrated.pdb'
-    topology = PDBFile(pdb_fname).topology
-    
-    u = mda.Universe(pdb_fname)
-    pocket_atoms = u.select_atoms(f'resid {" ".join(map(str, pocket_residues))} and name CA')
-    pocket_atoms_idx = [a.index for a in pocket_atoms]
-    ligand_atoms = u.select_atoms(f'resname {ligand_resname} and not name H*')
-    ligand_atoms_idx = [a.index for a in ligand_atoms]
-    
+    eq_root = args.eqdir or f"../01_Build_and_Equilibrate/{sys_name}"
+    eq_dir = f"{eq_root}/equilibration"
+
+    # Settings used in the AutoPath paper
+    TIMESTEP = 0.004        # ps (needs HMR)
+    TEMPERATURE = 300       # K
+    DX_PER_MOVE = 0.001     # nm, restraint-centre increment
+    MAX_DISPLACEMENT = 3.5  # nm, maximum pulling distance
+    SPRING_PER_ATOM = 100 * 4.184  # kJ/mol/nm2 per ligand heavy atom (418.4)
+    AUTOSTOP_NC = 0.01      # stop once ligand-pocket contacts < 1% of the initial value ...
+    AUTOSTOP_WINDOW = 5     # ... for this many consecutive samples
+
     os.makedirs(sys_name, exist_ok=True)
-    
+    logger = setup_logging(f"{sys_name}/autopath.log", log_level="INFO")
+
+    system = load_system(f"{eq_dir}/system_equil_{sys_name}.xml")
+    checkpoint = f"{eq_dir}/checkpoint_equil_{sys_name}.chk"
+    state_xml = f"{eq_dir}/checkpoint_equil_{sys_name}.xml"
+    system_pdb = f"{eq_root}/system.pdb"
+    eq_pdb = f"{eq_dir}/{sys_name}_equilibrated.pdb"
+    topology = PDBFile(system_pdb).topology
+
+    # Pocket and ligand anchor atoms (system.pdb numbering), from the equilibration
+    u = mda.Universe(eq_pdb, f"{eq_dir}/equilibration_{sys_name}_aligned.dcd")
+    lig_ha = f"({args.ligand_sel}) and not name H*"
+    if args.pocket_sel is not None:
+        pocket_idx = get_pocket_atoms_idxs(u, pocket_selection=args.pocket_sel)
+    else:
+        pocket_idx = get_pocket_atoms_idxs(u, ligand_selection=lig_ha)
+    ref_mol = Chem.SDMolSupplier(args.lig)[0] if args.lig else None
+    anchor_idx = get_ligand_anchor_atoms(u, args.ligand_sel, mode=args.anchor, n_atoms=5,
+                                         out_dir=sys_name, ref_mol=ref_mol)
+    n_heavy = len(u.select_atoms(lig_ha))
+    logger.info(f"{len(pocket_idx)} pocket atoms; {len(anchor_idx)} '{args.anchor}' anchor atoms")
+
     ########################################################################################
     ###################################### Steered MD ######################################
     ########################################################################################
 
-    sMD_spring_cte = SPRING_CTE * len(ligand_atoms_idx)  # Normalize by ligand size
-    logger.info(f"sMD spring constant set to {sMD_spring_cte} KJ/mol/nm2 for ligand of {len(ligand_atoms_idx)} atoms.")
-    
-    # Run steered MD
+    # The spring scales with the total number of ligand heavy atoms (not anchor atoms)
+    spring = SPRING_PER_ATOM * n_heavy
+    logger.info(f"sMD spring constant {spring:.1f} kJ/mol/nm2 for {n_heavy} ligand heavy atoms")
+
+    smd_dir = f"{sys_name}/sMD/trajectories"
     sMD = SteeredMD(
         system=system,
         topology=topology,
-        groupA_atoms=ligand_atoms_idx,
-        groupB_atoms=pocket_atoms_idx,
-        restrained_atoms=None,
+        groupA_atoms=anchor_idx,
+        groupB_atoms=pocket_idx,
         restart_velocities=True,
-        out_dir=f"{sys_name}/sMD",
+        timestep=TIMESTEP,
+        temperature=TEMPERATURE,
+        out_dir=smd_dir,
         dx_per_move=DX_PER_MOVE,
-        max_displacement=2.5,
-        sMD_spring_cte=sMD_spring_cte,
+        max_displacement=MAX_DISPLACEMENT,
+        sMD_spring_cte=spring,
+        autostop_nc=AUTOSTOP_NC,
+        autostop_nc_window=AUTOSTOP_WINDOW,
+        autostop_min_displacement=0.5,
+        save_freq=5,
+        # Per-frame geometry (contacts, min-distance, ligand shape) logged to
+        # sMD_<run_id>_geom.dat; used as clustering features by analyze_sMD.py
+        log_geom_features=True,
     )
 
-    for rep_idx in range(1, N_REPS+1):
-        rep_id = sMD.run(
-                pulling_speed=SPEED, #nm/ps
-                checkpoint_file=checkpoint,
-                pulling_direction=DIRECTION,
-                )
-        
-        logger.info(f"Completed sMD replicate {rep_idx}/{N_REPS} with ID: {rep_id}")
+    # Each replica starts from the equilibrated state with new velocities,
+    # relaxes 50 ps with the spring at its start position, then pulls forward.
+    for speed in args.speeds:
+        for rep in range(1, args.reps + 1):
+            run_id = sMD.run(pulling_speed=speed, pulling_direction="forward",
+                             checkpoint_file=checkpoint, state_xml_file=state_xml)
+            logger.info(f"Completed sMD replica {rep}/{args.reps} at {speed} nm/ps: {run_id}")
 
-        ####################### Post-processing ######################
-        ########## Wrap, align and save the clean trajectory #########
-        ##############################################################
-        
-        smd_traj = f"{sys_name}/sMD/sMD_{rep_id}.dcd"
-        wrap_align_save_traj(smd_traj, prmtop_fname)
-    
-    return
+    # Wrap, centre and superpose the pulling trajectories
+    trajs = [f for f in sorted(glob(f"{smd_dir}/sMD_replica-*.dcd")) if "aligned" not in f]
+    wrap_align_save_traj(trajs, system_pdb)
+
 
 if __name__ == "__main__":
     main()

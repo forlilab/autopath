@@ -5,6 +5,9 @@ This package provides tools for running, analysing, and post-processing
 funnel metadynamics simulations:
 
 - MetadynamicsMD          : run OpenMM WT-MetaD simulations
+- BoundaryCorrectedMetadynamics : WT-MetaD with McGovern–de Pablo edge-corrected hills
+- TransitionTemperedMetadynamics : transition-tempered MetaD (Dama 2014) on the same hills
+- load_hills / bias_from_hills / fes_history : rebuild the bias and FES(t) from HILLS v2
 - MetadynamicsAnalysis    : post-run diagnostics and convergence analysis
 - correct_fe_for_funnel   : Limongelli 2013 standard-state correction
 - write_metad_preseed     : pre-seed metadynamics bias from sMD PMF
@@ -14,11 +17,17 @@ funnel metadynamics simulations:
 
 # --- Simulation ---
 from .MetadynamicsMD import MetadynamicsMD
+from .BoundaryCorrection import BoundaryCorrectedMetadynamics, LinearComposite, ResidualComposite
+from .TransitionTempered import TransitionTemperedMetadynamics, vstar
+from .Hills import load_hills, bias_from_hills, fes_history, hills_record
 
 # --- Analysis ---
 from .Analysis import (
     MetadynamicsAnalysis,
     correct_fe_for_funnel,
+    rct_weights,
+    dcd_frame_of_rows,
+    reweighted_fes,
     write_metad_preseed,
     plot_colvar,
     plot_bias,
@@ -36,6 +45,7 @@ from .CV import (
     rmsd_states_cv,
     path_rmsd_cv,
     pathCV_cv,
+    funnel_z_cv,
     contacts_cv,
 )
 
@@ -46,13 +56,42 @@ from .Funnel import (
     save_funnel_params,
     load_funnel_params,
     create_funnel_force_from_trajectory_analysis,
+    funnel_lower_wall_ang,
+    funnel_z_grid_min_ang,
+    funnel_z_bounds_nm,
+    com_distance_at_z,
+    z_max_for_bulk,
     write_funnel_pymol,
+    FunnelFrameError,
+    upgrade_funnel_params,
+    funnel_frame,
+    funnel_axis_at,
+    funnel_z_ang,
+    funnel_mode,
+    funnel_coords_ang,
+    funnel_origin_axis_at,
+    orientation_restrained_params,
+    orient_params_for_state,
+    orientation_restraint_force,
+    check_orient_start,
+    orient_theta_deg,
+    ORIENT_MAX_START_DEG,
 )
 
 __all__ = [
     "MetadynamicsMD",
+    "BoundaryCorrectedMetadynamics",
+    "TransitionTemperedMetadynamics",
+    "vstar",
+    "load_hills",
+    "bias_from_hills",
+    "fes_history",
+    "hills_record",
     "MetadynamicsAnalysis",
     "correct_fe_for_funnel",
+    "rct_weights",
+    "dcd_frame_of_rows",
+    "reweighted_fes",
     "write_metad_preseed",
     "plot_colvar",
     "plot_bias",
@@ -66,11 +105,31 @@ __all__ = [
     "rmsd_states_cv",
     "path_rmsd_cv",
     "pathCV_cv",
+    "funnel_z_cv",
     "contacts_cv",
     "add_funnel_restraints",
     "generate_funnel_parameters_from_trajectory",
     "save_funnel_params",
     "load_funnel_params",
     "create_funnel_force_from_trajectory_analysis",
+    "funnel_lower_wall_ang",
+    "funnel_z_grid_min_ang",
+    "funnel_z_bounds_nm",
+    "com_distance_at_z",
+    "z_max_for_bulk",
     "write_funnel_pymol",
+    "FunnelFrameError",
+    "upgrade_funnel_params",
+    "funnel_frame",
+    "funnel_axis_at",
+    "funnel_z_ang",
+    "funnel_mode",
+    "funnel_coords_ang",
+    "funnel_origin_axis_at",
+    "orientation_restrained_params",
+    "orient_params_for_state",
+    "orientation_restraint_force",
+    "check_orient_start",
+    "orient_theta_deg",
+    "ORIENT_MAX_START_DEG",
 ]
