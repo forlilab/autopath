@@ -26,6 +26,26 @@ def _feature_atoms(smd):
     lig = getattr(smd, "ligand_atoms", None)
     return smd.groupA_atoms if lig is None or len(lig) == 0 else lig
 
+
+def _com_reduction_margin(positions_nm, box_nm, idx_a, w_a, idx_b, w_b):
+    """Current COM-COM distance and the PBC half-box limit along its *current* direction.
+
+    Positions are continuous (never wrapped), so the raw COM difference is the physical
+    displacement. The pbc=True CV equals its length only while |d_i| < L_i / 2 on every
+    axis (the same per-axis rule as the t=0 move cap); the direction rotates during a
+    pull, so the t=0 cap alone is not enough.
+    """
+    pos = np.asarray(positions_nm, dtype=float)
+    d = (np.asarray(w_a)[:, None] * pos[idx_a]).sum(0) - (np.asarray(w_b)[:, None] * pos[idx_b]).sum(0)
+    dn = float(np.linalg.norm(d))
+    if dn < 1e-9:
+        return dn, float("inf")
+    half = np.diag(np.asarray(box_nm, dtype=float)) / 2.0
+    n = np.abs(d / dn)
+    with np.errstate(divide="ignore"):
+        per = np.where(n > 1e-12, half / n, np.inf)
+    return dn, float(per.min())
+
 class SteeredMD:
     """Steered molecular dynamics: pull a ligand along a COM-COM reaction
     coordinate using a moving harmonic restraint.
@@ -233,6 +253,7 @@ class SteeredMD:
         initial_r0_nm = initial_r0.value_in_unit(openmmunit.nanometers)
         dx_nm = float(self.dx_per_move.value_in_unit(openmmunit.nanometers))
         n_moves = self.sMD_moves
+        _guard_w = None   # COM weights for the in-loop PBC guard (set with the t=0 cap)
         if direction == "forward" and self.sMD_max_r_offset > 0:
             state    = simulation.context.getState(getPositions=True)
             box_vecs = state.getPeriodicBoxVectors()
@@ -275,6 +296,7 @@ class SteeredMD:
             with np.errstate(divide='ignore', invalid='ignore'):
                 r_max_per_axis = np.where(abs_v > 1e-6, (L / 2.0) * v_norm / abs_v, np.inf)
             r_max_pbc      = float(np.min(r_max_per_axis)) - self.pbc_safety_nm
+            _guard_w = (masses_A / masses_A.sum(), masses_B / masses_B.sum())
             r_max_offset   = v_norm + self.sMD_max_r_offset
             r_max          = min(r_max_pbc, r_max_offset)
             moves_safe     = max(1, int((r_max - v_norm) / dx_nm))
@@ -406,9 +428,26 @@ class SteeredMD:
                 # One positions fetch shared by NC autostop and the geom sidecar.
                 nc = None
                 grow = None
+                pbc_stop = None
                 if i % self.save_freq == 0 and (self.subset_protein_CA is not None
-                                                or geom_fh is not None):
-                    pos_nm = simulation.context.getState(getPositions=True).getPositions(asNumpy=True) / openmmunit.nanometers
+                                                or geom_fh is not None or _guard_w is not None):
+                    _st = simulation.context.getState(getPositions=True)
+                    pos_nm = _st.getPositions(asNumpy=True) / openmmunit.nanometers
+                    if _guard_w is not None:
+                        # The t=0 cap assumed the starting direction; the COM-COM vector
+                        # rotates during the pull. Stop cleanly before the pbc=True CV
+                        # leaves the identity region (it would jump to another image).
+                        _box = np.asarray(_st.getPeriodicBoxVectors(asNumpy=True)
+                                          .value_in_unit(openmmunit.nanometers))
+                        d_nm, lim_nm = _com_reduction_margin(
+                            np.asarray(pos_nm), _box, self.groupA_atoms, _guard_w[0],
+                            self.groupB_atoms, _guard_w[1])
+                        if r_target_nm >= lim_nm - self.pbc_safety_nm:
+                            pbc_stop = (f"target r={r_target_nm:.3f} nm within {self.pbc_safety_nm:.2f} nm "
+                                        f"of the reduction limit {lim_nm:.3f} nm for the current direction")
+                        elif abs(d_nm - r_after_nm) > 0.05:
+                            pbc_stop = (f"COM distance {d_nm:.3f} nm != CV {r_after_nm:.3f} nm "
+                                        f"(CV on another periodic image)")
                     if self.subset_protein_CA is not None:
                         nc = self._compute_nc(pos_nm)
                         if _unbound_nm is not None:
@@ -419,6 +458,14 @@ class SteeredMD:
                                         ",".join(f"{grow[c]:.5f}" for c in geom_cols) + "\n")
                         if len(geom_buf) >= self.save_freq:
                             geom_fh.write(''.join(geom_buf)); geom_buf.clear()
+
+                if pbc_stop is not None:
+                    _buf.append(_row)
+                    f.write(''.join(_buf))
+                    _buf.clear()
+                    logger.warning(f"[PBC guard] Stopping at move {i}: {pbc_stop} "
+                                   f"(displacement={(i + 1) * dx_nm:.3f} nm).")
+                    break
 
                 if self.autostop_nc is not None and nc is not None and _nc_initial is not None:
                     _nc_buf.append(nc)
