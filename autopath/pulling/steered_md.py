@@ -10,7 +10,7 @@ from datetime import datetime
 
 from autopath.utils import *
 from autopath.customForces import (add_harmonic_restraints, remove_openmm_force)
-from autopath.pulling.pbc import reduction_identity_limit, triclinic_minimum_image
+from autopath.pulling.pbc import reduction_identity_limit, triclinic_minimum_image, com_reduction_margin
 
 from openmm.app import *
 from openmm import XmlSerializer
@@ -237,6 +237,7 @@ class SteeredMD:
         initial_r0_nm = initial_r0.value_in_unit(openmmunit.nanometers)
         dx_nm = float(self.dx_per_move.value_in_unit(openmmunit.nanometers))
         n_moves = self.sMD_moves
+        _guard_w = None   # COM weights for the in-loop PBC guard (set with the t=0 cap)
         if direction == "forward" and self.sMD_max_r_offset > 0:
             state    = simulation.context.getState(getPositions=True)
             box_vecs = state.getPeriodicBoxVectors()
@@ -266,6 +267,7 @@ class SteeredMD:
                     f"across a periodic boundary at t=0; cap would be unreliable."
                 )
             r_red, red_axis = reduction_identity_limit(v / v_norm, box_arr)
+            _guard_w = (masses_A / masses_A.sum(), masses_B / masses_B.sum())
             r_max_pbc      = r_red - self.pbc_safety_nm
             r_max_offset   = v_norm + self.sMD_max_r_offset
             r_max          = min(r_max_pbc, r_max_offset)
@@ -400,9 +402,26 @@ class SteeredMD:
                 # One positions fetch shared by NC autostop and the geom sidecar.
                 nc = None
                 grow = None
+                pbc_stop = None
                 if i % self.save_freq == 0 and (self.subset_protein_CA is not None
-                                                or geom_fh is not None):
-                    pos_nm = simulation.context.getState(getPositions=True).getPositions(asNumpy=True) / openmmunit.nanometers
+                                                or geom_fh is not None or _guard_w is not None):
+                    _st = simulation.context.getState(getPositions=True)
+                    pos_nm = _st.getPositions(asNumpy=True) / openmmunit.nanometers
+                    if _guard_w is not None:
+                        # The t=0 cap assumed the starting direction; the COM-COM vector
+                        # rotates during the pull. Stop cleanly before the pbc=True CV
+                        # leaves the identity region (it would jump to another image).
+                        _box = np.asarray(_st.getPeriodicBoxVectors(asNumpy=True)
+                                          .value_in_unit(openmmunit.nanometers))
+                        d_nm, lim_nm = com_reduction_margin(
+                            np.asarray(pos_nm), _box, self.groupA_atoms, _guard_w[0],
+                            self.groupB_atoms, _guard_w[1])
+                        if r_target_nm >= lim_nm - self.pbc_safety_nm:
+                            pbc_stop = (f"target r={r_target_nm:.3f} nm within {self.pbc_safety_nm:.2f} nm "
+                                        f"of the reduction limit {lim_nm:.3f} nm for the current direction")
+                        elif abs(d_nm - r_after_nm) > 0.05:
+                            pbc_stop = (f"COM distance {d_nm:.3f} nm != CV {r_after_nm:.3f} nm "
+                                        f"(CV on another periodic image)")
                     if self.subset_protein_CA is not None:
                         nc = self._compute_nc(pos_nm)
                         if _unbound_nm is not None:
@@ -413,6 +432,14 @@ class SteeredMD:
                                         ",".join(f"{grow[c]:.5f}" for c in geom_cols) + "\n")
                         if len(geom_buf) >= self.save_freq:
                             geom_fh.write(''.join(geom_buf)); geom_buf.clear()
+
+                if pbc_stop is not None:
+                    _buf.append(_row)
+                    f.write(''.join(_buf))
+                    _buf.clear()
+                    logger.warning(f"[PBC guard] Stopping at move {i}: {pbc_stop} "
+                                   f"(displacement={(i + 1) * dx_nm:.3f} nm).")
+                    break
 
                 if self.autostop_nc is not None and nc is not None and _nc_initial is not None:
                     _nc_buf.append(nc)

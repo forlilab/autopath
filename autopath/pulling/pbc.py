@@ -48,3 +48,24 @@ def reduction_identity_limit(n, box_nm):
         per = np.where(n > 1e-12, half / n, np.inf)
     axis = int(np.argmin(per))
     return float(per[axis]), axis
+
+
+def com_reduction_margin(positions_nm, box_nm, idx_a, w_a, idx_b, w_b):
+    """Current COM-COM distance and its reduction-identity limit along the current direction.
+
+    ``positions_nm`` are the continuous (never wrapped) context positions, so the raw COM
+    difference is the physical displacement. The pbc=True CV equals its length only while the
+    displacement stays inside :func:`reduction_identity_limit` for its *current* direction;
+    the direction rotates during a pull, so a limit taken at t=0 is not enough.
+
+    Returns
+    -------
+    (float, float)
+        ``|d|`` (nm) and the identity limit along ``d / |d|`` (nm).
+    """
+    pos = np.asarray(positions_nm, dtype=float)
+    d = (np.asarray(w_a)[:, None] * pos[idx_a]).sum(0) - (np.asarray(w_b)[:, None] * pos[idx_b]).sum(0)
+    dn = float(np.linalg.norm(d))
+    if dn < 1e-9:
+        return dn, float("inf")
+    return dn, reduction_identity_limit(d / dn, box_nm)[0]

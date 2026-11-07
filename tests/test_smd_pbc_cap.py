@@ -127,3 +127,30 @@ def test_pull_cap_unchanged_in_orthorhombic_box(tmp_path, monkeypatch, caplog):
     want = int((_old_cap(v, L) - 0.5 - r) / 0.001)
     m = re.search(r"Capping sMD_moves 10000 → (\d+)", caplog.text)
     assert m and int(m.group(1)) == want
+
+
+def test_com_reduction_margin_follows_current_direction():
+    from autopath.pulling.pbc import com_reduction_margin
+    box = _DODEC
+    w = np.array([1.0])
+    # 2.0 nm along x: limit a_x/2 = 4.24 nm; same length along z: limit c_z/2 = 3.00 nm
+    pos_x = np.array([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
+    pos_z = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 2.0]])
+    d, lim_x = com_reduction_margin(pos_x, box, [1], w, [0], w)
+    assert d == pytest.approx(2.0) and lim_x == pytest.approx(box[0, 0] / 2)
+    d, lim_z = com_reduction_margin(pos_z, box, [1], w, [0], w)
+    assert d == pytest.approx(2.0) and lim_z == pytest.approx(box[2, 2] / 2)
+    assert lim_z < lim_x   # a pull that tilts toward z loses margin the t=0 cap did not see
+
+
+def test_com_reduction_margin_matches_openmm_cv_inside_limit():
+    from autopath.pulling.pbc import com_reduction_margin
+    rng = np.random.default_rng(3)
+    for _ in range(50):
+        n = rng.normal(size=3); n /= np.linalg.norm(n)
+        lim, _ = reduction_identity_limit(n, _DODEC)
+        r = rng.uniform(0.1, 0.95) * lim
+        pos = np.array([[0.0, 0.0, 0.0], r * n])
+        d, lim2 = com_reduction_margin(pos, _DODEC, [1], [1.0], [0], [1.0])
+        assert d == pytest.approx(r) and lim2 == pytest.approx(lim)
+        assert np.linalg.norm(triclinic_minimum_image(r * n, _DODEC)) == pytest.approx(r)
