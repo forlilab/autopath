@@ -41,12 +41,12 @@ def test_raises_when_cvpack_cv_disagrees_with_geometry(tmp_path, monkeypatch):
         steps_per_move=1,
         save_freq=1,
         sMD_max_r_offset=3.0,
-        pbc_safety_nm=0.5,
+        pbc_safety_nm=0.5, _co_image_ligand=lambda sim: 1.743,
         groupA_atoms=[0],
         groupB_atoms=[1],
         dx_per_move=0.001 * openmmunit.nanometers,
     )
 
-    with pytest.raises(RuntimeError, match="differs from cvpack"):
+    with pytest.raises(RuntimeError, match="differs from cvpack COM distance"):
         SteeredMD.pull_single_direction(smd, simulation, run_id=1, direction="forward",
                                         lambda0=1.743 * openmmunit.nanometers)

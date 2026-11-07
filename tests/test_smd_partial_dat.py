@@ -31,7 +31,7 @@ def test_crashed_pull_leaves_no_dat(tmp_path, monkeypatch):
         com_dist=SimpleNamespace(getValue=lambda *a, **k: 1.5 * openmmunit.nanometers),
         com_force=SimpleNamespace(getValue=_raise),
         sMD_moves=10, steps_per_move=1, save_freq=1, sMD_max_r_offset=0.0,
-        pbc_safety_nm=0.5, groupA_atoms=[0], groupB_atoms=[1],
+        pbc_safety_nm=0.5, _co_image_ligand=lambda sim: 1.5, groupA_atoms=[0], groupB_atoms=[1],
         dx_per_move=0.001 * openmmunit.nanometers,
         autostop_nc=None, autostop_nc_window=2, subset_protein_CA=None,
         _resolve_geom_features=lambda: [], _GEOM_POCKET=set(),
