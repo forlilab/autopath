@@ -112,7 +112,8 @@ class SteeredMD:
         dx_per_move: float = 0.001,        # nm — RC grid spacing (held constant across speeds)
         max_displacement: float = 3.5,     # nm — total RC range
         sMD_spring_cte: float = 10000,     # kJ/mol/nm^2
-        save_freq: int = 5,                # writes DCD every save_freq*steps_per_move
+        save_freq: int = 5,                # moves between NC / geom / image-guard samples
+        dcd_every: int | None = None,      # moves between DCD frames (None = save_freq)
         force_n_samples: int = 10,         # cap on restraint-force samples averaged per move (>=1)
         force_sample_stride: int = 5,      # MD steps between force samples; n_samples adapts to move length
         verbose: int = 0,
@@ -155,6 +156,7 @@ class SteeredMD:
         self.dx_per_move = float(dx_per_move) * openmmunit.nanometers                                   # Quantity
         self.sMD_spring_cte = float(sMD_spring_cte) * openmmunit.kilojoules_per_mole / openmmunit.nanometer**2
         self.save_freq = int(save_freq)
+        self.dcd_every = int(dcd_every) if dcd_every else self.save_freq
         self.force_n_samples = max(1, int(force_n_samples))
         self.force_sample_stride = max(1, int(force_sample_stride))
         self.sMD_moves = int(math.ceil(self.max_displacement / float(dx_per_move)))
@@ -227,7 +229,7 @@ class SteeredMD:
                     
         add_reporters(simulation, self.out_dir, f"sMD_{run_id}",
             total_steps=self.sMD_moves*self.steps_per_move, # total steps 
-            logperiod=self.save_freq*self.steps_per_move, # steps
+            logperiod=self.dcd_every*self.steps_per_move, # steps
             verbose=0 #verbose level
         )
 
@@ -539,7 +541,7 @@ class SteeredMD:
             logger.info(f"steps_per_move: {self.steps_per_move} steps")
             logger.info(f"Time per move: {self.steps_per_move * dt_ps:.3f} ps")
             logger.info(f"Max displacement: {self.max_displacement:.3f} nm, total sMD moves: {self.sMD_moves}")
-            logger.info(f'Saving DCD every {self.save_freq*self.steps_per_move} steps')
+            logger.info(f'Saving DCD every {self.dcd_every*self.steps_per_move} steps')
             logger.info("#"*80)
             self._params_logged_speeds.add(pulling_speed)
         ########################################################################################

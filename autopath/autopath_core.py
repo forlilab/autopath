@@ -333,6 +333,7 @@ class AutoPath:
         sMD_spring_cte: float = None,  # KJ/mol/nm2
         sMD_force_n_samples: int = 10,  # max restraint-force samples averaged per move (>=1)
         sMD_force_sample_stride: int = 5,  # MD steps between force samples
+        sMD_dcd_every: int | None = None,  # moves between saved DCD frames (None = every 5 moves)
         sMD_ligand_anchor_mode: str = 'murcko',
         sMD_max_replicas: int = 50,  # max replicas per speed in convergence mode
         sMD_run_analysis: bool = True,
@@ -431,6 +432,7 @@ class AutoPath:
         self.sMD_spring_cte = sMD_spring_cte
         self.sMD_force_n_samples = sMD_force_n_samples
         self.sMD_force_sample_stride = sMD_force_sample_stride
+        self.sMD_dcd_every = sMD_dcd_every
         self.sMD_ligand_anchor_mode = sMD_ligand_anchor_mode
         self.sMD_max_replicas = sMD_max_replicas
         self.sMD_run_analysis = sMD_run_analysis
@@ -786,6 +788,7 @@ class AutoPath:
                 autostop_min_displacement=self.sMD_autostop_min_displacement,
                 autostop_unbound_nm=self.sMD_autostop_unbound_nm,
                 save_freq=5,
+                dcd_every=self.sMD_dcd_every,
                 force_n_samples=self.sMD_force_n_samples,
                 force_sample_stride=self.sMD_force_sample_stride,
                 log_geom_features=self.sMD_log_geom_features,
