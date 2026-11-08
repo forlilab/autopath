@@ -403,6 +403,7 @@ def add_reporters(
     total_steps: int = 250000,
     logperiod: int = 2500,
     verbose: int = 2,
+    atom_subset: list[int] | None = None,
 ) -> None:
     """Attach DCD trajectory and CSV state-data reporters to a simulation.
 
@@ -428,6 +429,8 @@ def add_reporters(
     verbose : int
         Verbosity level: 0 = no CSV, 1 = CSV with progress only,
         2 = CSV with full thermodynamic data.
+    atom_subset : list of int, optional
+        Atom indices written to the DCD (None = all atoms).
     """
 
     logging.debug(f"Adding reporters to the simulation")
@@ -452,6 +455,7 @@ def add_reporters(
             f"{out_dir}/{suffix}.dcd",
             reportInterval=logperiod,
             enforcePeriodicBox=False,  # WARNING this compromises autoimaging afterwards in some cases
+            atomSubset=atom_subset,
         )
     )
 

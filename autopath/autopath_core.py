@@ -137,6 +137,7 @@ class AutoPath:
         sMD_spring_cte: float = None,  # KJ/mol/nm2
         sMD_force_n_samples: int = 10,  # cap on restraint-force samples time-averaged per move (>=1); 1 = legacy single pre-step sample
         sMD_force_sample_stride: int = 5,  # MD steps between force samples; samples-per-move adapts to move length (capped by sMD_force_n_samples)
+        sMD_dcd_dry: bool = False,  # sMD DCDs/final PDBs hold protein+ligand only (topology: trajectories/dry_top.pdb)
         sMD_ligand_anchor_mode: str = 'murcko',
         sMD_max_replicas: int = 50,  # max replicas per speed in convergence mode
         sMD_run_analysis: bool = True,
@@ -208,6 +209,7 @@ class AutoPath:
         self.sMD_spring_cte = sMD_spring_cte
         self.sMD_force_n_samples = sMD_force_n_samples
         self.sMD_force_sample_stride = sMD_force_sample_stride
+        self.sMD_dcd_dry = sMD_dcd_dry
         self.sMD_ligand_anchor_mode = sMD_ligand_anchor_mode
         self.sMD_max_replicas = sMD_max_replicas
         self.sMD_run_analysis = sMD_run_analysis
@@ -228,6 +230,9 @@ class AutoPath:
         self.sMD_kramers_bound = sMD_kramers_bound
         self.cluster_across_speeds = cluster_across_speeds
         self.sMD_min_replicas_per_path = sMD_min_replicas_per_path
+        if sMD_dcd_dry and sMD_align_trajs:
+            # wrap/align reads the trajectories with the solvated topology.
+            raise ValueError("sMD_dcd_dry=True needs sMD_align_trajs=False")
         # VS mode
         if VS_mode:
             raise ValueError("VS_mode is not supported.")
@@ -506,6 +511,7 @@ class AutoPath:
                 autostop_min_displacement=self.sMD_autostop_min_displacement,
                 autostop_unbound_nm=self.sMD_autostop_unbound_nm,
                 save_freq=5,
+                dcd_dry=self.sMD_dcd_dry,
                 force_n_samples=self.sMD_force_n_samples,
                 force_sample_stride=self.sMD_force_sample_stride,
                 log_geom_features=self.sMD_log_geom_features,

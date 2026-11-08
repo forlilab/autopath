@@ -6,7 +6,7 @@ import pandas as pd
 import tqdm
 import MDAnalysis as mda
 
-from .SMDData import SMDData
+from .SMDData import SMDData, smd_topology
 
 logger = logging.getLogger("autopath.pulling.LigandFeatures")
 
@@ -125,7 +125,7 @@ class LigandTrajectoryFeatures:
 
         for traj in tqdm.tqdm(traj_files, desc="Computing ligand features"):
             try:
-                u = mda.Universe(reference_pdb, traj)
+                u = mda.Universe(smd_topology(reference_pdb, traj), traj)
             except Exception as exc:
                 logger.warning(f"Could not load {traj}: {exc}")
                 continue

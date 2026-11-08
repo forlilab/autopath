@@ -39,7 +39,7 @@ def test_raises_when_cvpack_cv_disagrees_with_geometry(tmp_path, monkeypatch):
         com_dist=SimpleNamespace(getValue=lambda *a, **k: 7.612 * openmmunit.nanometers),
         sMD_moves=2700,
         steps_per_move=1,
-        save_freq=1,
+        save_freq=1, dcd_dry=False,
         sMD_max_r_offset=3.0,
         pbc_safety_nm=0.5,
         groupA_atoms=[0],
