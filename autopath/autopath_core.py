@@ -334,6 +334,7 @@ class AutoPath:
         sMD_force_n_samples: int = 10,  # max restraint-force samples averaged per move (>=1)
         sMD_force_sample_stride: int = 5,  # MD steps between force samples
         sMD_dcd_every: int | None = None,  # moves between saved DCD frames (None = every 5 moves)
+        sMD_dcd_dry: bool = False,  # sMD DCDs/final PDBs hold protein+ligand only (topology: trajectories/dry_top.pdb)
         sMD_ligand_anchor_mode: str = 'murcko',
         sMD_max_replicas: int = 50,  # max replicas per speed in convergence mode
         sMD_run_analysis: bool = True,
@@ -433,6 +434,7 @@ class AutoPath:
         self.sMD_force_n_samples = sMD_force_n_samples
         self.sMD_force_sample_stride = sMD_force_sample_stride
         self.sMD_dcd_every = sMD_dcd_every
+        self.sMD_dcd_dry = sMD_dcd_dry
         self.sMD_ligand_anchor_mode = sMD_ligand_anchor_mode
         self.sMD_max_replicas = sMD_max_replicas
         self.sMD_run_analysis = sMD_run_analysis
@@ -465,6 +467,11 @@ class AutoPath:
         if run_metadynamics and not sMD_align_trajs:
             # The funnel axis and the learned CVs are fitted on superposed/imaged sMD frames.
             raise ValueError("run_metadynamics=True needs sMD_align_trajs=True")
+        if sMD_dcd_dry and sMD_align_trajs:
+            # wrap/align reads the trajectories with the solvated topology.
+            raise ValueError("sMD_dcd_dry=True needs sMD_align_trajs=False")
+        if sMD_dcd_dry and extract_milestones:
+            raise ValueError("sMD_dcd_dry=True does not support extract_milestones (solvated frames)")
         self.mMD_use_funnel_potential = mMD_use_funnel_potential
         self.mMD_bias_factor = mMD_bias_factor
         self.mMD_bias_frequency = mMD_bias_frequency
@@ -789,6 +796,7 @@ class AutoPath:
                 autostop_unbound_nm=self.sMD_autostop_unbound_nm,
                 save_freq=5,
                 dcd_every=self.sMD_dcd_every,
+                dcd_dry=self.sMD_dcd_dry,
                 force_n_samples=self.sMD_force_n_samples,
                 force_sample_stride=self.sMD_force_sample_stride,
                 log_geom_features=self.sMD_log_geom_features,

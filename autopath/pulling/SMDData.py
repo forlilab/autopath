@@ -79,6 +79,47 @@ def frame_log_index(log_file: str, n_frames: int) -> tuple[np.ndarray, np.ndarra
 
 
 
+# Dry sMD output (SteeredMD dcd_dry=True): DCDs hold only the protein+ligand prefix of the
+# system, and this PDB (same atoms, same indices) sits next to them as their topology.
+DRY_TOP_NAME = "dry_top.pdb"
+SOLVENT_ION_RESNAMES = frozenset({
+    "HOH", "WAT", "SOL", "TIP3", "TIP4", "TIP5", "SPC", "T3P", "T4P",
+    "NA", "CL", "K", "MG", "CA", "ZN", "Na+", "Cl-", "K+", "NA+", "CL-", "LI", "CS", "RB", "BR", "IOD",
+})
+_N_ATOMS_CACHE: dict = {}
+
+
+def _n_atoms(path: str) -> int:
+    key = (os.path.abspath(path), os.path.getmtime(path))
+    if key not in _N_ATOMS_CACHE:
+        if path.endswith(".dcd"):
+            from MDAnalysis.lib.formats.libdcd import DCDFile
+            with DCDFile(path) as f:
+                _N_ATOMS_CACHE[key] = f.header["natoms"]
+        else:
+            _N_ATOMS_CACHE[key] = mda.Universe(path).atoms.n_atoms
+    return _N_ATOMS_CACHE[key]
+
+
+def smd_topology(reference_pdb: str, traj: str) -> str:
+    """Topology matching an sMD DCD: ``reference_pdb``, or the dry topology next to the DCD.
+
+    Full-system DCDs use the reference PDB. Dry DCDs (fewer atoms) use
+    ``<dcd dir>/dry_top.pdb``; its atoms are the reference's first atoms, so
+    index and name selections mean the same atoms.
+    """
+    n_traj = _n_atoms(traj)
+    if n_traj == _n_atoms(reference_pdb):
+        return reference_pdb
+    dry = os.path.join(os.path.dirname(os.path.abspath(traj)), DRY_TOP_NAME)
+    if not os.path.exists(dry):
+        raise ValueError(f"{traj} has {n_traj} atoms, {reference_pdb} has {_n_atoms(reference_pdb)}, "
+                         f"and there is no {DRY_TOP_NAME} next to the DCD")
+    if _n_atoms(dry) != n_traj:
+        raise ValueError(f"{traj} has {n_traj} atoms but {dry} has {_n_atoms(dry)}")
+    return dry
+
+
 def resolve_smd_dcd(stem: str) -> str:
     """DCD of an sMD replica from its path stem (no extension).
 
@@ -599,7 +640,7 @@ class SMDData:
         log_of = dict(zip(self.traj_files, self.log_files))
         all_rows = []
         for traj in tqdm.tqdm(trajs, desc="Calculating distances.."):
-            u = mda.Universe(self.reference_pdb, traj)
+            u = mda.Universe(smd_topology(self.reference_pdb, traj), traj)
 
             atoms_A = u.select_atoms(group_A)
             atoms_B = u.select_atoms(group_B)

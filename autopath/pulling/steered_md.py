@@ -11,9 +11,10 @@ from datetime import datetime
 from autopath.utils import *
 from autopath.customForces import (add_harmonic_restraints, remove_openmm_force)
 from autopath.pulling.pbc import triclinic_minimum_image
+from autopath.pulling.SMDData import DRY_TOP_NAME, SOLVENT_ION_RESNAMES
 
 from openmm.app import *
-from openmm import XmlSerializer
+from openmm import XmlSerializer, Vec3
 import openmm.unit as openmmunit
 
 import cvpack
@@ -114,6 +115,7 @@ class SteeredMD:
         sMD_spring_cte: float = 10000,     # kJ/mol/nm^2
         save_freq: int = 5,                # moves between NC / geom / image-guard samples
         dcd_every: int | None = None,      # moves between DCD frames (None = save_freq)
+        dcd_dry: bool = False,             # DCD + final PDB hold only the protein+ligand prefix (no solvent/ions)
         force_n_samples: int = 10,         # cap on restraint-force samples averaged per move (>=1)
         force_sample_stride: int = 5,      # MD steps between force samples; n_samples adapts to move length
         verbose: int = 0,
@@ -157,6 +159,8 @@ class SteeredMD:
         self.sMD_spring_cte = float(sMD_spring_cte) * openmmunit.kilojoules_per_mole / openmmunit.nanometer**2
         self.save_freq = int(save_freq)
         self.dcd_every = int(dcd_every) if dcd_every else self.save_freq
+        self.dcd_dry = bool(dcd_dry)
+        self._dry_top = None   # (subset indices, subset Topology), built once by _dry_subset()
         self.force_n_samples = max(1, int(force_n_samples))
         self.force_sample_stride = max(1, int(force_sample_stride))
         self.sMD_moves = int(math.ceil(self.max_displacement / float(dx_per_move)))
@@ -227,10 +231,18 @@ class SteeredMD:
         coordinate deconvolution uses the equilibrium lag ``Feq/k`` instead.
         """
                     
+        dry_idx = None
+        if self.dcd_dry:
+            dry_idx, _ = self._dry_subset()
+            dry_top = os.path.join(self.out_dir, DRY_TOP_NAME)
+            if not os.path.exists(dry_top):
+                st = simulation.context.getState(getPositions=True)
+                self._save_dry_pdb(st.getPositions(), st.getPeriodicBoxVectors(), dry_top)
         add_reporters(simulation, self.out_dir, f"sMD_{run_id}",
             total_steps=self.sMD_moves*self.steps_per_move, # total steps 
             logperiod=self.dcd_every*self.steps_per_move, # steps
-            verbose=0 #verbose level
+            verbose=0, #verbose level
+            atom_subset=dry_idx,
         )
 
         # The schedule starts at lambda0; r_start is where the replica actually is.
@@ -466,9 +478,46 @@ class SteeredMD:
 
         # Save final positions
         final_positions = simulation.context.getState(getPositions=True).getPositions()
-        self.topology.setPeriodicBoxVectors(simulation.context.getState(getPositions=True).getPeriodicBoxVectors()) #saves correct box vectors to the pdb
+        final_box = simulation.context.getState(getPositions=True).getPeriodicBoxVectors()
+        if self.dcd_dry:
+            self._save_dry_pdb(final_positions, final_box, f"{self.out_dir}/sMD_{run_id}.pdb")
+            return
+        self.topology.setPeriodicBoxVectors(final_box) #saves correct box vectors to the pdb
         save_pdb(self.topology, final_positions, f"{self.out_dir}/sMD_{run_id}.pdb")
         return
+
+    def _dry_subset(self):
+        """Indices and Topology of the protein+ligand atoms written by dry DCDs.
+
+        The subset must be a prefix of the system (solvent and ions after every
+        solute atom), so dry-topology atom indices equal full-system indices and
+        index-based selections stay valid on dry trajectories.
+        """
+        if self._dry_top is None:
+            atoms = list(self.topology.atoms())
+            solute = [a.index for a in atoms if a.residue.name.strip() not in SOLVENT_ION_RESNAMES]
+            if not solute:
+                raise ValueError("dcd_dry=True: no protein/ligand atoms found")
+            n = max(solute) + 1
+            if len(solute) != n:
+                bad = sorted({atoms[i].residue.name for i in range(n)
+                              if atoms[i].residue.name.strip() in SOLVENT_ION_RESNAMES})
+                raise ValueError(
+                    f"dcd_dry=True needs protein+ligand atoms before all solvent/ions; "
+                    f"found {bad} inside the first {n} atoms"
+                )
+            keep = set(range(n))
+            modeller = Modeller(self.topology, [Vec3(0, 0, 0)] * len(atoms) * openmmunit.nanometers)
+            modeller.delete([a for a in atoms if a.index not in keep])
+            self._dry_top = (list(range(n)), modeller.topology)
+            logger.info(f"dcd_dry=True: DCDs/final PDBs keep atoms 0..{n-1} ({n} of {len(atoms)})")
+        return self._dry_top
+
+    def _save_dry_pdb(self, positions, box, path):
+        idx, top = self._dry_subset()
+        pos = positions.value_in_unit(openmmunit.nanometers)
+        top.setPeriodicBoxVectors(box)
+        save_pdb(top, [pos[i] for i in idx] * openmmunit.nanometers, path)
     
 
     def run(self,
