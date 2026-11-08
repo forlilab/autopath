@@ -341,6 +341,7 @@ class AutoPath:
         sMD_align_trajs: bool = True,  # False: keep raw sMD DCDs (<stem>.dcd), skip wrap/align
         sMD_clust_selection:str = None,
         sMD_path_model: str = 'dtw',   # 'dtw' | 'null' ('null' = no clustering: one path)
+        sMD_paths_viz: str = 'pse',    # unbinding-paths figure: 'pse' | 'pml' | 'none'
         sMD_n_paths: int | None = None,  # fixed number of paths; None = silhouette-selected
         sMD_max_frac_neg_dG_first_half: float = 0.25,  # pass-3 binding-well filter; <=0 disables
         sMD_friction_model: str = 'mixed',  # 'mixed' | 'ols' force friction slope regression
@@ -441,6 +442,9 @@ class AutoPath:
         self.sMD_align_trajs = sMD_align_trajs
         self.sMD_clust_selection = sMD_clust_selection
         self.sMD_path_model = str(sMD_path_model).lower()
+        self.sMD_paths_viz = str(sMD_paths_viz).lower()
+        if self.sMD_paths_viz not in ("pse", "pml", "none"):
+            raise ValueError(f"sMD_paths_viz must be 'pse', 'pml' or 'none', got {sMD_paths_viz!r}")
         self.sMD_n_paths = sMD_n_paths
         self.sMD_max_frac_neg_dG_first_half = float(sMD_max_frac_neg_dG_first_half)
         self.sMD_path_combination = validate_path_combination(sMD_path_combination)
@@ -1044,7 +1048,8 @@ class AutoPath:
                             "assigned to a single path.")
             else:
                 cluster_model = DTWPathModel(seed=self.random_state, do_plots=True,
-                                            outdir=sMD_analysis_outdir)
+                                            outdir=sMD_analysis_outdir,
+                                            viz_output_format=self.sMD_paths_viz)
 
             smdanalysis = SMDAnalysis(sys_name, cluster_model,
                                     estimators=['cumulant', 'jarzynski', 'force'],

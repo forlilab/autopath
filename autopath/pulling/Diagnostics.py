@@ -864,6 +864,7 @@ def make_unbinding_paths_visualization(
             ``"pml"`` writes a script + auxiliary .dx files next to it.
             PSE is self-contained (all data embedded); PML references
             auxiliary ``.dx`` files that must stay alongside the script.
+            ``"none"`` writes nothing and returns None.
         color_by_friction: When ``True`` (and *friction_csv* is provided), the
             isosurfaces are coloured by local friction Γ(r) as a blue (low) →
             white → red (high) gradient.  Default ``False``: each path is
@@ -899,8 +900,11 @@ def make_unbinding_paths_visualization(
     ensure the spatial Γ(r) pattern reflects each path's own simulation
     conditions.
     """
-    if output_format not in ("pse", "pml"):
-        raise ValueError(f"output_format must be 'pse' or 'pml', got '{output_format}'")
+    if output_format not in ("pse", "pml", "none"):
+        raise ValueError(f"output_format must be 'pse', 'pml' or 'none', got '{output_format}'")
+    if output_format == "none":
+        logger.info("Unbinding paths visualization disabled (output_format='none').")
+        return None
 
     if stick_transparency_ladder is not None:
         if len(stick_transparency_ladder) != 2:
