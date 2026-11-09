@@ -6,6 +6,7 @@ import MDAnalysis as mda
 import mdtraj as md
 
 from autopath import SystemPreparation, Equilibration
+from autopath.membrane_orient import orient_membrane
 from autopath.ap_PLIP import plot_atomic_property, calculate_ligand_rmsf
 from autopath.utils import save_pdb, save_receptor_w_colig, load_system, setup_logging, compute_rmsd
 from autopath.pdb_preprocessor import PDBPreprocessor, fetch_pdb, save_receptor_and_ligand_from_pdb, save_receptor_and_ligand_from_openmm
@@ -322,6 +323,14 @@ def main():
     ########################################################################################
     #################################### System preparation ################################
     ########################################################################################
+
+    # Put the membrane normal on z before the bilayer is built. addMembrane lays the
+    # bilayer in xy and never moves the solute, so a tilted receptor silently builds a
+    # tilted system. Set this to True whenever is_membrane=True below; the receptor and
+    # every ligand pose are moved by the same transform, so docked poses stay in register.
+    membrane_orientation = False
+    if membrane_orientation:
+        prot_path, ligands = orient_membrane(prot_path, ligands, save_dir)
 
     # Prepare the system
     prepare_system = SystemPreparation(

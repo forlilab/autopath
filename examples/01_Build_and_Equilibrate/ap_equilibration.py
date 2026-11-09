@@ -6,6 +6,7 @@ from rdkit import Chem
 from openmm.app import PDBFile
 
 from autopath import SystemPreparation, Equilibration
+from autopath.membrane_orient import orient_membrane
 from autopath.ap_PLIP import plot_atomic_property, cw_rmsf_windows
 from autopath.utils import save_pdb, load_system, setup_logging, compute_rmsd, wrap_align_save_traj
 from autopath.pdb_preprocessor import PDBPreprocessor
@@ -70,6 +71,14 @@ def main():
         save_pdb(fixed_receptor.topology, fixed_receptor.positions, receptor_path)
     else:
         receptor_path = receptor
+
+    # Put the membrane normal on z before the bilayer is built. addMembrane lays the
+    # bilayer in xy and never moves the solute, so a tilted receptor silently builds a
+    # tilted system. Set this to True whenever is_membrane=True below; the receptor and
+    # every ligand pose are moved by the same transform, so docked poses stay in register.
+    membrane_orientation = False
+    if membrane_orientation:
+        receptor_path, ligands = orient_membrane(receptor_path, ligands, sys_name)
 
     # Assemble and parameterize the system (defaults used in the AutoPath paper)
     prepare_system = SystemPreparation(
