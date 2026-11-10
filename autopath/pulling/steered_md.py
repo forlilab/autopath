@@ -535,6 +535,21 @@ class SteeredMD:
         save_pdb(self.topology, final_positions, f"{self.out_dir}/sMD_{run_id}.pdb")
         return
 
+    def _new_run_id(self, pulling_speed, pulling_direction):
+        """``replica-HHMMSS_v<speed>_<direction>`` that no file in ``out_dir`` uses yet.
+
+        The ID is a time of day with no date, so a pull added on a later day can hit the
+        HHMMSS of an existing pull at the same speed and would overwrite it; wait for a
+        free second instead.
+        """
+        while True:
+            timestamp = datetime.now().strftime("%H%M%S")
+            run_id = f"replica-{timestamp}_v{pulling_speed}_{pulling_direction}"
+            if not glob(f"{self.out_dir}/sMD_{run_id}.*"):
+                return run_id
+            logger.info(f"sMD_{run_id} already exists; waiting for a free replica ID")
+            time.sleep(1)
+
     def _dry_subset(self):
         """Indices and Topology of the protein+ligand atoms written by dry DCDs.
 
@@ -589,8 +604,7 @@ class SteeredMD:
 
         # ensure proper formating of the file name
         if run_id is None:
-            timestamp = datetime.now().strftime("%H%M%S")
-            run_id = f"replica-{timestamp}_v{pulling_speed}_{pulling_direction}"
+            run_id = self._new_run_id(pulling_speed, pulling_direction)
         else:
             run_id = f"replica-{run_id}_v{pulling_speed}_{pulling_direction}"
 
