@@ -333,64 +333,68 @@ class ProteinLigandAnalyzer:
         fp_interactions : list of str or None
             ProLIF interaction types to fingerprint. If None, ProLIF defaults are used.
         frequency_cutoff : float
-            Only interactions present in at least this fraction of frames are kept.
+            Fraction of frames in [0, 1]; only interactions present in at least this
+            fraction are kept (0.5 means 50%).
         stride : int
-            Frame stride passed to ProLIF. See Warning below.
+            Analyse every ``stride``-th frame of each replica trajectory. Must be >= 1.
+            Ignored for replicas whose fingerprint is read from cache.
         n_jobs : int
             Number of parallel workers for ProLIF. See Warning below.
 
         Returns
         -------
         important_resids : list of int
-            Sorted residue IDs whose interaction frequency exceeds ``frequency_cutoff``.
-            These are numbered as in the TOPOLOGY that was loaded. A prmtop renumbers
-            sequentially from 1, so they are generally offset from the original PDB author
-            numbering (e.g. 5 for a structure whose first modelled residue is 6) -- convert
-            before comparing against crystal-structure residue numbers.
+            Sorted residue IDs whose interaction frequency exceeds ``frequency_cutoff``,
+            pooled over all replicas. These are numbered as in the TOPOLOGY that was
+            loaded. A prmtop renumbers sequentially from 1, so they are generally offset
+            from the original PDB author numbering (e.g. 5 for a structure whose first
+            modelled residue is 6) -- convert before comparing against crystal-structure
+            residue numbers.
         persistence_byRes : pd.DataFrame
-            Interaction persistence grouped by residue (all interaction types merged).
+            Interaction persistence in percent, grouped by residue (all interaction types
+            merged), for every replica stacked with a ``replica`` column.
         persistence_byRes_byType : pd.DataFrame
-            Interaction persistence broken down by residue and interaction type.
+            Same, broken down by residue and interaction type.
 
         Warning
         -------
-        The ``stride`` parameter is currently not applied correctly by ProLIF; all
-        frames in each replica trajectory are analyzed regardless of the value passed.
-
         The ``n_jobs`` parameter is currently non-functional due to serialization
         incompatibilities (dill/multiprocess version conflicts in ProLIF). All
         fingerprint computations run serially regardless of the value passed.
         """
+        if stride < 1:
+            raise ValueError(f"stride must be >= 1, got {stride}")
 
         important_resids = set()
-        if fp_interactions is not None:
-            fp = Fingerprint(interactions=fp_interactions)
-        else:
-            fp = Fingerprint()  # default interaction set
+        byRes_frames = []
+        byRes_byType_frames = []
 
         for rep_name, u in self.replicas.items():
             fp_fname = os.path.join(self.outdir, f"FP_{rep_name}.pkl")
             if os.path.exists(fp_fname):
-                fp = Fingerprint.from_pickle(fp_fname)
+                rep_fp = Fingerprint.from_pickle(fp_fname)
                 logger.info(f"Loaded cached ProLif fingerprint for replica {rep_name}")
             else:
                 logger.info(f"Computing ProLif fingerprint for replica {rep_name}")
+                rep_fp = (Fingerprint(interactions=fp_interactions)
+                          if fp_interactions is not None else Fingerprint())
                 protein_sel = u.select_atoms(self.protein_mda_selection) if self.protein_mda_selection else u.select_atoms("protein")
                 logger.info(f"Protein selection has {protein_sel.n_atoms} atoms.")
                 ligand_sel = u.select_atoms(self.ligand_mda_selection)
                 logger.info(f"Ligand selection has {ligand_sel.n_atoms} atoms.")
-                
+
+                # ProLIF ignores its own stride argument, so slice the trajectory instead.
                 # ProLIF's signature is run(traj, lig, prot)
-                fp = fp.run(u.trajectory,
-                            ligand_sel,
-                            protein_sel,
-                            n_jobs=n_jobs,
-                            )
-                fp.to_pickle(fp_fname)
-            
+                rep_fp = rep_fp.run(u.trajectory[::stride],
+                                    ligand_sel,
+                                    protein_sel,
+                                    n_jobs=n_jobs,
+                                    )
+                rep_fp.to_pickle(fp_fname)
+
             # convert to DataFrame
-            df = fp.to_dataframe()
-            fp.plot_barcode()
+            df = rep_fp.to_dataframe()
+            rep_fp.plot_barcode()
             plt.savefig(os.path.join(self.outdir, f"prolif_barcode_{rep_name}.png"))
             # plt.show()
             plt.close()
@@ -408,16 +412,26 @@ class ProteinLigandAnalyzer:
                 .T
                 * 100
             ).T
-            
+
             # Filter residues by frequency
-            selected_residues = persistence_byRes[persistence_byRes["%"] >= frequency_cutoff/100].index.tolist()
+            selected_residues = persistence_byRes[persistence_byRes["%"] >= frequency_cutoff * 100].index.tolist()
             # groupby(level=["protein", "ligand"]) puts the protein residue first
             selected_resnames = [res[0] for res in selected_residues]
             selected_resids = [int(re.search(r"(\d+)", r).group(1))
                                for r in selected_resnames if re.search(r"(\d+)", r)]
             important_resids.update(selected_resids)
 
-        return sorted(list(important_resids)), persistence_byRes, persistence_byRes_byType
+            # replica as a column, not an index level: callers index these frames by the
+            # ProLIF tuple and would break if the tuple grew a level.
+            persistence_byRes = persistence_byRes.assign(replica=rep_name)
+            persistence_byRes_byType = persistence_byRes_byType.assign(replica=rep_name)
+            byRes_frames.append(persistence_byRes)
+            byRes_byType_frames.append(persistence_byRes_byType)
+
+        empty = pd.DataFrame(columns=["%", "replica"])
+        return (sorted(important_resids),
+                pd.concat(byRes_frames) if byRes_frames else empty,
+                pd.concat(byRes_byType_frames) if byRes_byType_frames else empty)
 
     @staticmethod
     def plot_tanimoto_similarity(query_fp, reference_fp, use_frame: int = None, outdir: str = None):
