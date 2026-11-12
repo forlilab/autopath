@@ -340,7 +340,7 @@ class AutoPath:
         sMD_max_frac_neg_dG_first_half: float = 0.25,  # pass-3 binding-well filter; <=0 disables
         sMD_friction_model: str = 'mixed',  # 'mixed' | 'ols' force friction slope regression
         sMD_friction_source_work: str = 'auto',  # 'auto'|'derivative'|'force'|'regression' Kramers friction
-        sMD_path_combination: str = 'eq21',  # 'eq21' (Wolf, Post & Stock 2023, Eq. 21) | 'linear' (p_eq mean)
+        sMD_path_combination: str = 'eq21',  # 'eq21' (Wolf, Post & Stock 2023, Eq. 21) | 'linear' (path-weighted mean)
         sMD_features: list | None = None,
         sMD_log_geom_features: bool | list = True,  # hybrid: log geom during pulling + merge into clustering
         sMD_plateau_frac: float = 0.4,  # force-plateau TS boundary as a fraction of peak |force|

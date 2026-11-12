@@ -157,6 +157,32 @@ def test_mix_force_weighted_average_over_paths():
     assert mixed.iloc[0]['Fbar'] == pytest.approx(175.0)   # 0.25*100 + 0.75*200
 
 
+def test_mix_force_path_weights_equal_pooled_mean():
+    from autopath.pulling.AnalysisSMD import SMDAnalysis
+    rng = np.random.default_rng(1)
+    n_by_path = {0.005: {'pA': 3, 'pB': 7}, 0.01: {'pA': 5, 'pB': 2}}
+    steps = range(6)
+    raw = pd.DataFrame([
+        dict(speed=sp, path=p, traj=f'{p}{i}', step=s,
+             F=rng.normal(100.0 + 10.0 * s + (50.0 if p == 'pB' else 0.0), 20.0))
+        for sp, counts in n_by_path.items() for p, n in counts.items()
+        for i in range(n) for s in steps
+    ])
+    fr = (raw.groupby(['speed', 'path', 'step'])['F'].mean().rename('Fmean')
+          .reset_index().assign(estimator='force', dG=lambda d: d['step'] + 1.0,
+                                r_coord=lambda d: 0.1 * d['step']))
+    weights = {
+        sp: SMDAnalysis._path_weights(fr[fr['speed'] == sp],
+                                      SMDData._compute_p_neq(counts))
+        for sp, counts in n_by_path.items()
+    }
+    mixed = FrictionEstimator._mix_force(fr, weights).set_index(['speed', 'step'])['Fbar']
+    pooled = raw.groupby(['speed', 'step'])['F'].mean()
+    assert len(mixed) == len(pooled) == 12
+    np.testing.assert_allclose(mixed.loc[pooled.index].to_numpy(), pooled.to_numpy(),
+                               rtol=1e-12)
+
+
 from autopath.pulling.AnalysisSMD import SMDAnalysis
 from autopath.pulling.Estimators import CumulantEstimator, JarzynskiEstimator
 

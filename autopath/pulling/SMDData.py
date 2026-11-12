@@ -900,13 +900,13 @@ class SMDData:
 
     @staticmethod
     def _choose_estimator_for_weights(results: pd.DataFrame, estimator: str = 'auto') -> str:
-        """Resolve which estimator's dG to use for p_eq computation.
+        """Resolve which estimator's dG gates the path weights.
 
         ``estimator='auto'`` selects by ROBUSTNESS: among genuine free-energy
         candidates (all available estimators EXCLUDING ``'force'``, whose
         ``dG=Wmean`` is non-negative by construction), pick the one with the
-        smallest fraction of negative-dG bins — those are exactly the bins
-        masked to 0 in ``_compute_p_eq`` and what destabilises the p_eq integral.
+        smallest fraction of negative-dG bins (the bins ignored by the
+        path-weight gate in ``_path_weights``).
         Ties resolve to the order ``['cumulant','jarzynski']`` then first
         available.  An explicitly named estimator is returned as-is (raises if
         not present).
@@ -916,7 +916,7 @@ class SMDData:
 
         available_estimators = results['estimator'].dropna().unique().tolist()
         if len(available_estimators) == 0:
-            raise ValueError("No estimator results available to compute p_eq.")
+            raise ValueError("No estimator results available to compute path weights.")
 
         if estimator != 'auto':
             if estimator not in available_estimators:
@@ -944,5 +944,5 @@ class SMDData:
 
     @staticmethod
     def choose_reference_estimator(results: pd.DataFrame) -> str:
-        """Robustness-selected reference estimator for shared p_eq weighting."""
+        """Robustness-selected reference estimator for shared path weighting."""
         return SMDData._choose_estimator_for_weights(results, 'auto')

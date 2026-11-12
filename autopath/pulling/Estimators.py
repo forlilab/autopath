@@ -465,9 +465,9 @@ class FrictionEstimator(BaseEstimator):
 
     @staticmethod
     def _mix_force(force_results: pd.DataFrame, weights: dict) -> pd.DataFrame:
-        """Path-mix Fmean into <F>(step, speed) using p_eq weights.
+        """Path-mix Fmean into <F>(step, speed) using path weights.
 
-        ``weights`` is ``{speed: {path: p_eq}}``.  For single-path systems this
+        ``weights`` is ``{speed: {path: weight}}``.  For single-path systems this
         reduces to the plain mean.  Returns columns
         ``estimator, step, r_coord, speed, Fbar``.
         """
@@ -576,7 +576,7 @@ class FrictionEstimator(BaseEstimator):
         """Mean-force TI PMF G(z)=∫Feq dz on z=λ−Feq/k, per-path remap-then-mix.
 
         Guards: sign check (Feq>0), monotone-z filter with λ fallback (never silent
-        sort), p_eq-weighted mix on a common z grid. Returns (mix_df[z,dG_z], diag);
+        sort), path-weighted mix on a common z grid. Returns (mix_df[z,dG_z], diag);
         (None, diag) with the reason logged at WARNING when no PMF can be built."""
         if force_results is None or force_results.empty:
             logger.warning("[meanforce_ti] not computed: no force rows")
@@ -1605,7 +1605,8 @@ class KramersEstimator:
 
         Returns one row per (estimator, speed, path) with ``source='per_path'``,
         plus one combined row per (estimator, speed) with ``source='per_path_combined'``
-        computed as ``k_off_total = Σ_k p_eq(k) × k_off(k)`` (parallel pathways).
+        computed as ``k_off_total = Σ_k w(k) × k_off(k) / Σ_k w(k)`` with path
+        weights ``w`` (parallel pathways).
 
         *boundary_method* is ``"pmf_peak"`` (path's PMF peak, else its last point)
         or ``"end"`` (end of the path's merged profile). *bound_extension* is
@@ -1682,14 +1683,14 @@ class KramersEstimator:
                     f"Likely a sampling artifact (threshold: {self.barrier_warn_kjmol:.0f} kJ/mol)."
                 )
 
-            p_eq   = weights_by_estimator.get(est_name, {}).get(speed, {}).get(path, float("nan"))
+            weight = weights_by_estimator.get(est_name, {}).get(speed, {}).get(path, float("nan"))
             tau_ps = float(res["tau_ps"])
             rows.append({
                 "estimator":     est_name,
                 "speed":         speed,
                 "path":          path,
                 "source":        "per_path",
-                "p_eq":          p_eq,
+                "weight":        weight,
                 "start_r_nm":    float(res["start_r_input"]),
                 "abs_r_nm":      abs_r,
                 "plateau_reached": self.plateau_reached(r_arr, dG_arr),
@@ -1710,21 +1711,21 @@ class KramersEstimator:
 
         df = pd.DataFrame(rows)
 
-        # Combined: k_off_total = Σ p_eq(k) × k_off(k)  (parallel independent pathways)
+        # Combined: k_off_total = Σ w(k) × k_off(k) / Σ w(k)  (parallel independent pathways)
         combined: list[dict] = []
         for (est_name, speed), grp in df.groupby(["estimator", "speed"]):
-            valid = grp.dropna(subset=["k_off_per_s", "p_eq"])
+            valid = grp.dropna(subset=["k_off_per_s", "weight"])
             if valid.empty:
                 continue
-            p_sum      = float(valid["p_eq"].sum())
-            k_combined = float((valid["p_eq"] * valid["k_off_per_s"]).sum() / p_sum) if p_sum > 0 else float("nan")
+            p_sum      = float(valid["weight"].sum())
+            k_combined = float((valid["weight"] * valid["k_off_per_s"]).sum() / p_sum) if p_sum > 0 else float("nan")
             tau_comb   = (_PS_PER_S / k_combined) if (k_combined > 0 and not np.isnan(k_combined)) else float("nan")
             combined.append({
                 "estimator":     est_name,
                 "speed":         speed,
                 "path":          "combined_weighted",
                 "source":        "per_path_combined",
-                "p_eq":          p_sum,
+                "weight":        p_sum,
                 "start_r_nm":    float(valid["start_r_nm"].mean()),
                 "abs_r_nm":      float("nan"),
                 "reflect_r_nm":  float(valid["reflect_r_nm"].mean()),
@@ -2079,13 +2080,13 @@ def calculate_weighted_pmf(
     grid_col : str
         Grid column (default 'step').
     weights_by_estimator : dict
-        Pre-computed weights ``{estimator: {speed: {path: p_eq}}}``.
-        Obtain these from :meth:`SMDAnalysis.compute_p_eq`.
+        Pre-computed path weights ``{estimator: {speed: {path: weight}}}``.
+        Obtain these from :meth:`SMDAnalysis.path_weights`.
     path_combination : str
         ``'eq21'``: ``dG = -(1/beta) ln sum_k p_neq,k exp(-beta dG_k)``
         (Wolf, Post & Stock 2023, Eq. 21), ``Wmean`` the p_neq-weighted mean
         and ``Wdiss = Wmean - dG``; supports ``weight_cols`` in
-        {'dG', 'Wdiss', 'Wmean'}. ``'linear'``: p_eq-weighted mean of every
+        {'dG', 'Wdiss', 'Wmean'}. ``'linear'``: path-weighted mean of every
         column. The force estimator is always mixed linearly here; its eq21 v->0
         readout is :func:`force_v0_dG`.
     p_neq_by_speed : dict | None
@@ -2095,8 +2096,8 @@ def calculate_weighted_pmf(
     Note
     ----
     The grid stops at the shortest path's last step, so the normalisation
-    does not jump where a path ends. Paths contribute only where their p_eq is
-    in ``weights_by_estimator`` (``'eq21'``: with p_eq > 0), and p_neq is
+    does not jump where a path ends. Paths contribute only where their weight is
+    in ``weights_by_estimator`` (``'eq21'``: with weight > 0), and p_neq is
     renormalised over the paths present at each grid point.
     """
     validate_path_combination(path_combination)
@@ -2110,7 +2111,7 @@ def calculate_weighted_pmf(
 
     if weights_by_estimator is None:
         raise ValueError(
-            "weights_by_estimator is required. Compute it with SMDAnalysis.compute_p_eq()."
+            "weights_by_estimator is required. Compute it with SMDAnalysis.path_weights()."
         )
     estimators = results['estimator'].dropna().unique()
 
@@ -2176,7 +2177,7 @@ def calculate_weighted_pmf(
 
 def _mix_slice_linear(slice_g: pd.DataFrame, speed_weights: dict,
                       weight_cols: list[str]) -> dict | None:
-    """p_eq-weighted mean of each column over the paths at one grid point."""
+    """Path-weighted mean of each column over the paths at one grid point."""
     vals_per_col = {col: [] for col in weight_cols}
     w_per_col = {col: [] for col in weight_cols}
 

@@ -111,7 +111,7 @@ class SMDAnalysis:
         How per-path profiles are combined, in both :meth:`run` and
         :meth:`check_convergence`: ``'eq21'`` (default) uses
         ``exp(-beta dG) = sum_k p_neq,k exp(-beta dG_k)`` (Wolf, Post & Stock
-        2023, Eq. 21) with ``Wdiss = <W> - dG``; ``'linear'`` is the p_eq-weighted
+        2023, Eq. 21) with ``Wdiss = <W> - dG``; ``'linear'`` is the path-weighted
         mean of each column. Per-speed force profiles are always mixed linearly;
         with ``'eq21'`` the force v->0 dG comes from :func:`force_v0_dG`.
     friction_model : {'mixed', 'ols'}, optional
@@ -602,11 +602,11 @@ class SMDAnalysis:
                 f"continuing with {[e.name for e in active_estimators]} only."
             )
 
-        # One p_eq from a reference estimator, shared by all (force has no dG to
-        # weight by). Negative-dG bins contribute 0 to Z, downweighting those paths.
+        # One set of path weights shared by all estimators; the reference
+        # estimator's dG only gates paths (force has no dG).
         ref_estimator = SMDData.choose_reference_estimator(sMDDdata.results)
-        logger.info(f"[p_eq] shared reference estimator (robustness): {ref_estimator}")
-        ref_weights = self.compute_p_eq(sMDDdata, estimator=ref_estimator)
+        logger.info(f"[path weights] shared reference estimator (robustness): {ref_estimator}")
+        ref_weights = self.path_weights(sMDDdata, estimator=ref_estimator)
         weights_by_estimator = {est.name: ref_weights for est in active_estimators}
 
         self._write_path_quality(sMDDdata, weights_by_estimator)
@@ -1358,12 +1358,12 @@ class SMDAnalysis:
         """Build the mixture PMF series.
 
         ``return_paths=True`` also returns ``(per_path, n_paths)``: ``per_path`` is
-        ``{step: {path: value}}`` over paths with ``p_eq > 0``, and ``n_paths`` is
+        ``{step: {path: value}}`` over paths with weight > 0, and ``n_paths`` is
         the number of such paths.
 
-        ``path_combination='eq21'`` mixes paths with ``p_eq > 0`` by Eq. 21 with
+        ``path_combination='eq21'`` mixes paths with weight > 0 by Eq. 21 with
         p_neq renormalised per step (``value_col`` in {'dG', 'Wdiss', 'Wmean'});
-        ``'linear'`` takes the p_eq-weighted mean of ``value_col``. Callers pass
+        ``'linear'`` takes the path-weighted mean of ``value_col``. Callers pass
         ``'linear'`` for the force estimator.
         """
         validate_path_combination(path_combination)
@@ -1386,8 +1386,8 @@ class SMDAnalysis:
         if not p_neq:
             return empty
 
-        p_eq = SMDAnalysis._compute_p_eq(results_df, p_neq, beta)
-        if not p_eq:
+        weights = SMDAnalysis._path_weights(results_df, p_neq)
+        if not weights:
             return empty
 
         # Common extent = shortest usable path, so every rung covers the same range;
@@ -1409,8 +1409,8 @@ class SMDAnalysis:
                 supported = step_support[step_support / n_ref >= (1.0 - trim_fraction)].index
                 grid_steps = [s for s in grid_steps if s in supported]
 
-        # p_eq == 0 paths pass the gate but contribute nothing.
-        contributing_paths = {p for p, w in p_eq.items() if w > 0}
+        # Zero-weight paths pass the gate but contribute nothing.
+        contributing_paths = {p for p, w in weights.items() if w > 0}
 
         out = {}
         per_path_out: dict = {}
@@ -1432,13 +1432,13 @@ class SMDAnalysis:
 
             for _, row in slice_step.iterrows():
                 path = row['path']
-                if path not in p_eq:
+                if path not in weights:
                     continue
                 val = row[value_col]
                 if pd.isna(val):
                     continue
                 vals.append(float(val))
-                ws.append(float(p_eq[path]))
+                ws.append(float(weights[path]))
                 if return_paths and path in contributing_paths:
                     per_path_out.setdefault(int(step), {})[path] = float(val)
 
@@ -1482,7 +1482,7 @@ class SMDAnalysis:
     ) -> None:
         """Write a per-(estimator, speed, path) quality summary to disk.
 
-        Negative-dG counts, replica counts, dG endpoints and final p_eq per path.
+        Negative-dG counts, replica counts, dG endpoints and path ``weight``.
         Cumulant-only reliability columns (NaN otherwise):
 
         ``beta_sigma``
@@ -1543,7 +1543,7 @@ class SMDAnalysis:
                     'beta_sigma': bs_final,
                     'cumulant_correction_ratio': corr_ratio,
                     'n_steps_ratio': float(last_step / global_max) if global_max > 0 else float('nan'),
-                    'p_eq': float(weights.get(speed, {}).get(path, 0.0)),
+                    'weight': float(weights.get(speed, {}).get(path, 0.0)),
                 })
         if rows:
             pd.DataFrame(rows).to_csv(
@@ -1554,7 +1554,7 @@ class SMDAnalysis:
         """Drop (speed, path) groups that are under-sampled or prematurely terminated.
 
         Call after paths are assigned in ``raw_data['path']`` and estimators are
-        fitted, and before p_eq and PMF construction.
+        fitted, and before path weighting and PMF construction.
 
         Three passes, controlled by instance attributes:
 
@@ -1687,73 +1687,59 @@ class SMDAnalysis:
         return sMDDdata
 
     @staticmethod
-    def _compute_p_eq(
+    def _path_weights(
         results_df: pd.DataFrame,
         p_neq: dict,
-        beta: float,
     ) -> dict:
-        """Compute normalised equilibrium path probabilities for a single speed.
+        """Normalised path weights for a single speed.
 
-        Negative dG bins contribute 0 to Z (clipping dG to 0 would instead add
-        exp(0)=1 per bin), so an all-negative path gets p_eq=0.
+        A path's weight is its ``p_neq``. Paths with fewer than 2 rows are
+        skipped; paths with fewer than 2 bins with ``dG >= 0`` get weight 0.
 
         Parameters
         ----------
         results_df :
-            DataFrame with 'path', 'step', 'dG', 'r_coord' for a single speed.
+            DataFrame with 'path', 'step', 'dG' for a single speed.
         p_neq :
             Non-equilibrium path probabilities {path: p_neq}.
-        beta :
-            Inverse thermal energy (1 / k_B T).
+
+        Returns
+        -------
+        dict
+            ``{path: weight}`` summing to 1, or ``{}`` if all weights are 0.
         """
         weights = {}
         for path, gpath in results_df.groupby('path'):
             if path not in p_neq:
                 continue
-            gpath = gpath.sort_values('step')
             dG = gpath['dG'].to_numpy(dtype=float)
-            x = gpath['r_coord'].to_numpy(dtype=float)
             if len(dG) < 2:
                 continue
-            mask = dG >= 0
-            if mask.sum() < 2:
-                weights[path] = 0.0
-                continue
-            log_integrand = -beta * dG[mask]
-            shift = log_integrand.max()
-            integrand = np.zeros_like(dG)
-            integrand[mask] = np.exp(log_integrand - shift)
-            # abs(): r_coord decreases with step for backward pulls
-            Zk = abs(np.trapz(integrand, x)) * np.exp(shift)
-            p_eq_raw = p_neq[path] * Zk
-            if not np.isfinite(p_eq_raw) or p_eq_raw < 0.0:
-                p_eq_raw = 0.0
-            weights[path] = p_eq_raw
+            w = float(p_neq[path]) if (dG >= 0).sum() >= 2 else 0.0
+            weights[path] = w if np.isfinite(w) and w > 0.0 else 0.0
         total = sum(weights.values())
         if total <= 0:
             return {}
         return {path: w / total for path, w in weights.items()}
 
-    def compute_p_eq(
+    def path_weights(
         self,
         sMDDdata: 'SMDData',
         estimator: str = 'auto',
     ) -> dict:
-        """Compute equilibrium path probabilities.
-
-        Negative dG bins contribute 0 to Z (see :meth:`_compute_p_eq`).
+        """Path weights per speed (see :meth:`_path_weights`).
 
         Parameters
         ----------
         sMDDdata : SMDData
             Data object with fitted estimator results.
         estimator : str
-            Which estimator's dG to use ('auto', 'cumulant', 'jarzynski', ...).
+            Estimator whose dG gates the paths ('auto', 'cumulant', 'jarzynski', ...).
 
         Returns
         -------
         dict
-            ``{speed: {path: p_eq}}`` normalised per speed.
+            ``{speed: {path: weight}}`` normalised per speed.
         """
         results = sMDDdata.results
         if results is None or results.empty:
@@ -1764,11 +1750,10 @@ class SMDAnalysis:
 
         p_neq_dic = sMDDdata.get_p_neq(byspeed=True)
 
-        p_eq_dic = {}
+        weights_dic = {}
         for speed, gspeed in results_for_weights.groupby('speed'):
             p_neq = p_neq_dic.get(speed, {})
 
-            # Detect and warn about negative dG paths before computing weights
             for path, gpath in gspeed.groupby('path'):
                 dG = gpath['dG'].dropna().to_numpy(dtype=float)
                 n_neg = int(np.sum(dG < 0))
@@ -1777,16 +1762,15 @@ class SMDAnalysis:
                         f"Path '{path}' at speed={speed} nm/ps: {n_neg}/{len(dG)} dG "
                         f"values are negative (min={np.nanmin(dG):.1f} kJ/mol). "
                         f"Likely a cumulant artifact from insufficient sampling. "
-                        f"Negative bins excluded from the p_eq integrand "
-                        f"(contribute 0 to Z), so this path is downweighted."
+                        f"The path gets zero weight only if it has <2 non-negative bins."
                     )
 
-            p_eq_dic[speed] = self._compute_p_eq(gspeed, p_neq, sMDDdata.beta)
+            weights_dic[speed] = self._path_weights(gspeed, p_neq)
 
-            for path, w in p_eq_dic[speed].items():
+            for path, w in weights_dic[speed].items():
                 logger.info(
                     f"  Speed={speed} nm/ps  path={path}  "
-                    f"p_neq={p_neq.get(path, 0):.4f}  p_eq={w:.4f}"
+                    f"p_neq={p_neq.get(path, 0):.4f}  weight={w:.4f}"
                 )
 
-        return p_eq_dic
+        return weights_dic

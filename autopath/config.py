@@ -277,7 +277,7 @@ class Config(object):
         sMD_path_combination : str, optional
             How per-path profiles are combined: ``"eq21"`` (free-energy
             exponential average weighted by trajectory fraction; Wolf, Post &
-            Stock 2023, Eq. 21) or ``"linear"`` (p_eq-weighted mean).
+            Stock 2023, Eq. 21) or ``"linear"`` (path-weighted mean).
             Default ``"eq21"``.
         sMD_features : list, optional
             Extra per-frame features to include in path clustering, beyond
