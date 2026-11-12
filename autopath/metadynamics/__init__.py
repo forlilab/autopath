@@ -42,6 +42,9 @@ from .CV import (
     funnel_z_cv,
     membrane_z_cv,
     axis_cos_cv,
+    end_to_end_atoms,
+    crippen_contributions,
+    lipophilicity_z_cv,
     contacts_cv,
 )
 
@@ -98,6 +101,9 @@ __all__ = [
     "funnel_z_cv",
     "membrane_z_cv",
     "axis_cos_cv",
+    "end_to_end_atoms",
+    "crippen_contributions",
+    "lipophilicity_z_cv",
     "contacts_cv",
     "add_funnel_restraints",
     "generate_funnel_parameters_from_trajectory",
