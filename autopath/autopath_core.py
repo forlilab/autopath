@@ -51,6 +51,7 @@ from autopath.metadynamics import (
     funnel_z_ang,
 )
 from autopath.pulling import SMDData, SMDAnalysis
+from autopath.pulling.SMDData import resolve_smd_dcd
 from autopath.pulling.Convergence import (tail_converged, validate_autostop_options,
                                           round_robin_order)
 from autopath.pulling.PathModel import DTWPathModel, NullPathModel
@@ -245,10 +246,10 @@ class AutoPath:
         ``run_sMDpulling``, ``sMD_outdir``, ``sMD_pulling_dir``,
         ``sMD_pulling_speeds``, ``sMD_max_pulling_dist``, ``sMD_max_r_offset``,
         ``sMD_autostop_nc``, ``sMD_autostop_nc_window``,
-        ``sMD_autostop_min_displacement``, ``sMD_converge_speeds``,
+        ``sMD_autostop_min_displacement``, ``sMD_autostop_unbound_nm``, ``sMD_converge_speeds``,
         ``sMD_time``, ``sMD_steps_per_move``, ``sMD_dx_per_move``,
         ``sMD_spring_cte``, ``sMD_ligand_anchor_mode``, ``sMD_max_replicas``,
-        ``sMD_run_analysis``, ``sMD_clust_selection``, ``sMD_features``,
+        ``sMD_run_analysis``, ``sMD_align_trajs``, ``sMD_clust_selection``, ``sMD_features``,
         ``sMD_log_geom_features``, ``sMD_plateau_frac``,
         ``sMD_cluster_to_boundary``, ``sMD_boundary_buffer_frac``,
         ``sMD_kramers_abs``, ``sMD_kramers_bound``,
@@ -320,6 +321,7 @@ class AutoPath:
         sMD_autostop_nc: float | None = 0.01,  # fraction of NC_initial; None disables
         sMD_autostop_nc_window: int = 5,
         sMD_autostop_min_displacement: float = 0.5,
+        sMD_autostop_unbound_nm: float | None = None,  # NC stop also needs ligand-protein heavy-atom gap >= this (nm)
         sMD_converge_speeds: bool = True,
         sMD_conv_window: int = 5,
         sMD_conv_streak: int = 3,
@@ -331,11 +333,15 @@ class AutoPath:
         sMD_spring_cte: float = None,  # KJ/mol/nm2
         sMD_force_n_samples: int = 10,  # max restraint-force samples averaged per move (>=1)
         sMD_force_sample_stride: int = 5,  # MD steps between force samples
+        sMD_dcd_every: int | None = None,  # moves between saved DCD frames (None = every 5 moves)
+        sMD_dcd_dry: bool = False,  # sMD DCDs/final PDBs hold protein+ligand only (topology: trajectories/dry_top.pdb)
         sMD_ligand_anchor_mode: str = 'murcko',
         sMD_max_replicas: int = 50,  # max replicas per speed in convergence mode
         sMD_run_analysis: bool = True,
+        sMD_align_trajs: bool = True,  # False: keep raw sMD DCDs (<stem>.dcd), skip wrap/align
         sMD_clust_selection:str = None,
         sMD_path_model: str = 'dtw',   # 'dtw' | 'null' ('null' = no clustering: one path)
+        sMD_paths_viz: str = 'pse',    # unbinding-paths figure: 'pse' | 'pml' | 'none'
         sMD_n_paths: int | None = None,  # fixed number of paths; None = silhouette-selected
         sMD_max_frac_neg_dG_first_half: float = 0.25,  # pass-3 binding-well filter; <=0 disables
         sMD_friction_model: str = 'mixed',  # 'mixed' | 'ols' force friction slope regression
@@ -411,6 +417,7 @@ class AutoPath:
         self.sMD_autostop_nc = sMD_autostop_nc
         self.sMD_autostop_nc_window = sMD_autostop_nc_window
         self.sMD_autostop_min_displacement = sMD_autostop_min_displacement
+        self.sMD_autostop_unbound_nm = sMD_autostop_unbound_nm
         for _name, _val in (("sMD_time", sMD_time), ("sMD_steps_per_move", sMD_steps_per_move)):
             if _val is not None:
                 raise ValueError(f"{_name} is not supported; set sMD_pulling_speeds and sMD_dx_per_move instead.")
@@ -427,11 +434,17 @@ class AutoPath:
         self.sMD_spring_cte = sMD_spring_cte
         self.sMD_force_n_samples = sMD_force_n_samples
         self.sMD_force_sample_stride = sMD_force_sample_stride
+        self.sMD_dcd_every = sMD_dcd_every
+        self.sMD_dcd_dry = sMD_dcd_dry
         self.sMD_ligand_anchor_mode = sMD_ligand_anchor_mode
         self.sMD_max_replicas = sMD_max_replicas
         self.sMD_run_analysis = sMD_run_analysis
+        self.sMD_align_trajs = sMD_align_trajs
         self.sMD_clust_selection = sMD_clust_selection
         self.sMD_path_model = str(sMD_path_model).lower()
+        self.sMD_paths_viz = str(sMD_paths_viz).lower()
+        if self.sMD_paths_viz not in ("pse", "pml", "none"):
+            raise ValueError(f"sMD_paths_viz must be 'pse', 'pml' or 'none', got {sMD_paths_viz!r}")
         self.sMD_n_paths = sMD_n_paths
         self.sMD_max_frac_neg_dG_first_half = float(sMD_max_frac_neg_dG_first_half)
         self.sMD_path_combination = validate_path_combination(sMD_path_combination)
@@ -455,6 +468,14 @@ class AutoPath:
         self.n_milestones = n_milestones
         # Metadynamics
         self.run_metadynamics = run_metadynamics
+        if run_metadynamics and not sMD_align_trajs:
+            # The funnel axis and the learned CVs are fitted on superposed/imaged sMD frames.
+            raise ValueError("run_metadynamics=True needs sMD_align_trajs=True")
+        if sMD_dcd_dry and sMD_align_trajs:
+            # wrap/align reads the trajectories with the solvated topology.
+            raise ValueError("sMD_dcd_dry=True needs sMD_align_trajs=False")
+        if sMD_dcd_dry and extract_milestones:
+            raise ValueError("sMD_dcd_dry=True does not support extract_milestones (solvated frames)")
         self.mMD_use_funnel_potential = mMD_use_funnel_potential
         self.mMD_bias_factor = mMD_bias_factor
         self.mMD_bias_frequency = mMD_bias_frequency
@@ -763,6 +784,7 @@ class AutoPath:
                 topology=topology,
                 groupA_atoms=ligand_atoms_indices,
                 groupB_atoms=pocket_atom_indices,
+                ligand_atoms=ligand_total_hatoms,  # NC autostop + geom features: whole ligand
                 restart_velocities=True,
                 timestep=self.timestep,
                 temperature=self.temperature,
@@ -775,7 +797,10 @@ class AutoPath:
                 autostop_nc=self.sMD_autostop_nc,
                 autostop_nc_window=self.sMD_autostop_nc_window,
                 autostop_min_displacement=self.sMD_autostop_min_displacement,
+                autostop_unbound_nm=self.sMD_autostop_unbound_nm,
                 save_freq=5,
+                dcd_every=self.sMD_dcd_every,
+                dcd_dry=self.sMD_dcd_dry,
                 force_n_samples=self.sMD_force_n_samples,
                 force_sample_stride=self.sMD_force_sample_stride,
                 log_geom_features=self.sMD_log_geom_features,
@@ -959,13 +984,12 @@ class AutoPath:
                 else:
                     n_done = len(glob(f"{sMD_traj_outdir}/sMD_*_v{speed}_{self.sMD_pulling_dir}.dat"))
                     logger.info(f"Running sMD for speed {speed} nm/ps: {reps} replicas requested, {n_done} on disk.")
-                    for i in range(max(0, reps - n_done)):
+                    # A failed pull (e.g. NaN) writes no .dat; retry it so the speed still
+                    # ends with `reps` replicas. Consecutive failures abort the speed.
+                    consecutive_failures, MAX_CONSECUTIVE_FAILURES = 0, 5
+                    while True:
                         existing = glob(f"{sMD_traj_outdir}/sMD_*_v{speed}_{self.sMD_pulling_dir}.dat")
-                        if len(existing) >= self.sMD_max_replicas:
-                            logger.warning(
-                                f"Reached maximum replicas ({self.sMD_max_replicas}) for speed {speed} nm/ps "
-                                f"(folder already has {len(existing)}). Stopping."
-                            )
+                        if len(existing) >= min(reps, self.sMD_max_replicas):
                             break
                         try:
                             sMD.run(
@@ -974,21 +998,33 @@ class AutoPath:
                                 pulling_speed=speed,  # nm/ps
                                 pulling_direction=self.sMD_pulling_dir,
                             )
+                            consecutive_failures = 0
                         except Exception as e:
-                            logger.error(f"Error during sMD pulling for speed {speed} nm/ps, replica {i+1}: {e}")
-                            continue
+                            consecutive_failures += 1
+                            logger.error(f"Error during sMD pulling for speed {speed} nm/ps, replica "
+                                         f"{len(existing) + 1}: {e} (consecutive failure "
+                                         f"{consecutive_failures}/{MAX_CONSECUTIVE_FAILURES}; retrying)")
+                            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                                logger.error(f"Aborting sMD for speed {speed} nm/ps after "
+                                             f"{consecutive_failures} consecutive failures.")
+                                break
 
         # Load and align sMD trajectories
         sMD_trajs = glob(f"{sMD_traj_outdir}/sMD_replica-*_*_*.dcd")
         sMD_trajs = [f for f in sMD_trajs if "aligned" not in f]  # only process unaligned trajectories
-        logger.info(f"Found {len(sMD_trajs)} sMD trajectories to align.")        
-        wrap_align_save_traj(sMD_trajs, solvated_system_pdb, is_membrane=self.is_membrane)
+        if self.sMD_align_trajs:
+            logger.info(f"Found {len(sMD_trajs)} sMD trajectories to align.")
+            wrap_align_save_traj(sMD_trajs, solvated_system_pdb, is_membrane=self.is_membrane)
+        else:
+            logger.info(f"sMD_align_trajs=False: keeping {len(sMD_trajs)} raw sMD trajectories (<stem>.dcd).")
                                 
         ##############################################################################################
         ######################################### sMD Analysis #######################################
         ##############################################################################################        
         
         sMD_trajs = glob(f"{sMD_traj_outdir}/sMD_replica-*_*_*_aligned.dcd")
+        if not self.sMD_align_trajs:
+            sMD_trajs = [f for f in glob(f"{sMD_traj_outdir}/sMD_replica-*_*_*.dcd") if "aligned" not in f]
 
         if self.sMD_run_analysis:
             
@@ -1012,7 +1048,8 @@ class AutoPath:
                             "assigned to a single path.")
             else:
                 cluster_model = DTWPathModel(seed=self.random_state, do_plots=True,
-                                            outdir=sMD_analysis_outdir)
+                                            outdir=sMD_analysis_outdir,
+                                            viz_output_format=self.sMD_paths_viz)
 
             smdanalysis = SMDAnalysis(sys_name, cluster_model,
                                     estimators=['cumulant', 'jarzynski', 'force'],
@@ -1843,5 +1880,5 @@ class AutoPath:
         str
             Absolute or relative path to ``<sMD_outdir>/trajectories/<name>_aligned.dcd``.
         """
-        dcd_name = trajname.replace("log", "traj") + "_aligned.dcd"
-        return os.path.join(self.sMD_outdir, "trajectories", dcd_name)
+        return resolve_smd_dcd(os.path.join(self.sMD_outdir, "trajectories",
+                                            trajname.replace("log", "traj")))

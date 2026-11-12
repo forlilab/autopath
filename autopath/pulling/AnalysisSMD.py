@@ -11,6 +11,7 @@ from scipy.ndimage import gaussian_filter1d
 from scipy.signal import find_peaks
 
 from autopath.pulling import SMDData
+from autopath.pulling.SMDData import smd_topology
 from autopath.pulling.Estimators import BaseEstimator, FrictionEstimator
 from autopath.pulling.PathModel import DTWPathModel, NullPathModel, PathModel
 from autopath.pulling.Estimators import (
@@ -539,7 +540,7 @@ class SMDAnalysis:
         trajectory_files = {}
         for traj in sMDDdata.traj_files:
             trajname = SMDData._traj_to_log_name(traj)
-            trajectory_files[trajname] = (self.reference_pdb, traj)
+            trajectory_files[trajname] = (smd_topology(self.reference_pdb, traj), traj)
 
         path_mappings = self.path_model.fit_transform(
             feat_df,

@@ -1,9 +1,8 @@
-import logging
-import re
 from types import SimpleNamespace
 
 import numpy as np
 import openmm
+import openmm.app
 import openmm.unit as openmmunit
 import pytest
 
@@ -76,54 +75,71 @@ def test_cap_is_identity_region_of_openmm_pbc_distance(n):
             assert abs(d - r) > 1e-3
 
 
-class _Stop(Exception):
-    pass
+def _smd(lig, prot, anchor=None):
+    smd = SteeredMD.__new__(SteeredMD)
+    smd.ligand_atoms, smd.groupA_atoms = lig, lig
+    smd.groupB_atoms = anchor if anchor is not None else prot
+    smd._protein_heavy = np.asarray(prot)
+    return smd
 
 
-class _FakeSMD(SimpleNamespace):
-    @property
-    def autostop_nc_window(self):
-        # Halts pull_single_direction right after the move cap.
-        raise _Stop
+def test_image_distance_sees_protein_across_the_boundary():
+    # ligand 0.3 nm inside the top face; the protein image one c-vector down sits 0.3+0.2 nm away
+    c = _DODEC[2]
+    pos = np.array([[0.0, 0.0, 0.0],              # protein atom
+                    c - np.array([0.0, 0.0, 0.5])])  # ligand atom, 0.5 nm below the protein's +c image
+    d = _smd([1], [0])._min_ligand_protein_image_nm(pos, _DODEC)
+    assert d == pytest.approx(0.5, abs=1e-9)
+    # same-image distance is not counted: only the 26 neighbouring images
+    assert np.linalg.norm(pos[1] - pos[0]) > 5.0
 
 
-def _run_cap(tmp_path, box, pos, n_moves, monkeypatch, caplog):
-    monkeypatch.setattr("autopath.pulling.steered_md.add_reporters", lambda *a, **k: None)
-    box_vecs = [[x * openmmunit.nanometers for x in row] for row in box]
-    positions = np.asarray(pos) * openmmunit.nanometers
-    r = float(np.linalg.norm(triclinic_minimum_image(np.subtract(*pos), box)))
-    state = SimpleNamespace(getPeriodicBoxVectors=lambda: box_vecs, getPositions=lambda **kw: positions)
-    sim = SimpleNamespace(context=SimpleNamespace(setParameter=lambda *a, **k: None,
-                                                  getState=lambda **kw: state))
-    smd = _FakeSMD(out_dir=str(tmp_path), use_GReweighting=False,
-                   com_dist=SimpleNamespace(getValue=lambda *a, **k: r * openmmunit.nanometers),
-                   sMD_moves=n_moves, steps_per_move=1, save_freq=1, sMD_max_r_offset=100.0,
-                   pbc_safety_nm=0.5, groupA_atoms=[0], groupB_atoms=[1],
-                   dx_per_move=0.001 * openmmunit.nanometers)
-    with caplog.at_level(logging.WARNING, logger="autopath"), pytest.raises(_Stop):
-        SteeredMD.pull_single_direction(smd, sim, run_id=1, direction="forward",
-                                        lambda0=r * openmmunit.nanometers)
-    return r
+def test_co_image_ligand_shifts_the_whole_ligand_once():
+    # topology: residue 0 = protein (atom 0), residue 1 = ligand (atoms 1, 2)
+    top = openmm.app.Topology()
+    ch = top.addChain()
+    r0, r1 = top.addResidue("ALA", ch), top.addResidue("UNK", ch)
+    for res, n in ((r0, 1), (r1, 2)):
+        for _ in range(n):
+            top.addAtom("C", openmm.app.element.carbon, res)
+    lig = np.array([[0.1, 0.2, 1.5], [0.2, 0.2, 1.5]]) + _DODEC[2] + _DODEC[1]  # wrapped one c+b away
+    pos = np.vstack([[0.1, 0.2, 0.0], lig])
+    box = [openmm.Vec3(*row) * openmmunit.nanometers for row in _DODEC]
+    stored = {}
+    state = SimpleNamespace(getPositions=lambda asNumpy=True: pos * openmmunit.nanometers,
+                            getPeriodicBoxVectors=lambda asNumpy=True: np.asarray(_DODEC) * openmmunit.nanometers)
+    ctx = SimpleNamespace(getState=lambda **kw: state, setPositions=lambda p: stored.setdefault("p", p))
+    smd = _smd([1, 2], [0])
+    smd.topology = top
+    SteeredMD._co_image_ligand(smd, SimpleNamespace(context=ctx))
+    new = stored["p"].value_in_unit(openmmunit.nanometers)
+    np.testing.assert_allclose(new[0], pos[0])                                   # protein untouched
+    np.testing.assert_allclose(new[1:], lig - _DODEC[2] - _DODEC[1], atol=1e-9)  # both ligand atoms moved back
+    assert np.linalg.norm(new[1] - new[0]) == pytest.approx(1.5, abs=1e-9)
 
 
-@pytest.mark.parametrize("wrapped", [False, True])
-def test_pull_cap_in_dodecahedron(tmp_path, monkeypatch, caplog, wrapped):
-    # COM-COM vector along z; wrapped stores it across the c+b boundary to exercise the image.
-    pos = [[0.1, 0.2, 1.5], [0.1, 0.2, 0.0]]
-    if wrapped:
-        pos[0] = list(np.asarray(pos[0]) + _DODEC[2] + _DODEC[1])
-    r = _run_cap(tmp_path, _DODEC, pos, 10000, monkeypatch, caplog)
-    assert r == pytest.approx(1.5)
-    want = int((_old_cap(np.array([0.0, 0.0, r]), np.diag(_DODEC)) - 0.5 - r) / 0.001)
-    m = re.search(r"Capping sMD_moves 10000 → (\d+)", caplog.text)
-    assert m and int(m.group(1)) == want
-    assert "non-orthorhombic" not in caplog.text
+def test_com_reduction_margin_follows_current_direction():
+    from autopath.pulling.pbc import com_reduction_margin
+    box = _DODEC
+    w = np.array([1.0])
+    # 2.0 nm along x: limit a_x/2 = 4.24 nm; same length along z: limit c_z/2 = 3.00 nm
+    pos_x = np.array([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
+    pos_z = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 2.0]])
+    d, lim_x = com_reduction_margin(pos_x, box, [1], w, [0], w)
+    assert d == pytest.approx(2.0) and lim_x == pytest.approx(box[0, 0] / 2)
+    d, lim_z = com_reduction_margin(pos_z, box, [1], w, [0], w)
+    assert d == pytest.approx(2.0) and lim_z == pytest.approx(box[2, 2] / 2)
+    assert lim_z < lim_x   # a pull that tilts toward z loses margin the t=0 cap did not see
 
 
-def test_pull_cap_unchanged_in_orthorhombic_box(tmp_path, monkeypatch, caplog):
-    L = np.array([7.0, 9.0, 11.0])
-    v = np.array([1.0, 0.6, 0.3])
-    r = _run_cap(tmp_path, np.diag(L), [list(v), [0.0, 0.0, 0.0]], 10000, monkeypatch, caplog)
-    want = int((_old_cap(v, L) - 0.5 - r) / 0.001)
-    m = re.search(r"Capping sMD_moves 10000 → (\d+)", caplog.text)
-    assert m and int(m.group(1)) == want
+def test_com_reduction_margin_matches_openmm_cv_inside_limit():
+    from autopath.pulling.pbc import com_reduction_margin
+    rng = np.random.default_rng(3)
+    for _ in range(50):
+        n = rng.normal(size=3); n /= np.linalg.norm(n)
+        lim, _ = reduction_identity_limit(n, _DODEC)
+        r = rng.uniform(0.1, 0.95) * lim
+        pos = np.array([[0.0, 0.0, 0.0], r * n])
+        d, lim2 = com_reduction_margin(pos, _DODEC, [1], [1.0], [0], [1.0])
+        assert d == pytest.approx(r) and lim2 == pytest.approx(lim)
+        assert np.linalg.norm(triclinic_minimum_image(r * n, _DODEC)) == pytest.approx(r)
