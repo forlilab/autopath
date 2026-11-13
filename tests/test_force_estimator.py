@@ -101,7 +101,7 @@ def test_force_regression_recovers_feq_and_gamma():
     gam = [500.0, 800.0, 1200.0, 900.0, 400.0]
     fr = _force_results_linear(feq, gam, speeds)
     weights = {sp: {'p0': 1.0} for sp in speeds}
-    out = FrictionEstimator().gamma_from_force_regression(fr, weights)
+    out = FrictionEstimator(friction_model='ols').gamma_from_force_regression(fr, weights)
     out = out.sort_values('step')
     np.testing.assert_allclose(out['Feq'].to_numpy(), feq, atol=1e-6)
     np.testing.assert_allclose(out['Gamma'].to_numpy(), gam, atol=1e-6)
@@ -115,7 +115,7 @@ def test_force_derivative_matches_slope():
     gam = [500.0, 800.0, 1200.0]
     fr = _force_results_linear(feq, gam, speeds)
     weights = {sp: {'p0': 1.0} for sp in speeds}
-    out = FrictionEstimator().gamma_from_force_derivative(fr, weights)
+    out = FrictionEstimator(friction_model='ols').gamma_from_force_derivative(fr, weights)
     # For exactly-linear data, per-speed (Fbar-Feq)/v == gamma at every speed.
     for sp in speeds:
         g = out[out['speed'] == sp].sort_values('step')

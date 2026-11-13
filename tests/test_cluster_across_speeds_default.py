@@ -78,7 +78,8 @@ def test_convergence_fits_do_not_persist_medoids(tmp_path):
 def test_check_convergence_keeps_run_medoids(tmp_path):
     smd = _two_speed_smd(tmp_path)
     out = tmp_path / "out"
-    an = SMDAnalysis(do_plots=False, outdir=str(out), estimators=["cumulant"], n_paths=2)
+    # >=2 speeds: Kramers auto friction needs the force estimator
+    an = SMDAnalysis(do_plots=False, outdir=str(out), estimators=["cumulant", "force"], n_paths=2)
     an.run(smd, cluster_to_boundary=False)
     path = out / "path_analysis" / "medoid_info.json"
     before = json.loads(path.read_text())
