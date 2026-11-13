@@ -123,6 +123,19 @@ def test_force_derivative_matches_slope():
     assert (out['method'] == 'derivative').all()
 
 
+
+def test_force_derivative_exact_with_mixed_friction_model():
+    # Few grid points: the mixedlm intercept is off by ~0.1, which /v would amplify.
+    speeds = [0.001, 0.005, 0.01]
+    feq = [0.0, 100.0, 250.0]
+    gam = [500.0, 800.0, 1200.0]
+    fr = _force_results_linear(feq, gam, speeds)
+    weights = {sp: {'p0': 1.0} for sp in speeds}
+    out = FrictionEstimator(friction_model='mixed').gamma_from_force_derivative(fr, weights)
+    for sp in speeds:
+        g = out[out['speed'] == sp].sort_values('step')
+        np.testing.assert_allclose(g['Gamma'].to_numpy(), gam, rtol=1e-6)
+
 def test_force_derivative_drops_steps_without_feq_no_offset():
     # step 0 has only ONE speed -> extrapolate_to_v0 trims it -> no Feq(step 0).
     # It must be ABSENT from derivative output (not zero-filled), and the

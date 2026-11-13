@@ -525,10 +525,12 @@ class FrictionEstimator(BaseEstimator):
         if fbar.empty or fbar['speed'].nunique() < 2:
             return pd.DataFrame()
 
-        reg = self.gamma_from_force_regression(force_results, weights)
-        if reg.empty:
+        # Per-point OLS Feq: a pooled (mixed) intercept error is amplified by 1/v.
+        reg = extrapolate_to_v0(results=fbar, param='Fbar', speeds=self.speeds,
+                                realized_speed_map=self.realized_speed_map, model='ols')
+        if reg is None or reg.empty:
             return pd.DataFrame()
-        feq_by_step = reg.set_index('step')['Feq'].to_dict()
+        feq_by_step = reg.set_index('step')['Fbar'].to_dict()
 
         rows = []
         for speed, g in fbar.groupby('speed'):
