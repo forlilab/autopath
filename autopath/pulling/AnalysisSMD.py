@@ -537,10 +537,12 @@ class SMDAnalysis:
                 f"(r <= {boundary_cap:.2f} nm)."
             )
 
+        # Viz-only map: analyses of .dat logs without DCDs on disk must still run.
         trajectory_files = {}
         for traj in sMDDdata.traj_files:
-            trajname = SMDData._traj_to_log_name(traj)
-            trajectory_files[trajname] = (smd_topology(self.reference_pdb, traj), traj)
+            if self.reference_pdb is not None and os.path.exists(traj):
+                trajname = SMDData._traj_to_log_name(traj)
+                trajectory_files[trajname] = (smd_topology(self.reference_pdb, traj), traj)
 
         path_mappings = self.path_model.fit_transform(
             feat_df,
