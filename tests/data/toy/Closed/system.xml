@@ -1,0 +1,78 @@
+<?xml version="1.0" ?>
+<System openmmVersion="8.4" type="System" version="1">
+	<PeriodicBoxVectors>
+		<A x="6" y="0" z="0"/>
+		<B x="0" y="6" z="0"/>
+		<C x="0" y="0" z="6"/>
+	</PeriodicBoxVectors>
+	<Particles>
+		<Particle mass="12.011"/>
+		<Particle mass="12.011"/>
+		<Particle mass="12.011"/>
+		<Particle mass="12.011"/>
+		<Particle mass="12.011"/>
+		<Particle mass="12.011"/>
+		<Particle mass="12.011"/>
+		<Particle mass="12.011"/>
+		<Particle mass="12.011"/>
+		<Particle mass="12.011"/>
+		<Particle mass="12.011"/>
+		<Particle mass="12.011"/>
+		<Particle mass="12.011"/>
+	</Particles>
+	<Constraints/>
+	<Forces>
+		<Force energy="0.5*kp*periodicdistance(x,y,z,x0,y0,z0)^2" forceGroup="0" name="CustomExternalForce" type="CustomExternalForce" version="1">
+			<PerParticleParameters>
+				<Parameter name="x0"/>
+				<Parameter name="y0"/>
+				<Parameter name="z0"/>
+			</PerParticleParameters>
+			<GlobalParameters>
+				<Parameter default="100000" name="kp"/>
+			</GlobalParameters>
+			<Particles>
+				<Particle index="0" param1="3.45" param2="1.8000000000000003" param3="3"/>
+				<Particle index="1" param1="3.3181980515339466" param2="1.8000000000000003" param3="3.318198051533946"/>
+				<Particle index="2" param1="3" param2="1.8000000000000003" param3="3.45"/>
+				<Particle index="3" param1="2.681801948466054" param2="1.8000000000000003" param3="3.3181980515339466"/>
+				<Particle index="4" param1="2.55" param2="1.8000000000000003" param3="3"/>
+				<Particle index="5" param1="2.6818019484660534" param2="1.8000000000000003" param3="2.681801948466054"/>
+				<Particle index="6" param1="3" param2="1.8000000000000003" param3="2.55"/>
+				<Particle index="7" param1="3.318198051533946" param2="1.8000000000000003" param3="2.6818019484660534"/>
+			</Particles>
+		</Force>
+		<Force forceGroup="0" name="HarmonicBondForce" type="HarmonicBondForce" usesPeriodic="0" version="2">
+			<Bonds>
+				<Bond d=".15" k="20000" p1="8" p2="9"/>
+				<Bond d=".14866068747318506" k="20000" p1="8" p2="10"/>
+				<Bond d=".147648230602334" k="20000" p1="8" p2="11"/>
+				<Bond d=".147648230602334" k="20000" p1="8" p2="12"/>
+				<Bond d=".24413111231467408" k="20000" p1="9" p2="10"/>
+				<Bond d=".24351591323771843" k="20000" p1="9" p2="11"/>
+				<Bond d=".24351591323771843" k="20000" p1="9" p2="12"/>
+				<Bond d=".2418677324489565" k="20000" p1="10" p2="11"/>
+				<Bond d=".2418677324489565" k="20000" p1="10" p2="12"/>
+				<Bond d=".24" k="20000" p1="11" p2="12"/>
+			</Bonds>
+		</Force>
+		<Force energy="min(U0,U1) - 2.4943387799999996*log(1+exp(-abs(U0-U1)/2.4943387799999996)); U0=((-10.0*exp(-(s0)^2/(2*0.15^2)) + 5.0*exp(-((s0)-0.55)^2/(2*0.12^2)) + 2.0*0.5*(1+tanh(((s0)-0.9)/0.08)) + 0.5*5000.0*step(-0.15-(s0))*((s0)--0.15)^2 + 0.5*5000.0*step((s0)-2.4)*((s0)-2.4)^2) + 0.5*500.0*(d2-s0^2)); U1=((-10.0*exp(-(s1)^2/(2*0.15^2)) + 12.0*exp(-((s1)-0.55)^2/(2*0.12^2)) + 2.0*0.5*(1+tanh(((s1)-0.9)/0.08)) + 0.5*5000.0*step(-0.15-(s1))*((s1)--0.15)^2 + 0.5*5000.0*step((s1)-2.4)*((s1)-2.4)^2) + 0.5*500.0*(d2-s1^2)); s0=dx*0.7071067811865476+dy*0.7071067811865476+dz*0.0; s1=dx*-0.7071067811865476+dy*0.7071067811865476+dz*0.0; d2=dx^2+dy^2+dz^2; dx=x1-3.0; dy=y1-2.2; dz=z1-3.0" forceGroup="0" groups="1" name="CustomCentroidBondForce" type="CustomCentroidBondForce" usesPeriodic="0" version="3">
+			<PerBondParameters/>
+			<GlobalParameters/>
+			<EnergyParameterDerivatives/>
+			<Groups>
+				<Group>
+					<Particle p="8"/>
+					<Particle p="9"/>
+					<Particle p="10"/>
+					<Particle p="11"/>
+					<Particle p="12"/>
+				</Group>
+			</Groups>
+			<Bonds>
+				<Bond g1="0"/>
+			</Bonds>
+			<Functions/>
+		</Force>
+	</Forces>
+</System>
