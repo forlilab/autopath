@@ -1,6 +1,7 @@
 import os
 import math
 import time
+import zlib
 import logging
 from glob import glob
 from copy import deepcopy
@@ -88,6 +89,15 @@ class SteeredMD:
     ligand the per-atom convention ``k = N_ha * k_per_atom`` (used in
     :mod:`autopath_core`) keeps the thermal sigma roughly invariant to
     ligand size.
+
+    Seeding
+    -------
+    ``seed=None`` leaves OpenMM's random seeds unset (every run differs).
+    With an integer ``seed`` each :meth:`run` seeds the Langevin integrator
+    and the initial velocities with :meth:`run_seed` of ``(seed, run_id)``,
+    so pulls with different ``run_id`` or speed differ and the same pull
+    is reproducible regardless of call order. Reproducibility therefore
+    needs an explicit ``run_id`` and a deterministic platform (Reference/CPU).
     """
 
     def __init__(
@@ -120,6 +130,7 @@ class SteeredMD:
         force_sample_stride: int = 5,      # MD steps between force samples; n_samples adapts to move length
         verbose: int = 0,
         log_geom_features: bool | list[str] = False,  # log per-frame geom scalars to a sidecar
+        seed: int | None = None,           # base RNG seed; per-run seeds via run_seed()
     ):
 
         self.system = system
@@ -134,6 +145,7 @@ class SteeredMD:
         self.ligand_atoms = ligand_atoms # whole-ligand heavy atoms; groupA (anchor) is only the pulled COM
         self.restrained_atoms = restrained_atoms
         self.restart_velocities = restart_velocities
+        self.seed = None if seed is None else int(seed)
 
         self.verbose = verbose
         self.log_geom_features = log_geom_features
@@ -486,6 +498,16 @@ class SteeredMD:
         save_pdb(self.topology, final_positions, f"{self.out_dir}/sMD_{run_id}.pdb")
         return
 
+    def run_seed(self, run_id):
+        """OpenMM seed of one run: hash of ``(seed, run_id)`` in [1, 2**31 - 1); None if unseeded.
+
+        ``run_id`` is the full replica name (``replica-<id>_v<speed>_<direction>``).
+        """
+        if self.seed is None:
+            return None
+        # 0 means "random" to OpenMM, hence the +1
+        return zlib.crc32(f"{self.seed}|{run_id}".encode()) % (2**31 - 1) + 1
+
     def _new_run_id(self, pulling_speed, pulling_direction):
         """``replica-HHMMSS_v<speed>_<direction>`` that no file in ``out_dir`` uses yet.
 
@@ -611,7 +633,12 @@ class SteeredMD:
         
         # The OpenMM default; it does not track work (discussion https://github.com/openmm/openmm/issues/2520)
         integrator = LangevinMiddleIntegrator(self.temperature, self.integrator_friction, self.timestep)
-                    
+        run_seed = self.run_seed(run_id)
+        vel_seed = () if run_seed is None else (run_seed,)
+        if run_seed is not None:
+            integrator.setRandomNumberSeed(run_seed)  # before the Context exists
+            logger.info(f"sMD_{run_id}: random seed {run_seed}")
+
         system = deepcopy(self.system)  # Create a copy of the system to avoid modifying the original
         simulation = Simulation(self.topology, system, integrator, self.platform)
 
@@ -641,7 +668,7 @@ class SteeredMD:
             pdb = PDBFile(pdb_file)
             simulation.context.setPositions(pdb.getPositions())
             simulation.context.setPeriodicBoxVectors(*pdb.topology.getPeriodicBoxVectors())
-            simulation.context.setVelocitiesToTemperature(self.temperature)
+            simulation.context.setVelocitiesToTemperature(self.temperature, *vel_seed)
 
         elif checkpoint_file is not None and pdb_file is None:
             logger.info(f"Setting positions from checkpoint {checkpoint_file}")
@@ -697,7 +724,7 @@ class SteeredMD:
 
         # Reset velocities to temperature. Check https://github.com/openmm/openmm/pull/259
         if self.restart_velocities:
-            simulation.context.setVelocitiesToTemperature(self.temperature)
+            simulation.context.setVelocitiesToTemperature(self.temperature, *vel_seed)
         
         if self.use_NVT:
             # Prefix match also covers the membrane/anisotropic barostats.
