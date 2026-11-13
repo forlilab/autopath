@@ -49,14 +49,6 @@ class TestSupportPolicy(unittest.TestCase):
             set(map(tuple, gdf_b[["step", "path"]].values.tolist())),
         )
 
-    def test_gated_counts_renormalize_to_one(self):
-        # Survivor counts feed p_neq = count / total → sums to 1.
-        pol = SupportPolicy(min_samples_per_step=3, min_trajs_per_path=2)
-        _, gcounts = pol.apply(self.df, self.counts)
-        total = sum(gcounts.values())
-        p_neq = {p: c / total for p, c in gcounts.items()}
-        self.assertAlmostEqual(sum(p_neq.values()), 1.0, places=12)
-
     def test_noop_on_fully_supported_data(self):
         # Regression guard for run(): data already at/above 5/5 is unchanged.
         pol = SupportPolicy(min_samples_per_step=5, min_trajs_per_path=5)

@@ -91,8 +91,7 @@ class CumulantEstimator(BaseEstimator):
         if raw_W.size == 0:
             return None
         Wmean = float(raw_W.mean())
-        # ddof=1 variance is undefined for a single sample → NaN (propagates to dG);
-        # guard to avoid a spurious "Degrees of freedom <= 0" RuntimeWarning.
+        # ddof=1 variance is undefined for one sample; NaN without the RuntimeWarning.
         Wvar = float(raw_W.var(ddof=1)) if raw_W.size > 1 else np.nan
         dG = Wmean - (beta * Wvar) / 2.0
         return {'Wmean': Wmean, 'dG': dG, 'Wdiss': Wmean - dG}
@@ -145,8 +144,7 @@ class ForceEstimator(BaseEstimator):
         if raw_W.size == 0:
             return None
         Wmean = float(raw_W.mean())
-        # Per-speed "PMF" is the raw work; dissipation is removed by the v→0
-        # extrapolation, not per-speed.  Wdiss is NaN (force friction uses force).
+        # Dissipation is removed only by the v→0 extrapolation; Wdiss is undefined here.
         return {'Wmean': Wmean, 'dG': Wmean, 'Wdiss': np.nan}
 
     def fit_transform(self, smd_data: SMDData) -> SMDData:
@@ -195,16 +193,20 @@ class FrictionEstimator(BaseEstimator):
         smooth_polyorder: int = 3,
         speeds: list[float] | None = None,
         realized_speed_map: dict | None = None,
+        friction_model: str = 'mixed',
     ):
+        if friction_model not in ('ols', 'mixed'):
+            raise ValueError(
+                f"friction_model must be 'ols' or 'mixed', got {friction_model!r}")
+        self.friction_model = friction_model
         self.w_col = w_col
         self.use_spline = use_spline
         self.smooth_window = smooth_window
         self.smooth_method = smooth_method
         self.smooth_polyorder = smooth_polyorder
         self.speeds = speeds
-        # {nominal filename speed -> realized pulling speed}. Used as the physical
-        # velocity in every dF/dv, per-speed /v, and v->0 regression so the
-        # steps_per_move rounding does not bias friction/PMF. None -> use nominal.
+        # {nominal speed -> realized speed}: the physical v used in every /v and v->0
+        # regression, so steps_per_move rounding does not bias friction. None -> nominal.
         self.realized_speed_map = realized_speed_map or None
 
     def _realized(self, speed: float) -> float:
@@ -313,12 +315,8 @@ class FrictionEstimator(BaseEstimator):
 
         Note
         ----
-        For backward pulling, r_coord decreases with step.  After sorting by
-        r_coord the step index is reversed: the small-r end (center) comes first
-        and carries the largest accumulated Wdiss, making dWdiss/dr negative.
-        The correct formula for backward pulling is γ = −dWdiss/dr / v (sign flip
-        because dr < 0 during the pull).  Direction is detected from the ``step``
-        column when available, otherwise from the sign of Wdiss[0] − Wdiss[−1].
+        Backward pulls (r decreasing with step) use γ = −dWdiss/dr / v. Direction is
+        taken from ``step`` when present, else from the sign of Wdiss[0] − Wdiss[−1].
         """
         if df is None or df.empty:
             return pd.DataFrame()
@@ -384,10 +382,6 @@ class FrictionEstimator(BaseEstimator):
         :func:`extrapolate_to_v0`, then differentiates the resulting
         Gamma_integrated(r) = slope(r) to obtain the local friction Γ(r).
 
-        This cross-speed approach averages over pulling-speed noise and is
-        complementary to the per-speed derivative method
-        (:meth:`gamma_from_wdiss_derivative`).
-
         Parameters
         ----------
         df : pd.DataFrame
@@ -425,6 +419,7 @@ class FrictionEstimator(BaseEstimator):
             param=self.w_col,
             speeds=self.speeds,
             realized_speed_map=self.realized_speed_map,
+            model='ols',  # friction_model applies to the force friction only
         )
 
         if v0_df is None or v0_df.empty:
@@ -470,9 +465,9 @@ class FrictionEstimator(BaseEstimator):
 
     @staticmethod
     def _mix_force(force_results: pd.DataFrame, weights: dict) -> pd.DataFrame:
-        """Path-mix Fmean into <F>(step, speed) using p_eq weights.
+        """Path-mix Fmean into <F>(step, speed) using path weights.
 
-        ``weights`` is ``{speed: {path: p_eq}}``.  For single-path systems this
+        ``weights`` is ``{speed: {path: weight}}``.  For single-path systems this
         reduces to the plain mean.  Returns columns
         ``estimator, step, r_coord, speed, Fbar``.
         """
@@ -504,7 +499,8 @@ class FrictionEstimator(BaseEstimator):
             return pd.DataFrame()
 
         v0 = extrapolate_to_v0(results=fbar, param='Fbar', speeds=self.speeds,
-                               realized_speed_map=self.realized_speed_map)
+                               realized_speed_map=self.realized_speed_map,
+                               model=self.friction_model)
         if v0 is None or v0.empty:
             return pd.DataFrame()
 
@@ -517,7 +513,7 @@ class FrictionEstimator(BaseEstimator):
         out['method'] = 'regression'
         out['estimator'] = 'force'
         keep = ['r_coord', 'step', 'speed', 'Gamma', 'Gamma_integrated',
-                'Feq', 'method', 'estimator']
+                'Feq', 'method', 'estimator', 'model']
         return out[[c for c in keep if c in out.columns]]
 
     def gamma_from_force_derivative(self, force_results: pd.DataFrame,
@@ -529,10 +525,12 @@ class FrictionEstimator(BaseEstimator):
         if fbar.empty or fbar['speed'].nunique() < 2:
             return pd.DataFrame()
 
-        reg = self.gamma_from_force_regression(force_results, weights)
-        if reg.empty:
+        # Per-point OLS Feq: a pooled (mixed) intercept error is amplified by 1/v.
+        reg = extrapolate_to_v0(results=fbar, param='Fbar', speeds=self.speeds,
+                                realized_speed_map=self.realized_speed_map, model='ols')
+        if reg is None or reg.empty:
             return pd.DataFrame()
-        feq_by_step = reg.set_index('step')['Feq'].to_dict()
+        feq_by_step = reg.set_index('step')['Fbar'].to_dict()
 
         rows = []
         for speed, g in fbar.groupby('speed'):
@@ -540,9 +538,7 @@ class FrictionEstimator(BaseEstimator):
                 continue
             v = self._realized(speed)  # physical velocity for the /v division
             g = g.sort_values('r_coord')
-            # Friction is undefined at steps the regression trimmed (no Feq);
-            # drop them rather than zero-filling, which would bias the running
-            # cumulative integral for all subsequent steps.
+            # Drop steps without Feq; zero-filling would bias the cumulative integral.
             g = g[g['step'].isin(feq_by_step.keys())]
             if g.empty:
                 continue
@@ -582,11 +578,17 @@ class FrictionEstimator(BaseEstimator):
         """Mean-force TI PMF G(z)=∫Feq dz on z=λ−Feq/k, per-path remap-then-mix.
 
         Guards: sign check (Feq>0), monotone-z filter with λ fallback (never silent
-        sort), p_eq-weighted mix on a common z grid. Returns (mix_df[z,dG_z], diag)."""
+        sort), path-weighted mix on a common z grid. Returns (mix_df[z,dG_z], diag);
+        (None, diag) with the reason logged at WARNING when no PMF can be built."""
         if force_results is None or force_results.empty:
+            logger.warning("[meanforce_ti] not computed: no force rows")
             return None, {}
         E = self.per_path_feq(force_results)
         if E.empty:
+            # Per-speed clustering labels every path with one speed; Feq(v->0) needs a path
+            # identity shared across speeds.
+            logger.warning("[meanforce_ti] not computed: no path has force rows at at least 2 speeds "
+                           "at any step (path labels are per speed unless clustered across speeds)")
             return None, {}
         paths = list(E['path'].unique())
         if weights:
@@ -616,11 +618,14 @@ class FrictionEstimator(BaseEstimator):
                 logger.warning(f"[meanforce_ti] path {path}: G(z) falls outward — check signs")
             per_path.append((path, zc, G))
         if not per_path:
+            logger.warning("[meanforce_ti] not computed: no path has at least 3 usable z points")
             return None, {'fell_back_paths': fell_back}
 
         z_lo = max(zc[0] for _, zc, _ in per_path)
         z_hi = min(zc[-1] for _, zc, _ in per_path)
         if not (z_hi > z_lo):
+            logger.warning(f"[meanforce_ti] not computed: no common z range across paths "
+                           f"(max start {z_lo:.3f} nm >= min end {z_hi:.3f} nm)")
             return None, {'fell_back_paths': fell_back}
         zg = np.linspace(z_lo, z_hi, n_grid)
         Gmix = np.zeros(n_grid)
@@ -721,9 +726,6 @@ def _find_pmf_peak(
         window (odd int, auto-adjusted); for 'gaussian', it is σ in grid points.
     prominence_factor : float
         Peak prominence threshold as a multiple of kBT (default 0.5).
-
-    Both ``KramersEstimator.detect_ts`` and ``SMDAnalysis._compute_barrier_rts``
-    delegate to this function so the algorithm stays in one place.
     """
     smoothed = _smooth_profile(dG, smooth, smooth_window, smooth_polyorder)
 
@@ -739,14 +741,14 @@ def _find_pmf_peak(
 NO_PER_SPEED_FREE_ENERGY = frozenset({"force"})
 
 
+class FrictionSourceError(ValueError):
+    """Requested Kramers friction source is unavailable."""
+
+
 class KramersEstimator:
     """Kramers/Pontryagin MFPT k_off from pre-computed PMF and friction profiles.
 
-    NOT a BaseEstimator subclass — operates on mixture_pmfs + friction DataFrames
-    produced by the sMD analysis pipeline rather than on raw per-step work values.
-
-    Called automatically at the end of ``SMDAnalysis.run()`` after ``mixture_pmfs.csv``
-    and ``friction.csv`` have been written.
+    Not a BaseEstimator: operates on mixture_pmfs + friction tables, not raw work.
 
     Output (one row per dG estimator present in *mixture_pmfs*) columns:
       estimator, source, speed_nm_per_ps, T_K, start_r_nm, abs_r_nm,
@@ -781,12 +783,8 @@ class KramersEstimator:
     ) -> pd.DataFrame:
         """Inner join of PMF and friction.
 
-        Merges on ``step`` (integer, protocol-anchored) when both DataFrames
-        carry the column, avoiding float jitter in ``r_coord`` that causes
-        spurious row drops after ``extrapolate_to_v0()`` end-trimming.
-        Falls back to ``r_coord`` for the per-path codepath where ``step``
-        is not available.  ``r_coord`` in the output always comes from
-        *pmf_df* (authoritative source).
+        Merges on integer ``step`` when both carry it (``r_coord`` float jitter
+        drops rows), else on ``r_coord``. Output ``r_coord`` comes from *pmf_df*.
         """
         use_step = "step" in pmf_df.columns and "step" in fric_df.columns
         key_label = "step" if use_step else "r_coord"
@@ -794,11 +792,10 @@ class KramersEstimator:
         if use_step:
             left = pmf_df[["step", "r_coord", "dG"]].copy()
             right = fric_df[["step", "Gamma"]].copy()
-            # Coerce to int64 defensively (float step can arise after CSV round-trip)
+            # step can become float after a CSV round-trip
             left["step"] = left["step"].astype("int64")
             right["step"] = right["step"].astype("int64")
             merged = pd.merge(left, right, on="step", how="inner")
-            # r_coord comes from pmf_df (left); no r_coord_x/r_coord_y ambiguity
         else:
             merged = pd.merge(
                 pmf_df[["r_coord", "dG"]],
@@ -824,6 +821,7 @@ class KramersEstimator:
         estimator_name: str,
         prefer_v0: bool,
         speed_override: float | None,
+        friction_source_work: str = "auto",
     ) -> tuple[pd.DataFrame, str, float]:
         """Choose the best (merged PMF+friction) profile for *estimator_name*.
 
@@ -835,12 +833,13 @@ class KramersEstimator:
         Returns ``(merged_df, source_label, speed_value)``.
         """
         pmf_sub = pmf_df[pmf_df["estimator"] == estimator_name]
-        fric_sub = fric_df[fric_df["estimator"] == estimator_name]
 
         if pmf_sub.empty:
             raise RuntimeError(
                 f"[Kramers] Estimator '{estimator_name}' not found in mixture_pmfs."
             )
+        fric_sub, friction_source_work = KramersEstimator._friction_rows(
+            fric_df, pmf_sub, estimator_name, friction_source_work)
 
         # --- try v→0 extrapolation ---
         if prefer_v0 and dG_extrapolated is not None:
@@ -866,9 +865,10 @@ class KramersEstimator:
             )
 
         # --- per-speed fallback ---
-        fric_deriv, common_speeds = KramersEstimator._per_speed_candidates(
-            pmf_sub, fric_sub, estimator_name
+        fric_deriv, common_speeds, fsrc = KramersEstimator._per_speed_candidates(
+            pmf_sub, fric_sub, estimator_name, friction_source_work
         )
+        logger.info(f"[Kramers] {estimator_name}: per-speed friction source = {fsrc}")
         if not common_speeds:
             raise RuntimeError(
                 f"[Kramers] No common (speed, estimator='{estimator_name}') "
@@ -883,7 +883,7 @@ class KramersEstimator:
 
         merged = KramersEstimator._merge_pmf_friction(
             pmf_sub[pmf_sub["speed"] == chosen],
-            fric_deriv[fric_deriv["speed"] == chosen],
+            KramersEstimator._fric_at(fric_deriv, chosen, fsrc),
         )
         if merged.empty:
             raise RuntimeError(
@@ -892,12 +892,44 @@ class KramersEstimator:
         return merged, f"per_speed(v={chosen})", float(chosen)
 
     @staticmethod
+    def _friction_rows(
+        fric_df: pd.DataFrame,
+        pmf_sub: pd.DataFrame,
+        estimator_name: str,
+        source: str,
+    ) -> tuple[pd.DataFrame, str]:
+        """Friction rows for *estimator_name* and the resolved source.
+
+        ``'auto'`` resolves to ``'force'`` with >=2 speeds, else ``'derivative'``.
+        ``'force'`` pairs every estimator with the force-estimator regression
+        friction (relabelled to *estimator_name*).
+        """
+        n_speeds = pmf_sub.loc[pmf_sub["speed"] > 0, "speed"].nunique()
+        if source == "auto":
+            source = "force" if n_speeds >= 2 else "derivative"
+        logger.info(f"[Kramers] {estimator_name}: friction source = {source}")
+        if source != "force":
+            return fric_df[fric_df["estimator"] == estimator_name], source
+        rows = fric_df[(fric_df["estimator"] == "force")
+                       & (fric_df["method"] == "regression")]
+        if rows.empty:
+            raise FrictionSourceError(
+                "force friction requested but no force-estimator friction is "
+                "available: enable the force estimator or set "
+                "friction_source_work='derivative'.")
+        return rows.assign(estimator=estimator_name), source
+
+    @staticmethod
     def _per_speed_candidates(
         pmf_sub: pd.DataFrame,
         fric_sub: pd.DataFrame,
         estimator_name: str,
-    ) -> tuple[pd.DataFrame, list[float]]:
-        """Derivative friction and the pulling speeds usable for a per-speed profile.
+        source: str = "derivative",
+    ) -> tuple[pd.DataFrame, list[float], str]:
+        """Friction rows, usable speeds and resolved source for a per-speed profile.
+
+        *source* is ``'derivative'`` (per-speed Gamma), ``'regression'``/``'force'`` (the
+        across-speed Gamma, shared by all speeds); ``'auto'`` is resolved by the caller.
 
         A per-speed profile pairs that speed's dG with the friction measured at the
         same speed. Excluded: ``speed = 0`` (the v→0 extrapolation, paired only with
@@ -905,7 +937,12 @@ class KramersEstimator:
         whose per-speed dG is not a free energy (``force``: raw mean work).
         """
         if estimator_name in NO_PER_SPEED_FREE_ENERGY:
-            return fric_sub.iloc[0:0], []
+            return fric_sub.iloc[0:0], [], source
+        pmf_speeds = set(pmf_sub.loc[pmf_sub["speed"] > 0, "speed"].unique())
+        fric_reg = fric_sub[(fric_sub["method"] == "regression")
+                            & np.isfinite(fric_sub["Gamma"].astype(float))]
+        if source in ("regression", "force"):
+            return fric_reg, sorted(pmf_speeds) if not fric_reg.empty else [], source
         fric_deriv = fric_sub[
             (fric_sub["method"] == "derivative")
             & (fric_sub["speed"] > 0)
@@ -915,7 +952,14 @@ class KramersEstimator:
             set(pmf_sub.loc[pmf_sub["speed"] > 0, "speed"].unique())
             & set(fric_deriv["speed"].unique())
         )
-        return fric_deriv, speeds
+        return fric_deriv, speeds, source
+
+    @staticmethod
+    def _fric_at(fric: pd.DataFrame, speed: float, source: str) -> pd.DataFrame:
+        """Friction rows for *speed*; regression friction is shared by all speeds."""
+        if source in ("regression", "force"):
+            return fric
+        return fric[fric["speed"] == speed]
 
     @staticmethod
     def _iter_profiles(
@@ -924,6 +968,7 @@ class KramersEstimator:
         dG_extrapolated: pd.DataFrame | None,
         estimator_name: str,
         prefer_v0: bool,
+        friction_source_work: str = "auto",
     ) -> list[tuple[pd.DataFrame, str, float]]:
         """Return all available (merged, source_label, speed) profiles for *estimator_name*.
 
@@ -933,12 +978,13 @@ class KramersEstimator:
         """
         profiles: list[tuple[pd.DataFrame, str, float]] = []
         pmf_sub = pmf_df[pmf_df["estimator"] == estimator_name]
-        fric_sub = fric_df[fric_df["estimator"] == estimator_name]
 
         if pmf_sub.empty:
             raise RuntimeError(
                 f"[Kramers] Estimator '{estimator_name}' not found in mixture_pmfs."
             )
+        fric_sub, friction_source_work = KramersEstimator._friction_rows(
+            fric_df, pmf_sub, estimator_name, friction_source_work)
 
         # v→0 extrapolated profile
         if prefer_v0 and dG_extrapolated is not None:
@@ -950,13 +996,14 @@ class KramersEstimator:
                     profiles.append((merged, "v0_extrapolation", 0.0))
 
         # per-speed profiles (derivative friction)
-        fric_deriv, common_speeds = KramersEstimator._per_speed_candidates(
-            pmf_sub, fric_sub, estimator_name
+        fric_deriv, common_speeds, fsrc = KramersEstimator._per_speed_candidates(
+            pmf_sub, fric_sub, estimator_name, friction_source_work
         )
+        logger.info(f"[Kramers] {estimator_name}: per-speed friction source = {fsrc}")
         for speed in common_speeds:
             merged = KramersEstimator._merge_pmf_friction(
                 pmf_sub[pmf_sub["speed"] == speed],
-                fric_deriv[fric_deriv["speed"] == speed],
+                KramersEstimator._fric_at(fric_deriv, speed, fsrc),
             )
             if not merged.empty:
                 profiles.append((merged, f"per_speed(v={speed})", float(speed)))
@@ -983,19 +1030,11 @@ class KramersEstimator:
     ) -> float | None:
         """Absorbing boundary from the pulling restraint force (kinetics-motivated).
 
-        The mean |force| along the reaction coordinate peaks at the rupture and
-        decays as the ligand leaves the pocket. The boundary is placed where the
-        (speed-matched) mean |force| has decayed to *frac* of its peak past that
-        peak. Estimator-independent (raw pulling data), so it avoids the failure
-        mode of :meth:`detect_ts` where a noisy/monotonic reconstructed PMF has no
-        clean interior barrier (jarzynski) or a spurious far peak (cumulant at
-        higher speed). Returns ``None`` when it cannot be located, in which case
-        the caller should fall back to :meth:`detect_ts`.
-
-        Validated on the HSP90 kinetics set (koff↔pKoff): with ``frac=0.3`` it
-        rescues the cumulant boundary failures and matches jarzynski. NOTE: this is
-        a *kinetic* boundary for the Kramers MFPT — it is not a thermodynamic
-        affinity readout (use max/end dG for that).
+        Placed where the speed-matched mean |force| has decayed to *frac* of its
+        peak, past the peak. Independent of the dG estimator, so it does not need a
+        clean PMF barrier. A kinetic boundary only, not an affinity readout.
+        Returns ``None`` when it cannot be located (caller falls back to
+        :meth:`detect_ts`).
 
         Parameters
         ----------
@@ -1160,15 +1199,9 @@ class KramersEstimator:
 
         Note
         ----
-        ΔF is referenced so ΔF(start_r) = 0; barriers are reported from there.
-        Only [reflect_r, abs_r] enters the integral, so every diagnostic is
-        evaluated there. Before integrating, ΔF is offset so its minimum in that
-        window is 0; the constant cancels between exp(+βΔF) and exp(−βΔF), so τ is
-        unchanged and exp(−βΔF) ≤ 1.
-
-        A warning is emitted when the β·ΔF span exceeds 100 (δlnτ = β·δΔF, so τ is
-        exponentially sensitive to ΔF errors). A hard guard at a span ≈ 708
-        (float64 overflow) returns ``tau_ps = inf``.
+        Barriers are reported with ΔF(start_r) = 0. For integration ΔF is offset to a
+        zero minimum in [reflect_r, abs_r]; the constant cancels, so τ is unchanged.
+        A β·ΔF span > 100 warns; > ~708 (float64 overflow) returns ``tau_ps = inf``.
         """
         df = (
             profile_df.dropna(subset=["r_coord", "dG", "Gamma"])
@@ -1340,6 +1373,7 @@ class KramersEstimator:
         boundary_method: str = "pmf_peak",
         plateau_frac: float = 0.3,
         bound_extension: str = "none",
+        friction_source_work: str = "auto",
     ) -> pd.DataFrame:
         """Run Kramers MFPT for every dG estimator present in *mixture_pmfs*.
 
@@ -1381,6 +1415,14 @@ class KramersEstimator:
         diagnostic that does not affect the boundary.
         reflect_r : float or None
             Explicit reflecting boundary (nm); ``None`` → same as *start_r*.
+        friction_source_work : {'auto', 'derivative', 'force', 'regression'}
+            Friction paired with every estimator's profiles. ``'force'``: the
+            force-estimator across-speed regression friction. ``'auto'``:
+            ``'force'`` with at least two speeds, else per-speed derivative.
+            ``'regression'``: the estimator's own W_diss across-speed regression.
+            The v->0 profile pairs with the regression-type friction of the
+            resolved source. ``'auto'``/``'force'`` need force friction rows
+            (ValueError otherwise).
         prefer_v0 : bool
             Include the v→0 extrapolated profile (when *all_speeds* is True) or
             prefer it over per-speed profiles (when *all_speeds* is False).
@@ -1401,20 +1443,28 @@ class KramersEstimator:
         if speed_override is not None:
             all_speeds = False
 
+        if friction_source_work not in ("auto", "derivative", "force", "regression"):
+            raise ValueError(
+                f"friction_source_work must be auto|derivative|force|regression, "
+                f"got {friction_source_work!r}")
         if boundary_method not in ("pmf_peak", "force_plateau", "end"):
             raise ValueError(f"[Kramers] unknown boundary_method={boundary_method!r}")
+        for est_name in mixture_pmfs["estimator"].unique():  # fail loudly, no skip
+            self._friction_rows(friction_df,
+                                mixture_pmfs[mixture_pmfs["estimator"] == est_name],
+                                est_name, friction_source_work)
         records = []
         for est_name in mixture_pmfs["estimator"].unique():
             try:
                 if all_speeds:
                     profile_list = self._iter_profiles(
                         mixture_pmfs, friction_df, dG_extrapolated,
-                        est_name, prefer_v0,
+                        est_name, prefer_v0, friction_source_work,
                     )
                 else:
                     profile, source, speed = self._select_profile(
                         mixture_pmfs, friction_df, dG_extrapolated,
-                        est_name, prefer_v0, speed_override,
+                        est_name, prefer_v0, speed_override, friction_source_work,
                     )
                     profile_list = [(profile, source, speed)]
             except (RuntimeError, ValueError) as exc:
@@ -1557,7 +1607,8 @@ class KramersEstimator:
 
         Returns one row per (estimator, speed, path) with ``source='per_path'``,
         plus one combined row per (estimator, speed) with ``source='per_path_combined'``
-        computed as ``k_off_total = Σ_k p_eq(k) × k_off(k)`` (parallel pathways).
+        computed as ``k_off_total = Σ_k w(k) × k_off(k) / Σ_k w(k)`` with path
+        weights ``w`` (parallel pathways).
 
         *boundary_method* is ``"pmf_peak"`` (path's PMF peak, else its last point)
         or ``"end"`` (end of the path's merged profile). *bound_extension* is
@@ -1634,14 +1685,14 @@ class KramersEstimator:
                     f"Likely a sampling artifact (threshold: {self.barrier_warn_kjmol:.0f} kJ/mol)."
                 )
 
-            p_eq   = weights_by_estimator.get(est_name, {}).get(speed, {}).get(path, float("nan"))
+            weight = weights_by_estimator.get(est_name, {}).get(speed, {}).get(path, float("nan"))
             tau_ps = float(res["tau_ps"])
             rows.append({
                 "estimator":     est_name,
                 "speed":         speed,
                 "path":          path,
                 "source":        "per_path",
-                "p_eq":          p_eq,
+                "weight":        weight,
                 "start_r_nm":    float(res["start_r_input"]),
                 "abs_r_nm":      abs_r,
                 "plateau_reached": self.plateau_reached(r_arr, dG_arr),
@@ -1662,21 +1713,21 @@ class KramersEstimator:
 
         df = pd.DataFrame(rows)
 
-        # Combined: k_off_total = Σ p_eq(k) × k_off(k)  (parallel independent pathways)
+        # Combined: k_off_total = Σ w(k) × k_off(k) / Σ w(k)  (parallel independent pathways)
         combined: list[dict] = []
         for (est_name, speed), grp in df.groupby(["estimator", "speed"]):
-            valid = grp.dropna(subset=["k_off_per_s", "p_eq"])
+            valid = grp.dropna(subset=["k_off_per_s", "weight"])
             if valid.empty:
                 continue
-            p_sum      = float(valid["p_eq"].sum())
-            k_combined = float((valid["p_eq"] * valid["k_off_per_s"]).sum() / p_sum) if p_sum > 0 else float("nan")
+            p_sum      = float(valid["weight"].sum())
+            k_combined = float((valid["weight"] * valid["k_off_per_s"]).sum() / p_sum) if p_sum > 0 else float("nan")
             tau_comb   = (_PS_PER_S / k_combined) if (k_combined > 0 and not np.isnan(k_combined)) else float("nan")
             combined.append({
                 "estimator":     est_name,
                 "speed":         speed,
                 "path":          "combined_weighted",
                 "source":        "per_path_combined",
-                "p_eq":          p_sum,
+                "weight":        p_sum,
                 "start_r_nm":    float(valid["start_r_nm"].mean()),
                 "abs_r_nm":      float("nan"),
                 "reflect_r_nm":  float(valid["reflect_r_nm"].mean()),
@@ -2031,13 +2082,13 @@ def calculate_weighted_pmf(
     grid_col : str
         Grid column (default 'step').
     weights_by_estimator : dict
-        Pre-computed weights ``{estimator: {speed: {path: p_eq}}}``.
-        Obtain these from :meth:`SMDAnalysis.compute_p_eq`.
+        Pre-computed path weights ``{estimator: {speed: {path: weight}}}``.
+        Obtain these from :meth:`SMDAnalysis.path_weights`.
     path_combination : str
         ``'eq21'``: ``dG = -(1/beta) ln sum_k p_neq,k exp(-beta dG_k)``
         (Wolf, Post & Stock 2023, Eq. 21), ``Wmean`` the p_neq-weighted mean
         and ``Wdiss = Wmean - dG``; supports ``weight_cols`` in
-        {'dG', 'Wdiss', 'Wmean'}. ``'linear'``: p_eq-weighted mean of every
+        {'dG', 'Wdiss', 'Wmean'}. ``'linear'``: path-weighted mean of every
         column. The force estimator is always mixed linearly here; its eq21 v->0
         readout is :func:`force_v0_dG`.
     p_neq_by_speed : dict | None
@@ -2047,8 +2098,8 @@ def calculate_weighted_pmf(
     Note
     ----
     The grid stops at the shortest path's last step, so the normalisation
-    does not jump where a path ends. Paths contribute only where their p_eq is
-    in ``weights_by_estimator`` (``'eq21'``: with p_eq > 0), and p_neq is
+    does not jump where a path ends. Paths contribute only where their weight is
+    in ``weights_by_estimator`` (``'eq21'``: with weight > 0), and p_neq is
     renormalised over the paths present at each grid point.
     """
     validate_path_combination(path_combination)
@@ -2062,7 +2113,7 @@ def calculate_weighted_pmf(
 
     if weights_by_estimator is None:
         raise ValueError(
-            "weights_by_estimator is required. Compute it with SMDAnalysis.compute_p_eq()."
+            "weights_by_estimator is required. Compute it with SMDAnalysis.path_weights()."
         )
     estimators = results['estimator'].dropna().unique()
 
@@ -2128,7 +2179,7 @@ def calculate_weighted_pmf(
 
 def _mix_slice_linear(slice_g: pd.DataFrame, speed_weights: dict,
                       weight_cols: list[str]) -> dict | None:
-    """p_eq-weighted mean of each column over the paths at one grid point."""
+    """Path-weighted mean of each column over the paths at one grid point."""
     vals_per_col = {col: [] for col in weight_cols}
     w_per_col = {col: [] for col in weight_cols}
 
@@ -2185,17 +2236,13 @@ def _mix_slice_eq21(slice_g: pd.DataFrame, speed_weights: dict, p_neq: dict,
 def recover_spring_constant(raw_data: pd.DataFrame, logged_k: float | None = None) -> float:
     """Per-ligand SMD spring constant.
 
-    Prefers ``logged_k`` (the value SteeredMD wrote to the .dat header) when
-    available; otherwise recovers it from the identity
-    force = -k*(r_before - r_target). The averaged ``force`` column no longer
-    satisfies that identity exactly per row (it is a within-move mean, not the
-    pre-step sample), so the logged value is both exact and cheaper.
+    Prefers ``logged_k`` (from the .dat header); otherwise recovers k from
+    force = -k*(r_before - r_target), which holds only for logs whose ``force``
+    is the pre-step sample rather than a within-move mean.
     """
     if logged_k is not None and np.isfinite(logged_k) and logged_k > 0:
         return float(logged_k)
-    # Fallback for older logs without a header: there the `force` column is the
-    # single pre-step sample, which satisfies force = -k*(r_before - r_target)
-    # exactly. (New logs always carry the logged k above, so never reach here.)
+    # Logs without a header k: `force` is the pre-step sample, so the identity is exact.
     d = raw_data.dropna(subset=['force', 'r_before', 'r_target'])
     delta = (d['r_before'] - d['r_target']).to_numpy(dtype=float)
     f = d['force'].to_numpy(dtype=float)
@@ -2213,22 +2260,55 @@ def monotone_z_filter(z: np.ndarray) -> np.ndarray:
             keep[i] = True; last = zi
     return keep
 
+def _mixed_step_rows(sub: pd.DataFrame, param: str, estimator: str,
+                     step_r_coord: pd.Series) -> list[dict]:
+    """Per-step intercept and slope from one grouped mixed-effects fit.
+
+    Raises on a failed or non-converged fit.  statsmodels names the random
+    intercept ``'Group'``, not ``'Intercept'``.
+    """
+    import statsmodels.formula.api as smf
+
+    sub = sub[sub.groupby('step')['speed'].transform('nunique') >= 2]
+    res = smf.mixedlm(f"{param} ~ _xspeed", sub, groups=sub['step'],
+                      re_formula="~_xspeed").fit(reml=False)
+    if not res.converged:
+        raise RuntimeError("mixedlm did not converge")
+    fe_int = res.fe_params['Intercept']
+    fe_slope = res.fe_params['_xspeed']
+    n_sp = sub.groupby('step')['speed'].nunique()
+    rows = []
+    for step, re_ in res.random_effects.items():
+        rows.append({
+            "step": step,
+            "r_coord": step_r_coord.loc[step],
+            "estimator": estimator,
+            param: fe_int + re_['Group'],
+            f"{param}_slope": fe_slope + re_['_xspeed'],
+            f"{param}_se": np.nan,
+            f"{param}_slope_se": np.nan,
+            "R2": np.nan,
+            "n_speeds": n_sp.loc[step],
+            "model": "mixedlm",
+            "speed": 0.0,
+        })
+    return rows
+
+
 def extrapolate_to_v0(
     results: pd.DataFrame,
     param: str = 'dG_weighted',
     speeds: list[float] | None = None,
     min_speeds: int = 2,
     realized_speed_map: dict | None = None,
+    model: str = 'ols',
 ) -> pd.DataFrame:
     """
     Extrapolate a single parameter to zero pulling speed (v → 0)
     using per-step regression across speeds.
 
-    Because dx_per_move is fixed across all pulling speeds, the
-    protocol step index maps to the same r_target regardless of
-    speed.  The natural join key is therefore ``step``, not
-    ``r_coord`` (which may carry tiny r₀ jitter between speeds).
-    Only steps present at **all** included speeds are used.
+    dx_per_move is speed-independent, so steps are joined on ``step`` rather
+    than ``r_coord`` (which jitters with r₀).
 
     Parameters
     ----------
@@ -2248,6 +2328,13 @@ def extrapolate_to_v0(
         for a linear fit).  Setting this lower than the total number of
         speeds lets the extrapolated PMF extend beyond where the fastest
         speed's profile ends.
+    model : {'ols', 'mixed'}
+        ``'ols'``: independent linear fit per step.  ``'mixed'``: one
+        mixed-effects fit per estimator (groups = step, random intercept and
+        slope on speed); the per-step slope is fixed + random slope.  On a
+        failed fit the estimator falls back to OLS and its rows carry
+        ``model = 'ols_fallback'``.  Shrinks the profile, so use it for
+        friction slopes only, not for free energies.
 
     Returns
     -------
@@ -2263,19 +2350,12 @@ def extrapolate_to_v0(
 
     Note
     ----
-    **Step selection trade-off (min_speeds):** requiring all speeds (equivalent
-    to setting ``min_speeds`` equal to the total number of speeds) cuts the
-    extrapolated PMF to whichever speed has the shortest profile.  Allowing
-    fewer speeds via a lower ``min_speeds`` lets the tail extend further at the
-    cost of a less constrained fit (fewer data points per step).
-
-    **Edge trimming:** after the per-step regressions, leading and trailing steps
-    where fewer than the maximum number of available speeds contributed are
-    stripped.  Edge rows with only ``min_speeds`` data points have R²=1.0
-    trivially (zero degrees of freedom) and produce unconstrained intercept
-    spikes.
+    Leading/trailing steps with fewer than the maximum number of speeds are
+    trimmed: with few points the fit is unconstrained and the intercept spikes.
     """
 
+    if model not in ('ols', 'mixed'):
+        raise ValueError(f"model must be 'ols' or 'mixed', got {model!r}")
     df = results.copy()
 
     if param not in df.columns:
@@ -2289,9 +2369,7 @@ def extrapolate_to_v0(
         speeds = [float(s) for s in speeds]
         df = df[df['speed'].isin(speeds)]
 
-    # Regression x-axis: realized pulling speed (nominal is only a label). The
-    # v->0 intercept and slope are taken against `_xspeed`; falls back to the
-    # nominal speed when no map is supplied (older data).
+    # Regress against the realized speed; nominal is only a label.
     if realized_speed_map:
         df['_xspeed'] = df['speed'].map(
             lambda s: float(realized_speed_map.get(float(s), s))).astype(float)
@@ -2317,6 +2395,18 @@ def extrapolate_to_v0(
         # Mean r_coord per step across speeds (should be nearly identical)
         step_r_coord = sub.groupby('step')['r_coord'].mean()
 
+        ols_label = 'linear'
+        if model == 'mixed':
+            try:
+                out_rows.extend(_mixed_step_rows(sub, param, estimator, step_r_coord))
+                continue
+            except Exception as exc:
+                logger.warning(
+                    "[extrapolate_to_v0] mixed-effects fit failed for estimator=%s "
+                    "param=%s (%s: %s); using OLS for this estimator.",
+                    estimator, param, type(exc).__name__, exc)
+                ols_label = 'ols_fallback'
+
         for step, g in sub.groupby("step"):
             if g['speed'].nunique() < 2:
                 continue
@@ -2333,7 +2423,7 @@ def extrapolate_to_v0(
                 f"{param}_slope_se": lr.stderr,
                 "R2": lr.rvalue ** 2,
                 "n_speeds": g['speed'].nunique(),
-                "model": "linear",
+                "model": ols_label,
                 "speed": 0.0,
             })
 

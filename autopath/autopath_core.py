@@ -36,6 +36,7 @@ from autopath.pulling.Diagnostics import plot_convergence_traces, plot_convergen
 import logging
 logger = logging.getLogger('autopath.core')
 
+
 class AutoPath:
     """Main orchestrator for the AutoPath binding-free-energy pipeline.
 
@@ -135,8 +136,9 @@ class AutoPath:
         sMD_steps_per_move: int = None,
         sMD_dx_per_move: float = 0.001,  # nm, this is the displacement per move
         sMD_spring_cte: float = None,  # KJ/mol/nm2
-        sMD_force_n_samples: int = 10,  # cap on restraint-force samples time-averaged per move (>=1); 1 = legacy single pre-step sample
-        sMD_force_sample_stride: int = 5,  # MD steps between force samples; samples-per-move adapts to move length (capped by sMD_force_n_samples)
+        sMD_force_n_samples: int = 10,  # max restraint-force samples averaged per move (>=1)
+        sMD_force_sample_stride: int = 5,  # MD steps between force samples
+        sMD_dcd_every: int | None = None,  # moves between saved DCD frames (None = every 5 moves)
         sMD_dcd_dry: bool = False,  # sMD DCDs/final PDBs hold protein+ligand only (topology: trajectories/dry_top.pdb)
         sMD_ligand_anchor_mode: str = 'murcko',
         sMD_max_replicas: int = 50,  # max replicas per speed in convergence mode
@@ -147,12 +149,14 @@ class AutoPath:
         sMD_paths_viz: str = 'pse',    # unbinding-paths figure: 'pse' | 'pml' | 'none'
         sMD_n_paths: int | None = None,  # fixed number of paths; None = silhouette-selected
         sMD_max_frac_neg_dG_first_half: float = 0.25,  # pass-3 binding-well filter; <=0 disables
-        sMD_path_combination: str = 'eq21',  # 'eq21' (Wolf, Post & Stock 2023, Eq. 21) | 'linear' (p_eq mean)
+        sMD_friction_model: str = 'mixed',  # 'mixed' | 'ols' force friction slope regression
+        sMD_friction_source_work: str = 'auto',  # 'auto'|'derivative'|'force'|'regression' Kramers friction
+        sMD_path_combination: str = 'eq21',  # 'eq21' (Wolf, Post & Stock 2023, Eq. 21) | 'linear' (path-weighted mean)
         sMD_features: list | None = None,
         sMD_log_geom_features: bool | list = True,  # hybrid: log geom during pulling + merge into clustering
-        sMD_plateau_frac: float = 0.4,  # force-plateau TS boundary: fraction of peak |force| (higher -> boundary nearer rupture, off the tail)
-        sMD_cluster_to_boundary: bool = True,  # cluster + RMSD-converge only up to the force-plateau boundary (exclude bulk-solvent tail)
-        sMD_boundary_buffer_frac: float = 0.1,  # extend the boundary cap by this fraction of r_ts (a little buffer past rupture)
+        sMD_plateau_frac: float = 0.4,  # force-plateau TS boundary as a fraction of peak |force|
+        sMD_cluster_to_boundary: bool = True,  # cluster/converge only up to the force-plateau boundary
+        sMD_boundary_buffer_frac: float = 0.1,  # boundary buffer as a fraction of r_ts
         sMD_kramers_abs: str = "end",  # Kramers absorbing boundary: 'end' (pulled range) | 'force_plateau' (legacy)
         sMD_kramers_bound: str = "mirror",  # bound population below pull start: 'mirror' | 'none'
         cluster_across_speeds: bool = True,
@@ -210,6 +214,7 @@ class AutoPath:
         self.sMD_spring_cte = sMD_spring_cte
         self.sMD_force_n_samples = sMD_force_n_samples
         self.sMD_force_sample_stride = sMD_force_sample_stride
+        self.sMD_dcd_every = sMD_dcd_every
         self.sMD_dcd_dry = sMD_dcd_dry
         self.sMD_ligand_anchor_mode = sMD_ligand_anchor_mode
         self.sMD_max_replicas = sMD_max_replicas
@@ -223,6 +228,8 @@ class AutoPath:
         self.sMD_n_paths = sMD_n_paths
         self.sMD_max_frac_neg_dG_first_half = float(sMD_max_frac_neg_dG_first_half)
         self.sMD_path_combination = validate_path_combination(sMD_path_combination)
+        self.sMD_friction_model = sMD_friction_model
+        self.sMD_friction_source_work = sMD_friction_source_work
         if self.sMD_path_model not in ('dtw', 'null'):
             raise ValueError(f"sMD_path_model must be 'dtw' or 'null', got {sMD_path_model!r}")
         self.sMD_features = sMD_features
@@ -473,8 +480,8 @@ class AutoPath:
         
         # sMD_collision_frequency = 1  # ps^-1
         # sMD_outdir = f"{sys_name}/sMD_{lig_anchor_mode}_{sMD_timestep}ps_{sMD_collision_frequency}ps_200stm"
-        # in this paper they used 80 kcal·mol−1? units don match tho. Ziada et al 2022.
-        sMD_spring_cte_per_atom = 100 * 4.184  # KJ/mol/nm2, converted from kcal. This affects thermal fluctuations
+        # cf. Ziada et al. 2022
+        sMD_spring_cte_per_atom = 100 * 4.184  # KJ/mol/nm2, converted from kcal
         sMD_traj_outdir = f"{self.sMD_outdir}/trajectories"
         
         sMD_analysis_outdir = f"{self.sMD_outdir}/analysis_traces"
@@ -515,6 +522,7 @@ class AutoPath:
                 autostop_min_displacement=self.sMD_autostop_min_displacement,
                 autostop_unbound_nm=self.sMD_autostop_unbound_nm,
                 save_freq=5,
+                dcd_every=self.sMD_dcd_every,
                 dcd_dry=self.sMD_dcd_dry,
                 force_n_samples=self.sMD_force_n_samples,
                 force_sample_stride=self.sMD_force_sample_stride,
@@ -522,12 +530,8 @@ class AutoPath:
             )
 
             if self.sMD_alternate_speeds and self.sMD_converge_speeds:
-                # Round-robin: run one replica per live speed in turn so that
-                # the 'force' estimator always has >=2 speeds advancing
-                # together (it needs a joint v->0 extrapolation, not a single
-                # speed's running PMF). Per-speed estimators still retire
-                # each speed independently; 'force' retires all of them at
-                # once when the joint ladder converges.
+                # Round-robin keeps >=2 speeds advancing for the 'force' v->0
+                # extrapolation; 'force' retires all speeds at once.
                 live = {s: True for s in self.sMD_pulling_speeds}
                 failures = {s: 0 for s in live}
                 force_ladder_dead = False   # log the "<2 live speeds" ERROR once
@@ -564,14 +568,9 @@ class AutoPath:
                             continue
                         if len(log_files) + 1 < reps:
                             continue
-                        # decision: per-speed estimators check that speed; force
-                        # checks the joint ladder and retires every speed at once
                         if self.sMD_autostop_estimator == "force":
-                            # Only *live* speeds may feed the ladder. Its depth K is
-                            # min(replicas) over the speeds it is given, so a retired
-                            # speed — whose .dat files stay on disk — would freeze K
-                            # at the replica count it died on and the force criterion
-                            # could never fire again.
+                            # Only live speeds: ladder depth is min(replicas), so a
+                            # retired speed left on disk would freeze it.
                             live_speeds = [
                                 s for s in self.sMD_pulling_speeds
                                 if live[s] and glob(
@@ -599,9 +598,7 @@ class AutoPath:
                                 speed=speed)
                         if conv_df is None or conv_df.empty:
                             continue
-                        # Tail-anchored, not first_streak: the question here is
-                        # "are we converged right now", and conv_df is rebuilt from
-                        # scratch each call (not append-only).
+                        # tail-anchored: conv_df is rebuilt from scratch each call
                         if tail_converged(conv_df, k_consec=self.sMD_conv_streak):
                             n_conv = float(conv_df["n_replicas"].max())
                             if self.sMD_autostop_estimator == "force":
@@ -624,9 +621,7 @@ class AutoPath:
                 if self.sMD_converge_speeds:
                     logger.info(f"Running sMD for speed {speed} nm/ps until convergence (min {reps} replicas).")
                     CONVERGED = False
-                    # Guard against livelock: a failing sMD.run() writes no .dat file, so the
-                    # replica count never advances and the sMD_max_replicas cap never trips.
-                    # Abort after too many consecutive failures that make no progress.
+                    # a failed run writes no .dat, so the replica cap alone cannot stop a livelock
                     consecutive_failures = 0
                     MAX_CONSECUTIVE_FAILURES = 5
                     while not CONVERGED:
@@ -666,17 +661,8 @@ class AutoPath:
                                 plot_convergence_traces(conv_traces, outdir=sMD_analysis_outdir)
                                 plot_convergence_metrics(conv_metrics, outdir=sMD_analysis_outdir, tolerances=CONVERGENCE_TOLERANCES)
 
-                                # Convergence = the readouts hold a plateau for
-                                # sMD_conv_streak consecutive rungs. Two adjacent
-                                # passes are not evidence: on WDR5 the per-rung flag
-                                # flickers with a pass rate around 0.13, so a pair
-                                # arises by chance.
-                                # The streak must be the TAIL of the history, not any
-                                # streak in it (first_streak): conv_df is rebuilt from
-                                # scratch on every call, so an old streak followed by a
-                                # failing latest rung — a restarted campaign, or a
-                                # re-clustering that flipped an earlier rung — must not
-                                # stop the run.
+                                # Converged = the last sMD_conv_streak rungs all pass.
+                                # Must be the tail streak: conv_df is rebuilt each call.
                                 if len(conv_df) >= self.sMD_conv_streak:
                                     CONVERGED = tail_converged(conv_df, k_consec=self.sMD_conv_streak)
                                     n_conv = float(conv_df["n_replicas"].max())
@@ -778,9 +764,7 @@ class AutoPath:
             smd_data = SMDData(logs, sys_name, temperature=self.temperature,
                                reference_pdb=equilibrated_pdb)
             
-            # cluster trajectories into pathways
-            # 'null' bypasses clustering entirely (all trajectories -> one path); it is the
-            # no-clustering reference for isolating what the path split actually buys.
+            # cluster trajectories into pathways ('null' = one path, no clustering)
             if self.sMD_path_model == 'null':
                 cluster_model = NullPathModel()
                 logger.info("sMD_path_model='null': clustering bypassed, all trajectories "
@@ -806,6 +790,8 @@ class AutoPath:
                                     max_frac_neg_dG_first_half=self.sMD_max_frac_neg_dG_first_half,
                                     min_speeds_for_extrapolation=2,
                                     path_combination=self.sMD_path_combination,
+                                    friction_model=self.sMD_friction_model,
+                                    friction_source_work=self.sMD_friction_source_work,
                                     )
 
             smd_data = smdanalysis.run(smd_data,
@@ -825,12 +811,8 @@ class AutoPath:
                                     #    r_range=(0, 1.75)
                                        )
 
-            # check convergence regardless of speed and autopstop.
-            # Cluster with the same feature config as the main analysis run() above.
-            # conv_window/estimator_name must mirror the deployment loop's autostop
-            # settings: this vALL frame (plus its plots) is the only surviving
-            # convergence artefact, so it has to be the criterion that actually
-            # made the stopping decision, not the function defaults.
+            # Convergence over all speeds, with the same features as run() above and
+            # the same estimator/window as the autostop loop (this is the kept record).
             # Same first comparison rung as the autostop loop (its per-speed `reps`)
             _reps = [r for r in self.sMD_pulling_speeds.values() if r is not None]
             conv_df, traces_df = smdanalysis.check_convergence(logs=logs,
@@ -871,14 +853,9 @@ class AutoPath:
                      speeds=None):
         """Build the analysis and run the convergence check for one speed.
 
-        ``speed=None`` and ``speeds=None`` mean "every speed on disk jointly",
-        which is what the force ladder needs. Pass ``speeds=[...]`` to restrict
-        the joint check to a subset (the still-live speeds): the ladder's depth
-        is min(replicas) over the speeds it is handed, so a retired speed left
-        on disk would otherwise cap it forever.
-        `min_replicas` is passed explicitly rather than derived from
-        sMD_pulling_speeds, whose values are None in the Config default
-        (`config.py:46`) and would raise on min().
+        ``speed=None`` and ``speeds=None`` check every speed on disk jointly (the
+        force ladder); ``speeds=[...]`` restricts the joint check to a subset.
+        `min_replicas` is explicit because sMD_pulling_speeds values may be None.
         Returns (convergence_df, traces_df); convergence_df is empty when it
         cannot be computed yet.
         """
@@ -898,7 +875,9 @@ class AutoPath:
                                   ligand_select=lig_sel,
                                   pocket_select=self.pocket_selection,
                                   n_paths=self.sMD_n_paths,
-                                  path_combination=self.sMD_path_combination)
+                                  path_combination=self.sMD_path_combination,
+                                  friction_model=self.sMD_friction_model,
+                                  friction_source_work=self.sMD_friction_source_work)
         conv_df, traces_df = smdanalysis.check_convergence(
             logs=logs, speeds=speeds,
             min_replicas=min_replicas,

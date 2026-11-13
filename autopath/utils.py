@@ -87,11 +87,9 @@ def wrap_align_save_traj(traj_files, topology, remove_original=True, is_membrane
         (hundreds of lipids), and centering is sufficient for sMD.
     reference : str or mdtraj.Trajectory, optional
         Structure whose first frame is the superposition target. Default (None)
-        superposes each trajectory onto its OWN first frame, which puts every
-        trajectory in a *different* frame — fine for single-trajectory analysis, but
-        an external reference is required when several trajectories must share one
-        Cartesian frame (e.g. pooling cosolvent density maps across replicas or
-        probes). Must have a topology compatible with *align_select*.
+        superposes each trajectory onto its own first frame; pass a reference when
+        several trajectories must share one Cartesian frame. Must have a topology
+        compatible with *align_select*.
     align_select : str
         MDTraj selection used for the superposition (default ``"backbone"``).
     out_dir : str, optional
@@ -104,11 +102,8 @@ def wrap_align_save_traj(traj_files, topology, remove_original=True, is_membrane
 
     Notes
     -----
-    Superposition rotates the coordinates while the stored box lengths and angles
-    are rotation-invariant, so the saved box no longer records the periodic frame
-    of the coordinates. Treat aligned trajectories as geometry for superposition
-    and visualisation; do not run PBC-dependent calculations (minimum image,
-    re-wrapping, re-imaging) on them.
+    Superposition rotates the coordinates but not the box, so do not run
+    PBC-dependent calculations (minimum image, re-imaging) on aligned output.
     """
     import mdtraj as md
     if isinstance(traj_files, str):
@@ -131,13 +126,8 @@ def wrap_align_save_traj(traj_files, topology, remove_original=True, is_membrane
         if len(sel) > 0:
             try:
                 if ref_traj is None:
-                    # Image BEFORE superposing only (done above). Superposition
-                    # rotates the coordinates but not unitcell_vectors, so imaging
-                    # afterwards wraps against a box that no longer matches them and
-                    # translates whole molecules by vectors that are wrong in the
-                    # rotated frame -- dropping solvent on top of solvent. A uniform
-                    # rigid transform preserves every interatomic vector, so nothing
-                    # needs re-imaging after it.
+                    # Image only before superposing: superpose rotates coordinates
+                    # but not unitcell_vectors, so imaging afterwards is wrong.
                     traj = traj.superpose(traj[0], atom_indices=sel)
                 else:
                     ref_sel = ref_traj.topology.select(align_select)
@@ -145,10 +135,7 @@ def wrap_align_save_traj(traj_files, topology, remove_original=True, is_membrane
                         raise ValueError(
                             f"reference selection {align_select!r} has {len(ref_sel)} "
                             f"atoms but the trajectory has {len(sel)}")
-                    # Aligning to an EXTERNAL frame: a uniform rigid transform cannot
-                    # move any molecule into a different image relative to the solute,
-                    # so no second imaging pass is needed (and re-imaging here would
-                    # re-wrap against a box that no longer matches the coordinates).
+                    # No re-imaging after superposition (box no longer matches).
                     traj = traj.superpose(ref_traj, frame=0, atom_indices=sel,
                                           ref_atom_indices=ref_sel)
             except Exception as e:
@@ -919,7 +906,6 @@ def get_ligand_anchor_atoms(
         except Exception as e:
             logging.warning(f"Could not generate 2D image with highlights: {e}")
         
-    #ligand_ag = u.atoms[anchor]
     
     return anchor
 
@@ -982,9 +968,7 @@ def get_COM_dist(simulation,
 
     Note
     ----
-    Positions are retrieved via ``getPositions(asNumpy=True) / openmmunit.nanometers``,
-    which strips the OpenMM unit wrapper while normalizing to nanometers. The
-    returned scalar is therefore dimensionless but numerically in nanometers.
+    The returned value is a unitless float in nanometers.
     """
     state = simulation.context.getState(getPositions=True, getVelocities=False)
     positions = state.getPositions(asNumpy=True) / openmmunit.nanometers
@@ -1061,6 +1045,7 @@ def compute_rmsd(u,
             plt.close()
 
     return rmsd_df
+
 
 
 def write_pocket_pymol(

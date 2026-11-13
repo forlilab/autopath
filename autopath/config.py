@@ -43,9 +43,9 @@ class Config(object):
         run_sMDpulling: bool = True,
         sMD_outdir: str = "sMD",
         sMD_pulling_dir: str = "forward",  # "forward" or "backward"
-        sMD_pulling_speeds: dict = {0.005: 5, 0.0025: 5, 0.001: 5},  # nm/ps; value = min reps (floor) if sMD_converge_speeds, else total reps
+        sMD_pulling_speeds: dict = {0.005: 5, 0.0025: 5, 0.001: 5},  # nm/ps -> replicas
         sMD_max_pulling_dist: float = 3.5,  # nm
-        sMD_max_r_offset: float = 3.0,  # max displacement offset (nm): cap pull at r0 + offset nm (also capped at half-box - 0.5 nm)
+        sMD_max_r_offset: float = 3.0,  # nm, from r0
         sMD_autostop_nc: float = 0.01,  # fraction of NC_initial; None disables
         sMD_autostop_nc_window: int = 5,
         sMD_autostop_min_displacement: float = 0.5,
@@ -67,6 +67,8 @@ class Config(object):
         sMD_path_model: str = "dtw",  # "dtw" | "null" ("null" = no clustering: one path)
         sMD_n_paths: int = None,  # fixed number of paths; None = silhouette-selected
         sMD_max_frac_neg_dG_first_half: float = 0.25,  # pass-3 binding-well filter; <=0 disables
+        sMD_friction_model: str = "mixed",  # "mixed" | "ols" force friction slope regression
+        sMD_friction_source_work: str = "auto",  # "auto" | "derivative" | "force" | "regression"
         sMD_path_combination: str = "eq21",  # "eq21" | "linear" per-path profile recombination
         sMD_features: list = None,
         sMD_log_geom_features: bool = True,  # log geom features during pulling + merge into clustering
@@ -220,8 +222,7 @@ class Config(object):
             ligand heavy-atom count.  Default ``None``.
         sMD_force_n_samples : int, optional
             Cap on the number of restraint-force samples time-averaged per pull
-            move (``1`` reproduces the legacy single pre-step sample).  Default
-            ``10``.
+            move.  Default ``10``.
         sMD_force_sample_stride : int, optional
             MD steps between force samples within a move; the number of samples
             actually taken adapts to the move length, capped by
@@ -249,10 +250,18 @@ class Config(object):
             Pass-3 binding-well filter: maximum fraction of the first half of a
             path's ΔG trace allowed to be negative before the path is discarded.
             Values ``<= 0`` disable the filter.  Default ``0.25``.
+        sMD_friction_model : str, optional
+            ``"mixed"`` (default) or ``"ols"``: regression for the force
+            friction slope; the W_diss regression and free energies use OLS.
+        sMD_friction_source_work : str, optional
+            Friction the Kramers MFPT uses for all estimators: ``"auto"``
+            (default; force friction with at least two speeds, which needs the
+            force estimator, else per-speed derivative), ``"derivative"``,
+            ``"force"`` or ``"regression"`` (W_diss across speeds, OLS).
         sMD_path_combination : str, optional
             How per-path profiles are combined: ``"eq21"`` (free-energy
             exponential average weighted by trajectory fraction; Wolf, Post &
-            Stock 2023, Eq. 21) or ``"linear"`` (p_eq-weighted mean).
+            Stock 2023, Eq. 21) or ``"linear"`` (path-weighted mean).
             Default ``"eq21"``.
         sMD_features : list, optional
             Extra per-frame features to include in path clustering, beyond
@@ -345,6 +354,8 @@ class Config(object):
         self.sMD_n_paths = sMD_n_paths
         self.sMD_max_frac_neg_dG_first_half = sMD_max_frac_neg_dG_first_half
         self.sMD_path_combination = sMD_path_combination
+        self.sMD_friction_model = sMD_friction_model
+        self.sMD_friction_source_work = sMD_friction_source_work
         self.sMD_features = sMD_features
         self.sMD_log_geom_features = sMD_log_geom_features
         self.sMD_plateau_frac = sMD_plateau_frac

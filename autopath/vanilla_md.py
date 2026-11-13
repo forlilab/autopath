@@ -35,8 +35,7 @@ class VanillaMD:
         Simulation temperature in Kelvin.
     save_freq : int, optional
         Interval (in steps) between checkpoint and trajectory saves.
-        Default is 25 000 steps, which corresponds to every 0.1 ns at the
-        default 4 fs timestep.
+        Default 25 000 (0.1 ns at 4 fs).
     out_dir : str, optional
         Directory where trajectory, checkpoint, system XML, and PDB are written.
     platform : str, optional
@@ -95,20 +94,12 @@ class VanillaMD:
         Parameters
         ----------
         checkpoint_file : str, optional
-            Path to a binary OpenMM checkpoint file. When provided, the
-            simulation continues directly from that state (positions,
-            velocities, box vectors). Takes precedence over ``pdb_file``
-            when both are supplied.
-
-            Note that OpenMM checkpoints are tied to the platform and device
-            they were written on; restarting on a different GPU can abort the
-            process at context creation. Prefer ``state_file`` when the
-            equilibration and production stages may land on different hardware.
+            Path to a binary OpenMM checkpoint file. Takes precedence over
+            ``pdb_file``. Checkpoints are platform/device specific; prefer
+            ``state_file`` when the hardware may differ.
         state_file : str, optional
-            Path to an OpenMM State XML (as written alongside the checkpoint by
-            ``save_simulation``). Portable across platforms and devices, and
-            carries positions, velocities and box vectors at full precision.
-            Takes precedence over both other options when supplied.
+            Path to a portable OpenMM State XML (written by ``save_simulation``).
+            Takes precedence over both other options.
         pdb_file : str, optional
             Path to a PDB file used to set initial positions and box vectors
             when no checkpoint is available. Velocities are initialised at
@@ -121,18 +112,12 @@ class VanillaMD:
         restart_velocities : bool, optional
             When True, reassign velocities from a Maxwell–Boltzmann
             distribution at ``temperature`` after loading the initial state.
-            Useful when continuing from a checkpoint with stale velocities.
 
         Returns
         -------
         None
             Checkpoint, system XML, trajectory, and final PDB are written to
             ``self.out_dir``.
-
-        Note
-        ----
-        The default ``save_freq=25000`` saves output every 0.1 ns at the
-        default 4 fs timestep (25 000 × 4 fs = 100 ps = 0.1 ns).
         """
 
         start_time = time.monotonic()
@@ -149,8 +134,13 @@ class VanillaMD:
         simulation = Simulation(self.topology, system, integrator, self.platform)
 
         if state_file is not None:
-            logger.info(f"Loading state from {state_file}")
-            simulation.loadState(state_file)
+            # Not loadState: it restores global parameters by name, keeping stale values.
+            logger.info(f"Setting state from portable XML state file {state_file}")
+            with open(state_file) as f:
+                state = XmlSerializer.deserialize(f.read())
+            simulation.context.setPeriodicBoxVectors(*state.getPeriodicBoxVectors())
+            simulation.context.setPositions(state.getPositions())
+            simulation.context.setVelocities(state.getVelocities())
         elif checkpoint_file is None and pdb_file is None:
             raise ValueError("Either pdb_file, checkpoint_file or state_file must be provided to set initial positions.")
         elif checkpoint_file is None and pdb_file is not None:

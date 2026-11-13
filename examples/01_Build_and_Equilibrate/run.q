@@ -14,7 +14,7 @@ source ~/.bashrc
 micromamba activate autopath
 
 python ap_equilibration.py --rec ../data/3ptb.pdb --lig ../data/3ptb.sdf\
-    --protocol ../../autopath/data/eq_lig-prot_5ns_4fs.json\
+    --protocol ../../autopath/data/eq_lig-prot_5ns_4fs.json
 
 # resname and smiles are optional
 #  --resname UNK\

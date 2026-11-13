@@ -1,6 +1,7 @@
 import os
 import math
 import time
+import zlib
 import logging
 from glob import glob
 from copy import deepcopy
@@ -10,6 +11,7 @@ from datetime import datetime
 
 from autopath.utils import *
 from autopath.customForces import (add_harmonic_restraints, remove_openmm_force)
+from autopath.pulling.pbc import triclinic_minimum_image
 from autopath.pulling.SMDData import DRY_TOP_NAME, SOLVENT_ION_RESNAMES
 
 from openmm.app import *
@@ -22,30 +24,19 @@ logger = logging.getLogger("autopath")
 
 
 
+def _nonbonded_cutoff_nm(system):
+    """Nonbonded cutoff of *system* in nm (1.0 if none is set)."""
+    from openmm import NonbondedForce
+    for f in system.getForces():
+        if isinstance(f, NonbondedForce):
+            return float(f.getCutoffDistance().value_in_unit(openmmunit.nanometers))
+    return 1.0
+
+
 def _feature_atoms(smd):
     """Whole-ligand heavy atoms if set on *smd*, else its groupA (anchor) atoms."""
     lig = getattr(smd, "ligand_atoms", None)
     return smd.groupA_atoms if lig is None or len(lig) == 0 else lig
-
-
-def _com_reduction_margin(positions_nm, box_nm, idx_a, w_a, idx_b, w_b):
-    """Current COM-COM distance and the PBC half-box limit along its *current* direction.
-
-    Positions are continuous (never wrapped), so the raw COM difference is the physical
-    displacement. The pbc=True CV equals its length only while |d_i| < L_i / 2 on every
-    axis (the same per-axis rule as the t=0 move cap); the direction rotates during a
-    pull, so the t=0 cap alone is not enough.
-    """
-    pos = np.asarray(positions_nm, dtype=float)
-    d = (np.asarray(w_a)[:, None] * pos[idx_a]).sum(0) - (np.asarray(w_b)[:, None] * pos[idx_b]).sum(0)
-    dn = float(np.linalg.norm(d))
-    if dn < 1e-9:
-        return dn, float("inf")
-    half = np.diag(np.asarray(box_nm, dtype=float)) / 2.0
-    n = np.abs(d / dn)
-    with np.errstate(divide="ignore"):
-        per = np.where(n > 1e-12, half / n, np.inf)
-    return dn, float(per.min())
 
 class SteeredMD:
     """Steered molecular dynamics: pull a ligand along a COM-COM reaction
@@ -98,6 +89,15 @@ class SteeredMD:
     ligand the per-atom convention ``k = N_ha * k_per_atom`` (used in
     :mod:`autopath_core`) keeps the thermal sigma roughly invariant to
     ligand size.
+
+    Seeding
+    -------
+    ``seed=None`` leaves OpenMM's random seeds unset (every run differs).
+    With an integer ``seed`` each :meth:`run` seeds the Langevin integrator
+    and the initial velocities with :meth:`run_seed` of ``(seed, run_id)``,
+    so pulls with different ``run_id`` or speed differ and the same pull
+    is reproducible regardless of call order. Reproducibility therefore
+    needs an explicit ``run_id`` and a deterministic platform (Reference/CPU).
     """
 
     def __init__(
@@ -115,20 +115,22 @@ class SteeredMD:
         autostop_nc_window: int = 2,      # consecutive NC samples below threshold to confirm detachment
         autostop_min_displacement: float = 0.5,  # nm — don't fire before this displacement from r0
         autostop_unbound_nm: float | None = None,  # also require min ligand–protein heavy-atom distance >= this (nm)
-        sMD_max_r_offset: float = 3.0,   # max displacement offset (nm): cap pull at r0 + offset nm (also capped by PBC half-box minus pbc_safety_nm)
-        pbc_safety_nm: float = 0.5,      # nm — safety margin subtracted from the per-axis PBC half-box cap (raise for large proteins)
+        sMD_max_r_offset: float = 3.0,   # max displacement offset (nm): cap pull at r0 + offset nm
+        pbc_safety_nm: float = 0.2,      # nm above the nonbonded cutoff: stop when the ligand gets this close to a periodic image of the protein
         use_NVT: bool = False,  # Use NVT ensemble
         out_dir: str = None,
         platform: str = "fastest",
         dx_per_move: float = 0.001,        # nm — RC grid spacing (held constant across speeds)
         max_displacement: float = 3.5,     # nm — total RC range
         sMD_spring_cte: float = 10000,     # kJ/mol/nm^2
-        save_freq: int = 5,                # writes DCD every save_freq*steps_per_move
+        save_freq: int = 5,                # moves between NC / geom / image-guard samples
+        dcd_every: int | None = None,      # moves between DCD frames (None = save_freq)
         dcd_dry: bool = False,             # DCD + final PDB hold only the protein+ligand prefix (no solvent/ions)
         force_n_samples: int = 10,         # cap on restraint-force samples averaged per move (>=1)
         force_sample_stride: int = 5,      # MD steps between force samples; n_samples adapts to move length
         verbose: int = 0,
         log_geom_features: bool | list[str] = False,  # log per-frame geom scalars to a sidecar
+        seed: int | None = None,           # base RNG seed; per-run seeds via run_seed()
     ):
 
         self.system = system
@@ -143,6 +145,7 @@ class SteeredMD:
         self.ligand_atoms = ligand_atoms # whole-ligand heavy atoms; groupA (anchor) is only the pulled COM
         self.restrained_atoms = restrained_atoms
         self.restart_velocities = restart_velocities
+        self.seed = None if seed is None else int(seed)
 
         self.verbose = verbose
         self.log_geom_features = log_geom_features
@@ -167,6 +170,7 @@ class SteeredMD:
         self.dx_per_move = float(dx_per_move) * openmmunit.nanometers                                   # Quantity
         self.sMD_spring_cte = float(sMD_spring_cte) * openmmunit.kilojoules_per_mole / openmmunit.nanometer**2
         self.save_freq = int(save_freq)
+        self.dcd_every = int(dcd_every) if dcd_every else self.save_freq
         self.dcd_dry = bool(dcd_dry)
         self._dry_top = None   # (subset indices, subset Topology), built once by _dry_subset()
         self.force_n_samples = max(1, int(force_n_samples))
@@ -196,8 +200,9 @@ class SteeredMD:
 
     def pull_single_direction(self, 
                               simulation, 
-                              run_id: int, 
+                              run_id: int,
                               direction: str = "forward",
+                              lambda0=None,
                              ):
         """Main pulling loop for a single replica in one direction.
 
@@ -215,9 +220,12 @@ class SteeredMD:
 
         Output
         ------
+        The spring schedule starts at ``lambda0`` (a length Quantity, required), the spring
+        centre the replica was equilibrated at by ``run``.
+
         Writes ``{out_dir}/sMD_{run_id}.dat`` with a ``# key=value`` metadata
         header (spring_constant, requested/realized speed, steps_per_move,
-        force_n_samples) followed by columns:
+        force_n_samples, lambda0_nm, r_start_nm) followed by columns:
         step, time, r_target, r_before, r_after, force, force_sem,
         U_cvpack, dW_protocol
 
@@ -244,86 +252,41 @@ class SteeredMD:
                 self._save_dry_pdb(st.getPositions(), st.getPeriodicBoxVectors(), dry_top)
         add_reporters(simulation, self.out_dir, f"sMD_{run_id}",
             total_steps=self.sMD_moves*self.steps_per_move, # total steps 
-            logperiod=self.save_freq*self.steps_per_move, # steps
+            logperiod=self.dcd_every*self.steps_per_move, # steps
             verbose=0, #verbose level
             atom_subset=dry_idx,
         )
 
-        # Set the initial r0 parameter
-        initial_r0 = self.com_dist.getValue(simulation.context, allowReinitialization=False)
-        logger.info(f"Initial COM distance: {initial_r0}")
+        # The schedule starts at lambda0; r_start is where the replica actually is.
+        if lambda0 is None:
+            raise ValueError("lambda0 is required: the spring centre the replica was equilibrated at")
+        initial_r0 = lambda0
+        r_geom_nm = self._co_image_ligand(simulation)  # CVs use pbc=False: ligand next to the anchor
+        r_start = self.com_dist.getValue(simulation.context, allowReinitialization=False)
+        r_start_nm = r_start.value_in_unit(openmmunit.nanometers)
+        if abs(r_geom_nm - r_start_nm) > 0.05:
+            raise RuntimeError(
+                f"COM distance {r_geom_nm:.3f} nm differs from cvpack COM distance "
+                f"{r_start_nm:.3f} nm at t=0; the pull CV is not measuring the groups it should."
+            )
+        logger.info(f"Spring start lambda0: {initial_r0}; COM distance at pull start: {r_start}")
         simulation.context.setParameter("r0_smd", initial_r0)
 
-        # ── Move count cap: box safety + r0 factor ─────────────────────────────
-        # PBC cap: cvpack uses pbc=True, so the COM-COM distance is the
-        # minimum image. The scalar becomes ill-defined once any component of
-        # the COM-COM vector exceeds L_axis/2. Per-axis limit on r:
-        #     r_max_i = (L_i / 2) * |v| / |v_i|
-        # The binding axis dominates; for a box elongated along the pull
-        # direction this gives ~L_long/2, not the more conservative min(L)/2.
-        # WARNING: minimum-image wrap (line below) is orthorhombic only.
+        # ── Move count cap: r0 + offset ────────────────────────────────────────
+        # The CVs use pbc=False on continuous coordinates, so the distance is valid at any
+        # separation; the box is protected by the periodic-image guard in the loop.
         initial_r0_nm = initial_r0.value_in_unit(openmmunit.nanometers)
         dx_nm = float(self.dx_per_move.value_in_unit(openmmunit.nanometers))
         n_moves = self.sMD_moves
-        _guard_w = None   # COM weights for the in-loop PBC guard (set with the t=0 cap)
+        _image_guard = direction == "forward"
+        _image_min_nm = None   # nonbonded cutoff + pbc_safety_nm, set on the first guard check
         if direction == "forward" and self.sMD_max_r_offset > 0:
-            state    = simulation.context.getState(getPositions=True)
-            box_vecs = state.getPeriodicBoxVectors()
-            box_arr = np.array([
-                [box_vecs[i][j].value_in_unit(openmmunit.nanometers) for j in range(3)]
-                for i in range(3)
-            ])
-            off_diag_max = float(np.abs(box_arr - np.diag(np.diag(box_arr))).max())
-            if off_diag_max > 1e-3:
-                logger.warning(
-                    f"PBC move-capping: non-orthorhombic box detected "
-                    f"(max off-diagonal element = {off_diag_max:.4f} nm). "
-                    f"Minimum-image wrapping assumes orthorhombic geometry and may be incorrect "
-                    f"for triclinic boxes."
-                )
-            L = np.diag(box_arr)
-
-            positions = state.getPositions(asNumpy=True).value_in_unit(openmmunit.nanometers)
-            weigh_by_mass = not (len(self.groupA_atoms) == 1 or len(self.groupB_atoms) == 1)
-            if weigh_by_mass:
-                masses_A = np.array([simulation.system.getParticleMass(i).value_in_unit(openmmunit.dalton)
-                                     for i in self.groupA_atoms])
-                masses_B = np.array([simulation.system.getParticleMass(i).value_in_unit(openmmunit.dalton)
-                                     for i in self.groupB_atoms])
-            else:
-                masses_A = np.ones(len(self.groupA_atoms))
-                masses_B = np.ones(len(self.groupB_atoms))
-            com_A = np.average(positions[self.groupA_atoms], axis=0, weights=masses_A)
-            com_B = np.average(positions[self.groupB_atoms], axis=0, weights=masses_B)
-            v = com_A - com_B
-            v -= np.round(v / L) * L  # minimum-image (orthorhombic only; triclinic triggers a warning above)
-            v_norm = float(np.linalg.norm(v))
-            if abs(v_norm - initial_r0_nm) > 0.05:
-                raise RuntimeError(
-                    f"PBC cap: |v|={v_norm:.3f} nm differs from cvpack initial_r0="
-                    f"{initial_r0_nm:.3f} nm. Check that protein/ligand are not split "
-                    f"across a periodic boundary at t=0; cap would be unreliable."
-                )
-            abs_v = np.abs(v)
-            with np.errstate(divide='ignore', invalid='ignore'):
-                r_max_per_axis = np.where(abs_v > 1e-6, (L / 2.0) * v_norm / abs_v, np.inf)
-            r_max_pbc      = float(np.min(r_max_per_axis)) - self.pbc_safety_nm
-            _guard_w = (masses_A / masses_A.sum(), masses_B / masses_B.sum())
-            r_max_offset   = v_norm + self.sMD_max_r_offset
-            r_max          = min(r_max_pbc, r_max_offset)
-            moves_safe     = max(1, int((r_max - v_norm) / dx_nm))
+            moves_safe = max(1, int(self.sMD_max_r_offset / dx_nm))
             if n_moves > moves_safe:
-                if r_max == r_max_pbc:
-                    dom_axis = int(np.argmin(r_max_per_axis))
-                    reason = (f"PBC axis-{('xyz')[dom_axis]} half-box "
-                              f"(L={L[dom_axis]:.2f} nm, |v|/|v_{('xyz')[dom_axis]}|={v_norm/max(abs_v[dom_axis],1e-12):.2f}, "
-                              f"safety={self.pbc_safety_nm:.2f} nm)")
-                else:
-                    reason = f"r0+{self.sMD_max_r_offset:.1f}nm offset"
                 logger.warning(
                     f"Capping sMD_moves {n_moves} → {moves_safe}: planned r_end="
-                    f"{initial_r0_nm + n_moves * dx_nm:.3f} nm exceeds {reason} limit "
-                    f"({r_max:.3f} nm)."
+                    f"{initial_r0_nm + n_moves * dx_nm:.3f} nm exceeds r0+{self.sMD_max_r_offset:.1f}nm offset "
+                    f"limit ({r_start_nm + self.sMD_max_r_offset:.3f} nm)."
                 )
                 n_moves = moves_safe
 
@@ -389,6 +352,8 @@ class SteeredMD:
             f.write(f"# realized_speed_nm_per_ps={getattr(self, '_realized_speed', float('nan')):.10g}\n")
             f.write(f"# steps_per_move={self.steps_per_move}\n")
             f.write(f"# force_n_samples={n_sub}\n")
+            f.write(f"# lambda0_nm={initial_r0_nm:.10g}\n")
+            f.write(f"# r_start_nm={r_start_nm:.10g}\n")
             f.write("step,time,r_target,r_before,r_after,force,force_sem,U_cvpack,dW_protocol\n")
 
             # Loop over the number of moves
@@ -442,24 +407,22 @@ class SteeredMD:
                 grow = None
                 pbc_stop = None
                 if i % self.save_freq == 0 and (self.subset_protein_CA is not None
-                                                or geom_fh is not None or _guard_w is not None):
+                                                or geom_fh is not None or _image_guard):
                     _st = simulation.context.getState(getPositions=True)
                     pos_nm = _st.getPositions(asNumpy=True) / openmmunit.nanometers
-                    if _guard_w is not None:
-                        # The t=0 cap assumed the starting direction; the COM-COM vector
-                        # rotates during the pull. Stop cleanly before the pbc=True CV
-                        # leaves the identity region (it would jump to another image).
+                    if _image_guard:
+                        # Stop before the ligand feels a periodic image of the protein
+                        # (nonbonded cutoff + pbc_safety_nm), whatever the pull direction.
                         _box = np.asarray(_st.getPeriodicBoxVectors(asNumpy=True)
                                           .value_in_unit(openmmunit.nanometers))
-                        d_nm, lim_nm = _com_reduction_margin(
-                            np.asarray(pos_nm), _box, self.groupA_atoms, _guard_w[0],
-                            self.groupB_atoms, _guard_w[1])
-                        if r_target_nm >= lim_nm - self.pbc_safety_nm:
-                            pbc_stop = (f"target r={r_target_nm:.3f} nm within {self.pbc_safety_nm:.2f} nm "
-                                        f"of the reduction limit {lim_nm:.3f} nm for the current direction")
-                        elif abs(d_nm - r_after_nm) > 0.05:
-                            pbc_stop = (f"COM distance {d_nm:.3f} nm != CV {r_after_nm:.3f} nm "
-                                        f"(CV on another periodic image)")
+                        if _image_min_nm is None:
+                            if getattr(self, "_protein_heavy", None) is None:
+                                self._protein_heavy = self._protein_heavy_atoms()
+                            _image_min_nm = _nonbonded_cutoff_nm(simulation.system) + self.pbc_safety_nm
+                        d_img = self._min_ligand_protein_image_nm(np.asarray(pos_nm), _box)
+                        if d_img < _image_min_nm:
+                            pbc_stop = (f"ligand {d_img:.3f} nm from a periodic image of the protein "
+                                        f"(limit {_image_min_nm:.2f} nm)")
                     if self.subset_protein_CA is not None:
                         nc = self._compute_nc(pos_nm)
                         if _unbound_nm is not None:
@@ -535,6 +498,16 @@ class SteeredMD:
         save_pdb(self.topology, final_positions, f"{self.out_dir}/sMD_{run_id}.pdb")
         return
 
+    def run_seed(self, run_id):
+        """OpenMM seed of one run: hash of ``(seed, run_id)`` in [1, 2**31 - 1); None if unseeded.
+
+        ``run_id`` is the full replica name (``replica-<id>_v<speed>_<direction>``).
+        """
+        if self.seed is None:
+            return None
+        # 0 means "random" to OpenMM, hence the +1
+        return zlib.crc32(f"{self.seed}|{run_id}".encode()) % (2**31 - 1) + 1
+
     def _new_run_id(self, pulling_speed, pulling_direction):
         """``replica-HHMMSS_v<speed>_<direction>`` that no file in ``out_dir`` uses yet.
 
@@ -591,8 +564,13 @@ class SteeredMD:
         checkpoint_file: str = None,
         pdb_file: str = None,
         state_xml_file: str = None,
+        lambda0_nm: float | None = None,
     ):
         """Run one steered MD replica at the requested speed.
+
+        The replica is equilibrated for 50 ps with the spring held at lambda0 and then pulled from
+        lambda0. lambda0_nm=None uses the COM distance of the input structure, which is shared by
+        replicas started from the same structure; pass it explicitly when starting structures differ.
 
         Sweep-fixed parameters (dx_per_move, max_displacement, sMD_spring_cte,
         save_freq) are set in __init__. Only the speed-dependent bookkeeping
@@ -648,14 +626,19 @@ class SteeredMD:
             logger.info(f"steps_per_move: {self.steps_per_move} steps")
             logger.info(f"Time per move: {self.steps_per_move * dt_ps:.3f} ps")
             logger.info(f"Max displacement: {self.max_displacement:.3f} nm, total sMD moves: {self.sMD_moves}")
-            logger.info(f'Saving DCD every {self.save_freq*self.steps_per_move} steps')
+            logger.info(f'Saving DCD every {self.dcd_every*self.steps_per_move} steps')
             logger.info("#"*80)
             self._params_logged_speeds.add(pulling_speed)
         ########################################################################################
         
         # The OpenMM default; it does not track work (discussion https://github.com/openmm/openmm/issues/2520)
         integrator = LangevinMiddleIntegrator(self.temperature, self.integrator_friction, self.timestep)
-                    
+        run_seed = self.run_seed(run_id)
+        vel_seed = () if run_seed is None else (run_seed,)
+        if run_seed is not None:
+            integrator.setRandomNumberSeed(run_seed)  # before the Context exists
+            logger.info(f"sMD_{run_id}: random seed {run_seed}")
+
         system = deepcopy(self.system)  # Create a copy of the system to avoid modifying the original
         simulation = Simulation(self.topology, system, integrator, self.platform)
 
@@ -685,7 +668,7 @@ class SteeredMD:
             pdb = PDBFile(pdb_file)
             simulation.context.setPositions(pdb.getPositions())
             simulation.context.setPeriodicBoxVectors(*pdb.topology.getPeriodicBoxVectors())
-            simulation.context.setVelocitiesToTemperature(self.temperature)
+            simulation.context.setVelocitiesToTemperature(self.temperature, *vel_seed)
 
         elif checkpoint_file is not None and pdb_file is None:
             logger.info(f"Setting positions from checkpoint {checkpoint_file}")
@@ -741,26 +724,12 @@ class SteeredMD:
 
         # Reset velocities to temperature. Check https://github.com/openmm/openmm/pull/259
         if self.restart_velocities:
-            simulation.context.setVelocitiesToTemperature(self.temperature)
+            simulation.context.setVelocitiesToTemperature(self.temperature, *vel_seed)
         
         if self.use_NVT:
             # Prefix match also covers the membrane/anisotropic barostats.
             system = remove_openmm_force(system, "MonteCarlo")
 
-        # Reinitialize the simulation context with the updated system
-        simulation.context.reinitialize(preserveState=True)
-
-        #run a super short simulation to ensure the system is stable after temp reset
-        simulation.step(50/self.timestep.value_in_unit(openmmunit.picoseconds))  # 50 ps
-        
-        # try:
-        #     simulation.integrator.reset()  # Reset the integrator. Only openmmtools integrators have this method    
-        # except AttributeError:
-        #     logger.warning("Integrator does not have reset method. This is expected for standard OpenMM integrators.")
-
-        simulation.context.setTime(0)  # reset simulation time
-        simulation.context.setStepCount(0)  # reset step count
-        
         weighByMass = True
         if len(self.groupA_atoms) == 1 or len(self.groupB_atoms) == 1:
             weighByMass = False  # avoid problems with single DUM massless atom
@@ -772,7 +741,7 @@ class SteeredMD:
             openmmunit.kilojoules_per_mole,  # energy not force
             groups,
             weighByMass=weighByMass,
-            pbc=True,
+            pbc=False,  # continuous coordinates; see _co_image_ligand and the image guard
         )
         
         self.com_force.addGlobalParameter("r0_smd", 0)
@@ -786,7 +755,7 @@ class SteeredMD:
             openmmunit.nanometers,  # distance not energy
             groups,
             weighByMass=weighByMass,
-            pbc=True,
+            pbc=False,  # continuous coordinates; see _co_image_ligand and the image guard
         )
         
         self.com_dist.setForceGroup(3)  # Use a separate force group for the CV GROUP 3
@@ -796,8 +765,19 @@ class SteeredMD:
 
         simulation.context.reinitialize(preserveState=True)
 
+        # Jarzynski/HS need every replica to start equilibrated with the spring at one shared lambda0
+        # and to follow the same schedule, so the spring is on during the pre-pull run.
+        if lambda0_nm is None:
+            lambda0 = self.com_dist.getValue(simulation.context, allowReinitialization=False)
+        else:
+            lambda0 = float(lambda0_nm) * openmmunit.nanometers
+        simulation.context.setParameter("r0_smd", lambda0)
+        simulation.step(int(round(50 / self.timestep.value_in_unit(openmmunit.picoseconds))))  # 50 ps
+        simulation.context.setTime(0)
+        simulation.context.setStepCount(0)
+
         # Run the actual pulling
-        self.pull_single_direction(simulation, run_id, direction=pulling_direction)
+        self.pull_single_direction(simulation, run_id, direction=pulling_direction, lambda0=lambda0)
 
         # Logging the total time for all replicas
         simulation_time = time.monotonic() - simulation_start_time
@@ -968,6 +948,39 @@ class SteeredMD:
         return np.array([a.index for a in self.topology.atoms()
                          if a.residue.name not in skip and a.residue.index not in own
                          and a.element is not None and a.element.symbol != "H"], dtype=int)
+
+    def _co_image_ligand(self, simulation):
+        """Shift the ligand residue(s) to the periodic image nearest the anchor (once, at t=0).
+
+        Returns the anchor-to-ligand COM distance (nm) afterwards, weighted as the CV is.
+        """
+        st = simulation.context.getState(getPositions=True)
+        pos = st.getPositions(asNumpy=True).value_in_unit(openmmunit.nanometers)
+        box = np.asarray(st.getPeriodicBoxVectors(asNumpy=True).value_in_unit(openmmunit.nanometers))
+        A, B = list(self.groupA_atoms), list(self.groupB_atoms)
+        if len(A) == 1 or len(B) == 1:   # same rule as the cvpack CVs
+            wA, wB = np.ones(len(A)), np.ones(len(B))
+        else:
+            mass = lambda i: simulation.system.getParticleMass(i).value_in_unit(openmmunit.dalton)
+            wA, wB = np.array([mass(i) for i in A]), np.array([mass(i) for i in B])
+        v = np.average(pos[A], axis=0, weights=wA) - np.average(pos[B], axis=0, weights=wB)
+        shift = triclinic_minimum_image(v, box) - v
+        if np.linalg.norm(shift) > 1e-6:
+            res = {a.residue.index for a in self.topology.atoms() if a.index in set(self.groupA_atoms)}
+            idx = [a.index for a in self.topology.atoms() if a.residue.index in res]
+            pos[idx] += shift
+            simulation.context.setPositions(pos * openmmunit.nanometers)
+            logger.info(f"Moved the ligand by {np.round(shift, 3)} nm to the periodic image next to the anchor.")
+        return float(np.linalg.norm(v + shift))
+
+    def _min_ligand_protein_image_nm(self, positions_nm, box_nm):
+        """Smallest ligand heavy-atom distance to the protein's 26 neighbouring periodic images (nm)."""
+        from itertools import product
+        from scipy.spatial import cKDTree
+        lig = positions_nm[_feature_atoms(self)]
+        tree = cKDTree(positions_nm[self._protein_heavy])
+        shifts = np.array([n for n in product((-1, 0, 1), repeat=3) if any(n)], dtype=float) @ box_nm
+        return float(min(tree.query(lig - t, k=1)[0].min() for t in shifts))
 
     def _min_ligand_protein_nm(self, positions_nm):
         """Smallest ligand heavy-atom to protein heavy-atom distance (nm), same image.
