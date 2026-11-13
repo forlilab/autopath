@@ -257,7 +257,8 @@ def test_relax_writes_state_and_system_with_finite_energy(tmp_path):
     top = app.PDBFile(pdb).topology
     sysm = mm.System()
     for a in top.atoms():
-        sysm.addParticle(a.element.mass)
+        # RelaxMD's 4 fs step assumes HMR; bare 1 Da hydrogens NaN intermittently
+        sysm.addParticle(4.0 * unit.dalton if a.element.symbol == "H" else a.element.mass)
     nb = mm.NonbondedForce()
     nb.setNonbondedMethod(mm.NonbondedForce.CutoffPeriodic)
     nb.setCutoffDistance(0.9)
