@@ -218,7 +218,7 @@ class ProteinLigandAnalyzer:
             protein_sel: str = "protein",
             traj_slice: tuple = None,
             cutoff: float = 3.5,
-            fraction_persistence: float = 0.9,
+            fraction_persistence: float = 0.5,
             pdb_fname: str = None,
     ):
         """Identify persistent interfacial water molecules across a trajectory.
@@ -244,6 +244,8 @@ class ProteinLigandAnalyzer:
         fraction_persistence : float
             Minimum fraction of frames in which a water must be interfacial to be
             included in the returned set (e.g. 0.9 means present in >= 90% of frames).
+            Interfacial water exchanges fast enough that 0.9 can return nothing at
+            all; 0.5 keeps the structural core without admitting bulk.
         pdb_fname : str or None
             If provided, write a PDB containing the protein, ligand, and persistent
             waters from the last trajectory frame to this path.
@@ -293,11 +295,17 @@ class ProteinLigandAnalyzer:
         # print(counts)
         
         if pdb_fname is not None:
-            keep_water_str = " ".join(str(r) for r in persistent.keys())
-            persistent_water_sel = f"({WATER_SEL}) and resid {keep_water_str}"
-
-            # Final cleaned selection
-            final_sel_str = f"({protein_sel}) or ({ligand_sel}) or ({persistent_water_sel})"
+            parts = [f"({protein_sel})", f"({ligand_sel})"]
+            if persistent:
+                keep_water_str = " ".join(str(r) for r in persistent.keys())
+                parts.append(f"(({WATER_SEL}) and resid {keep_water_str})")
+            else:
+                # An empty resid list makes the selection string unparseable, and a
+                # site with no long-lived water is a normal result, not an error.
+                logger.warning(
+                    "No water reached %.2f persistence; writing %s without waters.",
+                    fraction_persistence, pdb_fname)
+            final_sel_str = " or ".join(parts)
 
             cleaned = u.select_atoms(final_sel_str)
 
@@ -325,64 +333,68 @@ class ProteinLigandAnalyzer:
         fp_interactions : list of str or None
             ProLIF interaction types to fingerprint. If None, ProLIF defaults are used.
         frequency_cutoff : float
-            Only interactions present in at least this fraction of frames are kept.
+            Fraction of frames in [0, 1]; only interactions present in at least this
+            fraction are kept (0.5 means 50%).
         stride : int
-            Frame stride passed to ProLIF. See Warning below.
+            Analyse every ``stride``-th frame of each replica trajectory. Must be >= 1.
+            Ignored for replicas whose fingerprint is read from cache.
         n_jobs : int
             Number of parallel workers for ProLIF. See Warning below.
 
         Returns
         -------
         important_resids : list of int
-            Sorted residue IDs whose interaction frequency exceeds ``frequency_cutoff``.
-            These are numbered as in the TOPOLOGY that was loaded. A prmtop renumbers
-            sequentially from 1, so they are generally offset from the original PDB author
-            numbering (e.g. 5 for a structure whose first modelled residue is 6) -- convert
-            before comparing against crystal-structure residue numbers.
+            Sorted residue IDs whose interaction frequency exceeds ``frequency_cutoff``,
+            pooled over all replicas. These are numbered as in the TOPOLOGY that was
+            loaded. A prmtop renumbers sequentially from 1, so they are generally offset
+            from the original PDB author numbering (e.g. 5 for a structure whose first
+            modelled residue is 6) -- convert before comparing against crystal-structure
+            residue numbers.
         persistence_byRes : pd.DataFrame
-            Interaction persistence grouped by residue (all interaction types merged).
+            Interaction persistence in percent, grouped by residue (all interaction types
+            merged), for every replica stacked with a ``replica`` column.
         persistence_byRes_byType : pd.DataFrame
-            Interaction persistence broken down by residue and interaction type.
+            Same, broken down by residue and interaction type.
 
         Warning
         -------
-        The ``stride`` parameter is currently not applied correctly by ProLIF; all
-        frames in each replica trajectory are analyzed regardless of the value passed.
-
         The ``n_jobs`` parameter is currently non-functional due to serialization
         incompatibilities (dill/multiprocess version conflicts in ProLIF). All
         fingerprint computations run serially regardless of the value passed.
         """
+        if stride < 1:
+            raise ValueError(f"stride must be >= 1, got {stride}")
 
         important_resids = set()
-        if fp_interactions is not None:
-            fp = Fingerprint(interactions=fp_interactions)
-        else:
-            fp = Fingerprint()  # default interaction set
+        byRes_frames = []
+        byRes_byType_frames = []
 
         for rep_name, u in self.replicas.items():
             fp_fname = os.path.join(self.outdir, f"FP_{rep_name}.pkl")
             if os.path.exists(fp_fname):
-                fp = Fingerprint.from_pickle(fp_fname)
+                rep_fp = Fingerprint.from_pickle(fp_fname)
                 logger.info(f"Loaded cached ProLif fingerprint for replica {rep_name}")
             else:
                 logger.info(f"Computing ProLif fingerprint for replica {rep_name}")
+                rep_fp = (Fingerprint(interactions=fp_interactions)
+                          if fp_interactions is not None else Fingerprint())
                 protein_sel = u.select_atoms(self.protein_mda_selection) if self.protein_mda_selection else u.select_atoms("protein")
                 logger.info(f"Protein selection has {protein_sel.n_atoms} atoms.")
                 ligand_sel = u.select_atoms(self.ligand_mda_selection)
                 logger.info(f"Ligand selection has {ligand_sel.n_atoms} atoms.")
-                
+
+                # ProLIF ignores its own stride argument, so slice the trajectory instead.
                 # ProLIF's signature is run(traj, lig, prot)
-                fp = fp.run(u.trajectory,
-                            ligand_sel,
-                            protein_sel,
-                            n_jobs=n_jobs,
-                            )
-                fp.to_pickle(fp_fname)
-            
+                rep_fp = rep_fp.run(u.trajectory[::stride],
+                                    ligand_sel,
+                                    protein_sel,
+                                    n_jobs=n_jobs,
+                                    )
+                rep_fp.to_pickle(fp_fname)
+
             # convert to DataFrame
-            df = fp.to_dataframe()
-            fp.plot_barcode()
+            df = rep_fp.to_dataframe()
+            rep_fp.plot_barcode()
             plt.savefig(os.path.join(self.outdir, f"prolif_barcode_{rep_name}.png"))
             # plt.show()
             plt.close()
@@ -400,16 +412,26 @@ class ProteinLigandAnalyzer:
                 .T
                 * 100
             ).T
-            
+
             # Filter residues by frequency
-            selected_residues = persistence_byRes[persistence_byRes["%"] >= frequency_cutoff/100].index.tolist()
+            selected_residues = persistence_byRes[persistence_byRes["%"] >= frequency_cutoff * 100].index.tolist()
             # groupby(level=["protein", "ligand"]) puts the protein residue first
             selected_resnames = [res[0] for res in selected_residues]
             selected_resids = [int(re.search(r"(\d+)", r).group(1))
                                for r in selected_resnames if re.search(r"(\d+)", r)]
             important_resids.update(selected_resids)
 
-        return sorted(list(important_resids)), persistence_byRes, persistence_byRes_byType
+            # replica as a column, not an index level: callers index these frames by the
+            # ProLIF tuple and would break if the tuple grew a level.
+            persistence_byRes = persistence_byRes.assign(replica=rep_name)
+            persistence_byRes_byType = persistence_byRes_byType.assign(replica=rep_name)
+            byRes_frames.append(persistence_byRes)
+            byRes_byType_frames.append(persistence_byRes_byType)
+
+        empty = pd.DataFrame(columns=["%", "replica"])
+        return (sorted(important_resids),
+                pd.concat(byRes_frames) if byRes_frames else empty,
+                pd.concat(byRes_byType_frames) if byRes_byType_frames else empty)
 
     @staticmethod
     def plot_tanimoto_similarity(query_fp, reference_fp, use_frame: int = None, outdir: str = None):
@@ -1232,12 +1254,13 @@ def _replace_line(lines: list,
             break
     return lines
 
-def calculate_contact_frequency(u, ligand_selection: str, pocket_cutoff: float = 5.0, contact_cutoff: float = 3.5) -> np.ndarray:
+def calculate_contact_frequency(u, ligand_selection: str, pocket_cutoff: float = 5.0, contact_cutoff: float = 3.5,
+                                start: int = None, stop: int = None, step: int = None) -> np.ndarray:
     """Return per-atom contact frequency for ligand heavy atoms.
 
     A ligand atom is counted as "in contact" in a frame if any pocket atom
     lies within ``contact_cutoff`` Å of it.  Pocket atoms are protein heavy
-    atoms within ``pocket_cutoff`` Å of the ligand in the first frame.
+    atoms within ``pocket_cutoff`` Å of the ligand in the first analysed frame.
 
     Parameters
     ----------
@@ -1246,26 +1269,32 @@ def calculate_contact_frequency(u, ligand_selection: str, pocket_cutoff: float =
     ligand_selection : str
         MDAnalysis selection string for the ligand.
     pocket_cutoff : float
-        Distance (Å) used to define the pocket in the first frame.
+        Distance (Å) used to define the pocket in the first analysed frame.
     contact_cutoff : float
         Distance threshold (Å) for declaring a contact in each frame.
+    start, stop, step : int, optional
+        Frame slice to analyse (default: whole trajectory).
 
     Returns
     -------
     np.ndarray
-        Fraction of trajectory frames in which each ligand heavy atom is in
+        Fraction of analysed frames in which each ligand heavy atom is in
         contact with any pocket atom. Shape ``(n_ligand_heavy_atoms,)``.
     """
+    frames = range(*slice(start, stop, step).indices(len(u.trajectory)))
+    if len(frames) == 0:
+        raise ValueError(f"Empty frame window start={start}, stop={stop}, step={step}.")
     lig_ha = u.select_atoms(f'({ligand_selection}) and not name H*')
-    u.trajectory[0]
+    u.trajectory[frames[0]]
     pocket = u.select_atoms(f'protein and not name H* and around {pocket_cutoff} ({ligand_selection})')
     contact_counts = np.zeros(len(lig_ha))
-    for ts in u.trajectory:
+    for ts in u.trajectory[frames.start:frames.stop:frames.step]:
         dmat = distance_array(lig_ha.positions, pocket.positions, box=ts.dimensions)
         contact_counts += (dmat < contact_cutoff).any(axis=1)
-    return contact_counts / len(u.trajectory)
+    return contact_counts / len(frames)
 
-def calculate_ligand_rmsf(u, ligand_selection: str = 'resname UNK') -> np.ndarray:
+def calculate_ligand_rmsf(u, ligand_selection: str = 'resname UNK',
+                          start: int = None, stop: int = None, step: int = None) -> np.ndarray:
     """Return per-atom RMSF values for ligand heavy atoms.
 
     Parameters
@@ -1274,15 +1303,158 @@ def calculate_ligand_rmsf(u, ligand_selection: str = 'resname UNK') -> np.ndarra
         MDAnalysis Universe with topology and trajectory loaded.
     ligand_selection : str
         MDAnalysis selection string for the ligand.
+    start, stop, step : int, optional
+        Frame slice to analyse (default: whole trajectory).
 
     Returns
     -------
     np.ndarray
-        RMSF (Å) for each ligand heavy atom over the full trajectory.
-        Shape ``(n_ligand_heavy_atoms,)``.
+        RMSF (Å) for each ligand heavy atom. Shape ``(n_ligand_heavy_atoms,)``.
     """
     lig_ha = u.select_atoms(f'({ligand_selection}) and not name H*')
-    return RMSF(atomgroup=lig_ha).run().rmsf
+    return RMSF(atomgroup=lig_ha).run(start=start, stop=stop, step=step).results.rmsf
+
+# Element sets of the cw-RMSF score; None = every heavy atom.
+CW_RMSF_ATOM_SETS = {
+    'polar': ('N', 'O', 'S'),
+    'nonpolar': ('C', 'F', 'Cl', 'Br', 'I'),
+    'all': None,
+}
+
+def ligand_rmsf_contacts(u, ligand_selection: str = 'resname UNK', start: int = None, stop: int = None,
+                         step: int = None, pocket_cutoff: float = 5.0, contact_cutoff: float = 3.5) -> pd.DataFrame:
+    """Per-atom RMSF and pocket-contact frequency of the ligand heavy atoms.
+
+    The trajectory must already be centred and superposed on the protein
+    (e.g. the ``*_aligned.dcd`` written by :func:`autopath.utils.wrap_align_save_traj`).
+
+    Parameters
+    ----------
+    u : mda.Universe
+        Universe with the aligned trajectory.
+    ligand_selection : str
+        MDAnalysis selection string for the ligand.
+    start, stop, step : int, optional
+        Frame slice to analyse (default: whole trajectory). The pocket is
+        defined on the first frame of the slice.
+    pocket_cutoff : float
+        Protein heavy atoms within this distance (Å) of the ligand define the pocket.
+    contact_cutoff : float
+        Ligand–pocket heavy-atom distance (Å) counted as a contact.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per ligand heavy atom with columns ``atom_name``, ``element``,
+        ``rmsf`` (Å) and ``contact_freq`` (fraction of analysed frames).
+    """
+    lig_ha = u.select_atoms(f'({ligand_selection}) and not name H*')
+    if len(lig_ha) == 0:
+        raise ValueError(f"Selection {ligand_selection!r} has no heavy atoms.")
+    contact_freq = calculate_contact_frequency(u, ligand_selection, pocket_cutoff=pocket_cutoff,
+                                               contact_cutoff=contact_cutoff, start=start, stop=stop, step=step)
+    return pd.DataFrame({
+        'atom_name': list(lig_ha.names),
+        'element': [a.element for a in lig_ha],
+        'rmsf': calculate_ligand_rmsf(u, ligand_selection, start=start, stop=stop, step=step),
+        'contact_freq': contact_freq,
+    })
+
+def cw_rmsf(per_atom: pd.DataFrame, atom_set='polar') -> float:
+    """Contact-weighted RMSF, sum(c_i * RMSF_i) / sum(c_i), over one set of ligand atoms.
+
+    Parameters
+    ----------
+    per_atom : pd.DataFrame
+        Columns ``element``, ``rmsf`` and ``contact_freq``, as returned by
+        :func:`ligand_rmsf_contacts` (or read from ``<sys>_RMSF.csv``).
+    atom_set : str or list of str
+        A key of ``CW_RMSF_ATOM_SETS`` (``'polar'``, ``'nonpolar'``, ``'all'``)
+        or an explicit list of element symbols.
+
+    Returns
+    -------
+    float
+        cw-RMSF in Å.
+
+    Raises
+    ------
+    ValueError
+        If no atom of the set is ever in contact with the pocket (score undefined).
+    """
+    if isinstance(atom_set, str):
+        if atom_set not in CW_RMSF_ATOM_SETS:
+            raise ValueError(f"Unknown atom set {atom_set!r}; use one of {list(CW_RMSF_ATOM_SETS)} or a list of elements.")
+        name, elements = atom_set, CW_RMSF_ATOM_SETS[atom_set]
+    else:
+        name, elements = '/'.join(atom_set), tuple(atom_set)
+    el = per_atom['element'].astype(str).str.capitalize()
+    sel = per_atom[el != 'H'] if elements is None else per_atom[el.isin([e.capitalize() for e in elements])]
+    weight = sel['contact_freq'].to_numpy(dtype=float)
+    if weight.sum() <= 0:
+        raise ValueError(f"cw-RMSF undefined: no {name} ligand atom contacts the pocket.")
+    return float(np.average(sel['rmsf'].to_numpy(dtype=float), weights=weight))
+
+def cw_rmsf_scores(per_atom: pd.DataFrame, atom_sets=tuple(CW_RMSF_ATOM_SETS), on_undefined: str = 'raise') -> dict:
+    """cw-RMSF for several atom sets (see :func:`cw_rmsf`).
+
+    Parameters
+    ----------
+    per_atom : pd.DataFrame
+        Output of :func:`ligand_rmsf_contacts`.
+    atom_sets : iterable of str
+        Keys of ``CW_RMSF_ATOM_SETS``.
+    on_undefined : {'raise', 'nan'}
+        For a set with no pocket contact: raise ``ValueError`` or report NaN (logged).
+
+    Returns
+    -------
+    dict
+        ``{'cw_rmsf_<set>': value}``.
+    """
+    if on_undefined not in ('raise', 'nan'):
+        raise ValueError(f"on_undefined must be 'raise' or 'nan', got {on_undefined!r}")
+    out = {}
+    for name in atom_sets:
+        try:
+            out[f'cw_rmsf_{name}'] = cw_rmsf(per_atom, name)
+        except ValueError as e:
+            if on_undefined == 'raise' or name not in CW_RMSF_ATOM_SETS:
+                raise
+            logger.warning(str(e))
+            out[f'cw_rmsf_{name}'] = float('nan')
+    return out
+
+def cw_rmsf_windows(u, ligand_selection: str, state_csv: str, protocol, component: str = 'ligand'):
+    """cw-RMSF over the whole run and over the free window of an equilibration.
+
+    Parameters
+    ----------
+    u : mda.Universe
+        Universe with the aligned equilibration trajectory.
+    ligand_selection : str
+        MDAnalysis selection string for the ligand.
+    state_csv, protocol, component
+        Passed to :func:`autopath.equilibration.free_window_start`.
+
+    Returns
+    -------
+    table : pd.DataFrame
+        Indexed by window (``'whole'``, ``'free'``) with ``first_frame`` and
+        ``cw_rmsf_<set>`` columns (NaN for a set with no pocket contact). The
+        ``'free'`` row is absent when the protocol has no free window.
+    per_atom : dict of pd.DataFrame
+        :func:`ligand_rmsf_contacts` output per window.
+    """
+    from autopath.equilibration import free_window_start  # openmm import, only needed here
+    windows = {'whole': 0}
+    free = free_window_start(state_csv, protocol, component=component, n_frames=len(u.trajectory))
+    if free is not None:
+        windows['free'] = free
+    per_atom = {w: ligand_rmsf_contacts(u, ligand_selection, start=s) for w, s in windows.items()}
+    table = pd.DataFrame([{'window': w, 'first_frame': s, **cw_rmsf_scores(per_atom[w], on_undefined='nan')}
+                          for w, s in windows.items()]).set_index('window')
+    return table, per_atom
 
 def plot_atomic_property(u, weights: np.ndarray, lig_resname: str = 'resname UNK',
                          outname: str = 'property.png', ref_mol=None,

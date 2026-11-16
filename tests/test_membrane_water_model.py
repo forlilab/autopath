@@ -7,19 +7,19 @@ therefore places the membrane with a derived 3-site force field and promotes eve
 afterwards, leaving ``createSystem`` on the real force field.
 """
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 from openmm import LangevinMiddleIntegrator, Platform
 from openmm.app import Modeller, PDBFile, Simulation
-from openmm.app.element import hydrogen
 import openmm.unit as unit
-from pdbfixer import PDBFixer
 
 from autopath.preparation import SystemPreparation, substitute_three_site_water
 
 FF_4SITE = ["amber19-all.xml", "amber19/opc.xml"]
 FF_3SITE = ["amber19-all.xml", "amber19/tip3pfb.xml"]
-SOURCE_PDB = "examples/data/3ptb_fixed.pdb"
+PEPTIDE_PDB = Path(__file__).parent / "data" / "membrane_peptide.pdb"
 
 
 class _Stop(Exception):
@@ -27,38 +27,13 @@ class _Stop(Exception):
 
 
 @pytest.fixture(scope="module")
-def peptide(tmp_path_factory):
+def peptide():
     """A ~60-residue peptide centred on the origin, plus a few crystal waters.
 
     addMembrane centres the bilayer on z=0 but never translates the solute, so an
     off-centre solute lands outside the box it sizes and the packing run diverges.
     """
-    out = tmp_path_factory.mktemp("peptide")
-    src = PDBFile(SOURCE_PDB)
-    modeller = Modeller(src.topology, src.positions)
-    residues = list(modeller.topology.residues())
-    protein = [r for r in residues if r.name != "HOH"]
-    waters = [r for r in residues if r.name == "HOH"]
-    keep = set(protein[:60]) | set(waters[:5])
-    modeller.delete([r for r in residues if r not in keep])
-    modeller.delete([a for a in modeller.topology.atoms() if a.element is hydrogen])
-    sliced = out / "sliced.pdb"
-    with open(sliced, "w") as f:
-        PDBFile.writeFile(modeller.topology, modeller.positions, f)
-
-    fixer = PDBFixer(filename=str(sliced))
-    fixer.findMissingResidues()
-    fixer.missingResidues = {}
-    fixer.findMissingAtoms()
-    fixer.addMissingAtoms()
-    fixer.addMissingHydrogens(7.0)
-    xyz = np.array(fixer.positions.value_in_unit(unit.nanometer))
-    xyz -= (xyz.min(axis=0) + xyz.max(axis=0)) / 2
-    fixer.topology.setPeriodicBoxVectors(None)
-    path = out / "peptide.pdb"
-    with open(path, "w") as f:
-        PDBFile.writeFile(fixer.topology, xyz * unit.nanometer, f)
-    return str(path)
+    return str(PEPTIDE_PDB)
 
 
 def _prep(tmp_path, forcefield, water_model, is_membrane):

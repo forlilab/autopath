@@ -732,9 +732,13 @@ def _get_friction_profile_for_path(
         return None
     path_speed = _parse_speed_from_path(path_name)
     if path_speed is None:
-        path_speed = friction_speed_override
-    if path_speed is None:
-        path_speed = max(friction_profiles)
+        path_speed = (friction_speed_override if friction_speed_override is not None
+                      else max(friction_profiles))
+        how = "override" if friction_speed_override is not None else "fastest available"
+        logger.warning(
+            f"Path '{path_name}' has no speed suffix; colouring by friction at "
+            f"speed={path_speed} nm/ps ({how})."
+        )
     if path_speed in friction_profiles:
         return friction_profiles[path_speed]
     # nearest speed fallback

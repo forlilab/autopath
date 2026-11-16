@@ -85,3 +85,26 @@ def test_meanforce_ti_skipped_single_speed():
     fr=pd.DataFrame([dict(path='p0',step=s,speed=0.01,r_coord=1.0+0.05*s,Fmean=100.+10*s) for s in range(10)])
     mix,diag=FrictionEstimator().meanforce_ti_pmf(fr,{0.01:{'p0':1.0}},9623.2)
     assert mix is None
+
+
+def test_meanforce_ti_pmf_per_speed_paths_logs_reason(caplog):
+    # Per-speed clustering gives each path label a single speed, so Feq(v->0) is undefined.
+    speeds = [0.005, 0.01, 0.015]
+    rows = [dict(path=f'path-0_v{sp}', step=step, speed=sp, r_coord=1.0 + 0.05 * step,
+                 Fmean=100.0 + 10 * step + 700 * sp)
+            for step in range(10) for sp in speeds]
+    with caplog.at_level("WARNING", logger="autopath"):
+        mix, diag = FrictionEstimator().meanforce_ti_pmf(pd.DataFrame(rows), {}, 9623.2)
+    assert mix is None
+    msgs = [r.getMessage() for r in caplog.records if "[meanforce_ti]" in r.getMessage()]
+    assert len(msgs) == 1 and "at least 2 speeds" in msgs[0]
+
+
+def test_meanforce_ti_pmf_no_common_z_logs_reason(caplog):
+    speeds = [0.005, 0.01]
+    rows = [dict(path=p, step=step, speed=sp, r_coord=r0 + 0.05 * step, Fmean=100.0 + 700 * sp)
+            for p, r0 in (('p0', 1.0), ('p1', 3.0)) for step in range(10) for sp in speeds]
+    with caplog.at_level("WARNING", logger="autopath"):
+        mix, _ = FrictionEstimator().meanforce_ti_pmf(pd.DataFrame(rows), {}, 9623.2)
+    assert mix is None
+    assert "no common z range" in caplog.text

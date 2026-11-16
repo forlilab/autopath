@@ -1,4 +1,4 @@
-"""Per-path profile recombination: Eq. 21 (exponential, p_neq) vs linear (p_eq)."""
+"""Per-path profile recombination: Eq. 21 (exponential, p_neq) vs linear (path weights)."""
 import numpy as np
 import pandas as pd
 import pytest
@@ -59,8 +59,8 @@ def _results_stub(per_path, n_by_path, estimator="jarzynski"):
     return smd, steps
 
 
-def _weights(p_eq, estimator="jarzynski"):
-    return {estimator: {SPEED: dict(p_eq)}}
+def _weights(w, estimator="jarzynski"):
+    return {estimator: {SPEED: dict(w)}}
 
 
 PER_PATH = {
@@ -68,12 +68,12 @@ PER_PATH = {
     "pB": (np.array([0.0, 8.0, 10.0, 30.0]), np.array([2.0, 15.0, 30.0, 60.0])),
 }
 N_BY_PATH = {"pA": 3, "pB": 7}
-P_EQ = {"pA": 0.8, "pB": 0.2}
+WEIGHTS = {"pA": 0.8, "pB": 0.2}
 
 
 def test_eq21_matches_closed_form_with_unequal_paths():
     smd, _ = _results_stub(PER_PATH, N_BY_PATH)
-    out = calculate_weighted_pmf(smd, weights_by_estimator=_weights(P_EQ),
+    out = calculate_weighted_pmf(smd, weights_by_estimator=_weights(WEIGHTS),
                                  path_combination="eq21").sort_values("step")
     pA, pB = 0.3, 0.7
     (dA, wA), (dB, wB) = PER_PATH["pA"], PER_PATH["pB"]
@@ -88,7 +88,7 @@ def test_eq21_renormalises_over_paths_present():
     dB[2] = np.nan
     smd, _ = _results_stub({"pA": PER_PATH["pA"], "pB": (dB, PER_PATH["pB"][1])},
                            N_BY_PATH)
-    out = calculate_weighted_pmf(smd, weights_by_estimator=_weights(P_EQ),
+    out = calculate_weighted_pmf(smd, weights_by_estimator=_weights(WEIGHTS),
                                  path_combination="eq21").set_index("step")
     assert out.loc[2, "dG"] == pytest.approx(PER_PATH["pA"][0][2], abs=1e-10)
     assert out.loc[2, "Wdiss"] == pytest.approx(
@@ -97,7 +97,7 @@ def test_eq21_renormalises_over_paths_present():
 
 def test_linear_is_peq_weighted_mean():
     smd, _ = _results_stub(PER_PATH, N_BY_PATH)
-    out = calculate_weighted_pmf(smd, weights_by_estimator=_weights(P_EQ),
+    out = calculate_weighted_pmf(smd, weights_by_estimator=_weights(WEIGHTS),
                                  path_combination="linear").sort_values("step")
     (dA, wA), (dB, wB) = PER_PATH["pA"], PER_PATH["pB"]
     dG_exp = (0.8 * dA + 0.2 * dB) / 1.0
@@ -109,7 +109,7 @@ def test_linear_is_peq_weighted_mean():
 
 def test_force_estimator_mixed_linearly_in_eq21_mode():
     smd, _ = _results_stub(PER_PATH, N_BY_PATH, estimator="force")
-    w = _weights(P_EQ, estimator="force")
+    w = _weights(WEIGHTS, estimator="force")
     eq21 = calculate_weighted_pmf(smd, weights_by_estimator=w, path_combination="eq21")
     lin = calculate_weighted_pmf(smd, weights_by_estimator=w, path_combination="linear")
     pd.testing.assert_frame_equal(eq21, lin)
@@ -161,25 +161,26 @@ def test_convergence_series_reproduces_pooled_jarzynski():
             assert series.loc[s] == pytest.approx(pooled[col], abs=1e-10)
 
 
-def test_convergence_series_linear_is_peq_weighted_mean():
+def test_convergence_series_linear_is_path_weighted_mean():
     steps = list(range(6))
     smd, _, n_by_path = _two_path_jarzynski(steps)
     p_neq = SMDData._compute_p_neq(n_by_path)
-    p_eq = SMDAnalysis._compute_p_eq(smd.results, p_neq, BETA)
+    w = SMDAnalysis._path_weights(smd.results, p_neq)
+    assert w == pytest.approx(p_neq)
     series = SMDAnalysis._weighted_series_from_results(
         smd.results, dict(n_by_path), value_col="dG", beta=BETA,
         path_combination="linear",
     )
     res = smd.results.set_index(["step", "path"])["dG"]
     for s in steps:
-        exp = sum(p_eq[p] * res.loc[(s, p)] for p in p_eq) / sum(p_eq.values())
+        exp = sum(w[p] * res.loc[(s, p)] for p in w) / sum(w.values())
         assert series.loc[s] == pytest.approx(exp, abs=1e-12)
 
 
 def test_invalid_path_combination_raises(tmp_path):
     smd, _ = _results_stub(PER_PATH, N_BY_PATH)
     with pytest.raises(ValueError):
-        calculate_weighted_pmf(smd, weights_by_estimator=_weights(P_EQ),
+        calculate_weighted_pmf(smd, weights_by_estimator=_weights(WEIGHTS),
                                path_combination="mean")
     with pytest.raises(ValueError):
         SMDAnalysis._weighted_series_from_results(
@@ -316,7 +317,7 @@ def test_force_v0_linear_mode_unchanged_and_eq21_wired(tmp_path):
     res, lin, out_lin = _run_toy(tmp_path, files, "linear")
     _, eq, out_eq = _run_toy(tmp_path, files, "eq21")
 
-    # linear: force v->0 dG is the intercept of the p_eq-mixed per-speed mean work
+    # linear: force v->0 dG is the intercept of the path-weighted per-speed mean work
     per_speed = lin[(lin["estimator"] == "force") & (lin["speed"] > 0)]
     ref = extrapolate_to_v0(per_speed, param="dG",
                             realized_speed_map=res.realized_speed_map).sort_values("step")

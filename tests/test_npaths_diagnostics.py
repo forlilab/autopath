@@ -32,7 +32,7 @@ class _StubSMDTwoPaths(_RealSMDData):
     (``_compute_p_neq``) stay available under the patched name.
 
     Small per-replica jitter keeps cumulant dG >= 0 at every step for both
-    paths, so both carry non-zero equilibrium weight once estimable.
+    paths, so both carry non-zero path weight once estimable.
     """
 
     def __init__(self, logs, **kw):

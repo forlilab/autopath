@@ -6,7 +6,7 @@ import pandas as pd
 import tqdm
 import MDAnalysis as mda
 
-from .SMDData import SMDData, smd_topology
+from .SMDData import SMDData, frame_log_index, smd_topology
 
 logger = logging.getLogger("autopath.pulling.LigandFeatures")
 
@@ -97,16 +97,28 @@ class LigandTrajectoryFeatures:
     # Public API
     # ------------------------------------------------------------------
 
-    def compute(self, traj_files: list, reference_pdb: str) -> pd.DataFrame:
+    def compute(self, traj_files: list, reference_pdb: str, log_files: list) -> pd.DataFrame:
         """Compute per-frame ligand features for all trajectories.
+
+        Parameters
+        ----------
+        traj_files : list of str
+            DCDs.
+        reference_pdb : str
+            Topology.
+        log_files : list of str
+            sMD log of each DCD, same order; gives each frame's log step/time.
 
         Returns
         -------
         pd.DataFrame
-            Columns: trajname, speed, time, [feature columns].
+            Columns: trajname, speed, step, time, [feature columns]; ``step``
+            and ``time`` are those of the log row each frame was saved after.
             One row per trajectory frame sampled at self.stride.
             Empty DataFrame if no trajectories could be processed.
         """
+        if len(log_files) != len(traj_files):
+            raise ValueError("log_files must pair one-to-one with traj_files")
         sel = f"resname {self.lig_resname} and not name H*"
         all_rows = []
 
@@ -123,7 +135,8 @@ class LigandTrajectoryFeatures:
 
         compute_rog = "rog" in self.features
 
-        for traj in tqdm.tqdm(traj_files, desc="Computing ligand features"):
+        for traj, log_file in tqdm.tqdm(list(zip(traj_files, log_files)),
+                                        desc="Computing ligand features"):
             try:
                 u = mda.Universe(smd_topology(reference_pdb, traj), traj)
             except Exception as exc:
@@ -145,11 +158,13 @@ class LigandTrajectoryFeatures:
             except (IndexError, ValueError):
                 speed = float("nan")
 
+            steps, times = frame_log_index(log_file, len(u.trajectory))
             for ts in u.trajectory[:: self.stride]:
                 row = {
                     "trajname": traj_name,
                     "speed": speed,
-                    "time": float(getattr(ts, "time", ts.frame)),
+                    "step": int(steps[ts.frame]),
+                    "time": float(times[ts.frame]),
                 }
                 if compute_rog:
                     row["lig_rog"] = self._compute_rog(lig)

@@ -1,0 +1,9 @@
+qfiles_mmgbsa/
+qfiles_LIE/
+run_mmgbsa_batch.sh
+run_LIE_batch.sh
+mmgbsa_HCT.in
+mmgbsa_OBC2.in
+mmgbsa_GBn.in
+mmgbsa_GBn2.in
+cwrmsf/

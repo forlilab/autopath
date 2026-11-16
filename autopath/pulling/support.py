@@ -2,9 +2,8 @@
 
 The support gate answers a pure trajectory-count question — "does this step
 have enough samples, does this path have enough trajectories?" — so the
-surviving (step, path) set is identical for every estimator. Equilibrium
-weights (p_eq) remain estimator-specific: they are computed *over* the gated
-survivors but still use each estimator's own dG profile.
+surviving (step, path) set is identical for every estimator. Path weights are
+computed *over* the gated survivors.
 """
 from __future__ import annotations
 

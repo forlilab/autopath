@@ -2,6 +2,7 @@ import os
 import math
 import time
 import json
+import numpy as np
 from dataclasses import dataclass
 from typing import List, Dict, Any
 
@@ -341,6 +342,60 @@ def run_restrained_md(
         stepsize_prev = step.stepsize
 
     return None
+
+
+def free_window_start(state_csv: str, protocol, component: str = "ligand", n_frames: int = None):
+    """First frame of the trailing window in which ``component`` is unrestrained.
+
+    The window length is the summed duration of the last equilibration stages
+    whose force constant for ``component`` is zero; its start is located on the
+    ``Time (ps)`` column of the equilibration state CSV, which has one row per
+    trajectory frame.
+
+    Parameters
+    ----------
+    state_csv : str
+        ``equilibration_<run_id>.csv`` written next to the trajectory.
+    protocol : str or dict
+        Equilibration protocol (JSON path or loaded dict) used for the run.
+    component : str
+        Key of ``components_lookup`` (default ``"ligand"``).
+    n_frames : int, optional
+        Number of trajectory frames; checked against the CSV rows when given.
+
+    Returns
+    -------
+    int or None
+        Index of the first frame of the unrestrained window; None (with a
+        warning) if ``component`` is not in the protocol or is restrained in
+        the last stage.
+
+    Raises
+    ------
+    ValueError
+        If the CSV does not match ``n_frames``.
+    """
+    import pandas as pd
+    if isinstance(protocol, str):
+        with open(protocol) as f:
+            protocol = json.load(f)
+    components = list(protocol["components_lookup"])
+    if component not in components:
+        logger.warning(f"Component {component!r} is not in the protocol ({components}): no free window.")
+        return None
+    k = components.index(component)
+    tail_ps = 0.0
+    for stage in reversed(protocol["equilibration"]):
+        if stage["forces"][k] != 0:
+            break
+        tail_ps += stage["nsteps"] * stage["stepsize"]
+    if tail_ps == 0:
+        logger.warning(f"Component {component!r} is restrained until the end: no free window.")
+        return None
+    t = pd.read_csv(state_csv)["Time (ps)"].to_numpy()
+    if n_frames is not None and len(t) != n_frames:
+        raise ValueError(f"{state_csv} has {len(t)} rows but the trajectory has {n_frames} frames.")
+    return int(np.argmax(t >= t[-1] - tail_ps + 1e-6))
 
 
 class Equilibration:

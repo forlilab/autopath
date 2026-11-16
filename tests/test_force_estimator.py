@@ -101,7 +101,7 @@ def test_force_regression_recovers_feq_and_gamma():
     gam = [500.0, 800.0, 1200.0, 900.0, 400.0]
     fr = _force_results_linear(feq, gam, speeds)
     weights = {sp: {'p0': 1.0} for sp in speeds}
-    out = FrictionEstimator().gamma_from_force_regression(fr, weights)
+    out = FrictionEstimator(friction_model='ols').gamma_from_force_regression(fr, weights)
     out = out.sort_values('step')
     np.testing.assert_allclose(out['Feq'].to_numpy(), feq, atol=1e-6)
     np.testing.assert_allclose(out['Gamma'].to_numpy(), gam, atol=1e-6)
@@ -115,13 +115,26 @@ def test_force_derivative_matches_slope():
     gam = [500.0, 800.0, 1200.0]
     fr = _force_results_linear(feq, gam, speeds)
     weights = {sp: {'p0': 1.0} for sp in speeds}
-    out = FrictionEstimator().gamma_from_force_derivative(fr, weights)
+    out = FrictionEstimator(friction_model='ols').gamma_from_force_derivative(fr, weights)
     # For exactly-linear data, per-speed (Fbar-Feq)/v == gamma at every speed.
     for sp in speeds:
         g = out[out['speed'] == sp].sort_values('step')
         np.testing.assert_allclose(g['Gamma'].to_numpy(), gam, atol=1e-6)
     assert (out['method'] == 'derivative').all()
 
+
+
+def test_force_derivative_exact_with_mixed_friction_model():
+    # Few grid points: the mixedlm intercept is off by ~0.1, which /v would amplify.
+    speeds = [0.001, 0.005, 0.01]
+    feq = [0.0, 100.0, 250.0]
+    gam = [500.0, 800.0, 1200.0]
+    fr = _force_results_linear(feq, gam, speeds)
+    weights = {sp: {'p0': 1.0} for sp in speeds}
+    out = FrictionEstimator(friction_model='mixed').gamma_from_force_derivative(fr, weights)
+    for sp in speeds:
+        g = out[out['speed'] == sp].sort_values('step')
+        np.testing.assert_allclose(g['Gamma'].to_numpy(), gam, rtol=1e-6)
 
 def test_force_derivative_drops_steps_without_feq_no_offset():
     # step 0 has only ONE speed -> extrapolate_to_v0 trims it -> no Feq(step 0).
@@ -155,6 +168,32 @@ def test_mix_force_weighted_average_over_paths():
     weights = {0.01: {'p0': 0.25, 'p1': 0.75}}
     mixed = FrictionEstimator._mix_force(fr, weights)
     assert mixed.iloc[0]['Fbar'] == pytest.approx(175.0)   # 0.25*100 + 0.75*200
+
+
+def test_mix_force_path_weights_equal_pooled_mean():
+    from autopath.pulling.AnalysisSMD import SMDAnalysis
+    rng = np.random.default_rng(1)
+    n_by_path = {0.005: {'pA': 3, 'pB': 7}, 0.01: {'pA': 5, 'pB': 2}}
+    steps = range(6)
+    raw = pd.DataFrame([
+        dict(speed=sp, path=p, traj=f'{p}{i}', step=s,
+             F=rng.normal(100.0 + 10.0 * s + (50.0 if p == 'pB' else 0.0), 20.0))
+        for sp, counts in n_by_path.items() for p, n in counts.items()
+        for i in range(n) for s in steps
+    ])
+    fr = (raw.groupby(['speed', 'path', 'step'])['F'].mean().rename('Fmean')
+          .reset_index().assign(estimator='force', dG=lambda d: d['step'] + 1.0,
+                                r_coord=lambda d: 0.1 * d['step']))
+    weights = {
+        sp: SMDAnalysis._path_weights(fr[fr['speed'] == sp],
+                                      SMDData._compute_p_neq(counts))
+        for sp, counts in n_by_path.items()
+    }
+    mixed = FrictionEstimator._mix_force(fr, weights).set_index(['speed', 'step'])['Fbar']
+    pooled = raw.groupby(['speed', 'step'])['F'].mean()
+    assert len(mixed) == len(pooled) == 12
+    np.testing.assert_allclose(mixed.loc[pooled.index].to_numpy(), pooled.to_numpy(),
+                               rtol=1e-12)
 
 
 from autopath.pulling.AnalysisSMD import SMDAnalysis
