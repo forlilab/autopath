@@ -163,6 +163,10 @@ class SystemPreparation:
         re-expansion increments. Stock OpenMM minimises only once for 30 iterations,
         which is not enough for a large membrane protein and lets the lipids blow up
         (see :func:`relaxed_membrane_packing`). Set to 0 for stock behaviour.
+    membrane_ligand_z : float or None, optional
+        Ligand-only membrane systems: z (nm) of the ligand centroid from the membrane
+        centre (default 3.0, in the water above the upper leaflet). ``None`` keeps the
+        coordinates of the ligand file.
     out_dir : str, optional
         Directory where all output files are written.
     """
@@ -187,6 +191,7 @@ class SystemPreparation:
         is_membrane: bool = False,
         lipid_type: str = 'POPC',
         membrane_relax_iterations: int = 0, #200
+        membrane_ligand_z: float = 3.0,
         out_dir: str = "system",
     ) -> None:
 
@@ -224,6 +229,7 @@ class SystemPreparation:
         self.lipid_type = lipid_type
         # 0 disables the relaxation and restores stock addMembrane behaviour
         self.membrane_relax_iterations = membrane_relax_iterations
+        self.membrane_ligand_z = membrane_ligand_z
         self._available_lipids = [
             "POPC",
             "POPE",
@@ -534,25 +540,22 @@ class SystemPreparation:
                         chain_id += 1
 
         # CASE: Ligand and membrane only (no protein)
-        max_length = 0.0 * openmmunit.angstroms
+        max_length = 0.0 * openmmunit.nanometers
         if protein is None and self.is_membrane:
+            if not isinstance(ligands, str):
+                raise ValueError("A ligand-only membrane system takes one ligand file: ligands='ligand.sdf'.")
+            logger.info(f"Parametrizing ligand {os.path.basename(ligands)}..")
+            ligand_topology, ligand_positions = self._parametrize_ligand(self._ligand_to_mol(ligands))
+            for res in ligand_topology.residues():
+                res.name = 'UNK'
 
-            # Centre ligand at the origin before translating it into the membrane.
-            lig_com = np.mean(ligand_positions, axis=0)
-            for i, xyz_i in enumerate(ligand_positions):
-                ligand_positions[i] = xyz_i - lig_com
+            xyz = np.array(ligand_positions.value_in_unit(openmmunit.nanometers))
+            max_length = np.max(np.linalg.norm(xyz[:, None] - xyz, axis=2)) * openmmunit.nanometers
+            if self.membrane_ligand_z is not None:
+                # centroid at the origin in x/y and at membrane_ligand_z in z
+                xyz += np.array([0.0, 0.0, self.membrane_ligand_z]) - xyz.mean(axis=0)
 
-            pairwise_distances = np.linalg.norm(
-                ligand_positions[:, None] - ligand_positions, axis=2
-            )
-            max_length = np.max(pairwise_distances) * openmmunit.angstroms
-
-            translation_distance = 3.0
-
-            translation_vector = np.array([0, 0, translation_distance])
-            ligand_positions += translation_vector * openmmunit.nanometers
-
-            modeller = Modeller(ligand_topology, ligand_positions)
+            modeller = Modeller(ligand_topology, xyz * openmmunit.nanometers)
 
         # A 4-site water model needs its virtual site on EVERY water, including the
         # crystallographic ones carried in from the input. On the solvation path that has to

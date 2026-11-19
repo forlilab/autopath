@@ -252,6 +252,49 @@ def membrane_z_cv(
     )
 
 
+def membrane_z_cv_relative_to_origin(
+    solute_atoms: list[int],
+    half_width: float,
+    hill_width: float = 0.2,
+    grid_points: Optional[int] = None,
+    name: str = "membrane_z",
+) -> CVSpec:
+    """``membrane_z_cv`` measured from the fixed point z = 0 instead of a centre atom (nm).
+
+    Same signed minimum-image expression, with the reference z fixed at 0: one centroid group (the solute), so
+    no reference particle is bonded to the solute. A bonded reference makes OpenMM's barostat treat solute +
+    reference as one molecule and scale them together, which drags a pinned dummy off its site and blocks
+    box-height moves. Assumes the membrane centre sits at the origin, as in prepare_permeation_system.py builds.
+    """
+    solute = [int(i) for i in solute_atoms]
+    hw = float(half_width)
+    if grid_points is None:
+        grid_points = int(round(2 * hw / (hill_width / 5))) + 1
+
+    def factory(input_positions, n_atoms, topology):
+        return cvpack.CentroidFunction(
+            "min(max(d0*select(step(pointdistance(0, 0, z1 + 0.01, 0, 0, 0) - d0), 1, -1), -mz_hw), mz_hw);"
+            "d0 = pointdistance(0, 0, z1, 0, 0, 0)",
+            openmmunit.nanometers,
+            [solute],
+            weighByMass=False,
+            pbc=True,
+            mz_hw=[hw],
+        )
+
+    return CVSpec(
+        cv=None,
+        grid_min=-hw,
+        grid_max=hw,
+        hill_width=hill_width,
+        grid_points=grid_points,
+        name=name,
+        cv_length_per_unit_ang=10.0,
+        origin=0.0,
+        _factory=factory,
+    )
+
+
 def axis_cos_cv(
     tail_atom: int,
     head_atom: int,
