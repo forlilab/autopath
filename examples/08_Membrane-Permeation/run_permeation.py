@@ -42,9 +42,12 @@ def parse_basins(text, with_axis):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     io = ap.add_argument_group("system")
-    io.add_argument("--system", required=True, help="serialized OpenMM System (.xml), barostat included")
-    io.add_argument("--pdb", required=True, help="topology + starting positions/box")
+    io.add_argument("--system", help="serialized OpenMM System (.xml), barostat included")
+    io.add_argument("--pdb", help="topology + starting positions/box")
     io.add_argument("--state", help="OpenMM State XML to start from instead of the PDB positions")
+    io.add_argument("--start-dirs", nargs="+", metavar="DIR",
+                    help="one start per walker instead of --system/--pdb/--state: walker k uses "
+                         "DIR[(k-1) %% n]/{system.xml, system.pdb, state.xml if present}; all must share one topology")
     io.add_argument("--solute-resname", default="UNK")
     io.add_argument("--center-resname", default="DUM", help="membrane-centre reference residue")
     cv2 = io.add_mutually_exclusive_group()
@@ -58,6 +61,9 @@ def main(argv=None):
     io.add_argument("--headgroup-atom",
                     help="lipid atom name (e.g. P) whose centroid z is logged as monitor_bilayer_z to catch "
                          "bilayer drift; off by default (an extra CV force, ~25%% slower)")
+    io.add_argument("--relative-to-origin", action="store_true",
+                    help="membrane z CV and cylinder restraint measured from the fixed origin instead of the DUM "
+                         "atom (no solute-DUM bond, so the barostat can change the box height)")
     io.add_argument("--temperature", type=float, default=310.0)
     io.add_argument("--timestep-fs", type=float, default=4.0)
 
@@ -83,11 +89,25 @@ def main(argv=None):
     if (a.end_to_end or a.lmz) and not a.ligand_sdf:
         ap.error("--end-to-end and --lmz need --ligand-sdf")
     with_cv2 = bool(a.axis_atoms or a.end_to_end or a.lmz)
+    if a.start_dirs and (a.system or a.pdb or a.state):
+        ap.error("--start-dirs replaces --system, --pdb and --state")
+    if not a.start_dirs and not (a.system and a.pdb):
+        ap.error("give --system and --pdb, or --start-dirs")
 
     from openmm import XmlSerializer, unit
     from openmm.app import PDBFile
     from autopath.metadynamics import (MetadynamicsMD, axis_cos_cv, crippen_contributions, end_to_end_atoms,
-                                       lipophilicity_z_cv, membrane_z_cv)
+                                       lipophilicity_z_cv, membrane_z_cv, membrane_z_cv_relative_to_origin)
+    from autopath.metadynamics.permeation import check_same_topology
+
+    if a.start_dirs:
+        dirs = [os.path.abspath(d) for d in a.start_dirs]
+        check_same_topology([os.path.join(d, "system.pdb") for d in dirs],
+                            [os.path.join(d, "system.xml") for d in dirs])
+        mine = dirs[(a.walker - 1) % len(dirs)]
+        a.system, a.pdb = os.path.join(mine, "system.xml"), os.path.join(mine, "system.pdb")
+        state = os.path.join(mine, "state.xml")
+        a.state = state if os.path.exists(state) else None
 
     pdb = PDBFile(a.pdb)
     top = pdb.topology
@@ -100,9 +120,18 @@ def main(argv=None):
         sys.exit(f"no {a.headgroup_atom} atoms outside the solute and centre")
     if not solute or not center:
         sys.exit(f"no {a.solute_resname} or {a.center_resname} atoms in {a.pdb}")
-    hw = a.half_width or 0.5 * top.getUnitCellDimensions()[2].value_in_unit(unit.nanometer)
+    if a.half_width:
+        hw = a.half_width
+    elif a.start_dirs:     # one grid for every walker of a shared bias: half the smallest start box height
+        hw = 0.5 * min(PDBFile(os.path.join(d, "system.pdb")).topology.getUnitCellDimensions()[2]
+                       .value_in_unit(unit.nanometer) for d in dirs)
+    else:
+        hw = 0.5 * top.getUnitCellDimensions()[2].value_in_unit(unit.nanometer)
 
-    cvs = [membrane_z_cv(solute, center, hw, hill_width=a.z_sigma)]
+    if a.relative_to_origin:
+        cvs = [membrane_z_cv_relative_to_origin(solute, hw, hill_width=a.z_sigma)]
+    else:
+        cvs = [membrane_z_cv(solute, center, hw, hill_width=a.z_sigma)]
     if a.ligand_sdf:
         from rdkit import Chem
         n_sdf = Chem.MolFromMolFile(a.ligand_sdf, removeHs=False).GetNumAtoms()
@@ -136,6 +165,15 @@ def main(argv=None):
 
     with open(a.system) as f:
         system = XmlSerializer.deserialize(f.read())
+    if not any("U_cylinder" in getattr(f, "getEnergyFunction", lambda: "")() for f in system.getForces()):
+        sys.exit(f"{a.system} has no cylinder restraint: the solute would drift in x/y (see prepare_permeation_system.py)")
+    if a.relative_to_origin:                  # swap the DUM-bonded cylinder for the origin one, same k and R
+        from autopath.customForces import add_cylindrical_restraints_relative_to_origin
+        i = next(k for k, f in enumerate(system.getForces()) if "U_cylinder" in getattr(f, "getEnergyFunction", lambda: "")())
+        old = system.getForce(i)
+        par = {old.getGlobalParameterName(j): old.getGlobalParameterDefaultValue(j) for j in range(old.getNumGlobalParameters())}
+        system.removeForce(i)
+        add_cylindrical_restraints_relative_to_origin(system, solute, k_xy=par["k_xy"], R_cylinder=par["R_cylinder"])
     mmd = MetadynamicsMD(topology=top, ligand_atoms=solute, pocket_atoms=center, is_membrane=True,
                          timestep=a.timestep_fs / 1000.0, temp=a.temperature, out_dir=a.run_dir)
     mmd.run(pdb_file=a.pdb, state_xml_file=a.state, system=system, run_id=run_id, cv_specs=cvs,
