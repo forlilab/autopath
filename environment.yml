@@ -22,6 +22,9 @@ dependencies:
   - openff-toolkit >=0.16
   - openff-units
   - ambertools
+  # ambertools' proprep/packmol-memgen pip metadata; conda recipe omits them
+  - pdb2pqr
+  - biopython >=1.83,<1.86
   - pdbfixer >=1.9
   - parmed >=4.2
   # trajectories and analysis
