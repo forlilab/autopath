@@ -37,6 +37,35 @@ def bulk_mask(z, bulk):
     return (np.abs(z) >= bulk[0]) & (np.abs(z) <= bulk[1])
 
 
+def check_same_topology(pdb_files, system_files=None) -> None:
+    """Raise ValueError unless every start has the same atoms, in the same order.
+
+    Walkers sharing one bias must simulate the same system. Compares (residue name, atom name,
+    element) of every atom across ``pdb_files`` and, if given, the particle count of every
+    serialized System in ``system_files``. The first file of each list is the reference.
+    """
+    from openmm import XmlSerializer
+    from openmm.app import PDBFile
+
+    def atoms(path):
+        return [(a.residue.name, a.name, a.element.symbol if a.element else None)
+                for a in PDBFile(path).topology.atoms()]
+
+    ref = atoms(pdb_files[0])
+    for p in pdb_files[1:]:
+        other = atoms(p)
+        if len(other) != len(ref):
+            raise ValueError(f"{p} has {len(other)} atoms, {pdb_files[0]} has {len(ref)}")
+        bad = next((i for i, (x, y) in enumerate(zip(ref, other)) if x != y), None)
+        if bad is not None:
+            raise ValueError(f"atom {bad}: {other[bad]} in {p}, {ref[bad]} in {pdb_files[0]}")
+    for s in system_files or []:
+        with open(s) as f:
+            n = XmlSerializer.deserialize(f.read()).getNumParticles()
+        if n != len(ref):
+            raise ValueError(f"{s} has {n} particles, {pdb_files[0]} has {len(ref)} atoms")
+
+
 def pmf_history(run_dir, bulk, n=30, z_name=Z_NAME) -> list:
     """PMF(z) snapshots of every independent bias in ``run_dir``, other CVs integrated out.
 

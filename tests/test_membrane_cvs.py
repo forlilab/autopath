@@ -68,3 +68,65 @@ def test_axis_cos_is_the_cosine_to_z(head, cos):
     pos = np.array([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]) + np.array([[0, 0, 0], head]) * 0.15
     cv, ctx = _context(axis_cos_cv(0, 1), pos)
     assert cv.getValue(ctx).value_in_unit(unit.dimensionless) == pytest.approx(cos, abs=1e-6)
+
+
+# --- lipophilicity moment z (LMZ) and end-to-end axis -------------------------------------------
+
+from autopath.metadynamics.CV import crippen_contributions, end_to_end_atoms, lipophilicity_z_cv
+
+
+def _lmz_reference(xyz, c):
+    """LM = sum_i (r_i - r_c) C_i, LMZ = LM_z / |LM| (the definition, in numpy)."""
+    lm = ((xyz - xyz.mean(axis=0)) * np.asarray(c)[:, None]).sum(axis=0)
+    return lm[2] / np.linalg.norm(lm)
+
+
+def _lmz_value(spec, pos_nm):
+    s = mm.System()
+    for _ in range(len(pos_nm)):
+        s.addParticle(1.0)
+    cv = spec.resolve(pos_nm, len(pos_nm), None).cv
+    cv.addToSystem(s)
+    ctx = mm.Context(s, mm.VerletIntegrator(0.001), mm.Platform.getPlatformByName("Reference"))
+    ctx.setPositions(pos_nm)
+    return cv.getValue(ctx).value_in_unit(unit.dimensionless)
+
+
+@pytest.mark.parametrize("offset", [0, 7])            # 7: the solute is not the first residue
+def test_lmz_matches_the_definition_wherever_the_solute_sits(offset):
+    rng = np.random.default_rng(1)
+    c = rng.normal(size=6)
+    xyz = rng.normal(scale=0.3, size=(6, 3)) + 2.0
+    pos = np.vstack([rng.normal(size=(offset, 3)), xyz])
+    spec = lipophilicity_z_cv(list(range(offset, offset + 6)), c)
+    assert _lmz_value(spec, pos) == pytest.approx(_lmz_reference(xyz, c), abs=1e-5)
+    assert (spec.grid_min, spec.grid_max, spec.name) == (-1.0, 1.0, "lm_z")
+
+
+def test_lmz_is_translation_invariant_and_flips_with_z():
+    rng = np.random.default_rng(2)
+    c = rng.normal(size=5)
+    xyz = rng.normal(scale=0.3, size=(5, 3))
+    spec = lipophilicity_z_cv(list(range(5)), c)
+    v = _lmz_value(spec, xyz)
+    assert _lmz_value(spec, xyz + [1.0, -2.0, 3.0]) == pytest.approx(v, abs=1e-6)
+    assert _lmz_value(spec, xyz * [1, 1, -1]) == pytest.approx(-v, abs=1e-6)
+
+
+def test_lmz_rejects_mismatched_contributions():
+    with pytest.raises(ValueError):
+        lipophilicity_z_cv([0, 1, 2], [0.1, -0.1])
+
+
+def test_crippen_contributions_are_rdkits_in_atom_order():
+    from rdkit import Chem
+    from rdkit.Chem import rdMolDescriptors
+    mol = Chem.AddHs(Chem.MolFromSmiles("CCO"))
+    expected = [x[0] for x in rdMolDescriptors._CalcCrippenContribs(mol)]
+    assert crippen_contributions(mol).tolist() == pytest.approx(expected)
+
+
+def test_end_to_end_atoms_are_the_heavy_chain_ends():
+    from rdkit import Chem
+    mol = Chem.AddHs(Chem.MolFromSmiles("CCCCCCO"))     # heavy atoms 0..6; ends are C0 and O6
+    assert set(end_to_end_atoms(mol)) == {0, 6}

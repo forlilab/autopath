@@ -14,6 +14,10 @@ Writes to --out (nothing else is touched):
   convergence.png  mean and max symmetry error, centre barrier and well depth vs walker-ns
   fes-2d.png       final 2D PMF (z, second CV) per arm, mean over estimates; TT basins as stars
   z_traces.png     z(t) of every walker of each arm's first run
+  fes_marginal_ARM.png  per two-CV arm: final 2D PMF with the symmetrised PMF(z) above it (with the
+                   membrane colour bar) and PMF of the second CV (LMZ or cos θ) to its right
+                   (Ligand_Bilayer_MD fancy_plot layout; same data as pmf.png)
+  e2e_atoms.png    with an end-to-end arm: 2D drawing of the solute, the two end-to-end atoms highlighted
   reports/         with --reports: the autopath summary report of every run
                    (python -m autopath.metadynamics.summary), bound = |z| < --report-centre, unbound = bulk (+z)
   summary.csv      one row per arm (also printed)
@@ -26,7 +30,7 @@ import os
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.ticker import MultipleLocator
+from matplotlib.ticker import MaxNLocator, MultipleLocator
 import numpy as np
 import pandas as pd
 
@@ -110,7 +114,7 @@ def fig_pmf(arms, a, path):
     for ax, t in zip(axes, ["PMF, mean ± SD over estimates",
                             "symmetrised (F(z) + F(-z)) / 2, ± SD over estimates and both sides"]):
         _style(ax, "z, solute - membrane centre (nm)", "PMF (kcal/mol), bulk = 0")
-        ax.yaxis.set_major_locator(MultipleLocator(0.5))
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=10, steps=[1, 2, 2.5, 5, 10]))
         ax.set_title(t, loc="left", fontsize=10, color=INK)
         ax.axhline(0, color=MUTED, lw=0.6)
         for s in (-1, 1):
@@ -185,6 +189,122 @@ def fig_traces(arms, a, path):
     plt.close(fig)
 
 
+Y_LABELS = {"lm_z": "Lipophilicity Moment Z", "cos_theta": "End-to-End cos θ"}
+MEMBRANE_BAR = [(None, -3.0, "lightblue"), (-3.0, -2.0, ("lightblue", "salmon")), (-2.0, -1.5, "salmon"),
+                (-1.5, -1.0, ("salmon", "grey")), (-1.0, 1.0, "grey"), (1.0, 1.5, ("grey", "salmon")),
+                (1.5, 2.0, "salmon"), (2.0, 3.0, ("salmon", "lightblue")), (3.0, None, "lightblue")]
+
+
+def _membrane_bar(ax, z_max, y_bottom, height):
+    """Water / headgroup / tail colour bar (POPC, nm) along the bottom of ax."""
+    from matplotlib.colors import LinearSegmentedColormap
+    from matplotlib.patches import Rectangle
+    for lo, hi, color in MEMBRANE_BAR:
+        lo, hi = (-z_max if lo is None else lo), (z_max if hi is None else hi)
+        if isinstance(color, str):
+            ax.add_patch(Rectangle((lo, y_bottom), hi - lo, height, color=color, lw=0))
+            continue
+        cmap, xs = LinearSegmentedColormap.from_list("grad", list(color)), np.linspace(lo, hi, 100)
+        for i in range(len(xs) - 1):
+            ax.add_patch(Rectangle((xs[i], y_bottom), xs[i + 1] - xs[i], height, color=cmap(i / 98), lw=0))
+
+
+def fig_e2e_atoms(arm_dir, path, size=500):
+    """2D drawing of the run's solute (its --ligand-sdf) with the two end-to-end atoms highlighted."""
+    import json
+    from rdkit import Chem
+    from rdkit.Chem import rdDepictor
+    from rdkit.Chem.Draw import rdMolDraw2D
+    from autopath.metadynamics import end_to_end_atoms
+    js = sorted(glob.glob(os.path.join(arm_dir, "walker_*.json")))
+    sdf = json.load(open(js[0])).get("ligand_sdf") if js else None
+    if not sdf or not os.path.exists(sdf):
+        return
+    mol = Chem.MolFromMolFile(sdf, removeHs=False)
+    ends = end_to_end_atoms(mol)
+    heavy = [a.GetIdx() for a in mol.GetAtoms() if a.GetAtomicNum() > 1]   # RemoveHs keeps this order
+    mol2d = Chem.RemoveHs(mol)
+    rdDepictor.Compute2DCoords(mol2d)
+    hl = [heavy.index(i) for i in ends]
+    d = rdMolDraw2D.MolDraw2DCairo(size, size)
+    d.DrawMolecule(mol2d, highlightAtoms=hl, highlightAtomColors={i: (1.0, 0.55, 0.0) for i in hl},
+                   highlightBonds=[])
+    d.FinishDrawing()
+    with open(path, "wb") as f:
+        f.write(d.GetDrawingText())
+
+
+def _fes_figure(z, fz, sdz, y, fy, sdy, f2, ylabel, title, path, stars=None):
+    """2D FES f2 (len(y), len(z)) with PMF(z) ± sdz above it and PMF(y) ± sdy to its right
+    (fancy_plot_no_lmz.py layout, plus the second marginal)."""
+    fig = plt.figure(figsize=(12, 8), facecolor="white")
+    gs = fig.add_gridspec(2, 3, height_ratios=[3, 5], width_ratios=[10, 2.5, 0.5], wspace=0.08, hspace=0.1)
+    ax = fig.add_subplot(gs[1, 0])
+    ax_top = fig.add_subplot(gs[0, 0], sharex=ax)
+    ax_right = fig.add_subplot(gs[1, 1], sharey=ax)
+
+    ax_top.plot(z, fz, color="black")
+    ax_top.fill_between(z, fz - sdz, fz + sdz, color="gray", alpha=0.3)
+    ax_top.set_ylabel("Free Energy (kcal/mol)", fontsize=14)
+    ax_top.tick_params(axis="both", labelsize=14)
+    ax_top.tick_params(axis="x", labelbottom=False)
+    lo, hi = ax_top.get_ylim()
+    _membrane_bar(ax_top, z[-1], lo, 0.06 * (hi - lo))
+
+    ax_right.plot(fy, y, color="black")
+    ax_right.fill_betweenx(y, fy - sdy, fy + sdy, color="gray", alpha=0.3)
+    ax_right.set_xlabel("Free Energy\n(kcal/mol)", fontsize=14)
+    ax_right.tick_params(axis="both", labelsize=14)
+    ax_right.tick_params(axis="y", labelleft=False)
+
+    mesh = ax.pcolormesh(z, y, f2, cmap="Spectral", shading="auto")
+    ax.contour(z, y, f2, levels=np.linspace(np.nanmin(f2), np.nanmax(f2), 10),
+               colors="black", linewidths=0.5, alpha=0.6)
+    if stars is not None:
+        ax.plot(stars[:, 0], stars[:, 1], ls="none", marker="*", ms=14, mfc="w", mec="k")
+    ax.set_xlim(z[0], z[-1])
+    ax.set_ylim(y[0], y[-1])
+    ax.set_xlabel("Ligand COM Depth in Bilayer (nm)", fontsize=16)
+    ax.set_ylabel(ylabel, fontsize=16)
+    ax.tick_params(axis="both", labelsize=14)
+    ax.tick_params(axis="x", rotation=45)
+    fig.colorbar(mesh, cax=fig.add_subplot(gs[1, 2]), label="Free Energy (kcal/mol)")
+    fig.suptitle(title, fontsize=18, y=0.95)
+    fig.subplots_adjust(left=0.1, right=0.9, top=0.92, bottom=0.15)
+    fig.savefig(path, dpi=150, facecolor="white")
+    plt.close(fig)
+
+
+def fig_fes_marginal(arms, a, out_dir):
+    """Per two-CV arm, fes_marginal_ARM.png from the same HILLS reconstruction as pmf.png
+    (edge-corrected): the 2D FES with PMF(z) above it (second CV integrated out, bulk window = 0)
+    and PMF(second CV) to its right (z integrated out, min = 0). Both 1D profiles symmetrised
+    (z -> -z flips the second CV too), band = SD over estimates and both sides.
+    Layout and colours from Ligand_Bilayer_MD fancy_plot_no_lmz.py."""
+    from scipy.special import logsumexp
+    for r in arms:
+        try:
+            est = [m for d in r["dirs"] for m in P.fes2d(d)]
+        except ValueError:                                # single-CV arm
+            continue
+        m0, z, y = est[0], est[0]["z"], est[0]["y"]
+        ylab = Y_LABELS.get(m0["y_name"], m0["y_name"])
+        kt = r["est"]["kt"] / KCAL
+        maps = np.array([m["fes"] for m in est]) / KCAL                    # (n_est, ny, nz)
+        f2 = maps.mean(axis=0)
+        marg = -kt * logsumexp(-f2 / kt, axis=0)                           # same marginal as the 1D PMF
+        f2 = f2 - marg[P.bulk_mask(z, a.bulk)].mean()                      # bulk = 0, as in the 1D PMF
+        title = f"Free Energy of {a.ligand + ' ' if a.ligand else ''}in a 100% POPC Bilayer ({r['name']})"
+
+        fz, sdz = P.symmetric_mean_sd(r["pmf"][:, -1])                     # PMF(z), kcal/mol
+        fy = -kt * logsumexp(-maps / kt, axis=2)                          # PMF(y) per estimate (n_est, ny)
+        fy, sdy = P.symmetric_mean_sd(fy - fy.min(axis=1, keepdims=True))
+        _fes_figure(z, fz, sdz, y, fy - fy.min(), sdy, f2, ylab, title,
+                    os.path.join(out_dir, f"fes_marginal_{r['name']}.png"), stars=m0["basins"])
+        if m0["y_name"] == "cos_theta":                  # same atoms for every e2e arm of a ligand
+            fig_e2e_atoms(r["dirs"][0], os.path.join(out_dir, "e2e_atoms.png"))
+
+
 def run_reports(arms, a):
     """Summary report per run dir: bound band = membrane centre, unbound = the +z bulk window."""
     bands = {P.Z_NAME: {"bound": [-a.report_centre, a.report_centre], "unbound": list(a.bulk)}}
@@ -206,6 +326,7 @@ def main(argv=None):
     ap.add_argument("--bilayer", type=float, default=2.0,
                     help="|z| of the headgroup planes, shaded as the membrane on z_traces.png (nm)")
     ap.add_argument("--snapshots", type=int, default=30)
+    ap.add_argument("--ligand", default="", help="ligand name for the fes_marginal_*.png titles")
     ap.add_argument("--reports", action="store_true", help="also write the autopath summary report of every run")
     ap.add_argument("--report-centre", type=float, default=0.5,
                     help="|z| (nm) of the report's bound band, the membrane centre")
@@ -221,6 +342,7 @@ def main(argv=None):
     fig_convergence(arms, os.path.join(a.out, "convergence.png"))
     fig_fes2d(arms, a, os.path.join(a.out, "fes-2d.png"))
     fig_traces(arms, a, os.path.join(a.out, "z_traces.png"))
+    fig_fes_marginal(arms, a, a.out)
     print(f"figures and summary.csv in {a.out}")
     if a.reports:
         run_reports(arms, a)

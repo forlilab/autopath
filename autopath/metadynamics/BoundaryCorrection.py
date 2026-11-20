@@ -31,6 +31,16 @@ from .learned.sw import z_spline_values
 MAX_CVS = 32                                        # OpenMM CustomCVForce limit
 
 
+def _clamp_expr(expr: str, lo: float, hi: float) -> str:
+    """min(max(expr, lo), hi) inset by 1e-9 of the range.
+
+    A tabulated spline aborts the process when evaluated exactly at its edge: its last
+    knot can round one ulp inside the declared range.
+    """
+    d = 1e-9 * (hi - lo)
+    return f"min(max({expr}, {lo + d!r}), {hi - d!r})"
+
+
 @dataclass(eq=False)
 class LinearComposite:
     """Bias variable s = sum_k w_k (f_k - mu_k) / sd_k over feature forces f_k.
@@ -62,7 +72,7 @@ class LinearComposite:
         return v if self.clamp is None else min(max(v, self.clamp[0]), self.clamp[1])
 
     def _clamped_expr(self, expr: str) -> str:
-        return expr if self.clamp is None else f"min(max({expr}, {self.clamp[0]!r}), {self.clamp[1]!r})"
+        return expr if self.clamp is None else _clamp_expr(expr, *self.clamp)
 
     def value(self, f) -> float:
         f = np.asarray(f, dtype=float)
@@ -113,7 +123,7 @@ class ResidualComposite(LinearComposite):
     def expression(self, names, tables) -> str:
         """names: feature CV names then the z CV name; tables: one tabulated-function name per feature."""
         *feats, zn = names
-        zc = f"min(max({zn}, {self.z_min!r}), {self.z_max!r})"
+        zc = _clamp_expr(zn, self.z_min, self.z_max)
         return self._clamped_expr(" + ".join(
             f"({float(w)!r})*(({n} - ({float(m)!r}))/({float(s)!r}) - {t}({zc}))"
             for n, t, w, m, s in zip(feats, tables, self.weights, self.mu, self.sd)))

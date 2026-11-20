@@ -252,6 +252,49 @@ def membrane_z_cv(
     )
 
 
+def membrane_z_cv_relative_to_origin(
+    solute_atoms: list[int],
+    half_width: float,
+    hill_width: float = 0.2,
+    grid_points: Optional[int] = None,
+    name: str = "membrane_z",
+) -> CVSpec:
+    """``membrane_z_cv`` measured from the fixed point z = 0 instead of a centre atom (nm).
+
+    Same signed minimum-image expression, with the reference z fixed at 0: one centroid group (the solute), so
+    no reference particle is bonded to the solute. A bonded reference makes OpenMM's barostat treat solute +
+    reference as one molecule and scale them together, which drags a pinned dummy off its site and blocks
+    box-height moves. Assumes the membrane centre sits at the origin, as in prepare_permeation_system.py builds.
+    """
+    solute = [int(i) for i in solute_atoms]
+    hw = float(half_width)
+    if grid_points is None:
+        grid_points = int(round(2 * hw / (hill_width / 5))) + 1
+
+    def factory(input_positions, n_atoms, topology):
+        return cvpack.CentroidFunction(
+            "min(max(d0*select(step(pointdistance(0, 0, z1 + 0.01, 0, 0, 0) - d0), 1, -1), -mz_hw), mz_hw);"
+            "d0 = pointdistance(0, 0, z1, 0, 0, 0)",
+            openmmunit.nanometers,
+            [solute],
+            weighByMass=False,
+            pbc=True,
+            mz_hw=[hw],
+        )
+
+    return CVSpec(
+        cv=None,
+        grid_min=-hw,
+        grid_max=hw,
+        hill_width=hill_width,
+        grid_points=grid_points,
+        name=name,
+        cv_length_per_unit_ang=10.0,
+        origin=0.0,
+        _factory=factory,
+    )
+
+
 def axis_cos_cv(
     tail_atom: int,
     head_atom: int,
@@ -261,8 +304,9 @@ def axis_cos_cv(
 ) -> CVSpec:
     """Cosine of the angle between the tail -> head bond vector and the z axis.
 
-    The cosine avoids the singular poles of acos at 0 and pi. The two atoms must
-    be bonded (no minimum image is applied).
+    The cosine avoids the singular poles of acos at 0 and pi. The two atoms must be in one
+    molecule that the context keeps whole (no minimum image is applied): a bond, or the
+    ends from ``end_to_end_atoms``.
     """
     i, j = int(tail_atom), int(head_atom)
 
@@ -274,6 +318,114 @@ def axis_cos_cv(
             weighByMass=False,
             pbc=False,
         )
+
+    return CVSpec(
+        cv=None,
+        grid_min=-1.0,
+        grid_max=1.0,
+        hill_width=hill_width,
+        grid_points=grid_points,
+        name=name,
+        _factory=factory,
+    )
+
+
+def _load_mol(mol_or_sdf):
+    """RDKit Mol with explicit H from a Mol or an SDF path (atom order kept)."""
+    from rdkit import Chem
+    if isinstance(mol_or_sdf, str):
+        mol = Chem.MolFromMolFile(mol_or_sdf, removeHs=False)
+        if mol is None:
+            raise ValueError(f"could not read {mol_or_sdf}")
+        return mol
+    return mol_or_sdf
+
+
+def end_to_end_atoms(mol_or_sdf, num_confs: int = 10, seed: int = 42) -> tuple[int, int]:
+    """Indices (in the molecule's atom order) of the two heavy atoms farthest apart.
+
+    Per ETKDG conformer: atom 1 is the heavy atom farthest from the centroid, atom 2 the
+    heavy atom farthest from atom 1; the most common pair over the conformers wins.
+    Hydrogens are skipped (their fast motion only adds noise to an orientation CV).
+    Map to system indices with ``solute_atoms[i]``; this assumes the solute's topology
+    follows the SDF atom order, which holds when the topology was built from that SDF.
+    """
+    from collections import Counter
+    from rdkit import Chem
+    from rdkit.Chem import AllChem
+    mol = Chem.Mol(_load_mol(mol_or_sdf))
+    heavy = np.array([a.GetAtomicNum() > 1 for a in mol.GetAtoms()])
+    if heavy.sum() < 2:
+        raise ValueError("need at least two heavy atoms to define an end-to-end axis")
+    params = AllChem.ETKDGv3()
+    params.randomSeed = seed
+    ids = list(AllChem.EmbedMultipleConfs(mol, numConfs=num_confs, params=params))
+    if not ids:
+        raise RuntimeError("conformer generation failed")
+    pairs = []
+    for cid in ids:
+        xyz = mol.GetConformer(cid).GetPositions()
+        d_c = np.where(heavy, np.linalg.norm(xyz - xyz.mean(axis=0), axis=1), -1.0)
+        a1 = int(np.argmax(d_c))
+        d_1 = np.where(heavy, np.linalg.norm(xyz - xyz[a1], axis=1), -1.0)
+        pairs.append((a1, int(np.argmax(d_1))))
+    return Counter(pairs).most_common(1)[0][0]
+
+
+def crippen_contributions(mol_or_sdf) -> np.ndarray:
+    """Per-atom Crippen logP contributions C_i, in the molecule's atom order."""
+    from rdkit.Chem import rdMolDescriptors
+    return np.array([x[0] for x in rdMolDescriptors._CalcCrippenContribs(_load_mol(mol_or_sdf))])
+
+
+def lipophilicity_z_cv(
+    solute_atoms: list[int],
+    contributions,
+    hill_width: float = 0.1,
+    grid_points: int = 101,
+    name: str = "lm_z",
+) -> CVSpec:
+    """z component of the unit lipophilicity moment of the solute (LMZ, dimensionless, [-1, 1]).
+
+        LM = sum_i ((x_i, y_i, z_i) - (x_c, y_c, z_c)) * C_i
+        LMZ = LM_z / sqrt(LM_x^2 + LM_y^2 + LM_z^2)
+
+    with (x_c, y_c, z_c) the unweighted centroid of the solute atoms and C_i their Crippen
+    logP contributions (``crippen_contributions``). Undefined when |LM| ~ 0 (a solute with no
+    lipophilic direction): use ``axis_cos_cv`` with ``end_to_end_atoms`` then.
+
+    Parameters
+    ----------
+    solute_atoms : list of int
+        System indices of the solute atoms, in the same order as ``contributions``.
+    contributions : array-like
+        One C_i per solute atom, normally ``crippen_contributions(sdf)``.
+    hill_width : float, optional
+        Gaussian width (default 0.1, as ``axis_cos_cv``).
+    grid_points : int, optional
+        Default 101, as ``axis_cos_cv``.
+    name : str, optional
+    """
+    atoms = [int(i) for i in solute_atoms]
+    c = np.asarray(contributions, dtype=float).ravel()
+    n = len(atoms)
+    if len(c) != n:
+        raise ValueError(f"{len(c)} contributions for {n} solute atoms")
+
+    # The centroid is defined once (xc, yc, zc) and reused, so the expression grows with N, not N^2.
+    # x1..xN are the solute atoms by their position in ``atoms`` (one AtomicFunction group), not system index.
+    def moment(ax):
+        return "+".join(f"({ax}{k + 1}-{ax}c)*({ci:.6f})" for k, ci in enumerate(c))
+
+    def centroid(ax):
+        return f"({'+'.join(f'{ax}{k + 1}' for k in range(n))})/{n}"
+
+    expr = ("mz/sqrt(mx^2+my^2+mz^2); "
+            + "; ".join(f"m{ax}={moment(ax)}" for ax in "xyz") + "; "
+            + "; ".join(f"{ax}c={centroid(ax)}" for ax in "xyz"))
+
+    def factory(input_positions, n_atoms, topology):
+        return cvpack.AtomicFunction(expr, openmmunit.dimensionless, [atoms], pbc=False, name=name)
 
     return CVSpec(
         cv=None,
