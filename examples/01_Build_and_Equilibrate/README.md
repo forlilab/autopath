@@ -61,6 +61,7 @@ NOTE: you can find the protocols in the `autopath/data/` folder. Equilibration l
 
 ## Post-processing
 Some basic post-processing is included in this script. Make sure you customize this to your specific system and needs.
+* Periodic-image check on the raw trajectory, before superposition: per frame, the closest approach of the protein to its own periodic images and of the ligand to the protein images, flagged against the nonbonded cutoff (`autopath.utils.periodic_image_report`). Frames inside the cutoff mean the system interacts with its own copy: enlarge `padding` (see "Periodic images" in `03_Pull-it-out/README.md`).
 * Wraps molecules into the box, centres and superposes the trajectory on the protein backbone (`autopath.utils.wrap_align_save_traj`).
 * RMSD of the protein and ligand.
 * Ligand per-atom RMSF and pocket-contact frequency, projected on the 2D structure.
@@ -112,6 +113,9 @@ Final structure, state and restraint-free system, the starting point for vanilla
 
 * `{sys_name}/equilibration/equilibration_protocol.json`
 Copy of the protocol used
+
+* `{sys_name}/equilibration/{sys_name}_image_distances.csv`
+Per-frame closest approach (Å) of the protein to its own images (`protein_self`) and of the ligand to the protein images (`ligand_protein`)
 
 * `{sys_name}/equilibration/{sys_name}_rmsd.csv`
 RMSD time series for all components. For each component a plot named `RMSD_{component}` will be generated.

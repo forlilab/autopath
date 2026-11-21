@@ -9,7 +9,8 @@ from openmm.app import PDBFile
 
 from autopath import SystemPreparation, Equilibration
 from autopath.ap_PLIP import plot_atomic_property, cw_rmsf_windows
-from autopath.utils import save_pdb, load_system, setup_logging, compute_rmsd, wrap_align_save_traj
+from autopath.utils import (save_pdb, load_system, setup_logging, compute_rmsd, wrap_align_save_traj,
+                            periodic_image_report)
 from autopath.pdb_preprocessor import PDBPreprocessor
 
 
@@ -141,6 +142,10 @@ def main():
     ########################################################################################
 
     eq_dir = f"{sys_dir}/equilibration"
+    # Closest approach to a periodic image; needs the raw trajectory (superposition breaks the box)
+    u_raw = mda.Universe(system_pdb_file, f"{eq_dir}/equilibration_{sys_name}.dcd")
+    periodic_image_report(u_raw, system, ligand_sel=f"resname {lig_resname}" if ligands else None
+                          ).to_csv(f"{eq_dir}/{sys_name}_image_distances.csv", index=False)
     # Wrap, centre and superpose on the protein backbone -> equilibration_<sys>_aligned.dcd
     aligned_traj = wrap_align_save_traj(f"{eq_dir}/equilibration_{sys_name}.dcd", system_pdb_file)[0]
     logger.info(f"Aligned trajectory saved to {aligned_traj}")

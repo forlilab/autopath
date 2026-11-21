@@ -2,13 +2,14 @@ import os
 import argparse
 from glob import glob
 
+import pandas as pd
 import MDAnalysis as mda
 from rdkit import Chem
 from openmm.app import PDBFile
 
 from autopath import SteeredMD
 from autopath.utils import (load_system, setup_logging, wrap_align_save_traj,
-                            get_pocket_atoms_idxs, get_ligand_anchor_atoms)
+                            get_pocket_atoms_idxs, get_ligand_anchor_atoms, periodic_image_report)
 
 
 def cmd_lineparser():
@@ -127,6 +128,10 @@ def main():
 
     # Wrap, centre and superpose the pulling trajectories
     trajs = [f for f in sorted(glob(f"{smd_dir}/sMD_replica-*.dcd")) if "aligned" not in f]
+    # Post-hoc periodic-image check on the raw pulls (the run-time guard covers the ligand only)
+    pd.concat([periodic_image_report(mda.Universe(system_pdb, t), system, ligand_sel=lig_sel)
+               .assign(replica=os.path.basename(t)) for t in trajs]
+              ).to_csv(f"{sys_name}/sMD/image_distances.csv", index=False)
     wrap_align_save_traj(trajs, system_pdb)
 
 

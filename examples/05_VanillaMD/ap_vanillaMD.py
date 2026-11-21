@@ -6,7 +6,7 @@ import MDAnalysis as mda
 
 from autopath import VanillaMD
 from autopath.ap_PLIP import plot_atomic_property, ligand_rmsf_contacts, cw_rmsf_scores
-from autopath.utils import load_system, compute_rmsd, setup_logging, wrap_align_save_traj
+from autopath.utils import load_system, compute_rmsd, setup_logging, wrap_align_save_traj, periodic_image_report
 
 from openmm.app import PDBFile
 
@@ -116,7 +116,7 @@ def main():
         out_dir=f"{sys_name}/MD"
         )
     
-    system = vanilla_md.run(
+    vanilla_md.run(
                             checkpoint_file=checkpoint,
                             pdb_file=None, 
                             run_id=run_id,
@@ -125,6 +125,11 @@ def main():
                             )
 
     traj_fname = f"{sys_name}/MD/MD_{run_id}.dcd"
+
+    # Closest approach to a periodic image; needs the raw trajectory (superposition breaks the box)
+    u_raw = mda.Universe(system_pdb_file, traj_fname)
+    periodic_image_report(u_raw, system, ligand_sel=f"resname {lig_resname}" if lig_resname else None
+                          ).to_csv(f"{sys_name}/MD/{run_id}_image_distances.csv", index=False)
 
     # Wrap, centre and superpose on the protein backbone -> MD_<run_id>_aligned.dcd
     aligned_traj = wrap_align_save_traj(traj_fname, system_pdb_file)[0]

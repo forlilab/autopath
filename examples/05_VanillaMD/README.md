@@ -8,6 +8,8 @@
 
 Production length is set with `--time_ns` (default 100). Other settings are at the top of `main()`: `TIMESTEP` (4 fs, needs HMR), `TEMPERATURE` (300 K), `SAVE_FREQ` (steps; 25000 = 0.1 ns), `RESTART_VELOCITIES`, `RESTRAINED_ATOMS`.
 
+Before superposition, the raw trajectory is checked for periodic-image contacts (see "Periodic images" in `03_Pull-it-out/README.md`); the run warns in the log when any frame comes inside the nonbonded cutoff.
+
 # Usage
 
 ```bash
@@ -23,6 +25,7 @@ python ap_vanillaMD.py --sysname 3ptb --resname UNK --replica rep1 --time_ns 100
 ├── autopath.log
 └── MD/
     ├── MD_{run_id}_aligned.dcd, MD_{run_id}.csv
+    ├── {run_id}_image_distances.csv       # closest approach to periodic images (protein_self, ligand_protein; Å)
     ├── {run_id}_rmsd.csv (+ RMSD plots)
     ├── {run_id}_RMSF.csv                  # per-atom rmsf, contact_freq
     ├── {run_id}_cwRMSF.csv                # cw-RMSF (polar, non-polar, all)
