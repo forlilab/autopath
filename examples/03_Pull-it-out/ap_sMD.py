@@ -20,7 +20,7 @@ def cmd_lineparser():
                              Scripps Research.""",
     )
     parser.add_argument("-s", "--sysname", dest="sysname", required=True,
-                        help="system name; outputs go to <sysname>/sMD")
+                        help="system name; outputs go to <sysname>/sMD. Must match --sysname of 01_Build_and_Equilibrate")
     parser.add_argument("--eqdir", default=None,
                         help="folder of the equilibrated system (default: ../01_Build_and_Equilibrate/<sysname>)")
     parser.add_argument("-l", "--lig", default=None,
@@ -53,6 +53,15 @@ def main():
     SPRING_PER_ATOM = 100 * 4.184  # kJ/mol/nm2 per ligand heavy atom (418.4)
     AUTOSTOP_NC = 0.01      # stop once ligand-pocket contacts < 1% of the initial value ...
     AUTOSTOP_WINDOW = 5     # ... for this many consecutive samples
+
+    needed = [f"{eq_root}/system.pdb", f"{eq_dir}/system_equil_{sys_name}.xml",
+              f"{eq_dir}/checkpoint_equil_{sys_name}.chk", f"{eq_dir}/checkpoint_equil_{sys_name}.xml",
+              f"{eq_dir}/{sys_name}_equilibrated.pdb", f"{eq_dir}/equilibration_{sys_name}_aligned.dcd"]
+    missing = [f for f in needed if not os.path.exists(f)]
+    if missing:
+        raise SystemExit(f"Missing equilibration file {missing[0]}\n"
+                         "--sysname must match the one used in 01_Build_and_Equilibrate and --eqdir "
+                         "must point to that run (default ../01_Build_and_Equilibrate/<sysname>).")
 
     os.makedirs(sys_name, exist_ok=True)
     logger = setup_logging(f"{sys_name}/autopath.log", log_level="INFO")

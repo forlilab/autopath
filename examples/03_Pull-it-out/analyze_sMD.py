@@ -12,6 +12,7 @@ Usage
 Outputs go to <sysname>/sMD/analysis_traces/.
 """
 import argparse
+import os
 from glob import glob
 
 from autopath.utils import setup_logging
@@ -21,7 +22,8 @@ from autopath.pulling.PathModel import DTWPathModel
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("-s", "--sysname", required=True)
+    ap.add_argument("-s", "--sysname", required=True,
+                    help="system name; must match --sysname of 01_Build_and_Equilibrate")
     ap.add_argument("--eqdir", default=None,
                     help="folder of the equilibrated system (default: ../01_Build_and_Equilibrate/<sysname>)")
     ap.add_argument("-l", "--lig", default=None, help="ligand SDF (for depictions; optional)")
@@ -33,6 +35,12 @@ def main():
     sys_name = args.sysname
     eq_root = args.eqdir or f"../01_Build_and_Equilibrate/{sys_name}"
     eq_pdb = f"{eq_root}/equilibration/{sys_name}_equilibrated.pdb"
+    needed = [eq_pdb]
+    missing = [f for f in needed if not os.path.exists(f)]
+    if missing:
+        raise SystemExit(f"Missing equilibration file {missing[0]}\n"
+                         "--sysname must match the one used in 01_Build_and_Equilibrate and --eqdir "
+                         "must point to that run (default ../01_Build_and_Equilibrate/<sysname>).")
     lig_ha = f"({args.ligand_sel}) and not name H*"
     outdir = f"{sys_name}/sMD/analysis_traces"
     logger = setup_logging(f"{sys_name}/autopath.log", log_level="INFO")

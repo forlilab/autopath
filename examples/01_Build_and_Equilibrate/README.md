@@ -130,10 +130,16 @@ Arguments
 `--rec`
 Path to the receptor PDB file.
 
-`--protocol`
-Path to the JSON file defining the equilibration protocol.
-
 Optional
+
+`--protocol`
+Path to the JSON file defining the equilibration protocol. Default: the packaged `eq_lig-prot_5ns_4fs.json` (found via `importlib.resources`, so it works from any location). Use `eq_lig-prot-memb_10ns_4fs.json` from the same folder for membrane systems.
+
+`--sysname`
+System name, used for the output folder and every file name (`system_equil_<sysname>.xml`, `checkpoint_equil_<sysname>.chk`, ...). Default: the ligand file stem (receptor stem if no ligand), so several ligands on one receptor do not overwrite each other. Steps `03_Pull-it-out` and `05_VanillaMD` rebuild these names from their own `--sysname`, which must be the SAME value.
+
+`--outdir`
+Parent folder; outputs go to `<outdir>/<sysname>/` (default: current folder). `03`/`05` look in `../01_Build_and_Equilibrate/<sysname>` unless given `--eqdir`/the equivalent option.
 
 `--lig`
 Path to ligand file (SDF or PDB).
@@ -158,13 +164,15 @@ python ap_equilibration.py \
     --rec receptor.pdb \
     --lig ligand.sdf \
     --resname LIG \
-    --smiles "CCOc1ccc2nc(S(N)(=O)=O)sc2c1" \
-    --protocol equilibration.json
+    --smiles "CCOc1ccc2nc(S(N)(=O)=O)sc2c1"
 ```
+
+The system is named `ligand` (ligand stem) and the packaged 5 ns protocol is used. Add `--protocol my.json` for a custom one.
 
 ### Apo protein equilibration
 ```
-python ap_equilibration.py \
-    --rec receptor.pdb \
-    --protocol equilibration_apo.json
+python ap_equilibration.py --rec receptor.pdb
 ```
+
+### Cluster
+`run.q` runs the 3ptb example. Its `#SBATCH` lines (partition, GPU type, exclude list) and the environment activation are specific to our cluster: edit the block at the top for yours. The `../data/3ptb.*` paths are the shipped example inputs.

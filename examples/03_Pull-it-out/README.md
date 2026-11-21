@@ -32,7 +32,17 @@ python ap_sMD.py --sysname 3ptb --lig ../data/3ptb.sdf --reps 10
 python analyze_sMD.py --sysname 3ptb --lig ../data/3ptb.sdf
 ```
 
-`--eqdir` points to the equilibrated system (default `../01_Build_and_Equilibrate/<sysname>`).
+`--sysname` must equal the `--sysname` used in `01_Build_and_Equilibrate` (it names the equilibration files, e.g. `system_equil_<sysname>.xml`). `--eqdir` points to that run (default `../01_Build_and_Equilibrate/<sysname>`). Both scripts stop with the name of the missing file if the contract is not met.
+
+## SLURM
+
+Pulls need a GPU, analysis only CPUs, so they are separate jobs. Submit the analysis to run after the pulls succeed:
+
+```bash
+jid=$(sbatch --parsable run.q); sbatch --dependency=afterok:$jid run_analysis.q
+```
+
+The `#SBATCH` lines (partition, GPU type, memory) and the environment activation in `run.q` and `run_analysis.q` are cluster-specific: edit the block marked `EDIT FOR YOUR CLUSTER`. Request a fast GPU type; the pulls are long.
 
 # Output Files
 

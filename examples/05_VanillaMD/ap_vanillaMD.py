@@ -25,7 +25,8 @@ def cmd_lineparser():
         dest="sysname",
         required=True,
         action="store",
-        help="Name of the system, used to create output directory and files",
+        help="Name of the system, used to create output directory and files. "
+             "Must match --sysname of 01_Build_and_Equilibrate",
     )
     
     parser.add_argument(
@@ -52,6 +53,14 @@ def cmd_lineparser():
         default=None,
         help='Replica name, used to differentiate multiple runs on the same system.'
     )
+
+    parser.add_argument(
+        "--time_ns",
+        dest="time_ns",
+        type=float,
+        default=100,
+        help="Production length in ns (default: 100)",
+    )
     return parser.parse_args()
 
 
@@ -67,6 +76,15 @@ def main():
         run_id = f'{sys_name}_{replica}'
     
     eq_root = args.eqdir or f"../01_Build_and_Equilibrate/{sys_name}"
+    eq_dir = f"{eq_root}/equilibration"
+    needed = [f"{eq_root}/system.pdb", f"{eq_dir}/system_equil_{sys_name}.xml",
+              f"{eq_dir}/checkpoint_equil_{sys_name}.chk"]
+    missing = [f for f in needed if not os.path.exists(f)]
+    if missing:
+        raise SystemExit(f"Missing equilibration file {missing[0]}\n"
+                         "--sysname must match the one used in 01_Build_and_Equilibrate and --eqdir "
+                         "must point to that run (default ../01_Build_and_Equilibrate/<sysname>).")
+
     os.makedirs(sys_name, exist_ok=True)
 
     # Setup logging
@@ -76,7 +94,6 @@ def main():
     ######################################## Vanilla MD ####################################
     ########################################################################################
     
-    MD_TIME = 100  # ns
     TIMESTEP = 0.004  # 4 fs timestep
     TEMPERATURE = 300  # 300 K
     SAVE_FREQ = 25000  # save /0.1ns at 4fs
@@ -103,7 +120,7 @@ def main():
                             checkpoint_file=checkpoint,
                             pdb_file=None, 
                             run_id=run_id,
-                            MD_time=MD_TIME,
+                            MD_time=args.time_ns,
                             restart_velocities=RESTART_VELOCITIES
                             )
 
