@@ -1,163 +1,11 @@
 import os
 import logging
-from pathlib import Path
 import numpy as np
 import pandas as pd
-from glob import glob
-
-import seaborn as sns
-import matplotlib.pyplot as plt
-import matplotlib.style as style
-style.use("fivethirtyeight")
-plt.rcParams["savefig.facecolor"] = 'white'
-plt.rcParams["savefig.edgecolor"] = 'white'
-plt.rcParams["axes.facecolor"] = 'white'
 
 from autopath.pulling.Estimators import _find_pmf_peak
 
-from autopath.metadynamics.Funnel import load_funnel_params, funnel_basins
-
 logger = logging.getLogger("autopath")
-
-KJ_TO_KCAL = 0.239006  # kJ/mol → kcal/mol conversion factor
-
-
-# ---------------------------------------------------------------------------
-# Plotting helpers
-# ---------------------------------------------------------------------------
-
-def plot_colvar(out_dir: str = None, colvar_name: str = None):
-    """Plot 1D collective variable (CV) time traces for each walker.
-
-    Parameters
-    ----------
-    out_dir : str
-        Directory containing ``COLVAR_*.npy`` output files from MetadynamicsMD.
-    colvar_name : str
-        Label for the CV axis (e.g. ``"PathCV_progress"``).
-
-    Output
-    ------
-    Saves ``<sys_name>_COLVAR.png`` into ``out_dir``.
-    """
-    sys_name = Path(out_dir).parts[0]
-    files = glob(f"{out_dir}/COLVAR_*")
-    data = []
-    for f in files:
-        walker_name = os.path.splitext(os.path.basename(f))[0]
-        np_data = np.load(f)
-        df = pd.DataFrame(np_data, columns=[colvar_name])
-        df["walker"] = walker_name
-        data.append(df)
-
-    data = pd.concat(data, axis=0)
-
-    plt.figure(figsize=(10, 5))
-    sns.lineplot(data, x=data.index, y=colvar_name, hue="walker")
-    plt.legend(bbox_to_anchor=(1.1, 1.05), fontsize="12")
-    plt.ylabel(colvar_name)
-    plt.xlabel("Frame #")
-    plt.tight_layout()
-    plt.suptitle("Quick look (per walker, provisional) — final: *_FES / *_COLVAR / *_convergence.png", fontsize=8)
-    plt.savefig(f"{out_dir}/{sys_name}_quicklook_COLVAR.png")
-    plt.close()
-    return
-
-
-def plot_bias(out_dir: str = None, x_min: float = None, x_max: float = None, grid_points: int = None, colvar_name: str = None):
-    """Plot per-walker accumulated bias profiles (hill deposition) over the CV grid.
-
-    Parameters
-    ----------
-    out_dir : str
-        Directory containing ``bias_*.npy`` output files from MetadynamicsMD.
-    x_min, x_max : float
-        CV grid bounds used to reconstruct the axis values.
-    grid_points : int
-        Number of grid points on the CV axis (must match the MetadynamicsMD run).
-    colvar_name : str
-        Label for the CV axis (e.g. ``"PathCV_progress"``).
-
-    Output
-    ------
-    Saves ``<sys_name>_BIAS.png`` into ``out_dir``.
-    """
-    sys_name = Path(out_dir).parts[0]
-    axis_values = np.linspace(x_min, x_max, grid_points)
-    axis_values = [round(i, 2) for i in axis_values]
-
-    # Shared bias: bias_*.npy in out_dir; isolated: one bias_<run_id>/ subdir per walker.
-    entries = []
-    for f in sorted(glob(f"{out_dir}/bias_*.npy")):
-        if os.path.isfile(f):
-            entries.append((os.path.splitext(os.path.basename(f))[0], f))
-    for d in sorted(glob(f"{out_dir}/bias_*")):
-        if not os.path.isdir(d):
-            continue
-        walker = os.path.basename(d)[len("bias_"):]
-        for f in sorted(glob(f"{d}/bias_*.npy")):
-            entries.append((walker, f))
-
-    if not entries:
-        logger.warning("No bias arrays found under %s; skipping bias plot.", out_dir)
-        return
-
-    data = []
-    for walker_name, f in entries:
-        np_data = np.load(f)
-        np_data = np_data * KJ_TO_KCAL
-        df = pd.DataFrame(np_data, columns=["bias"])
-        df.index = axis_values
-        df["walker"] = walker_name
-        data.append(df)
-
-    data = pd.concat(data, axis=0)
-
-    plt.figure(figsize=(10, 4))
-    sns.lineplot(data, x=data.index, y="bias", hue="walker")
-    plt.ylabel("Bias (Kcal/mol)")
-    plt.xlabel(colvar_name)
-    plt.legend(bbox_to_anchor=(1.1, 1.05), fontsize="12")
-    plt.title(f"Bias deposited - {sys_name}")
-    plt.tight_layout()
-    plt.suptitle("Quick look (per walker, provisional) — final: *_FES / *_COLVAR / *_convergence.png", fontsize=8)
-    plt.savefig(f"{out_dir}/{sys_name}_quicklook_BIAS.png")
-    plt.close()
-    return
-
-
-def plot_FE(out_dir, x_min, x_max, grid_points, colvar_name):
-    """Plot biased FE profiles (raw FE_*.npy, excluding _rw files), one line per walker."""
-    sys_name = Path(out_dir).parts[0]
-    axis_values = np.linspace(x_min, x_max, grid_points)
-    axis_values = [round(i, 2) for i in axis_values]
-
-    files = sorted(f for f in glob(f"{out_dir}/FE_*.npy") if not f.endswith("_rw.npy"))
-    if not files:
-        logger.warning(f"plot_FE: no FE_*.npy files found in {out_dir}")
-        return
-
-    data = []
-    for f in files:
-        walker_name = os.path.splitext(os.path.basename(f))[0]
-        np_data = np.load(f) * KJ_TO_KCAL
-        df = pd.DataFrame(np_data, columns=["FE"])
-        df.index = axis_values
-        df["walker"] = walker_name
-        data.append(df)
-
-    data = pd.concat(data, axis=0)
-    plt.figure(figsize=(10, 4))
-    sns.lineplot(data, x=data.index, y="FE", hue="walker")
-    plt.ylabel("FE (kcal/mol)")
-    plt.xlabel(colvar_name)
-    plt.legend(bbox_to_anchor=(1.1, 1.05), fontsize="10")
-    plt.title(f"Free Energy (biased) - {sys_name}")
-    plt.tight_layout()
-    plt.suptitle("Quick look (per walker, provisional) — final: *_FES / *_COLVAR / *_convergence.png", fontsize=8)
-    plt.savefig(f"{out_dir}/{sys_name}_quicklook_FE.png")
-    plt.close()
-    return
 
 
 def rct_weights(bias_kj, rct_kj, temperature: float) -> np.ndarray:
@@ -199,197 +47,6 @@ def bound_site_bins(grid_min, grid_max, n_points, origin=None, frac=0.20) -> int
     origin = grid_min if origin is None else float(origin)
     site_hi = origin + frac * (grid_max - origin)
     return max(1, int((site_hi - grid_min) / (grid_max - grid_min) * n_points + 1e-9))
-
-
-def plot_FE_rw(out_dir, x_min, x_max, grid_points, colvar_name, temperature: float = 298.15,
-               origin=None):
-    """Plot standard-state-corrected FE profiles (FE_*_rw.npy).
-
-    ΔG°_b per walker is the minimum over the bound site (see ``bound_site_bins``).
-
-    Parameters
-    ----------
-    out_dir : str
-        Directory containing ``FE_*_rw.npy`` output files from MetadynamicsMD.
-    x_min, x_max : float
-        CV grid bounds used to reconstruct the axis values.
-    grid_points : int
-        Number of grid points on the CV axis (must match the MetadynamicsMD run).
-    colvar_name : str
-        Label for the CV axis (e.g. ``"PathCV_progress"``).
-    temperature : float
-        Simulation temperature in K used to convert ΔG to pKd (default 298.15 K).
-    origin : float, optional
-        Bound end of the CV when the grid extends below it (default ``x_min``).
-
-    Output
-    ------
-    Saves ``<sys_name>_FE_rw.png`` into ``out_dir``.
-    """
-    sys_name = Path(out_dir).parts[0]
-    axis_values = np.linspace(x_min, x_max, grid_points)
-    axis_values = [round(i, 2) for i in axis_values]
-
-    files = sorted(glob(f"{out_dir}/FE_*_rw.npy"))
-    if not files:
-        return
-
-    bound_bins = bound_site_bins(x_min, x_max, grid_points, origin)
-    kT_log10 = 8.314e-3 * temperature * np.log(10)
-    best_dG, best_pKd = None, None
-
-    data = []
-    for f in files:
-        raw_name = os.path.splitext(os.path.basename(f))[0]
-        short = raw_name.replace("FE_", "").replace("_rw", "")
-        fe_kcal = np.load(f) * KJ_TO_KCAL
-        dG = float(fe_kcal[:bound_bins].min())
-        pKd_w = -dG * 4.184 / kT_log10
-        dG_str = f"{dG:.1f}" if dG < 0 else f"+{dG:.1f}"
-        label = f"{short}  ({dG_str} kcal/mol)"
-        df = pd.DataFrame(fe_kcal, columns=["FE"])
-        df.index = axis_values
-        df["walker"] = label
-        data.append(df)
-        # Best = last walker with a negative ΔG and a flat mid-CV plateau (s=0.4-0.8).
-        if dG < 0:
-            mid_lo = int(0.40 * len(fe_kcal))
-            mid_hi = int(0.80 * len(fe_kcal))
-            plateau_ok = abs(float(fe_kcal[mid_lo:mid_hi].mean())) < 5.0
-            if plateau_ok:
-                best_dG, best_pKd = dG, pKd_w   # overwrite → last valid wins
-
-    if best_dG is None:        # no walker passed — fall back to last negative ΔG
-        for f in files:
-            dG_f = float(np.load(f)[:bound_bins].min() * KJ_TO_KCAL)
-            if dG_f < 0:
-                best_dG = dG_f
-                best_pKd = -best_dG * 4.184 / kT_log10
-
-    data = pd.concat(data, axis=0)
-    fig, ax = plt.subplots(figsize=(12, 4))
-    sns.lineplot(data, x=data.index, y="FE", hue="walker", ax=ax)
-    ax.axhline(0, color="grey", linewidth=0.8, linestyle=":")
-    ax.set_ylabel("ΔG°_b (kcal/mol)")
-    ax.set_xlabel(colvar_name)
-    ax.legend(loc="upper right", fontsize=8, framealpha=0.85)
-    ax.set_title(f"FE standard-state corrected — {sys_name}   " + (
-        f"ΔG°_b ≈ {best_dG:.1f} kcal/mol  |  pKd ≈ {best_pKd:.2f}" if best_dG is not None
-        else "no walker resolved the bound site"))
-    plt.tight_layout()
-    plt.suptitle("Quick look (per walker, provisional) — final: *_FES / *_COLVAR / *_convergence.png", fontsize=8)
-    plt.savefig(f"{out_dir}/{sys_name}_quicklook_FE_rw.png")
-    plt.close()
-    return
-
-
-def plot_FE_2D(
-    out_dir, x_min, x_max, x_grid_points, xCV_name, y_min, y_max, y_grid_points, yCV_name
-):
-    """Plot a 2D free energy surface (FES) heatmap from 2D metadynamics.
-
-    Each ``FE_*.npy`` is a ``(y_grid_points, x_grid_points)`` array in kJ/mol.
-
-    Parameters
-    ----------
-    out_dir : str
-        Directory containing ``FE_*.npy`` output files from MetadynamicsMD.
-    x_min, x_max : float
-        Grid bounds for the first (x) collective variable.
-    x_grid_points : int
-        Number of grid points along the x CV axis.
-    xCV_name : str
-        Label for the x CV axis.
-    y_min, y_max : float
-        Grid bounds for the second (y) collective variable.
-    y_grid_points : int
-        Number of grid points along the y CV axis.
-    yCV_name : str
-        Label for the y CV axis.
-
-    Output
-    ------
-    Saves one PNG per walker as ``<sys_name>_<walker_name>.png`` in ``out_dir``.
-    """
-    sys_name = Path(out_dir).parts[0]
-
-    x_values = np.linspace(x_min, x_max, x_grid_points)
-    x_values = [round(i, 2) for i in x_values]
-
-    y_values = np.linspace(y_min, y_max, y_grid_points)
-    y_values = [round(i, 2) for i in y_values]
-
-    files_fe = glob(f"{out_dir}/FE_*.npy")
-    for i, f in enumerate(files_fe):
-        walker_name = os.path.splitext(os.path.basename(f))[0]
-
-        np_data = np.load(f)
-        np_data = np_data * KJ_TO_KCAL
-        df = pd.DataFrame(np_data)
-
-        df.index, df.columns = y_values, x_values
-
-        sns.heatmap(df, cmap="Spectral")
-        plt.title(f"Metadynamics - {sys_name} - {walker_name}", fontsize=12)
-        plt.xlabel(xCV_name)
-        plt.ylabel(yCV_name)
-        plt.title(f"Free Energy - {sys_name}")
-        plt.tight_layout()
-        plt.savefig(f"{out_dir}/{sys_name}_{walker_name}.png")
-        plt.close()
-
-    return
-
-
-def plot_colvar_2D(out_dir, xCV_name, yCV_name):
-    """Plot 2D CV time traces for each walker as separate line plots.
-
-    Parameters
-    ----------
-    out_dir : str
-        Directory containing ``COLVAR_*.npy`` output files from MetadynamicsMD.
-    xCV_name : str
-        Name of the first collective variable (column 0 of the COLVAR array).
-    yCV_name : str
-        Name of the second collective variable (column 1 of the COLVAR array).
-
-    Output
-    ------
-    Saves ``<sys_name>_<xCV_name>_COLVAR.png`` and
-    ``<sys_name>_<yCV_name>_COLVAR.png`` into ``out_dir``.
-    """
-    sys_name = Path(out_dir).parts[0]
-    files = glob(f"{out_dir}/COLVAR_*")
-    data = []
-    for f in files:
-        walker_name = os.path.basename(f).split(".")[0]
-        np_data = np.load(f)
-        df = pd.DataFrame(np_data, columns=[xCV_name, yCV_name])
-        df["walker"] = walker_name
-        data.append(df)
-    data = pd.concat(data, axis=0)
-
-    plt.figure(figsize=(10, 5))
-    sns.lineplot(data, x=data.index, y=xCV_name, hue="walker")
-    plt.legend(bbox_to_anchor=(1.1, 1.05), fontsize="12")
-    plt.xlabel('Step #')
-    plt.ylabel(xCV_name)
-    plt.title(f'{xCV_name} vs. Step # - {sys_name}')
-    plt.tight_layout()
-    plt.savefig(f"{out_dir}/{sys_name}_{xCV_name}_COLVAR.png")
-    plt.close()
-
-    plt.figure(figsize=(10, 5))
-    sns.lineplot(data, x=data.index, y=yCV_name, hue="walker")
-    plt.legend(bbox_to_anchor=(1.1, 1.05), fontsize="12")
-    plt.xlabel('Step #')
-    plt.ylabel(yCV_name)
-    plt.title(f'{yCV_name} vs. Step # - {sys_name}')
-    plt.tight_layout()
-    plt.savefig(f"{out_dir}/{sys_name}_{yCV_name}_COLVAR.png")
-    plt.close()
-
-    return
 
 
 # ---------------------------------------------------------------------------
@@ -768,18 +425,6 @@ def write_metad_preseed(
     np.save(out_path, V_preseed)
     logger.info(f"Preseed bias written → {out_path}")
 
-    try:
-        plot_bias(
-            out_dir=bias_dir,
-            x_min=grid_min,
-            x_max=grid_max,
-            grid_points=grid_points,
-            colvar_name="PathCV progress (s)",
-        )
-        logger.info(f"Preseed bias plot saved in {bias_dir}/")
-    except Exception as _plot_err:
-        logger.warning(f"Preseed bias plot failed (non-fatal): {_plot_err}")
-
     return out_path
 
 
@@ -1017,11 +662,9 @@ class MetadynamicsAnalysis:
         bias_factor: float = 15.0,
         grid_min: float = 0.0,
         grid_max: float = 1.0,
-        cv_name: str = "CV",
         bound_threshold: float = 0.1,
         unbound_threshold: float = 0.9,
         coverage_threshold: float = 0.6,
-        out_prefix: str = None,
         cv_length_per_unit_ang: float = None,
         cv_is_funnel_z: bool = False,
         hill_width: float = None,
@@ -1034,7 +677,6 @@ class MetadynamicsAnalysis:
         """
         from autopath.metadynamics.report import report
         return report(self.out_dir, temperature, grid_min=grid_min,
-                      grid_max=grid_max, cv_name=cv_name,
+                      grid_max=grid_max,
                       cv_length_per_unit_ang=cv_length_per_unit_ang,
-                      out_prefix=out_prefix, cv_is_funnel_z=cv_is_funnel_z,
-                      hill_width=hill_width)
+                      cv_is_funnel_z=cv_is_funnel_z, hill_width=hill_width)

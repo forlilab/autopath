@@ -1,5 +1,3 @@
-import os
-
 import numpy as np
 import pytest
 from openmm import unit
@@ -73,20 +71,31 @@ def test_mode_detection(tmp_path):
 
 def test_shared_report_uses_one_surface_and_one_correction(tmp_path):
     d = _shared(tmp_path)
-    out = R.report(str(d), 300.0, 0.0, 1.0, "s", cv_length_per_unit_ang=20.0,
-                   out_prefix=str(tmp_path / "rep"), funnel_params=_fp())
+    out = R.report(str(d), 300.0, 0.0, 1.0, cv_length_per_unit_ang=20.0,
+                   funnel_params=_fp())
     expected = correct_fe_for_funnel(F, _fp(), temperature=300.0, grid_min=0.0, grid_max=1.0,
                                      cv_length_per_unit_ang=20.0)
     assert out["dG_bind_std_kj"] == pytest.approx(expected["dG_bind_std_kj_mol"])
     assert out["n_round_trips"] == 3                    # one per walker, on the CV
-    for f in out["files"].values():
-        assert os.path.exists(f)
+    assert out["pKd"] is not None and isinstance(out["convergence"]["converged"], bool)
+    assert "files" not in out and not list(tmp_path.rglob("*.png"))
+
+
+def test_diagnose_returns_the_report_numbers_and_writes_no_png(tmp_path):
+    from autopath.metadynamics.Analysis import MetadynamicsAnalysis
+    d = _shared(tmp_path)                                  # no funnel_params.npz: well depth
+    out = MetadynamicsAnalysis(out_dir=str(d)).diagnose(
+        temperature=300.0, grid_min=0.0, grid_max=1.0, cv_length_per_unit_ang=20.0)
+    (label, depth), = out["well_depth_kj"]
+    assert depth == pytest.approx(-50.0, abs=1.0)
+    assert out["n_round_trips"] == 3 and out["convergence"]["verdict"]
+    assert not list(tmp_path.rglob("*.png"))
 
 
 def test_isolated_report_is_mean_and_sd_of_complete_walkers(tmp_path):
     d = _isolated(tmp_path)
-    out = R.report(str(d), 300.0, 0.0, 1.0, "s", cv_length_per_unit_ang=20.0,
-                   out_prefix=str(tmp_path / "iso"), funnel_params=_fp())
+    out = R.report(str(d), 300.0, 0.0, 1.0, cv_length_per_unit_ang=20.0,
+                   funnel_params=_fp())
     per = {lab: dg for lab, dg, done in out["estimates"]}
     complete = [dg for lab, dg, done in out["estimates"] if done]
     assert set(per) == {"m1", "m2", "m3"} and len(complete) == 2      # m3 never finished
@@ -104,43 +113,16 @@ def test_concurrent_history_is_on_aggregate_time(tmp_path):
     assert np.allclose(est.snapshots[-1], F, atol=1e-9)
 
 
-def test_hill_heights_fall_on_walker_time(tmp_path):
-    d = _isolated(tmp_path)
-    walkers = load_hills(d)
-    t = np.linspace(T_NS / 10, T_NS, 10)
-    for w in walkers:
-        w["height_kj"] = 1.2 * np.exp(-t / 2.0)                    # well-tempered decay
-    traces = R._hill_traces(walkers, R.detect_mode(walkers), window=3)
-    assert {r for r, _, _ in traces} == {"m1", "m2", "m3"}
-    for _, tt, h in traces:
-        assert tt[-1] == pytest.approx(T_NS)
-        ok = np.isfinite(h)
-        assert h[ok][-1] < 0.2 * h[ok][0]
-
-
-def test_sequential_hills_are_on_summed_time_in_start_order(tmp_path):
-    d = tmp_path / "seq_hills"
-    d.mkdir()
-    for k, rid in enumerate(("b", "a")):                       # b started first
-        _walker(d, rid, d, 1000.0 + 700.0 * k + 60.0 * np.arange(10), BIAS_DEPTH / 2.0)
-    walkers = load_hills(d)
-    traces = {r: t for r, t, _ in R._hill_traces(walkers, R.detect_mode(walkers), window=3)}
-    assert traces["b"][0] == pytest.approx(0.5)
-    assert traces["a"][0] == pytest.approx(T_NS + 0.5)
-
-
 def test_report_without_a_funnel_gives_the_uncorrected_well_depth(tmp_path):
     d = _shared(tmp_path)
-    out = R.report(str(d), 300.0, 0.0, 1.0, "s", out_prefix=str(tmp_path / "nf"),
-                   funnel_params=None)
+    out = R.report(str(d), 300.0, 0.0, 1.0, funnel_params=None)
     assert out["funnel"] is False and out["dG_bind_std_kj"] is None
     (label, depth), = out["well_depth_kj"]
     assert depth == pytest.approx(-50.0, abs=1.0)          # the synthetic well
     # no funnel axis: round trips use fractions of the CV grid (this trace reaches 92%)
     assert all(st["coordinate"] == "cv" for st in out["walker_stats"].values())
     assert out["n_round_trips"] == 3
-    for f in out["files"].values():
-        assert os.path.exists(f)
+    assert "files" not in out and not list(tmp_path.rglob("*.png"))
 
 
 def test_sequential_walkers_are_replayed_in_start_order(tmp_path):
@@ -163,15 +145,14 @@ def test_walker_without_hills_v2_is_not_reported(tmp_path):
     d.mkdir()
     np.save(d / "COLVAR_x.npy", np.zeros((10, 1)))
     np.savez(d / "HILLS_x.npz", time_ns=np.zeros(1), cv=np.zeros((1, 1)), height_kj=np.ones(1))
-    out = R.report(str(d), 300.0, 0.0, 1.0, "s", out_prefix=str(tmp_path / "old"), funnel_params=None)
+    out = R.report(str(d), 300.0, 0.0, 1.0, funnel_params=None)
     assert out["estimates"] == [] and out["n_walkers"] == 0
 
 
 def test_funnel_without_a_cv_length_tracks_the_well_depth(tmp_path):
     d = _shared(tmp_path)
-    out = R.report(str(d), 300.0, 0.0, 1.0, "s", out_prefix=str(tmp_path / "nolen"),
-                   funnel_params=_fp())                         # funnel, but no cv_length_per_unit_ang
+    out = R.report(str(d), 300.0, 0.0, 1.0, funnel_params=_fp())   # no cv_length_per_unit_ang
     assert out["dG_bind_std_kj"] is None
     (label, depth), = out["well_depth_kj"]
     assert depth == pytest.approx(-50.0, abs=1.0)
-    assert os.path.exists(out["files"]["convergence"])
+    assert out["convergence"]["verdict"] and not list(tmp_path.rglob("*.png"))

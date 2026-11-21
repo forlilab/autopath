@@ -13,9 +13,10 @@ def test_requires_protein_or_ligands(tmp_path):
         SystemPreparation(out_dir=str(tmp_path)).run(protein=None, ligands=None)
 
 
-def test_ligand_only_membrane_not_supported(tmp_path):
-    with pytest.raises(ValueError, match="not supported with a membrane"):
-        SystemPreparation(is_membrane=True, out_dir=str(tmp_path)).run(protein=None, ligands=LIG)
+def test_ligand_only_membrane_takes_one_ligand_file(tmp_path):
+    with pytest.raises(ValueError, match="one ligand file"):
+        SystemPreparation(is_membrane=True, out_dir=str(tmp_path)).run(
+            protein=None, ligands=[("LIG", LIG, None, False)])
 
 
 @pytest.mark.slow
