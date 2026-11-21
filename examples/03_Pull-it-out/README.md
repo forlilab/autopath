@@ -22,6 +22,24 @@ Steered MD (sMD) pulls of a ligand out of its pocket, followed by the nonequilib
 * Free-energy profiles from the cumulant, Jarzynski and force (v→0 regression) estimators, friction profile and Kramers k<sub>off</sub>; pathways are recombined into one profile.
 * PMF convergence as replicas accumulate (cumulant estimator) is written to `sMD_conv_vALL_metrics.csv`.
 
+# Ranking several ligands
+
+With one `<sysname>/` folder per ligand (each pulled and analysed as above), `collect_readouts.py` reduces every free-energy profile to one number per ligand, the sMD counterpart of `02_iAnalysis/run_cwrmsf.py`:
+
+```bash
+python collect_readouts.py            # scans ./*/sMD/analysis_traces/ -> readouts.csv
+python collect_readouts.py --root ../04_Full-Pipeline
+```
+
+Two label-free readouts are written per system, estimator and speed (the readouts of the AutoPath paper):
+
+* `dG_profile`, for affinity ranking within a series: ΔG at the most prominent peak of the profile for the cumulant (Savitzky–Golay smoothed, prominence ≥ 0.5 k<sub>B</sub>T; the maximum if there is no such peak, flagged in `peak_fell_back`), and the maximum of the profile for Jarzynski and force. The Jarzynski and force profiles rise monotonically and saturate, so their maximum is the end of the profile. The cumulant is the only estimator with a real peak, and its end value is not usable.
+* `dG_rupture`, for screening: ΔG at d\*, the displacement of the rupture. For each ligand and speed, the rupture is the argmax of the running mean (25 steps) of the mean pulling force over its pulls. d\* is the median of those positions over **all ligands in the set** (per speed; force v→0 pools all speeds), and every ligand is read at that same d\*. NaN if a profile ends before d\*. Because d\* depends on the set, rerun the script whenever ligands are added.
+
+Cumulant and Jarzynski are reported per pulling speed; force only at v→0 (its per-speed profile is not a free energy). `n_pulls` gives the pulls behind each value. In the paper, the cumulant and Jarzynski readouts came from per-speed pathway clustering; `analyze_sMD.py` clusters across speeds, so those two can differ from the paper's numbers (force v→0 is the same).
+
+Before ranking, check that each ligand's profile is converged (`sMD_conv_vALL_metrics.csv`) and that the pathways are well populated (`path_quality.csv`). The functions are in `autopath.pulling.readouts` (`profile_readouts`, `rupture_displacement`, `rupture_readouts`) for use on any set of `mixture_pmfs.csv` / `sMD_processed_data.csv`.
+
 # Periodic images
 
 Pulling the ligand out, or a protein drifting and rotating in a small box, can bring atoms within the nonbonded cutoff of a periodic image: the system then interacts with its own copy, and works, PMFs and contacts are contaminated.
@@ -78,5 +96,5 @@ The `#SBATCH` lines (partition, GPU type, memory) and the environment activation
     │   ├── sMD_replica-<id>_v<speed>_forward.dat       # per-move log: restraint position, CV, force, work
     │   ├── sMD_replica-<id>_v<speed>_forward_geom.dat  # per-frame geometry features
     │   └── sMD_replica-<id>_v<speed>_forward_aligned.dcd
-    └── analysis_traces/                    # pathways, PMFs, friction, koff, convergence
+    └── analysis_traces/                    # mixture_pmfs.csv + sMD_processed_data.csv feed collect_readouts.py                    # pathways, PMFs, friction, koff, convergence
 ```

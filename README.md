@@ -320,7 +320,7 @@ All examples use the trypsin–benzamidine complex (`3ptb`) as a reference syste
 
 - **`examples/02_iAnalysis`** — Early-filter analysis of equilibrated trajectories: cw-RMSF for every system (`run_cwrmsf.py`), MM-GBSA with the four GB models of the paper (via AMBER's `MMPBSA.py`) and Linear Interaction Energy (LIE). Includes orchestrator scripts for SLURM batch submission and two Jupyter notebooks (`analysis_mmgbsa.ipynb`, `analysis_LIE.ipynb`) for interactive exploration of results.
 
-- **`examples/03_Pull-it-out`** — Runs steered MD (sMD) pulls on an equilibrated system with the paper settings (Murcko anchor, 5/10/15 m/s, size-scaled spring, contact autostop), then the nonequilibrium analysis: pathway clustering and cumulant / Jarzynski / force free-energy profiles, friction and k<sub>off</sub>.
+- **`examples/03_Pull-it-out`** — Runs steered MD (sMD) pulls on an equilibrated system with the paper settings (Murcko anchor, 5/10/15 m/s, size-scaled spring, contact autostop), then the nonequilibrium analysis: pathway clustering and cumulant / Jarzynski / force free-energy profiles, friction and k<sub>off</sub>. `collect_readouts.py` reduces several analysed ligands to one ΔG each (profile readout for affinity ranking, median-rupture readout for screening), as in the AutoPath paper.
 
 - **`examples/04_Full-Pipeline`** — Executes the complete AutoPath pipeline end-to-end (preparation → equilibration → cw-RMSF early filter → convergence-driven sMD → analysis) from a single driver script.
 

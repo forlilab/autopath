@@ -29,6 +29,14 @@ or `sbatch run.q` (its `#SBATCH` lines, partition, GPU type, exclude list and en
 * The system name is the ligand file stem (`3ptb/`), fixed by the package. The ligand residue is always named `UNK`.
 * PDB fixing writes `<receptor>_fixed.pdb` next to the input receptor, so the input folder must be writable.
 
+# Ranking several ligands
+
+Run `run_AutoPath.py` once per ligand (one `<ligand stem>/` folder each), then reduce the free-energy profiles to one ΔG per ligand with `03_Pull-it-out/collect_readouts.py`. It writes the profile readout (affinity ranking within a series) and the median-rupture readout (screening); see "Ranking several ligands" in `03_Pull-it-out/README.md`. The cw-RMSF of each ligand is in `<sys>/equilibration/<sys>_cwRMSF.csv`; `02_iAnalysis/run_cwrmsf.py --eq_root .` gathers it for every ligand.
+
+```bash
+python ../03_Pull-it-out/collect_readouts.py --root .
+```
+
 # Main outputs
 
 ```
