@@ -29,13 +29,29 @@ or `sbatch run.q` (its `#SBATCH` lines, partition, GPU type, exclude list and en
 * The system name is the ligand file stem (`3ptb/`), fixed by the package. The ligand residue is always named `UNK`.
 * PDB fixing writes `<receptor>_fixed.pdb` next to the input receptor, so the input folder must be writable.
 
-# Ranking several ligands
+# Analysing the outputs
 
-Run `run_AutoPath.py` once per ligand (one `<ligand stem>/` folder each), then reduce the free-energy profiles to one ΔG per ligand with `03_Pull-it-out/collect_readouts.py`. It writes the profile readout (affinity ranking within a series) and the median-rupture readout (screening); see "Ranking several ligands" in `03_Pull-it-out/README.md`. The cw-RMSF of each ligand is in `<sys>/equilibration/<sys>_cwRMSF.csv`; `02_iAnalysis/run_cwrmsf.py --eq_root .` gathers it for every ligand.
+The pipeline writes the same files as the step-by-step examples, so their analyses apply to its output folders (one `<ligand stem>/` per ligand; run `run_AutoPath.py` once per ligand):
 
-```bash
-python ../03_Pull-it-out/collect_readouts.py --root .
-```
+* **Equilibration** (`<sys>/equilibration/`): RMSD, per-atom ligand RMSF, contact frequency and cw-RMSF. What they mean and how they are computed: "Post-processing" and "cw-RMSF" in `01_Build_and_Equilibrate/README.md`.
+* **Early filters on the equilibration** (`02_iAnalysis`), with `--eq_root` pointing to this folder:
+
+  ```bash
+  cd ../02_iAnalysis
+  python run_cwrmsf.py --eq_root ../04_Full-Pipeline          # cw-RMSF of every ligand -> cwrmsf/cwrmsf_summary.csv
+  python orchestrator_mmgbsa.py --eq_root ../04_Full-Pipeline # MM-GBSA jobs
+  python orchestrator_LIE.py --eq_root ../04_Full-Pipeline    # LIE jobs
+  ```
+
+  The ligand is always `UNK` here, the default `--resname`. See `02_iAnalysis/README.md`.
+* **Steered MD** (`<sys>/sMD/analysis_traces/`): pathways, free-energy and friction profiles, k<sub>off</sub>, convergence. The files are described in `03_Pull-it-out/README.md` ("Analysis" and "Output Files").
+* **Ranking several ligands**: `03_Pull-it-out/collect_readouts.py` reduces every ligand's profiles to the profile and median-rupture readouts ("Ranking several ligands" in `03_Pull-it-out/README.md`):
+
+  ```bash
+  python ../03_Pull-it-out/collect_readouts.py --root .
+  ```
+
+* **Periodic images**: the pulls stop if the ligand comes within the cutoff of a protein image (`[PBC guard]` in `autopath.log`). The pipeline deletes the raw trajectories after alignment, so the post-hoc check (`autopath.utils.periodic_image_report`, "Periodic images" in `03_Pull-it-out/README.md`) cannot be run on its output; the step-by-step examples 01, 03 and 05 run it before alignment.
 
 # Main outputs
 

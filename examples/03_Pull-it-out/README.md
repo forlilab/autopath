@@ -31,10 +31,10 @@ python collect_readouts.py            # scans ./*/sMD/analysis_traces/ -> readou
 python collect_readouts.py --root ../04_Full-Pipeline
 ```
 
-Two label-free readouts are written per system, estimator and speed (the readouts of the AutoPath paper):
+Two label-free readouts are written per system, estimator and speed, as in the AutoPath paper (which used `dG_profile` for the affinity series and `dG_rupture` for the screening set; which one ranks better can depend on the target):
 
-* `dG_profile`, for affinity ranking within a series: ΔG at the most prominent peak of the profile for the cumulant (Savitzky–Golay smoothed, prominence ≥ 0.5 k<sub>B</sub>T; the maximum if there is no such peak, flagged in `peak_fell_back`), and the maximum of the profile for Jarzynski and force. The Jarzynski and force profiles rise monotonically and saturate, so their maximum is the end of the profile. The cumulant is the only estimator with a real peak, and its end value is not usable.
-* `dG_rupture`, for screening: ΔG at d\*, the displacement of the rupture. For each ligand and speed, the rupture is the argmax of the running mean (25 steps) of the mean pulling force over its pulls. d\* is the median of those positions over **all ligands in the set** (per speed; force v→0 pools all speeds), and every ligand is read at that same d\*. NaN if a profile ends before d\*. Because d\* depends on the set, rerun the script whenever ligands are added.
+* `dG_profile`: ΔG at the most prominent peak of the profile for the cumulant (Savitzky–Golay smoothed, prominence ≥ 0.5 k<sub>B</sub>T; the maximum if there is no such peak, flagged in `peak_fell_back`), and the maximum of the profile for Jarzynski and force.
+* `dG_rupture`: ΔG at d\*, the displacement of the rupture. For each ligand and speed, the rupture is the argmax of the running mean (25 steps) of the mean pulling force over its pulls. d\* is the median of those positions over **all ligands in the set** (per speed; force v→0 pools all speeds), and every ligand is read at that same d\*. NaN if a profile ends before d\*. Because d\* depends on the set, rerun the script whenever ligands are added.
 
 Cumulant and Jarzynski are reported per pulling speed; force only at v→0 (its per-speed profile is not a free energy). `n_pulls` gives the pulls behind each value. In the paper, the cumulant and Jarzynski readouts came from per-speed pathway clustering; `analyze_sMD.py` clusters across speeds, so those two can differ from the paper's numbers (force v→0 is the same).
 
