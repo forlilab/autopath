@@ -30,6 +30,7 @@ dependencies:
   # trajectories and analysis
   - mdanalysis >=2.7
   - mdtraj >=1.10,<1.11.1  # 1.11.1 metadata requires numpy 2
+  - ml_dtypes <0.6  # via openmmtools -> jax; 0.6 metadata requires numpy 2 (drop with numpy<2)
   - rdkit >=2024.03
   - prolif >=2.0
   - pymol-open-source >=3.0
