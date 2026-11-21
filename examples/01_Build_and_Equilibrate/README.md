@@ -145,7 +145,7 @@ Parent folder; outputs go to `<outdir>/<sysname>/` (default: current folder). `0
 Path to ligand file (SDF or PDB).
 
 `--resname`
-Residue name assigned to the ligand (default: UNK).
+Residue name assigned to the ligand (default: UNK). Pass the same `--resname` to 02, 03 and 05. If it is not UNK, the ligand selection of the protocol is rewritten to it (`<sysname>/protocol_<resname>.json`).
 
 `--smiles`
 SMILES string for the ligand. Used to assign bond orders if provided.

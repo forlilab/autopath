@@ -16,4 +16,4 @@ micromamba activate autopath
 # ------------------------------------------------------------------------------
 
 python ap_vanillaMD.py --sysname 3ptb \
-  --ligname UNK --replica rep1
+  --resname UNK --replica rep1

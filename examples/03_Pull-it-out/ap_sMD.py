@@ -25,7 +25,7 @@ def cmd_lineparser():
                         help="folder of the equilibrated system (default: ../01_Build_and_Equilibrate/<sysname>)")
     parser.add_argument("-l", "--lig", default=None,
                         help="ligand SDF, only used to draw the anchor atoms (optional)")
-    parser.add_argument("--ligand_sel", default="resname UNK", help="MDAnalysis selection of the ligand")
+    parser.add_argument("-n", "--resname", default="UNK", help="ligand residue name (as in 01_Build_and_Equilibrate)")
     parser.add_argument("--pocket_sel", default=None,
                         help="MDAnalysis selection of the pocket atoms, in system.pdb numbering "
                              "(default: CA atoms of residues within 8 A of the ligand)")
@@ -75,13 +75,14 @@ def main():
 
     # Pocket and ligand anchor atoms (system.pdb numbering), from the equilibration
     u = mda.Universe(eq_pdb, f"{eq_dir}/equilibration_{sys_name}_aligned.dcd")
-    lig_ha = f"({args.ligand_sel}) and not name H*"
+    lig_sel = f"resname {args.resname}"
+    lig_ha = f"{lig_sel} and not name H*"
     if args.pocket_sel is not None:
         pocket_idx = get_pocket_atoms_idxs(u, pocket_selection=args.pocket_sel)
     else:
         pocket_idx = get_pocket_atoms_idxs(u, ligand_selection=lig_ha)
     ref_mol = Chem.SDMolSupplier(args.lig)[0] if args.lig else None
-    anchor_idx = get_ligand_anchor_atoms(u, args.ligand_sel, mode=args.anchor, n_atoms=5,
+    anchor_idx = get_ligand_anchor_atoms(u, lig_sel, mode=args.anchor, n_atoms=5,
                                          out_dir=sys_name, ref_mol=ref_mol)
     n_heavy = len(u.select_atoms(lig_ha))
     logger.info(f"{len(pocket_idx)} pocket atoms; {len(anchor_idx)} '{args.anchor}' anchor atoms")

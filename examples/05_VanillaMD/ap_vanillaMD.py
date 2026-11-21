@@ -31,11 +31,11 @@ def cmd_lineparser():
     
     parser.add_argument(
         "-n",
-        "--ligname",
-        dest="ligname",
+        "--resname",
+        dest="resname",
         required=False,
         default=None,
-        help="Residue name of the ligand, if present (e.g. UNK).",
+        help="Ligand residue name, as in 01_Build_and_Equilibrate (e.g. UNK); omit for apo systems.",
     )
 
     parser.add_argument(
@@ -67,7 +67,7 @@ def cmd_lineparser():
 def main():
 
     args = cmd_lineparser()
-    lig_resname = args.ligname
+    lig_resname = args.resname
     sys_name = args.sysname
     replica = args.replica
     if replica is None:
@@ -139,7 +139,12 @@ def main():
                            plots_outdir=f"{sys_name}/MD", suffix=run_id)
     rmsd_df.to_csv(f"{sys_name}/MD/{run_id}_rmsd.csv", index=False)
 
-    if lig_resname is not None:
+    MIN_FRAMES = 10
+    if lig_resname is not None and len(u.trajectory) < MIN_FRAMES:
+        # RMSF over one or two frames is ~0 and would read as a perfectly stable pose
+        logger.warning(f"Only {len(u.trajectory)} frames: skipping RMSF/cw-RMSF "
+                       f"(need {MIN_FRAMES}; increase --time_ns or lower SAVE_FREQ).")
+    elif lig_resname is not None:
         # Ligand per-atom RMSF / pocket-contact frequency and contact-weighted RMSF
         # (polar N/O/S, non-polar C/halogens, all heavy atoms; NaN if a set never contacts the pocket)
         lig_sel = f"resname {lig_resname}"

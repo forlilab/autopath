@@ -16,7 +16,7 @@ The scripts expect:
 * `{sysname}/equilibration/equilibration_{sysname}_aligned.dcd` — aligned equilibration trajectory
 * `{sysname}/equilibration/equilibration_{sysname}.csv` and `equilibration_protocol.json` — frame times and protocol, used to locate the free window (cw-RMSF)
 
-In practice, you can apply these methods to any unbiased MD trajectory. Every script looks for systems under `../01_Build_and_Equilibrate` by default; change it with `--eq_root`. The ligand residue name defaults to `UNK`; `--resname` must match the ligand resname used in `01_Build_and_Equilibrate` (`run_cwrmsf.py` takes `--ligand "resname XXX"`).
+In practice, you can apply these methods to any unbiased MD trajectory. Every script looks for systems under `../01_Build_and_Equilibrate` by default; change it with `--eq_root`. The ligand residue name defaults to `UNK`; `--resname` must match the ligand resname used in `01_Build_and_Equilibrate`.
 
 The `3ptb/` folder, when present, is reference output of the shipped example (not needed to run your own systems). The SLURM templates (`mmgbsa_slurm_template.q`, and the one embedded in `orchestrator_LIE.py`) and the bundled MM-GBSA one are cluster-specific: edit the blocks marked `EDIT FOR YOUR CLUSTER` (modules, node exclude list, environment activation). Generated jobs use absolute paths, so the batch scripts can be submitted from any directory.
 

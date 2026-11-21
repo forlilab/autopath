@@ -32,7 +32,7 @@ python ap_sMD.py --sysname 3ptb --lig ../data/3ptb.sdf --reps 10
 python analyze_sMD.py --sysname 3ptb --lig ../data/3ptb.sdf
 ```
 
-`--sysname` must equal the `--sysname` used in `01_Build_and_Equilibrate` (it names the equilibration files, e.g. `system_equil_<sysname>.xml`). `--eqdir` points to that run (default `../01_Build_and_Equilibrate/<sysname>`). Both scripts stop with the name of the missing file if the contract is not met.
+`--sysname` must equal the `--sysname` used in `01_Build_and_Equilibrate` (it names the equilibration files, e.g. `system_equil_<sysname>.xml`). `--eqdir` points to that run (default `../01_Build_and_Equilibrate/<sysname>`). Both scripts stop with the name of the missing file if the contract is not met. `--resname` (default UNK) must match the ligand residue name used in 01.
 
 ## SLURM
 

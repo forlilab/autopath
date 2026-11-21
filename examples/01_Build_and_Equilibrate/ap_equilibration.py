@@ -1,4 +1,5 @@
 import os
+import json
 import argparse
 from importlib.resources import files
 
@@ -60,6 +61,16 @@ def main():
     sys_name = args.sysname or os.path.splitext(os.path.basename(stem))[0]
     sys_dir = os.path.join(args.outdir, sys_name)
     os.makedirs(sys_dir, exist_ok=True)
+
+    # Packaged protocols select the ligand as resname UNK
+    if ligands is not None and lig_resname != "UNK":
+        with open(equilibration_scheme) as f:
+            protocol = json.load(f)
+        protocol["components_lookup"] = {k: v.replace("resname UNK", f"resname {lig_resname}")
+                                         for k, v in protocol["components_lookup"].items()}
+        equilibration_scheme = f"{sys_dir}/protocol_{lig_resname}.json"
+        with open(equilibration_scheme, "w") as f:
+            json.dump(protocol, f, indent=2)
 
     logger = setup_logging(f"{sys_dir}/autopath.log", log_level="INFO")
     logger.info("Starting equilibration process")

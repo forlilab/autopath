@@ -11,10 +11,10 @@ Production length is set with `--time_ns` (default 100). Other settings are at t
 # Usage
 
 ```bash
-python ap_vanillaMD.py --sysname 3ptb --ligname UNK --replica rep1 --time_ns 100
+python ap_vanillaMD.py --sysname 3ptb --resname UNK --replica rep1 --time_ns 100
 ```
 
-`--sysname` must equal the `--sysname` used in `01_Build_and_Equilibrate` (it names the equilibration files, e.g. `system_equil_<sysname>.xml`). `--eqdir` points to that run (default `../01_Build_and_Equilibrate/<sysname>`). The script stops with the name of the missing file if the contract is not met. Run several `--replica` values for independent replicas from the same equilibrated state (new velocities each time).
+`--sysname` must equal the `--sysname` used in `01_Build_and_Equilibrate` (it names the equilibration files, e.g. `system_equil_<sysname>.xml`). `--eqdir` points to that run (default `../01_Build_and_Equilibrate/<sysname>`). The script stops with the name of the missing file if the contract is not met. `--resname` must match the ligand residue name used in 01; omit it for apo systems. Run several `--replica` values for independent replicas from the same equilibrated state (new velocities each time).
 
 # Output Files
 

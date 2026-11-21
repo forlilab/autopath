@@ -5,8 +5,20 @@ Usage
     python run_LIE.py -s SYS [--eq_root ../01_Build_and_Equilibrate] [--resname UNK]
 """
 import argparse
+import os
+
+import MDAnalysis as mda
 
 from autopath.ap_PLIP import ProteinLigandAnalyzer
+
+
+def to_netcdf(top, traj, out):
+    """Rewrite ``traj`` as AMBER NetCDF; cpptraj misreads the DCD unit cell."""
+    u = mda.Universe(top, traj)
+    with mda.Writer(out, u.atoms.n_atoms) as w:
+        for _ in u.trajectory:
+            w.write(u.atoms)
+    return out
 
 
 def main():
@@ -17,10 +29,14 @@ def main():
     parser.add_argument("--resname", default="UNK", help="ligand residue name (as in 01_Build_and_Equilibrate)")
     args = parser.parse_args()
     sysname = args.sysname
+    top = f"{args.eq_root}/{sysname}/system.prmtop"
+    os.makedirs(f"{sysname}/lie", exist_ok=True)
+    traj = to_netcdf(top, f"{args.eq_root}/{sysname}/equilibration/equilibration_{sysname}_aligned.dcd",
+                     f"{sysname}/lie/equilibration_{sysname}_aligned.nc")
 
     aplip = ProteinLigandAnalyzer(
-        top=f"{args.eq_root}/{sysname}/system.prmtop",
-        trajs=[f"{args.eq_root}/{sysname}/equilibration/equilibration_{sysname}_aligned.dcd"],
+        top=top,
+        trajs=[traj],
         ligand_mda_selection=f"resname {args.resname}",
         protein_mda_selection='protein',
         outdir=f"{sysname}/lie")
