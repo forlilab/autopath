@@ -78,7 +78,7 @@ def main():
     eq_root = args.eqdir or f"../01_Build_and_Equilibrate/{sys_name}"
     eq_dir = f"{eq_root}/equilibration"
     needed = [f"{eq_root}/system.pdb", f"{eq_dir}/system_equil_{sys_name}.xml",
-              f"{eq_dir}/checkpoint_equil_{sys_name}.chk"]
+              f"{eq_dir}/checkpoint_equil_{sys_name}.xml"]
     missing = [f for f in needed if not os.path.exists(f)]
     if missing:
         raise SystemExit(f"Missing equilibration file {missing[0]}\n"
@@ -104,7 +104,8 @@ def main():
     topology = PDBFile(system_pdb_file).topology
     
     system = load_system(f"{eq_root}/equilibration/system_equil_{sys_name}.xml")
-    checkpoint = f"{eq_root}/equilibration/checkpoint_equil_{sys_name}.chk"
+    # portable state XML: a .chk only loads on the same GPU model and platform
+    state_xml = f"{eq_root}/equilibration/checkpoint_equil_{sys_name}.xml"
 
     vanilla_md = VanillaMD(
         system=system,
@@ -117,7 +118,7 @@ def main():
         )
     
     vanilla_md.run(
-                            checkpoint_file=checkpoint,
+                            state_file=state_xml,
                             pdb_file=None, 
                             run_id=run_id,
                             MD_time=args.time_ns,

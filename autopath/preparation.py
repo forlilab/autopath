@@ -465,8 +465,9 @@ class SystemPreparation:
 
         Parameters
         ----------
-        protein : str
-            Path to the prepared protein PDB file. Required.
+        protein : str, optional
+            Path to the prepared protein PDB file. None builds a ligand-only box
+            (requires ``ligands``; not supported with a membrane).
         variants : dict, optional
             Residue variant map passed to ``add_variants()`` (e.g. to
             specify HIS protonation states or CYS oxidation).
@@ -490,11 +491,15 @@ class SystemPreparation:
             Re-raised if the protein PDB cannot be loaded.
         """
 
-        if protein is None:
-            raise ValueError("protein=None is not supported; pass a protein PDB.")
+        if protein is None and ligands is None:
+            raise ValueError("pass a protein PDB, ligands, or both.")
+        if protein is None and self.is_membrane:
+            raise ValueError("ligand-only systems are not supported with a membrane.")
         start_time = time.monotonic()
 
-        if protein is not None:
+        if protein is None:
+            modeller = Modeller(Topology(), [])
+        else:
             rec_name = os.path.splitext(os.path.basename(protein))[0]
             try:
                 protein_pdb = PDBFile(protein)
@@ -508,31 +513,31 @@ class SystemPreparation:
             if variants is not None:
                 modeller = add_variants(modeller, variants)
 
-            if ligands is not None:
-                if isinstance(ligands, str):
-                    logger.info(f"Parametrizing ligand {os.path.basename(ligands)}..")
-                    lig = self._ligand_to_mol(ligands)
-                    ligand_topology, ligand_positions = self._parametrize_ligand(lig)
-                    for res in ligand_topology.residues():
-                        res.name = 'UNK'
-                    modeller.add(ligand_topology, ligand_positions)
+        if ligands is not None:
+            if isinstance(ligands, str):
+                logger.info(f"Parametrizing ligand {os.path.basename(ligands)}..")
+                lig = self._ligand_to_mol(ligands)
+                ligand_topology, ligand_positions = self._parametrize_ligand(lig)
+                for res in ligand_topology.residues():
+                    res.name = 'UNK'
+                modeller.add(ligand_topology, ligand_positions)
 
-                elif isinstance(ligands, list):
-                    used_chains = set(c.id for c in modeller.topology.chains()) if modeller else set()
-                    chain_id = ord('A')
-                    for lig_name, lig_path, lig_smiles, lig_from_xray in ligands:
-                        while chr(chain_id) in used_chains:
-                            chain_id += 1
-                        logger.info(f"Parametrizing ligand {lig_name}..")
-                        lig = self._ligand_to_mol(lig_path, lig_smiles, lig_from_xray)
-                        ligand_topology, ligand_positions = self._parametrize_ligand(lig)
-                        for chain in ligand_topology.chains():
-                            chain.id = chr(chain_id)
-                        for res in ligand_topology.residues():
-                            res.name = lig_name
-                        modeller.add(ligand_topology, ligand_positions)
-                        used_chains.add(chr(chain_id))
+            elif isinstance(ligands, list):
+                used_chains = set(c.id for c in modeller.topology.chains()) if modeller else set()
+                chain_id = ord('A')
+                for lig_name, lig_path, lig_smiles, lig_from_xray in ligands:
+                    while chr(chain_id) in used_chains:
                         chain_id += 1
+                    logger.info(f"Parametrizing ligand {lig_name}..")
+                    lig = self._ligand_to_mol(lig_path, lig_smiles, lig_from_xray)
+                    ligand_topology, ligand_positions = self._parametrize_ligand(lig)
+                    for chain in ligand_topology.chains():
+                        chain.id = chr(chain_id)
+                    for res in ligand_topology.residues():
+                        res.name = lig_name
+                    modeller.add(ligand_topology, ligand_positions)
+                    used_chains.add(chr(chain_id))
+                    chain_id += 1
 
 
         # A 4-site water model needs its virtual site on EVERY water, including the
@@ -618,6 +623,15 @@ class SystemPreparation:
                 boxShape=self.boxShape,
                 padding=self.padding,
             )
+
+        # OpenMM needs every reduced box width >= 2 x cutoff; fail here, not at the first Context
+        vecs = modeller.topology.getPeriodicBoxVectors().value_in_unit(openmmunit.nanometer)
+        width = min(vecs[0][0], vecs[1][1], vecs[2][2])
+        cutoff = self.nb_cutoff.value_in_unit(openmmunit.nanometer)
+        if width < 2 * cutoff:
+            raise ValueError(f"box is {width:.2f} nm across its narrowest axis, below twice the "
+                             f"{cutoff:.2f} nm nonbonded cutoff; increase padding (now {self.padding.value_in_unit(openmmunit.nanometer):.2f} nm) "
+                             f"by at least {(2 * cutoff - width) / 2 + 0.05:.2f} nm.")
 
         logger.info(f"Creating the OpenMM system..")
         system = self.forcefield.createSystem(

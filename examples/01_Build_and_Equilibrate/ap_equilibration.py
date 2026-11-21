@@ -67,8 +67,12 @@ def main():
     if ligands is not None and lig_resname != "UNK":
         with open(equilibration_scheme) as f:
             protocol = json.load(f)
-        protocol["components_lookup"] = {k: v.replace("resname UNK", f"resname {lig_resname}")
-                                         for k, v in protocol["components_lookup"].items()}
+        for k, v in protocol["components_lookup"].items():
+            # entries are a selection string or {"selection": ..., "type": ...}
+            if isinstance(v, dict):
+                v["selection"] = v["selection"].replace("resname UNK", f"resname {lig_resname}")
+            else:
+                protocol["components_lookup"][k] = v.replace("resname UNK", f"resname {lig_resname}")
         equilibration_scheme = f"{sys_dir}/protocol_{lig_resname}.json"
         with open(equilibration_scheme, "w") as f:
             json.dump(protocol, f, indent=2)
