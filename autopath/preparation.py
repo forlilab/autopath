@@ -624,6 +624,15 @@ class SystemPreparation:
                 padding=self.padding,
             )
 
+        # OpenMM needs every reduced box width >= 2 x cutoff; fail here, not at the first Context
+        vecs = modeller.topology.getPeriodicBoxVectors().value_in_unit(openmmunit.nanometer)
+        width = min(vecs[0][0], vecs[1][1], vecs[2][2])
+        cutoff = self.nb_cutoff.value_in_unit(openmmunit.nanometer)
+        if width < 2 * cutoff:
+            raise ValueError(f"box is {width:.2f} nm across its narrowest axis, below twice the "
+                             f"{cutoff:.2f} nm nonbonded cutoff; increase padding (now {self.padding.value_in_unit(openmmunit.nanometer):.2f} nm) "
+                             f"by at least {(2 * cutoff - width) / 2 + 0.05:.2f} nm.")
+
         logger.info(f"Creating the OpenMM system..")
         system = self.forcefield.createSystem(
             modeller.topology,
