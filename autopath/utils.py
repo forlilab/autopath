@@ -2017,3 +2017,127 @@ def extract_milestones(
         _plot_pca_milestones(X_pca, labels, closest_frames, out_dir, prefix, pca)
 
     return labels, sorted_centers, milestone_files
+
+
+def _molecule_groups(ag: mda.AtomGroup) -> List[np.ndarray]:
+    """Index arrays (into ``ag``) of the whole molecules in ``ag``: chains, else bonded fragments.
+
+    Chains come first: OpenMM PDBs carry CONECT records for a few atoms only, which
+    would split a protein into one-atom fragments.
+    """
+    u = ag.universe
+    if hasattr(ag, "chainIDs") and all(str(c).strip() for c in ag.chainIDs):
+        keys = ag.chainIDs
+    elif hasattr(u, "bonds") and len(u.bonds):
+        keys = ag.fragindices
+    else:
+        return [np.arange(ag.n_atoms)]
+    return [np.flatnonzero(keys == k) for k in dict.fromkeys(keys)]
+
+
+def min_image_distance(u: mda.Universe, sel_a: str, sel_b: Optional[str] = None,
+                       start: Optional[int] = None, stop: Optional[int] = None,
+                       step: Optional[int] = None) -> np.ndarray:
+    """Per-frame minimum distance from ``sel_a`` to the periodic images of ``sel_b``.
+
+    Each molecule (chain, else bonded fragment) is first shifted to the image
+    nearest the first molecule of ``sel_b``, so a ligand wrapped to the far side
+    of the box counts as bound. The distance is then taken over the 26
+    neighbouring images of ``sel_b``. With ``sel_b=None`` the selection is
+    compared with its own images (e.g. protein self-contact across the box).
+
+    Parameters
+    ----------
+    u : mda.Universe
+        Universe with a periodic box consistent with its coordinates.
+    sel_a : str
+        MDAnalysis selection.
+    sel_b : str, optional
+        MDAnalysis selection of the imaged group (default: ``sel_a``).
+    start, stop, step : int, optional
+        Frame slice.
+
+    Returns
+    -------
+    np.ndarray
+        Minimum image distance per analysed frame (Å).
+
+    Raises
+    ------
+    ValueError
+        On superposed (``*_aligned``) trajectories, a missing box, or an empty selection.
+    """
+    from itertools import product
+    from MDAnalysis.lib.mdamath import triclinic_vectors
+
+    fname = str(getattr(u.trajectory, "filename", "") or "")
+    if "_aligned" in os.path.basename(fname):
+        raise ValueError(f"{fname} is superposed: its box no longer matches the coordinates. "
+                         "Use the trajectory before wrap_align_save_traj.")
+    a = u.select_atoms(sel_a)
+    b = a if sel_b is None else u.select_atoms(sel_b)
+    if a.n_atoms == 0 or b.n_atoms == 0:
+        raise ValueError(f"empty selection: {sel_a!r} ({a.n_atoms}) / {sel_b!r} ({b.n_atoms})")
+
+    both = a | b
+    groups = _molecule_groups(both)
+    in_b = np.isin(both.ix, b.ix)
+    ref_group = next(g for g in groups if in_b[g].any())
+    ia = np.searchsorted(both.ix, a.ix)
+    ib = np.searchsorted(both.ix, b.ix)
+    lattice = np.array([n for n in product((-1, 0, 1), repeat=3) if any(n)], dtype=float)
+
+    out = []
+    for ts in u.trajectory[start:stop:step]:
+        if ts.dimensions is None or not np.all(ts.dimensions[:3] > 0):
+            raise ValueError(f"frame {ts.frame} has no periodic box")
+        pos = both.positions.astype(float)
+        ref = pos[ref_group].mean(axis=0)
+        for g in groups:
+            c = pos[g].mean(axis=0)
+            pos[g] += ref + minimize_vectors((c - ref)[None], ts.dimensions)[0] - c
+        tree = KDTree(pos[ib])
+        shifts = lattice @ triclinic_vectors(ts.dimensions)
+        out.append(min(tree.query(pos[ia] - t, k=1)[0].min() for t in shifts))
+    return np.asarray(out)
+
+
+def periodic_image_report(u: mda.Universe, system, ligand_sel: Optional[str] = None,
+                          protein_sel: str = "protein and not name H*",
+                          step: Optional[int] = None) -> pd.DataFrame:
+    """Per-frame closest approach to a periodic image, flagged against the nonbonded cutoff.
+
+    Parameters
+    ----------
+    u : mda.Universe
+        Non-superposed trajectory (see :func:`min_image_distance`).
+    system : openmm.System
+        System whose NonbondedForce cutoff is the threshold.
+    ligand_sel : str, optional
+        Ligand selection; adds a ligand-to-protein-images column.
+    protein_sel : str
+        Protein selection.
+    step : int, optional
+        Frame stride.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns ``frame``, ``protein_self`` and, with a ligand, ``ligand_protein`` (Å).
+        ``attrs["cutoff_A"]`` holds the threshold.
+    """
+    cutoff = next((f.getCutoffDistance().value_in_unit(openmmunit.angstrom)
+                   for f in system.getForces() if isinstance(f, NonbondedForce)), 10.0)
+    df = pd.DataFrame({"frame": np.arange(len(u.trajectory))[slice(None, None, step)],
+                       "protein_self": min_image_distance(u, protein_sel, step=step)})
+    if ligand_sel is not None:
+        df["ligand_protein"] = min_image_distance(u, f"({ligand_sel}) and not name H*", protein_sel, step=step)
+    df.attrs["cutoff_A"] = cutoff
+    for col in df.columns[1:]:
+        n = int((df[col] < cutoff).sum())
+        msg = f"{col}: closest periodic image {df[col].min():.2f} A (cutoff {cutoff:.2f} A)"
+        if n:
+            logging.getLogger("autopath").warning(f"{msg}; {n}/{len(df)} frames inside the cutoff")
+        else:
+            logging.getLogger("autopath").info(msg)
+    return df

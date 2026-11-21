@@ -665,7 +665,7 @@ class ProteinLigandAnalyzer:
                     lig_selection: str = None,
                     strip_selection: str = ":POP:WAT:Na+:Cl-:Mg+:K+:HOH:NA:CL:K:MG",
                     radii: str = 'mbondi2',
-                    time: str = "0:10:00",
+                    time: str = "1-0",
                     omp_threads: int = 222,
                     partition: str = "forli,forli-pro,shared,highmem,gpu",
                     slurm_template_fname: str = None,
@@ -721,6 +721,8 @@ class ProteinLigandAnalyzer:
             bash_fname:str="run_mmgbsa_batch.sh",
             mpi_threads:int=222,
             slurm_template_fname: str = None,
+            partition: str = "forli,forli-pro,shared,highmem,gpu",
+            time: str = "1-0",
             ):
         """Prepare a per-system MMPBSA SLURM qfile and a master batch script.
 
@@ -762,6 +764,10 @@ class ProteinLigandAnalyzer:
             Maximum number of MPI threads. Capped at the number of frames.
         slurm_template_fname : str or None
             Path to a custom SLURM template. Defaults to the bundled template.
+        partition : str
+            SLURM partition(s) written to the qfile.
+        time : str
+            SLURM wall-time limit written to the qfile.
 
         Returns
         -------
@@ -846,6 +852,8 @@ class ProteinLigandAnalyzer:
                                                 strip_selection=strip_amber_selection,
                                                 radii=radii,
                                                 omp_threads=mpi_threads,
+                                                partition=partition,
+                                                time=time,
                                                 slurm_template_fname=slurm_template_fname,
                                                 )
         

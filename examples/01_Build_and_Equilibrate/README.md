@@ -61,6 +61,7 @@ NOTE: you can find the protocols in the `autopath/data/` folder. Equilibration l
 
 ## Post-processing
 Some basic post-processing is included in this script. Make sure you customize this to your specific system and needs.
+* Periodic-image check on the raw trajectory, before superposition: per frame, the closest approach of the protein to its own periodic images and of the ligand to the protein images, flagged against the nonbonded cutoff (`autopath.utils.periodic_image_report`). Frames inside the cutoff mean the system interacts with its own copy: enlarge `padding` (see "Periodic images" in `03_Pull-it-out/README.md`).
 * Wraps molecules into the box, centres and superposes the trajectory on the protein backbone (`autopath.utils.wrap_align_save_traj`).
 * RMSD of the protein and ligand.
 * Ligand per-atom RMSF and pocket-contact frequency, projected on the 2D structure.
@@ -113,6 +114,9 @@ Final structure, state and restraint-free system, the starting point for vanilla
 * `{sys_name}/equilibration/equilibration_protocol.json`
 Copy of the protocol used
 
+* `{sys_name}/equilibration/{sys_name}_image_distances.csv`
+Per-frame closest approach (Å) of the protein to its own images (`protein_self`) and of the ligand to the protein images (`ligand_protein`)
+
 * `{sys_name}/equilibration/{sys_name}_rmsd.csv`
 RMSD time series for all components. For each component a plot named `RMSD_{component}` will be generated.
 
@@ -130,16 +134,22 @@ Arguments
 `--rec`
 Path to the receptor PDB file.
 
-`--protocol`
-Path to the JSON file defining the equilibration protocol.
-
 Optional
+
+`--protocol`
+Path to the JSON file defining the equilibration protocol. Default: the packaged `eq_lig-prot_5ns_4fs.json` (found via `importlib.resources`, so it works from any location). Use `eq_lig-prot-memb_10ns_4fs.json` from the same folder for membrane systems.
+
+`--sysname`
+System name, used for the output folder and every file name (`system_equil_<sysname>.xml`, `checkpoint_equil_<sysname>.chk`, ...). Default: the ligand file stem (receptor stem if no ligand), so several ligands on one receptor do not overwrite each other. Steps `03_Pull-it-out` and `05_VanillaMD` rebuild these names from their own `--sysname`, which must be the SAME value.
+
+`--outdir`
+Parent folder; outputs go to `<outdir>/<sysname>/` (default: current folder). `03`/`05` look in `../01_Build_and_Equilibrate/<sysname>` unless given `--eqdir`/the equivalent option.
 
 `--lig`
 Path to ligand file (SDF or PDB).
 
 `--resname`
-Residue name assigned to the ligand (default: UNK).
+Residue name assigned to the ligand (default: UNK). Pass the same `--resname` to 02, 03 and 05. If it is not UNK, the ligand selection of the protocol is rewritten to it (`<sysname>/protocol_<resname>.json`).
 
 `--smiles`
 SMILES string for the ligand. Used to assign bond orders if provided.
@@ -158,13 +168,15 @@ python ap_equilibration.py \
     --rec receptor.pdb \
     --lig ligand.sdf \
     --resname LIG \
-    --smiles "CCOc1ccc2nc(S(N)(=O)=O)sc2c1" \
-    --protocol equilibration.json
+    --smiles "CCOc1ccc2nc(S(N)(=O)=O)sc2c1"
 ```
+
+The system is named `ligand` (ligand stem) and the packaged 5 ns protocol is used. Add `--protocol my.json` for a custom one.
 
 ### Apo protein equilibration
 ```
-python ap_equilibration.py \
-    --rec receptor.pdb \
-    --protocol equilibration_apo.json
+python ap_equilibration.py --rec receptor.pdb
 ```
+
+### Cluster
+`run.q` runs the 3ptb example. Its `#SBATCH` lines (partition, GPU type, exclude list) and the environment activation are specific to our cluster: edit the block at the top for yours. The `../data/3ptb.*` paths are the shipped example inputs.

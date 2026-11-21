@@ -1,5 +1,7 @@
 import os
+import json
 import argparse
+from importlib.resources import files
 
 import MDAnalysis as mda
 from rdkit import Chem
@@ -7,7 +9,8 @@ from openmm.app import PDBFile
 
 from autopath import SystemPreparation, Equilibration
 from autopath.ap_PLIP import plot_atomic_property, cw_rmsf_windows
-from autopath.utils import save_pdb, load_system, setup_logging, compute_rmsd, wrap_align_save_traj
+from autopath.utils import (save_pdb, load_system, setup_logging, compute_rmsd, wrap_align_save_traj,
+                            periodic_image_report)
 from autopath.pdb_preprocessor import PDBPreprocessor
 
 
@@ -31,8 +34,16 @@ def cmd_lineparser():
                         help="the ligand is taken directly from the crystal structure without any processing")
     parser.add_argument("--no_fixpdb", dest="fixpdb", action="store_false",
                         help="skip PDBFixer (use the receptor as is)")
-    parser.add_argument("-p", "--protocol", dest="protocol", required=True,
-                        help="path to the JSON file with the equilibration protocol")
+    parser.add_argument("--sysname", dest="sysname", default=None,
+                        help="system name, used for the output folder and file names "
+                             "(default: ligand file stem, or receptor stem if no ligand)")
+    parser.add_argument("--outdir", dest="outdir", default=".",
+                        help="parent folder; outputs go to <outdir>/<sysname> (default: .)")
+    parser.add_argument("-p", "--protocol", dest="protocol",
+                        default=str(files("autopath") / "data" / "eq_lig-prot_5ns_4fs.json"),
+                        help="path to the JSON file with the equilibration protocol (default: packaged "
+                             "eq_lig-prot_5ns_4fs.json; for membranes use eq_lig-prot-memb_10ns_4fs.json "
+                             "from the same folder)")
     return parser.parse_args()
 
 
@@ -47,10 +58,22 @@ def main():
         ligands = None
     equilibration_scheme = args.protocol  # customize the equilibration scheme as needed
 
-    sys_name = os.path.splitext(os.path.basename(receptor))[0]
-    os.makedirs(sys_name, exist_ok=True)
+    stem = args.lig if args.lig is not None else receptor
+    sys_name = args.sysname or os.path.splitext(os.path.basename(stem))[0]
+    sys_dir = os.path.join(args.outdir, sys_name)
+    os.makedirs(sys_dir, exist_ok=True)
 
-    logger = setup_logging(f"{sys_name}/autopath.log", log_level="INFO")
+    # Packaged protocols select the ligand as resname UNK
+    if ligands is not None and lig_resname != "UNK":
+        with open(equilibration_scheme) as f:
+            protocol = json.load(f)
+        protocol["components_lookup"] = {k: v.replace("resname UNK", f"resname {lig_resname}")
+                                         for k, v in protocol["components_lookup"].items()}
+        equilibration_scheme = f"{sys_dir}/protocol_{lig_resname}.json"
+        with open(equilibration_scheme, "w") as f:
+            json.dump(protocol, f, indent=2)
+
+    logger = setup_logging(f"{sys_dir}/autopath.log", log_level="INFO")
     logger.info("Starting equilibration process")
 
     ########################################################################################
@@ -66,7 +89,7 @@ def main():
                             cap_termini=True,
                             pH=7.4
                             )
-        receptor_path = f"{sys_name}/{sys_name}_fixed.pdb"
+        receptor_path = f"{sys_dir}/{sys_name}_fixed.pdb"
         save_pdb(fixed_receptor.topology, fixed_receptor.positions, receptor_path)
     else:
         receptor_path = receptor
@@ -80,7 +103,7 @@ def main():
             ionicStrength=0.15,    # M
             ions=("Na+", "Cl-"),
             is_membrane=False,
-            out_dir=sys_name,
+            out_dir=sys_dir,
             forcefield=[
                 'amber14-all.xml',
                 'amber14/tip3pfb.xml',
@@ -96,9 +119,9 @@ def main():
     ###################################### Equilibration ###################################
     ########################################################################################
 
-    system_pdb_file = f"{sys_name}/system.pdb"
+    system_pdb_file = f"{sys_dir}/system.pdb"
     topology = PDBFile(system_pdb_file).topology
-    system = load_system(f"{sys_name}/system.xml")
+    system = load_system(f"{sys_dir}/system.xml")
 
     # restrained_minimization=False (as in the AutoPath pipeline): minimise with every
     # component restrained at the warm-up force constants of the protocol
@@ -108,7 +131,7 @@ def main():
         protocol_fname=equilibration_scheme,
         is_membrane=False,
         restrained_minimization=False,
-        out_dir=f"{sys_name}/equilibration",
+        out_dir=f"{sys_dir}/equilibration",
         )
 
     # If the system is already equilibrated you can comment out this line
@@ -118,7 +141,11 @@ def main():
     ###################################### Post-processing #################################
     ########################################################################################
 
-    eq_dir = f"{sys_name}/equilibration"
+    eq_dir = f"{sys_dir}/equilibration"
+    # Closest approach to a periodic image; needs the raw trajectory (superposition breaks the box)
+    u_raw = mda.Universe(system_pdb_file, f"{eq_dir}/equilibration_{sys_name}.dcd")
+    periodic_image_report(u_raw, system, ligand_sel=f"resname {lig_resname}" if ligands else None
+                          ).to_csv(f"{eq_dir}/{sys_name}_image_distances.csv", index=False)
     # Wrap, centre and superpose on the protein backbone -> equilibration_<sys>_aligned.dcd
     aligned_traj = wrap_align_save_traj(f"{eq_dir}/equilibration_{sys_name}.dcd", system_pdb_file)[0]
     logger.info(f"Aligned trajectory saved to {aligned_traj}")

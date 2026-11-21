@@ -2,13 +2,14 @@ import os
 import argparse
 from glob import glob
 
+import pandas as pd
 import MDAnalysis as mda
 from rdkit import Chem
 from openmm.app import PDBFile
 
 from autopath import SteeredMD
 from autopath.utils import (load_system, setup_logging, wrap_align_save_traj,
-                            get_pocket_atoms_idxs, get_ligand_anchor_atoms)
+                            get_pocket_atoms_idxs, get_ligand_anchor_atoms, periodic_image_report)
 
 
 def cmd_lineparser():
@@ -20,12 +21,12 @@ def cmd_lineparser():
                              Scripps Research.""",
     )
     parser.add_argument("-s", "--sysname", dest="sysname", required=True,
-                        help="system name; outputs go to <sysname>/sMD")
+                        help="system name; outputs go to <sysname>/sMD. Must match --sysname of 01_Build_and_Equilibrate")
     parser.add_argument("--eqdir", default=None,
                         help="folder of the equilibrated system (default: ../01_Build_and_Equilibrate/<sysname>)")
     parser.add_argument("-l", "--lig", default=None,
                         help="ligand SDF, only used to draw the anchor atoms (optional)")
-    parser.add_argument("--ligand_sel", default="resname UNK", help="MDAnalysis selection of the ligand")
+    parser.add_argument("-n", "--resname", default="UNK", help="ligand residue name (as in 01_Build_and_Equilibrate)")
     parser.add_argument("--pocket_sel", default=None,
                         help="MDAnalysis selection of the pocket atoms, in system.pdb numbering "
                              "(default: CA atoms of residues within 8 A of the ligand)")
@@ -54,6 +55,15 @@ def main():
     AUTOSTOP_NC = 0.01      # stop once ligand-pocket contacts < 1% of the initial value ...
     AUTOSTOP_WINDOW = 5     # ... for this many consecutive samples
 
+    needed = [f"{eq_root}/system.pdb", f"{eq_dir}/system_equil_{sys_name}.xml",
+              f"{eq_dir}/checkpoint_equil_{sys_name}.chk", f"{eq_dir}/checkpoint_equil_{sys_name}.xml",
+              f"{eq_dir}/{sys_name}_equilibrated.pdb", f"{eq_dir}/equilibration_{sys_name}_aligned.dcd"]
+    missing = [f for f in needed if not os.path.exists(f)]
+    if missing:
+        raise SystemExit(f"Missing equilibration file {missing[0]}\n"
+                         "--sysname must match the one used in 01_Build_and_Equilibrate and --eqdir "
+                         "must point to that run (default ../01_Build_and_Equilibrate/<sysname>).")
+
     os.makedirs(sys_name, exist_ok=True)
     logger = setup_logging(f"{sys_name}/autopath.log", log_level="INFO")
 
@@ -66,13 +76,14 @@ def main():
 
     # Pocket and ligand anchor atoms (system.pdb numbering), from the equilibration
     u = mda.Universe(eq_pdb, f"{eq_dir}/equilibration_{sys_name}_aligned.dcd")
-    lig_ha = f"({args.ligand_sel}) and not name H*"
+    lig_sel = f"resname {args.resname}"
+    lig_ha = f"{lig_sel} and not name H*"
     if args.pocket_sel is not None:
         pocket_idx = get_pocket_atoms_idxs(u, pocket_selection=args.pocket_sel)
     else:
         pocket_idx = get_pocket_atoms_idxs(u, ligand_selection=lig_ha)
     ref_mol = Chem.SDMolSupplier(args.lig)[0] if args.lig else None
-    anchor_idx = get_ligand_anchor_atoms(u, args.ligand_sel, mode=args.anchor, n_atoms=5,
+    anchor_idx = get_ligand_anchor_atoms(u, lig_sel, mode=args.anchor, n_atoms=5,
                                          out_dir=sys_name, ref_mol=ref_mol)
     n_heavy = len(u.select_atoms(lig_ha))
     logger.info(f"{len(pocket_idx)} pocket atoms; {len(anchor_idx)} '{args.anchor}' anchor atoms")
@@ -117,6 +128,10 @@ def main():
 
     # Wrap, centre and superpose the pulling trajectories
     trajs = [f for f in sorted(glob(f"{smd_dir}/sMD_replica-*.dcd")) if "aligned" not in f]
+    # Post-hoc periodic-image check on the raw pulls (the run-time guard covers the ligand only)
+    pd.concat([periodic_image_report(mda.Universe(system_pdb, t), system, ligand_sel=lig_sel)
+               .assign(replica=os.path.basename(t)) for t in trajs]
+              ).to_csv(f"{sys_name}/sMD/image_distances.csv", index=False)
     wrap_align_save_traj(trajs, system_pdb)
 
 
