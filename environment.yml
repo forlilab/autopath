@@ -5,7 +5,7 @@ channels:
   - mdtools
 dependencies:
   - python >=3.10,<3.13
-  - numpy >=1.26,<2
+  - numpy >=1.26
   - scipy >=1.11
   - pandas >=2.0
   - matplotlib-base >=3.8
@@ -30,7 +30,6 @@ dependencies:
   # trajectories and analysis
   - mdanalysis >=2.7
   - mdtraj >=1.10,<1.11.1  # 1.11.1 metadata requires numpy 2
-  - ml_dtypes <0.6  # via openmmtools -> jax; 0.6 metadata requires numpy 2 (drop with numpy<2)
   - rdkit >=2024.03
   - prolif >=2.0
   - pymol-open-source >=3.0

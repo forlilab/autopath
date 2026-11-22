@@ -37,7 +37,7 @@ setup(
     zip_safe=False,
     # openff-toolkit, openff-units, pymol-open-source and ambertools are conda-only: use environment.yml
     install_requires=[
-        "numpy>=1.26,<2",
+        "numpy>=1.26",
         "scipy>=1.11",
         "pandas>=2.0",
         "matplotlib>=3.8",
