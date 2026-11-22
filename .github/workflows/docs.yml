@@ -2,7 +2,7 @@ name: docs
 
 on:
   push:
-    branches: [main]
+    branches: [develop]  # docs follow develop; main lags behind it
   pull_request:
   workflow_dispatch:
 
@@ -28,12 +28,12 @@ jobs:
         env:
           NO_MKDOCS_2_WARNING: "1"
       - uses: actions/upload-pages-artifact@v3
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/develop'
         with:
           path: site
 
   deploy:
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/develop'
     needs: build
     runs-on: ubuntu-latest
     environment:
