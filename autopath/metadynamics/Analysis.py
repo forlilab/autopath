@@ -1,6 +1,7 @@
 import os
 import logging
 import numpy as np
+from scipy.integrate import trapezoid as _trapezoid
 import pandas as pd
 
 from autopath.pulling.Estimators import _find_pmf_peak
@@ -197,7 +198,7 @@ def correct_fe_for_funnel(
     # Only the cross-section is analytic; the length comes from the site integral.
     d_cv = (grid_max - grid_min) / max(1, len(fe_norm) - 1)
     site = fe_norm[:bound_bins]
-    integral_ang = float(np.trapz(np.exp(-site / kT), dx=d_cv)
+    integral_ang = float(_trapezoid(np.exp(-site / kT), dx=d_cv)
                          * cv_length_per_unit_ang)
     if integral_ang <= 0:
         raise ValueError("bound-site integral is not positive; cannot take its log")

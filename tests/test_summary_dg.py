@@ -2,6 +2,7 @@ import os
 import warnings
 
 import numpy as np
+from scipy.integrate import trapezoid as _trapezoid
 import pytest
 from openmm import unit
 
@@ -21,7 +22,7 @@ def test_dg_matches_formula_on_analytic_profile():
     p = np.exp(-W / kt); w = p / p.sum()
     bound, bulk = (-2.0, 5.0), (12.0, 22.5)
     m = (z >= -2) & (z <= 5)
-    integ = np.trapz(np.exp(-W[m] / kt), z[m]) if hasattr(np, "trapz") else np.trapezoid(np.exp(-W[m] / kt), z[m])
+    integ = _trapezoid(np.exp(-W[m] / kt), z[m])
     ref = -kt * np.log(1 / 1661.0 * np.pi * 1.0 ** 2 * integ)
     assert dg_from_frames(z, w, bound, bulk, 1.0, 300.0) == pytest.approx(ref, abs=0.05)
 

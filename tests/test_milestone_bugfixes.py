@@ -1,6 +1,7 @@
 """Regression tests for milestone extraction, metadynamics setup and analysis."""
 import os
 import numpy as np
+from scipy.integrate import trapezoid as _trapezoid
 import pytest
 import MDAnalysis as mda
 
@@ -499,7 +500,7 @@ def test_correction_uses_cross_section_not_cylinder_volume():
     fe = _well(); fe = fe - fe[-10:].mean()
     bound = fe[:max(1, int(0.20 * len(fe)))]
     d_cv = 1.0 / (len(fe) - 1)
-    I = float(np.trapz(np.exp(-bound / kT), dx=d_cv) * 10.0)
+    I = float(_trapezoid(np.exp(-bound / kT), dx=d_cv) * 10.0)
     expected = -kT * math.log(I) - kT * math.log(math.pi * R ** 2 / 1660.0)
     assert r["dG_bind_std_kj_mol"] == pytest.approx(expected, abs=1e-6)
 
