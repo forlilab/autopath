@@ -43,7 +43,7 @@ def test_vanilla_md_does_not_restrain_its_own_system(tmp_path, monkeypatch):
 
 def test_preparation_rejects_missing_protein(tmp_path):
     from autopath.preparation import SystemPreparation
-    with pytest.raises(ValueError, match="not supported"):
+    with pytest.raises(ValueError, match="protein PDB, ligands, or both"):
         SystemPreparation(out_dir=str(tmp_path)).run(protein=None)
 
 
