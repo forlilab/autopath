@@ -7,7 +7,7 @@ dependencies:
   - python >=3.10,<3.13
   - numpy >=1.26
   - scipy >=1.11
-  - pandas >=2.0
+  - pandas >=2.0,<3  # pulling analysis not ported to pandas 3
   - matplotlib-base >=3.8
   - seaborn >=0.13
   - scikit-learn >=1.4
