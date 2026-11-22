@@ -163,6 +163,15 @@ class SystemPreparation:
         re-expansion increments. Stock OpenMM minimises only once for 30 iterations,
         which is not enough for a large membrane protein and lets the lipids blow up
         (see :func:`relaxed_membrane_packing`). Set to 0 for stock behaviour.
+    nonbondedCutoff : float, optional
+        Nonbonded cutoff in nm. None picks 1.2 nm for CHARMM force fields (any
+        ``forcefield`` file name containing ``"charmm"``) and 1.0 nm otherwise.
+    switchDistance : float, optional
+        Lennard-Jones switching distance in nm. None picks 1.0 nm for CHARMM
+        force fields and 0.9 nm otherwise. Must be below ``nonbondedCutoff``,
+        so the old CHARMM build (1.0 / 0.9 nm, used before these options
+        existed) needs both arguments. CHARMM boxes must be at least 2.4 nm
+        across their narrowest reduced axis.
     out_dir : str, optional
         Directory where all output files are written.
     """
@@ -187,6 +196,8 @@ class SystemPreparation:
         is_membrane: bool = False,
         lipid_type: str = 'POPC',
         membrane_relax_iterations: int = 0, #200
+        nonbondedCutoff: float = None,  # nm; None = force-field default
+        switchDistance: float = None,  # nm; None = force-field default
         out_dir: str = "system",
     ) -> None:
 
@@ -246,9 +257,17 @@ class SystemPreparation:
         elif is_membrane and self.lipid_type is None:
             raise ValueError("For building a membrane system a lipid type must be specified.")
 
-        # Non-bonded parameters — probably don't want to change these defaults.
-        self.nb_cutoff = 1.0 * openmmunit.nanometers
-        self.switchDistance = 0.9 * openmmunit.nanometers
+        # CHARMM36 is parametrized with a 1.2 nm cutoff and a 1.0-1.2 nm LJ switch
+        is_charmm = any("charmm" in f.lower() for f in self.forcefield_files)
+        default_cutoff, default_switch = (1.2, 1.0) if is_charmm else (1.0, 0.9)
+        cutoff = default_cutoff if nonbondedCutoff is None else nonbondedCutoff
+        switch = default_switch if switchDistance is None else switchDistance
+        if not 0 < switch < cutoff:
+            raise ValueError(f"switchDistance ({switch} nm) must be positive and below "
+                             f"nonbondedCutoff ({cutoff} nm).")
+        self.nb_cutoff = cutoff * openmmunit.nanometers
+        self.switchDistance = switch * openmmunit.nanometers
+        logger.info(f"Nonbonded cutoff {cutoff:.2f} nm, LJ switch from {switch:.2f} nm.")
 
     @staticmethod
     def _parse_lig_ff(lig_ff: str) -> tuple[str, str]:
