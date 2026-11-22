@@ -28,7 +28,7 @@ setup(
     description='A Python package for performing path metadynamics simulations',
     long_description=open(os.path.join(base_dir, 'README.md')).read(),
     long_description_content_type="text/markdown",
-    packages=find_packages(exclude=['docs']),
+    packages=find_packages(exclude=['docs', 'tests', 'tests.*']),
     package_data={
         "autopath": ["data/*.json", "data/*.q"],
     },
