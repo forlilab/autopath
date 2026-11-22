@@ -14,6 +14,17 @@ python autopath/cli/run_AutoPath.py --config autopath/data/config.json --lig lig
 
 ## Python
 
+From a config file ([Configuration](configuration.md)):
+
+```python
+from autopath import AutoPath, Config
+
+cfg = Config.from_config("config.json")
+AutoPath(**vars(cfg)).run(ligand_file="compound_001.sdf")
+```
+
+Or with keyword arguments:
+
 ```python
 from autopath.autopath_core import AutoPath
 
