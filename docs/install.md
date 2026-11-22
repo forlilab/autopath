@@ -16,6 +16,11 @@ Check the installation:
 python -c "import autopath; from autopath.utils import periodic_image_report; print(autopath.__file__)"
 ```
 
+## Optional dependencies
+
+- **Espaloma:** install `espaloma` into the environment to use `lig_ff="espaloma-*"` ligand force fields.
+- **molscrub:** `pip install -e ".[scrub]"` installs it, for `autopath.pdb_preprocessor.get_scrubbed_smile` (docking preparation).
+
 ## Notes
 
 - `environment.yml` pins `numpy < 2`. A few related pins (`mdtraj < 1.11.1`, `ml_dtypes < 0.6`) exist only because newer releases declare numpy 2.

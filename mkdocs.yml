@@ -65,6 +65,7 @@ nav:
       - Analyse pulls: guide/pulling-analysis.md
       - MM-GBSA / MM-PBSA: guide/mmgbsa.md
       - Full pipeline: guide/pipeline.md
+      - Configuration: guide/configuration.md
       - Troubleshooting: guide/troubleshooting.md
   - Examples: examples.md
   - API reference:
