@@ -41,7 +41,7 @@ class AutoPath:
     """Main orchestrator for the AutoPath binding-free-energy pipeline.
 
     AutoPath runs a four-stage protocol that takes a protein-ligand PDB as input
-    and produces sMD unbinding paths and free-energy profiles:
+    and produces steered-MD unbinding free-energy profiles:
 
     1. **System preparation** — parametrises the protein + ligand, solvates,
        adds ions, and writes ``system.xml`` / ``system.pdb`` via

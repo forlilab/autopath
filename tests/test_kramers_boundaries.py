@@ -3,6 +3,7 @@ import json
 import sys
 
 import numpy as np
+from scipy.integrate import trapezoid as _trapezoid
 import pandas as pd
 import pytest
 from scipy.integrate import cumulative_trapezoid
@@ -32,7 +33,7 @@ def mfpt_reference(b, lo=X0 - 0.6, n=400_001):
     inner = cumulative_trapezoid(np.exp(-g), x, initial=0.0)
     outer = np.exp(g) * GAMMA / KBT * inner
     m = x >= X0
-    return float(np.trapz(outer[m], x[m]))
+    return float(_trapezoid(outer[m], x[m]))
 
 
 def pull_profile(hi=2.0, dr=0.001):

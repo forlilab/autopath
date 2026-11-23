@@ -12,7 +12,7 @@ Lower cw-RMSF = more stable pose.
 
 Usage
 -----
-    python run_cwrmsf.py [--eq_root ../01_Build_and_Equilibrate] [--ligand "resname UNK"] [-j 8]
+    python run_cwrmsf.py [--eq_root ../01_Build_and_Equilibrate] [--resname UNK] [-j 8]
 """
 import argparse
 import os
@@ -40,7 +40,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--eq_root", default="../01_Build_and_Equilibrate",
                     help="directory holding one <sys>/ folder per equilibrated system")
-    ap.add_argument("--ligand", default="resname UNK", help="MDAnalysis selection of the ligand")
+    ap.add_argument("-n", "--resname", default="UNK", help="ligand residue name (as in 01_Build_and_Equilibrate)")
     ap.add_argument("--outdir", default="cwrmsf")
     ap.add_argument("-j", "--n_jobs", type=int, default=int(os.environ.get("SLURM_CPUS_PER_TASK", 1)))
     args = ap.parse_args()
@@ -51,7 +51,7 @@ def main():
     jobs = []
     for traj in trajs:
         run_dir = os.path.dirname(os.path.dirname(traj))
-        jobs.append((os.path.basename(run_dir), run_dir, args.ligand, args.outdir))
+        jobs.append((os.path.basename(run_dir), run_dir, f"resname {args.resname}", args.outdir))
 
     if args.n_jobs > 1:
         with Pool(args.n_jobs) as pool:

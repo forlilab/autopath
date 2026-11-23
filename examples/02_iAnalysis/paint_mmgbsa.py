@@ -1,8 +1,9 @@
 """Color a structure by per-residue MMGBSA energy decomposition.
 
-Walks the ``mmgbsa_*`` result directories of a run (by default under the
-equilibration directory; pass ``--mmgbsa-dir`` for the ``<sys>/mmgbsa_<GB>``
-folders written by ``orchestrator_mmgbsa.py``), parses each
+Walks the ``mmgbsa_*`` result directories of a run (by default
+``<sys>/mmgbsa*`` relative to the current directory, as written by
+``orchestrator_mmgbsa.py`` from ``02_iAnalysis``; ``<sys>`` is the name of the
+run directory; override with ``--mmgbsa-dir``), parses each
 ``FINAL_DECOMP_*.dat``, and writes B-factor painted PDBs (plus the per-residue
 bar charts) into ``<mmgbsa_dir>/painted/``.
 
@@ -58,7 +59,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("equil_dir", help="equilibration/ directory of an autopath run")
     ap.add_argument("--mmgbsa-dir", nargs="+", default=None,
-                    help="MMGBSA result directories (default: <equil_dir>/mmgbsa*/)")
+                    help="MMGBSA result directories (default: ./<sys>/mmgbsa*/)")
     ap.add_argument("--pdb", default=None,
                     help="coordinates to paint (default: *_equilibrated.pdb in equil_dir)")
     ap.add_argument("--system-prmtop", default=None,
@@ -79,7 +80,7 @@ def main():
         raise SystemExit(f"no *_equilibrated.pdb in {equil}; pass --pdb")
     system_prmtop = args.system_prmtop or f"{run}/system.prmtop"
 
-    dirs = args.mmgbsa_dir or [f"{equil}/mmgbsa*"]
+    dirs = args.mmgbsa_dir or [f"{os.path.basename(run)}/mmgbsa*"]
     decomps = sorted(f for d in dirs for f in glob(f"{d}/FINAL_DECOMP_*.dat"))
     if not decomps:
         raise SystemExit(f"no FINAL_DECOMP_*.dat under {dirs}")

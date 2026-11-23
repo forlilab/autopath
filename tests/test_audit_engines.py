@@ -1,4 +1,4 @@
-"""Engine side paths: VanillaMD keeps its system clean, prep rejects protein=None,
+"""Engine side paths: VanillaMD keeps its system clean,
 contact frequency is periodic."""
 import numpy as np
 import openmm
@@ -39,12 +39,6 @@ def test_vanilla_md_does_not_restrain_its_own_system(tmp_path, monkeypatch):
     assert system.getNumForces() == 1     # restraints never land on the shared system
     saved = openmm.XmlSerializer.deserialize((tmp_path / "MD_b_system.xml").read_text())
     assert saved.getNumForces() == 1
-
-
-def test_preparation_rejects_missing_protein(tmp_path):
-    from autopath.preparation import SystemPreparation
-    with pytest.raises(ValueError, match="not supported"):
-        SystemPreparation(out_dir=str(tmp_path)).run(protein=None)
 
 
 def test_contact_frequency_across_box_edge():

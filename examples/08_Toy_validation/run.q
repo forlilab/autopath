@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH -e toy-Open-HW.err
 #SBATCH -o toy-Open-HW.out
+# --- EDIT FOR YOUR CLUSTER: partition, memory, env activation ---
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=8G
 #SBATCH --time=6:00:00
@@ -9,6 +10,7 @@
 
 source ~/.bashrc
 micromamba activate autopath
+# ------------------------------------------------------------------------------
 export OPENMM_CPU_THREADS=1 OMP_NUM_THREADS=1
 
 python run_toy.py --scenario Open-HW

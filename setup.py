@@ -28,7 +28,7 @@ setup(
     description='A Python package for protein-ligand unbinding simulations with steered MD',
     long_description=open(os.path.join(base_dir, 'README.md')).read(),
     long_description_content_type="text/markdown",
-    packages=find_packages(exclude=['docs']),
+    packages=find_packages(exclude=['docs', 'tests', 'tests.*']),
     package_data={
         "autopath": ["data/*.json", "data/*.q"],
     },
@@ -37,9 +37,9 @@ setup(
     zip_safe=False,
     # openff-toolkit, openff-units, pymol-open-source and ambertools are conda-only: use environment.yml
     install_requires=[
-        "numpy>=1.26,<2",
+        "numpy>=1.26",
         "scipy>=1.11",
-        "pandas>=2.0",
+        "pandas>=2.0,<3",
         "matplotlib>=3.8",
         "seaborn>=0.13",
         "scikit-learn>=1.4",

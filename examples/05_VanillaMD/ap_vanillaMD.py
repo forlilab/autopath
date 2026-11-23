@@ -6,7 +6,7 @@ import MDAnalysis as mda
 
 from autopath import VanillaMD
 from autopath.ap_PLIP import plot_atomic_property, ligand_rmsf_contacts, cw_rmsf_scores
-from autopath.utils import load_system, compute_rmsd, setup_logging, wrap_align_save_traj
+from autopath.utils import load_system, compute_rmsd, setup_logging, wrap_align_save_traj, periodic_image_report
 
 from openmm.app import PDBFile
 
@@ -25,16 +25,17 @@ def cmd_lineparser():
         dest="sysname",
         required=True,
         action="store",
-        help="Name of the system, used to create output directory and files",
+        help="Name of the system, used to create output directory and files. "
+             "Must match --sysname of 01_Build_and_Equilibrate",
     )
     
     parser.add_argument(
         "-n",
-        "--ligname",
-        dest="ligname",
+        "--resname",
+        dest="resname",
         required=False,
         default=None,
-        help="Residue name of the ligand, if present (e.g. UNK).",
+        help="Ligand residue name, as in 01_Build_and_Equilibrate (e.g. UNK); omit for apo systems.",
     )
 
     parser.add_argument(
@@ -52,13 +53,21 @@ def cmd_lineparser():
         default=None,
         help='Replica name, used to differentiate multiple runs on the same system.'
     )
+
+    parser.add_argument(
+        "--time_ns",
+        dest="time_ns",
+        type=float,
+        default=100,
+        help="Production length in ns (default: 100)",
+    )
     return parser.parse_args()
 
 
 def main():
 
     args = cmd_lineparser()
-    lig_resname = args.ligname
+    lig_resname = args.resname
     sys_name = args.sysname
     replica = args.replica
     if replica is None:
@@ -67,6 +76,15 @@ def main():
         run_id = f'{sys_name}_{replica}'
     
     eq_root = args.eqdir or f"../01_Build_and_Equilibrate/{sys_name}"
+    eq_dir = f"{eq_root}/equilibration"
+    needed = [f"{eq_root}/system.pdb", f"{eq_dir}/system_equil_{sys_name}.xml",
+              f"{eq_dir}/checkpoint_equil_{sys_name}.xml"]
+    missing = [f for f in needed if not os.path.exists(f)]
+    if missing:
+        raise SystemExit(f"Missing equilibration file {missing[0]}\n"
+                         "--sysname must match the one used in 01_Build_and_Equilibrate and --eqdir "
+                         "must point to that run (default ../01_Build_and_Equilibrate/<sysname>).")
+
     os.makedirs(sys_name, exist_ok=True)
 
     # Setup logging
@@ -76,7 +94,6 @@ def main():
     ######################################## Vanilla MD ####################################
     ########################################################################################
     
-    MD_TIME = 100  # ns
     TIMESTEP = 0.004  # 4 fs timestep
     TEMPERATURE = 300  # 300 K
     SAVE_FREQ = 25000  # save /0.1ns at 4fs
@@ -87,7 +104,8 @@ def main():
     topology = PDBFile(system_pdb_file).topology
     
     system = load_system(f"{eq_root}/equilibration/system_equil_{sys_name}.xml")
-    checkpoint = f"{eq_root}/equilibration/checkpoint_equil_{sys_name}.chk"
+    # portable state XML: a .chk only loads on the same GPU model and platform
+    state_xml = f"{eq_root}/equilibration/checkpoint_equil_{sys_name}.xml"
 
     vanilla_md = VanillaMD(
         system=system,
@@ -99,15 +117,20 @@ def main():
         out_dir=f"{sys_name}/MD"
         )
     
-    system = vanilla_md.run(
-                            checkpoint_file=checkpoint,
+    vanilla_md.run(
+                            state_file=state_xml,
                             pdb_file=None, 
                             run_id=run_id,
-                            MD_time=MD_TIME,
+                            MD_time=args.time_ns,
                             restart_velocities=RESTART_VELOCITIES
                             )
 
     traj_fname = f"{sys_name}/MD/MD_{run_id}.dcd"
+
+    # Closest approach to a periodic image; needs the raw trajectory (superposition breaks the box)
+    u_raw = mda.Universe(system_pdb_file, traj_fname)
+    periodic_image_report(u_raw, system, ligand_sel=f"resname {lig_resname}" if lig_resname else None
+                          ).to_csv(f"{sys_name}/MD/{run_id}_image_distances.csv", index=False)
 
     # Wrap, centre and superpose on the protein backbone -> MD_<run_id>_aligned.dcd
     aligned_traj = wrap_align_save_traj(traj_fname, system_pdb_file)[0]
@@ -122,7 +145,12 @@ def main():
                            plots_outdir=f"{sys_name}/MD", suffix=run_id)
     rmsd_df.to_csv(f"{sys_name}/MD/{run_id}_rmsd.csv", index=False)
 
-    if lig_resname is not None:
+    MIN_FRAMES = 10
+    if lig_resname is not None and len(u.trajectory) < MIN_FRAMES:
+        # RMSF over one or two frames is ~0 and would read as a perfectly stable pose
+        logger.warning(f"Only {len(u.trajectory)} frames: skipping RMSF/cw-RMSF "
+                       f"(need {MIN_FRAMES}; increase --time_ns or lower SAVE_FREQ).")
+    elif lig_resname is not None:
         # Ligand per-atom RMSF / pocket-contact frequency and contact-weighted RMSF
         # (polar N/O/S, non-polar C/halogens, all heavy atoms; NaN if a set never contacts the pocket)
         lig_sel = f"resname {lig_resname}"

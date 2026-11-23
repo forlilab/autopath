@@ -6,7 +6,8 @@ are available; which one ranks best is target dependent.
 
 Usage
 -----
-    python orchestrator_mmgbsa.py [--gb OBC2 GBn2] [--persistent_waters 0.9]
+    python orchestrator_mmgbsa.py [--gb OBC2 GBn2] [--persistent_waters 0.9] [--resname UNK]
+                                  [--slurm_template mmgbsa_slurm_template.q]
     bash run_mmgbsa_batch.sh
 """
 import argparse
@@ -29,6 +30,11 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--eq_root", default="../01_Build_and_Equilibrate",
                     help="directory holding one <sys>/ folder per equilibrated system")
+    ap.add_argument("--resname", default="UNK", help="ligand residue name (as in 01_Build_and_Equilibrate)")
+    ap.add_argument("--slurm_template", default=None,
+                    help="SLURM template (modules, env activation; default: bundled)")
+    ap.add_argument("--partition", default="forli,forli-pro,shared,highmem,gpu", help="SLURM partition(s)")
+    ap.add_argument("--time", default="1-0", help="SLURM wall-time limit")
     ap.add_argument("--gb", nargs="+", default=list(GB_MODELS), choices=list(GB_MODELS),
                     help="GB models to run (default: all four)")
     ap.add_argument("--persistent_waters", type=float, default=None,
@@ -36,7 +42,8 @@ def main():
                          "(default: strip all waters, as in the paper)")
     args = ap.parse_args()
 
-    trajectories = sorted(glob(f"{args.eq_root}/*/equilibration/equilibration_*_aligned.dcd"))
+    eq_root = os.path.abspath(args.eq_root)
+    trajectories = sorted(glob(f"{eq_root}/*/equilibration/equilibration_*_aligned.dcd"))
     print(f"Found {len(trajectories)} systems to process.")
     template = open(TEMPLATE).read()
 
@@ -52,12 +59,16 @@ def main():
             print(f"Processing system: {sysname} ({gb}: igb={igb}, {radii})")
             ProteinLigandAnalyzer.prepare_mmgbsa_batch(
                 f"{sysname}_{gb}",  # job/qfile name, unique per model
-                f"{args.eq_root}/{sysname}/system.prmtop",
+                f"{eq_root}/{sysname}/system.prmtop",
                 trajectory,
-                output_folder=f"{sysname}/{experiment}",
+                ligand_amber_selection=f":{args.resname}",
+                ligand_mda_selection=f"resname {args.resname}",
+                output_folder=os.path.abspath(f"{sysname}/{experiment}"),  # job does cd into it
                 mmpbsa_in=mmpbsa_in,
                 radii=radii,
-                slurm_template_fname=None,  # bundled template; or 'mmgbsa_slurm_template.q'
+                slurm_template_fname=args.slurm_template,
+                partition=args.partition,
+                time=args.time,
                 persistent_waters_cutoff=args.persistent_waters,
                 # traj_slice=(start, end, step),  # 1-based MMPBSA frames; default: all
                 # mpi_threads=64,
