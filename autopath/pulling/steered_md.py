@@ -5,7 +5,7 @@ import zlib
 import logging
 from glob import glob
 from copy import deepcopy
-from collections import deque
+from collections import Counter, defaultdict, deque
 import numpy as np
 from datetime import datetime
 
@@ -21,6 +21,15 @@ import openmm.unit as openmmunit
 import cvpack
 import logging
 logger = logging.getLogger(__name__)
+
+STOP_LABELS = {"autostop": "autostop", "pbc_guard": "PBC guard stop",
+               "end": "reached end", "r0_reached": "r0 reached 0"}
+
+
+def pull_summary(run_id, reason, move, n_moves, disp_nm, minutes):
+    """One-line summary of a finished pull."""
+    return (f"[{run_id}] {STOP_LABELS[reason]} at move {move}/{n_moves}, "
+            f"displacement {disp_nm:.3f} nm, {minutes:.1f} min")
 
 
 
@@ -195,6 +204,8 @@ class SteeredMD:
                 f"Consider a stiffer spring or smaller dx_per_move."
             )
 
+        self.stop_counts = defaultdict(Counter)  # speed -> Counter of stop reasons
+        self.capped_moves = {}  # speed -> capped move count
         self._params_logged_speeds: set = set()  # track which speeds already had the banner logged
         return None
 
@@ -269,13 +280,13 @@ class SteeredMD:
                 f"COM distance {r_geom_nm:.3f} nm differs from cvpack COM distance "
                 f"{r_start_nm:.3f} nm at t=0; the pull CV is not measuring the groups it should."
             )
-        logger.info(f"Spring start lambda0: {initial_r0}; COM distance at pull start: {r_start}")
         simulation.context.setParameter("r0_smd", initial_r0)
 
         # ── Move count cap: r0 + offset ────────────────────────────────────────
         # The CVs use pbc=False on continuous coordinates, so the distance is valid at any
         # separation; the box is protected by the periodic-image guard in the loop.
         initial_r0_nm = initial_r0.value_in_unit(openmmunit.nanometers)
+        logger.debug(f"[{run_id}] Spring start lambda0: {initial_r0_nm:.3f} nm; COM distance at pull start: {r_start_nm:.3f} nm")
         dx_nm = float(self.dx_per_move.value_in_unit(openmmunit.nanometers))
         n_moves = self.sMD_moves
         _image_guard = direction == "forward"
@@ -283,8 +294,9 @@ class SteeredMD:
         if direction == "forward" and self.sMD_max_r_offset > 0:
             moves_safe = max(1, int(self.sMD_max_r_offset / dx_nm))
             if n_moves > moves_safe:
-                logger.warning(
-                    f"Capping sMD_moves {n_moves} → {moves_safe}: planned r_end="
+                self.capped_moves[self._requested_speed] = moves_safe
+                logger.debug(
+                    f"[{run_id}] Capping sMD_moves {n_moves} → {moves_safe}: planned r_end="
                     f"{initial_r0_nm + n_moves * dx_nm:.3f} nm exceeds r0+{self.sMD_max_r_offset:.1f}nm offset "
                     f"limit ({r_start_nm + self.sMD_max_r_offset:.3f} nm)."
                 )
@@ -307,13 +319,14 @@ class SteeredMD:
         if self.autostop_nc is not None and self.subset_protein_CA is not None:
             pos_nm_init = simulation.context.getState(getPositions=True).getPositions(asNumpy=True) / openmmunit.nanometers
             _nc_initial = self._compute_nc(pos_nm_init)
-            logger.info(
-                f"NC initial: {_nc_initial:.2f}; "
+            logger.debug(
+                f"[{run_id}] NC initial: {_nc_initial:.2f}; "
                 f"stop threshold: {self.autostop_nc * _nc_initial:.2f} "
                 f"({self.autostop_nc:.0%} × NC_initial, window={self.autostop_nc_window})"
             )
 
         _buf: list[str] = []
+        _stop = None  # (reason, move, n_moves, disp_nm)
 
         # ── Inline geom-feature sidecar (opt-in) ───────────────────────────────
         # Sampled at the same save_freq cadence as NC / DCD frames. Pocket-
@@ -366,7 +379,7 @@ class SteeredMD:
                 if direction == "backward":
                     r_target = initial_r0 - (i + 1) * self.dx_per_move
                     if r_target.value_in_unit(openmmunit.nanometers) <= 0.0:
-                        logger.warning(f"Stopping backward pulling: r_target reached 0 at move {i}.")
+                        _stop = ("r0_reached", i, n_moves, i * dx_nm)
                         break
                 else:
                     r_target = initial_r0 + (i + 1) * self.dx_per_move
@@ -438,7 +451,8 @@ class SteeredMD:
                     _buf.append(_row)
                     f.write(''.join(_buf))
                     _buf.clear()
-                    logger.warning(f"[PBC guard] Stopping at move {i}: {pbc_stop} "
+                    _stop = ("pbc_guard", i + 1, n_moves, (i + 1) * dx_nm)
+                    logger.warning(f"[{run_id}] [PBC guard] Stopping at move {i}: {pbc_stop} "
                                    f"(displacement={(i + 1) * dx_nm:.3f} nm).")
                     break
 
@@ -455,8 +469,9 @@ class SteeredMD:
                         _buf.append(_row)
                         f.write(''.join(_buf))
                         _buf.clear()
-                        logger.warning(
-                            f"[Autostop/NC] Stopping at move {i}: NC={nc:.2f} "
+                        _stop = ("autostop", i + 1, n_moves, current_displacement_nm)
+                        logger.debug(
+                            f"[{run_id}] [Autostop/NC] Stopping at move {i}: NC={nc:.2f} "
                             f"< {self.autostop_nc:.0%} × NC_initial={_nc_initial:.2f} "
                             f"for {self.autostop_nc_window} consecutive samples "
                             f"(displacement={current_displacement_nm:.3f} nm"
@@ -482,6 +497,7 @@ class SteeredMD:
             if _buf:
                 f.write(''.join(_buf))
         os.replace(dat_path + ".part", dat_path)
+        self._last_stop = _stop or ("end", n_moves, n_moves, n_moves * dx_nm)
 
         if geom_fh is not None:
             if geom_buf:
@@ -618,16 +634,13 @@ class SteeredMD:
 
         ########################################################################################
         if pulling_speed not in self._params_logged_speeds:
-            logger.info("#"*80)
-            logger.info(f"Steered MD parameters (speed={pulling_speed} nm/ps):")
-            logger.info(f"Pulling direction: {pulling_direction}")
-            logger.info(f"Pulling speed: {pulling_speed} nm/ps (realized: {realized_speed:.5g} nm/ps)")
-            logger.info(f"dx_per_move: {dx_nm:.4f} nm")
-            logger.info(f"steps_per_move: {self.steps_per_move} steps")
-            logger.info(f"Time per move: {self.steps_per_move * dt_ps:.3f} ps")
-            logger.info(f"Max displacement: {self.max_displacement:.3f} nm, total sMD moves: {self.sMD_moves}")
-            logger.info(f'Saving DCD every {self.dcd_every*self.steps_per_move} steps')
-            logger.info("#"*80)
+            logger.info(
+                f"sMD v={pulling_speed:g} nm/ps: realized {realized_speed:.5g} nm/ps, "
+                f"{self.steps_per_move} steps/move ({self.steps_per_move * dt_ps:.3f} ps), "
+                f"dx {dx_nm:.4f} nm, max {self.sMD_moves} moves, "
+                f"DCD every {self.dcd_every*self.steps_per_move} steps"
+                + (f", direction {pulling_direction}" if pulling_direction != "forward" else "")
+            )
             self._params_logged_speeds.add(pulling_speed)
         ########################################################################################
         
@@ -637,7 +650,7 @@ class SteeredMD:
         vel_seed = () if run_seed is None else (run_seed,)
         if run_seed is not None:
             integrator.setRandomNumberSeed(run_seed)  # before the Context exists
-            logger.info(f"sMD_{run_id}: random seed {run_seed}")
+            logger.debug(f"[{run_id}] random seed {run_seed}")
 
         system = deepcopy(self.system)  # Create a copy of the system to avoid modifying the original
         simulation = Simulation(self.topology, system, integrator, self.platform)
@@ -649,7 +662,7 @@ class SteeredMD:
             # unlike the binary .chk, this isn't tied to the Platform/GPU that
             # created it, so it loads safely on any node. Prefer this over
             # checkpoint_file when both are given.
-            logger.info(f"Setting state from portable XML state file {state_xml_file}")
+            logger.debug(f"[{run_id}] Setting state from portable XML state file {state_xml_file}")
             with open(state_xml_file) as f:
                 state = XmlSerializer.deserialize(f.read())
             # Restore positions/velocities/box only — not state.getParameters():
@@ -664,14 +677,14 @@ class SteeredMD:
             logger.error("Either pdb_file, checkpoint_file, or state_xml_file must be provided to set initial positions.")
             exit(1)
         elif checkpoint_file is None and pdb_file is not None:
-            logger.info(f"Setting positions from PDB file {pdb_file}")
+            logger.debug(f"[{run_id}] Setting positions from PDB file {pdb_file}")
             pdb = PDBFile(pdb_file)
             simulation.context.setPositions(pdb.getPositions())
             simulation.context.setPeriodicBoxVectors(*pdb.topology.getPeriodicBoxVectors())
             simulation.context.setVelocitiesToTemperature(self.temperature, *vel_seed)
 
         elif checkpoint_file is not None and pdb_file is None:
-            logger.info(f"Setting positions from checkpoint {checkpoint_file}")
+            logger.debug(f"[{run_id}] Setting positions from checkpoint {checkpoint_file}")
             simulation.loadCheckpoint(checkpoint_file)
             simulation.integrator = integrator  # Replace the integrator with the new one
         else:
@@ -781,7 +794,9 @@ class SteeredMD:
 
         # Logging the total time for all replicas
         simulation_time = time.monotonic() - simulation_start_time
-        logger.info(f"Finished {pulling_direction} sMD simulation in {simulation_time/60:.2f} min.")
+        reason = self._last_stop[0]
+        logger.info(pull_summary(run_id, *self._last_stop, simulation_time / 60))
+        self.stop_counts[self._requested_speed][reason] += 1
 
         return run_id
 
