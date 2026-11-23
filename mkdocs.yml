@@ -1,0 +1,76 @@
+site_name: AutoPath
+site_description: Protein-ligand system building, MD, steered-MD unbinding and end-point free energies on OpenMM
+site_url: https://forlilab.github.io/autopath/
+repo_url: https://github.com/forlilab/autopath
+repo_name: forlilab/autopath
+edit_uri: edit/develop/docs/
+copyright: Copyright &copy; 2026 Forli Lab, Scripps Research
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - search.highlight
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      toggle: {icon: material/weather-night, name: Dark mode}
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      toggle: {icon: material/weather-sunny, name: Light mode}
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc: {permalink: true}
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.arithmatex: {generic: true}
+
+extra_javascript:
+  - https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [.]
+          options:
+            docstring_style: numpy
+            preload_modules: [openmm]   # resolves the `from openmm import *` aliases
+            show_source: false
+            show_root_heading: true
+            show_signature_annotations: true
+            separate_signature: true
+            members_order: source
+            filters: ["!^_"]
+
+nav:
+  - Home: index.md
+  - Installation: install.md
+  - User guide:
+      - Workflow overview: guide/overview.md
+      - Build a system: guide/build.md
+      - Equilibrate: guide/equilibrate.md
+      - Conventional MD: guide/md.md
+      - Analyse MD: guide/md-analysis.md
+      - Steered MD pulls: guide/pulling.md
+      - Analyse pulls: guide/pulling-analysis.md
+      - MM-GBSA / MM-PBSA: guide/mmgbsa.md
+      - Full pipeline: guide/pipeline.md
+      - Configuration: guide/configuration.md
+      - Troubleshooting: guide/troubleshooting.md
+  - Examples: examples.md
+  - API reference:
+      - System preparation: api/preparation.md
+      - Equilibration and MD: api/simulation.md
+      - Steered MD: api/pulling.md
+      - Analysis: api/analysis.md
+      - Utilities: api/utils.md

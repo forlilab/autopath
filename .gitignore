@@ -148,3 +148,9 @@ dmypy.json
 #VSCode
 .vscode
 .claude/
+
+# superpowers plans/specs: local only
+docs/superpowers/
+
+# mkdocs build output
+site/
