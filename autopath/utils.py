@@ -8,10 +8,9 @@ logger = logging.getLogger("autopath")
 import numpy as np
 import pandas as pd
 from sys import stdout, exit
-from glob import glob
 from pathlib import Path
 
-from typing import Union, Tuple, Optional, List
+from typing import Optional, List
 from collections import defaultdict
 
 from openmm import *
@@ -25,7 +24,6 @@ import parmed
 
 import MDAnalysis as mda
 from MDAnalysis.analysis.rms import RMSD, RMSF
-from scipy.spatial.distance import cdist
 from MDAnalysis.analysis.distances import distance_array
 from MDAnalysis.lib.distances import minimize_vectors
 
@@ -75,29 +73,7 @@ def setup_logging(logfile: str = 'autopath.log',
 
     return logger
 
-def align_trajectory_pytraj(
-    prmtop_file: str = None,
-    traj_file: Union[str, list] = None,
-    stride: int = None,
-    super_mask: str = "@CA,C,N",
-    strip_mask: str = None,  #':HOH,NA,CL,K,POP'
-    out_fname: str = None,
-) -> None:
 
-    """Deprecated: trajectory processing now uses mdtraj."""
-    import pytraj as pt
-
-    ptraj = pt.iterload(traj_file, prmtop_file, stride=stride)
-    ptraj = ptraj.autoimage()
-    ptraj = ptraj.center()
-    ptraj = ptraj.superpose(ref=0, mask=super_mask)
-
-    if strip_mask is not None:
-        ptraj = ptraj.strip(strip_mask)
-        pt.save(out_fname.replace('.dcd','_dry.prmtop'), ptraj.top, overwrite=True)
-    ptraj.save(out_fname)
-
-    return
 
 
 def wrap_align_save_traj(traj_files, topology, remove_original=True, is_membrane=False,
@@ -185,7 +161,6 @@ from autopath.pdb_preprocessor import (
     fetch_smiles,
     get_scrubbed_smile,
     fetch_pdb,
-    get_ligand_name,
     save_receptor_and_ligand_from_pdb,
     save_receptor_and_ligand_from_openmm,
     assign_bondOrders,
@@ -942,80 +917,10 @@ def get_ligand_anchor_atoms(
     return anchor
 
 
-def get_protein_ha(topology: app.Topology, lig_name: str = "UNK") -> Tuple[list, list]:
-    """Return the indices and names of all non-hydrogen protein heavy atoms.
-
-    Solvent molecules (HOH, WAT), ions (K, CL, NA), membrane lipids (POP),
-    and the ligand residue are excluded.
-
-    Parameters
-    ----------
-    topology : app.Topology
-        OpenMM topology of the full system.
-    lig_name : str
-        Residue name of the small-molecule ligand to exclude (default ``"UNK"``).
-
-    Returns
-    -------
-    protein_ha_idx : list of int
-        Atom indices for all protein heavy atoms.
-    protein_ha_name : list of str
-        Corresponding atom names.
-    """
-    ATOMSET = set(("HOH", "WAT", "POP", "K", "CL", "NA", lig_name))
-
-    protein_ha_idx = []
-    protein_ha_name = []
-
-    for atom in topology.atoms():
-        if atom.residue.name not in ATOMSET:
-            if not atom.name.startswith("H"):
-                protein_ha_idx.append(atom.index)
-                protein_ha_name.append(atom.name)
-
-    return protein_ha_idx, protein_ha_name
 
 
-def get_ligand_ha(topology: app.Topology, lig_name: str = "UNK") -> Tuple[list, list]:
-    """get indices and names for all non-hydrogen ligand atoms"""
-
-    residues = topology.residues()
-    lig_ha_idx = []
-    lig_ha_names = []
-    for r in residues:
-        if r.name == lig_name:
-            lig_ha_names = [a.name for a in r.atoms() if not a.name.startswith("H")]
-            lig_ha_idx = [a.index for a in r.atoms() if not a.name.startswith("H")]
-
-    return lig_ha_idx, lig_ha_names
 
 
-def get_pocket_ha(topology: app.Topology, pocket_resid: list[int] = None) -> list:
-    """Return the indices of all non-hydrogen pocket atoms.
-
-    Parameters
-    ----------
-    topology : app.Topology
-        OpenMM topology of the full system.
-    pocket_resid : list of int
-        Zero-based residue indices (``residue.index``) that define the pocket.
-
-    Returns
-    -------
-    list of int
-        Atom indices for every heavy atom belonging to the specified pocket
-        residues.
-    """
-    residues = topology.residues()
-    pocket_ha_idx = []
-
-    for r in residues:
-        if r.index in pocket_resid:
-            logger.debug(f"match for {r.index} {r.name} {r.id}")
-            res_ha_idx = [a.index for a in r.atoms() if not a.name.startswith("H")]
-            pocket_ha_idx.extend(res_ha_idx)
-
-    return pocket_ha_idx
 
 def get_center(positions, atoms, group, weighByMass):
     """Return the center of mass (COM) or center of geometry (COG) for a group of atoms.
@@ -1088,41 +993,6 @@ def get_COM_dist(simulation,
     return dist
 
 
-def calculate_com_distance(u, ligand_atoms=None, pocket_atoms=None, weighByMass: bool = True, wrap: bool = True) -> np.ndarray:
-    """Calculate the COM (or COG) distance between two atom groups over a trajectory.
-
-    Parameters
-    ----------
-    u : mda.Universe
-        MDAnalysis Universe with trajectory loaded.
-    ligand_atoms : mda.AtomGroup
-        Atom group for the ligand.
-    pocket_atoms : mda.AtomGroup
-        Atom group for the pocket (or any reference group).
-    weighByMass : bool
-        If True, use center of mass; if False, use center of geometry.
-    wrap : bool
-        Passed to MDAnalysis ``center_of_mass``/``center_of_geometry``; wraps
-        atoms into the primary unit cell before computing the center.
-
-    Returns
-    -------
-    np.ndarray
-        1D array of distances in Angstroms (MDAnalysis native units),
-        one value per trajectory frame.
-    """
-    distances = []
-    for ts in u.trajectory:
-        if weighByMass:
-            lig_com = ligand_atoms.center_of_mass(wrap=wrap)
-            prot_com = pocket_atoms.center_of_mass(wrap=wrap)
-        else:
-            lig_com = ligand_atoms.center_of_geometry(wrap=wrap)
-            prot_com = pocket_atoms.center_of_geometry(wrap=wrap)
-
-        distances.append(np.linalg.norm(prot_com - lig_com))
-
-    return np.array(distances)
 
 def compute_rmsd(u,
                 u_ref,
@@ -1190,66 +1060,6 @@ def compute_rmsd(u,
     return rmsd_df
 
 
-
-def find_closest_points(
-    out_dir, x_min, x_max, x_grid_points, x_name, 
-    y_min, y_max, y_grid_points, y_name, ref_point, num_neighbors=5
-):
-    """
-    This function finds the closest grid points in the heatmap data to a given reference point.
-    
-    Parameters:
-    - out_dir: Directory containing the heatmap .npy files.
-    - x_min, x_max: Min and max values of the x axis in the plot.
-    - x_grid_points: Number of grid points along the x axis.
-    - x_name: Label name for the x axis.
-    - y_min, y_max: Min and max values of the y axis in the plot.
-    - y_grid_points: Number of grid points along the y axis.
-    - y_name: Label name for the y axis.
-    - ref_point: The reference point on the plot (x_ref, y_ref) whose neighbors you want to find.
-    - num_neighbors: Number of closest points to retrieve.
-    
-    Returns:
-    A DataFrame of the closest points and their coordinates (x, y) in plot units.
-    """
-    
-    # Extract system name from directory
-    sys_name = out_dir.split("/")[0]
-
-    # Generate the x and y axis values (matching the plot)
-    x_values = np.linspace(x_min, x_max, x_grid_points)
-    y_values = np.linspace(y_min, y_max, y_grid_points)
-
-    # Load the first FE data file (assuming there's one file per walker)
-    file_fe = glob(f"{out_dir}/FE_*.npy")[0]
-    np_data = np.load(file_fe)
-    np_data = np_data * 0.239006  # Convert from KJ to Kcal
-
-    # Reshape np_data into a list of points with (x, y) coordinates
-    grid_x, grid_y = np.meshgrid(x_values, y_values)
-    grid_points = np.column_stack((grid_x.ravel(), grid_y.ravel()))
-    
-    # Reference point provided in plot axis units
-    ref_point = np.array([ref_point])  # Ensure it's in the correct shape for cdist
-
-    # Use scipy to calculate the Euclidean distance from each grid point to the reference point
-    distances = cdist(grid_points, ref_point, metric='euclidean').ravel()
-
-    # Find the indices of the closest points
-    closest_indices = np.argsort(distances)[:num_neighbors]
-
-    # Retrieve the closest points in grid coordinates and their corresponding values in np_data
-    closest_points = grid_points[closest_indices]
-    closest_values = np_data.ravel()[closest_indices]
-
-    # Prepare a DataFrame with the results
-    closest_df = pd.DataFrame({
-        'x_value': closest_points[:, 0],
-        'y_value': closest_points[:, 1],
-        'FE_value': closest_values
-    })
-    
-    return closest_df
 
 
 def write_pocket_pymol(
