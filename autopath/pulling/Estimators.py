@@ -1376,6 +1376,7 @@ class KramersEstimator:
         plateau_frac: float = 0.3,
         bound_extension: str = "none",
         friction_source_work: str = "auto",
+        warn: bool = True,
     ) -> pd.DataFrame:
         """Run Kramers MFPT for every dG estimator present in *mixture_pmfs*.
 
@@ -1525,7 +1526,7 @@ class KramersEstimator:
                 try:
                     res = self.kramers_mfpt(
                         profile, _start_r, _abs_r, reflect_r, self.kBT, self.gamma_floor,
-                        bound_extension=bound_extension,
+                        bound_extension=bound_extension, warn_clipped=warn,
                     )
                 except (RuntimeError, ValueError) as exc:
                     logger.warning(
@@ -1534,7 +1535,7 @@ class KramersEstimator:
                     )
                     continue
 
-                if res["barrier_kjmol"] > self.barrier_warn_kjmol:
+                if warn and res["barrier_kjmol"] > self.barrier_warn_kjmol:
                     logger.warning(
                         f"[Kramers] Large barrier detected: {res['barrier_kjmol']:.1f} kJ/mol "
                         f"(estimator={est_name}, source={source}, speed={speed}). "
@@ -1600,6 +1601,7 @@ class KramersEstimator:
         realized_speed_map: dict | None = None,
         boundary_method: str = "pmf_peak",
         bound_extension: str = "none",
+        warn: bool = True,
     ) -> pd.DataFrame:
         """Compute Kramers k_off for each (estimator, speed, path) independently.
 
@@ -1713,12 +1715,12 @@ class KramersEstimator:
                 "n_gamma_points":  int(res["n_gamma_points"]),
             })
 
-        for (est_name, speed), (n_c, n_p, n_paths) in clipped.items():
+        for (est_name, speed), (n_c, n_p, n_paths) in (clipped.items() if warn else ()):
             logger.warning(
                 f"[Kramers/per-path] clipped {n_c}/{n_p} Γ values to floor={self.gamma_floor} "
                 f"in {n_paths} path(s) (estimator={est_name}, speed={speed})"
             )
-        for (est_name, speed), bars in large_barriers.items():
+        for (est_name, speed), bars in (large_barriers.items() if warn else ()):
             logger.warning(
                 f"[Kramers/per-path] Large barrier: max {max(bars):.1f} kJ/mol, "
                 f"{len(bars)} path(s) above {self.barrier_warn_kjmol:.0f} kJ/mol "

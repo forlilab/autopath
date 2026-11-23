@@ -947,7 +947,7 @@ class SMDData:
 
         p_neq_dic = {}
         for speed, g in grouping_iter:
-            logger.info(f"Speed {speed} nm/ps has {g['path'].nunique()} unique paths.")
+            logger.debug(f"Speed {speed} nm/ps has {g['path'].nunique()} unique paths.")
             path_traj_counts = g.groupby('path')['trajname'].nunique().to_dict()
             speed_key = speed if byspeed else "all_speeds"
             p_neq_dic[speed_key] = SMDData._compute_p_neq(path_traj_counts)

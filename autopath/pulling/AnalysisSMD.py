@@ -45,6 +45,35 @@ from autopath.pulling.support import SupportPolicy
 
 logger = logging.getLogger(__name__)
 
+
+def kramers_warning(est, mix_df, path_df, thr, floor):
+    """One summary warning for estimator *est*, or None if nothing to flag.
+
+    Built from the koff_kramers / koff_per_path frames; *path_df* may be None.
+    """
+    m = mix_df[mix_df["estimator"] == est] if mix_df is not None and not mix_df.empty else None
+    pp = None
+    if path_df is not None and not path_df.empty:
+        pp = path_df[(path_df["estimator"] == est) & (path_df["source"] == "per_path")]
+    frames = [f for f in (m, pp) if f is not None and not f.empty]
+    if not frames:
+        return None
+    allr = pd.concat(frames, ignore_index=True)
+    big = int((m["barrier_kjmol"] > thr).sum()) if m is not None else 0
+    pbig = int((pp["barrier_kjmol"] > thr).sum()) if pp is not None else 0
+    fr = (allr["n_gamma_clipped"] / allr["n_gamma_points"])[allr["n_gamma_clipped"] > 0]
+    if not (big or pbig or len(fr)):
+        return None
+    msg = f"[Kramers] {est}: barrier {allr['barrier_kjmol'].min():.1f}-{allr['barrier_kjmol'].max():.1f} kJ/mol"
+    if m is not None:
+        msg += f", {big}/{len(m)} rows"
+    if pp is not None:
+        msg += f"{' and' if m is not None else ','} {pbig}/{len(pp)} paths"
+    msg += f" above {thr:.0f} kJ/mol (likely sampling-limited)"
+    if len(fr):
+        msg += f"; Γ clipped to floor={floor} at {fr.min():.0%}-{fr.max():.0%} of points"
+    return msg
+
 # Trace features available on SMDData.raw_data ('NC' excluded: forward-pull only).
 TRACE_FEATURE_POOL = frozenset({
     "lag", "work",
@@ -659,7 +688,7 @@ class SMDAnalysis:
                         _lam_end = float(_fv0['dG'].iloc[-1] - _fv0['dG'].iloc[0])
                     logger.info(f"[meanforce_ti] k={_ti_diag['k']:.1f} | dG_z endpoint="
                                 f"{_ti_diag['dG_z_endpoint']:.0f} kJ/mol | dG_lambda endpoint="
-                                f"{_lam_end} | z-divergence median/max="
+                                f"{_lam_end if _lam_end is None else round(_lam_end, 1)} | z-divergence median/max="
                                 f"{_ti_diag['z_divergence_nm_median']*1e3:.1f}/"
                                 f"{_ti_diag['z_divergence_nm_max']*1e3:.1f} pm | "
                                 f"fell_back_paths={_ti_diag['fell_back_paths']}")
@@ -669,6 +698,7 @@ class SMDAnalysis:
         # --- Kramers / Pontryagin MFPT k_off ---
         _dG_v0 = weighted_pmf_v0.get('dG')   # v→0 extrapolated PMF (None if single speed)
         _kramers = KramersEstimator(temperature=self.temperature)
+        _koff_df = _koff_per_path = None
         try:
             _koff_df = _kramers.compute(
                 mixture_pmfs=self.mixture_pmfs,
@@ -679,6 +709,7 @@ class SMDAnalysis:
                 plateau_frac=plateau_frac,
                 bound_extension=kramers_bound,
                 friction_source_work=self.friction_source_work,
+                warn=False,
             )
             if not _koff_df.empty:
                 _koff_df.to_csv(os.path.join(self.outdir, 'koff_kramers.csv'), index=False)
@@ -696,6 +727,7 @@ class SMDAnalysis:
                 realized_speed_map=sMDDdata.realized_speed_map,
                 boundary_method="end" if kramers_abs == "end" else "pmf_peak",
                 bound_extension=kramers_bound,
+                warn=False,
             )
             if not _koff_per_path.empty:
                 _koff_per_path.to_csv(
@@ -704,6 +736,16 @@ class SMDAnalysis:
                 logger.info(f"[Kramers/per-path] koff_per_path.csv written ({len(_koff_per_path)} rows)")
         except Exception as _exc:
             logger.warning(f"[Kramers/per-path] skipped: {_exc}")
+
+        _ests = set()
+        for _d in (_koff_df, _koff_per_path):
+            if _d is not None and not _d.empty:
+                _ests |= set(_d["estimator"])
+        for _est in sorted(_ests):
+            _msg = kramers_warning(_est, _koff_df, _koff_per_path,
+                                   _kramers.barrier_warn_kjmol, _kramers.gamma_floor)
+            if _msg:
+                logger.warning(_msg)
 
         # Rebuild the unbinding-paths PSE now that friction.csv exists.
         if hasattr(self.path_model, 'medoid_to_path') and self.path_model.medoid_to_path:
