@@ -1515,7 +1515,7 @@ class KramersEstimator:
                         )
                         _abs_r = r_ts
                     else:
-                        logger.info(
+                        logger.warning(
                             f"[Kramers] No PMF peak found for estimator='{est_name}', "
                             f"speed={speed}; using r_coord.max() as abs_r."
                         )
