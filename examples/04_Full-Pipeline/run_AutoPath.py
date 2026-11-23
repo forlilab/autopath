@@ -1,5 +1,6 @@
 import os
 import argparse
+from importlib.resources import files
 
 import pandas as pd
 import MDAnalysis as mda
@@ -18,9 +19,16 @@ def cmd_lineparser():
                              Scripps Research.""",
     )
     parser.add_argument("-r", "--rec", dest="rec", required=True, help="path to the receptor PDB file")
-    parser.add_argument("-l", "--lig", dest="lig", required=True, help="path to the ligand SDF file")
-    parser.add_argument("-p", "--protocol", dest="protocol", required=True,
-                        help="path to the JSON file with the equilibration protocol")
+    parser.add_argument("-l", "--lig", dest="lig", required=True,
+                        help="path to the ligand SDF file (its stem names the system and output folder)")
+    parser.add_argument("-p", "--protocol", dest="protocol",
+                        default=str(files("autopath") / "data" / "eq_lig-prot_5ns_4fs.json"),
+                        help="path to the JSON file with the equilibration protocol (default: packaged "
+                             "eq_lig-prot_5ns_4fs.json; for membranes use eq_lig-prot-memb_10ns_4fs.json "
+                             "from the same folder)")
+    parser.add_argument("--pocket_resids", type=int, nargs="+", default=None,
+                        help="pocket residue numbers of the ORIGINAL receptor PDB, used for the pulling CV "
+                             "(default: protein CA atoms within 8 A of the ligand)")
     parser.add_argument("--max_polar_cwrmsf", type=float, default=None,
                         help="skip pulling if the free-window polar cw-RMSF (A) exceeds this value "
                              "(default: no filter, the score is only reported)")
@@ -36,12 +44,9 @@ def main():
 
     # Settings shared by both phases (defaults of the AutoPath paper)
     settings = dict(
-        # Pocket for the pulling CV: CA atoms of the beta-sheet core around the S1 site, as
-        # residue numbers of the ORIGINAL receptor PDB (translated to system numbering).
+        # Residue numbers of the ORIGINAL receptor PDB (translated to system numbering).
         # None = protein CA atoms within 8 A of the ligand heavy atoms.
-        pocket_selection=[133, 134, 135, 136, 137, 138, 139, 140, 156, 157, 158, 159, 160, 161, 162,
-                          180, 181, 182, 183, 196, 197, 198, 199, 200, 201, 204, 205, 206, 207, 208,
-                          209, 210, 211, 212, 213, 214, 215, 226, 227, 228, 229, 230],
+        pocket_selection=args.pocket_resids,
 
         # System preparation
         padding=1.2,              # nm
@@ -74,6 +79,7 @@ def main():
         sMD_path_model="dtw",
         cluster_across_speeds=True,
 
+        extract_milestones=False,
     )
 
     # Phase 1: prepare and equilibrate (also writes RMSD, per-atom RMSF and contact frequency)
@@ -81,6 +87,7 @@ def main():
              run_preparation=True, run_equilibration=True,
              run_sMDpulling=False, sMD_run_analysis=False, **settings).run(ligand_file=ligand)
 
+    # Preparation names the single ligand residue UNK, whatever the input file says
     # Early filter: contact-weighted RMSF of the ligand over the equilibration
     eq = f"{sys_name}/equilibration"
     u = mda.Universe(f"{sys_name}/system.pdb", f"{eq}/equilibration_{sys_name}_aligned.dcd", in_memory=True)

@@ -665,7 +665,7 @@ class ProteinLigandAnalyzer:
                     lig_selection: str = None,
                     strip_selection: str = ":POP:WAT:Na+:Cl-:Mg+:K+:HOH:NA:CL:K:MG",
                     radii: str = 'mbondi2',
-                    time: str = "0:10:00",
+                    time: str = "1-0",
                     omp_threads: int = 222,
                     partition: str = "forli,forli-pro,shared,highmem,gpu",
                     slurm_template_fname: str = None,
@@ -721,6 +721,8 @@ class ProteinLigandAnalyzer:
             bash_fname:str="run_mmgbsa_batch.sh",
             mpi_threads:int=222,
             slurm_template_fname: str = None,
+            partition: str = "forli,forli-pro,shared,highmem,gpu",
+            time: str = "1-0",
             ):
         """Prepare a per-system MMPBSA SLURM qfile and a master batch script.
 
@@ -762,6 +764,10 @@ class ProteinLigandAnalyzer:
             Maximum number of MPI threads. Capped at the number of frames.
         slurm_template_fname : str or None
             Path to a custom SLURM template. Defaults to the bundled template.
+        partition : str
+            SLURM partition(s) written to the qfile.
+        time : str
+            SLURM wall-time limit written to the qfile.
 
         Returns
         -------
@@ -846,6 +852,8 @@ class ProteinLigandAnalyzer:
                                                 strip_selection=strip_amber_selection,
                                                 radii=radii,
                                                 omp_threads=mpi_threads,
+                                                partition=partition,
+                                                time=time,
                                                 slurm_template_fname=slurm_template_fname,
                                                 )
         
@@ -1542,3 +1550,25 @@ def plot_atomic_property(u, weights: np.ndarray, lig_resname: str = 'resname UNK
         drawer.WriteDrawingText(outname)
     return
 
+def plot_rmsd(rmsd_df: pd.DataFrame = None,
+              sys_name: str = None,
+              out_dir: str = None) -> None:
+    """Plot RMSD over time and save the figure.
+
+    Parameters
+    ----------
+    rmsd_df : pd.DataFrame
+        DataFrame with at least an ``rmsd`` column; the index is used as the x-axis.
+    sys_name : str
+        System name used in the plot title and output filename.
+    out_dir : str
+        Directory where the PNG is saved.
+    """
+    plt.figure(figsize=(10, 5))
+    sns.lineplot(data=rmsd_df, y="rmsd", x=rmsd_df.index)
+    plt.ylabel("RMSD (nm)");     plt.xlabel("Frame #")
+    plt.title(f"RMSD {sys_name}", fontsize=15)
+    plt.tight_layout()
+    plt.savefig(f"{out_dir}/{sys_name}_rmsd.png")
+    plt.close()
+    return

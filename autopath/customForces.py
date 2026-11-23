@@ -344,6 +344,38 @@ def add_flatbottom_XY_restraints(
 
     return None
 
+def add_membrane_center_atom(system: System, modeller: app.Modeller, k_pin: float = 1.0e6) -> int:
+    """Add the membrane-centre reference: residue DUM, one massless non-interacting particle at the origin.
+
+    ``Modeller.addMembrane`` centres the bilayer at z = 0, so DUM marks the membrane centre for
+    ``membrane_z_cv`` and anchors the cylinder restraint. It is pinned with
+    ``k_pin * periodicdistance(r, 0)^2`` (kJ/mol/nm^2). Call after ``createSystem``: the force field
+    has no DUM template, so the particle is added to ``system`` and ``modeller`` by hand.
+
+    Returns
+    -------
+    int
+        Index of the DUM particle.
+    """
+    nb = [f for f in system.getForces() if isinstance(f, NonbondedForce)]
+    if len(nb) != 1:
+        raise ValueError(f"expected one NonbondedForce, found {len(nb)}")
+    if system.getNumParticles() != modeller.topology.getNumAtoms():
+        raise ValueError("system and modeller have different atom counts")
+    dum = system.addParticle(0.0)
+    nb[0].addParticle(0.0, 0.0, 0.0)
+    top = app.Topology()
+    res = top.addResidue("DUM", top.addChain())
+    top.addAtom("DUM", app.element.sodium, res)    # an element only so that PDB/Amber writers accept the atom
+    modeller.add(top, [Vec3(0.0, 0.0, 0.0)] * openmmunit.nanometer)
+    pin = CustomExternalForce(f"{k_pin} * (periodicdistance(x, y, z, x0_dum, y0_dum, z0_dum))^2")
+    for p in ("x0_dum", "y0_dum", "z0_dum"):
+        pin.addGlobalParameter(p, 0.0)
+    pin.addParticle(dum, [])
+    system.addForce(pin)
+    return dum
+
+
 def add_cylindrical_restraints(
     system: System,
     host_index: List[int],
@@ -414,5 +446,34 @@ def add_cylindrical_restraints(
     # Add force to system
     system.addForce(cylindrical_restraint)
 
+    return
+
+
+def add_cylindrical_restraints_relative_to_origin(
+    system: System,
+    guest_index: List[int],
+    k_xy: Optional[openmmunit.Quantity] = 10.0 * openmmunit.kilocalorie_per_mole / openmmunit.angstrom**2,
+    R_cylinder: Optional[openmmunit.Quantity] = 10.0 * openmmunit.angstrom,
+    force_group: Optional[int] = 10,
+):
+    """``add_cylindrical_restraints`` about the fixed z axis through the origin instead of a host centroid.
+
+    ``U = step(r_xy - R_cylinder) * 0.5 * k_xy * (r_xy - R_cylinder)^2`` with r_xy the periodic x/y distance of
+    the guest centroid from (0, 0). One centroid group, so no host particle is bonded to the guest (a bonded
+    host makes OpenMM's barostat scale host + guest as one molecule; see membrane_z_cv_relative_to_origin).
+    """
+    force = CustomCentroidBondForce(
+        1,
+        "U_cylinder;"
+        "U_cylinder = step(r_xy - R_cylinder) * 0.5 * k_xy * (r_xy - R_cylinder)^2;"
+        "r_xy = pointdistance(x1, y1, 0, 0, 0, 0);"
+    )
+    force.setUsesPeriodicBoundaryConditions(True)
+    force.setForceGroup(force_group)
+    force.addGlobalParameter("k_xy", k_xy)
+    force.addGlobalParameter("R_cylinder", R_cylinder)
+    g = force.addGroup(guest_index, [1.0] * len(guest_index))
+    force.addBond([g], [])
+    system.addForce(force)
     return
 

@@ -46,5 +46,11 @@
         "sMD_ligand_anchor_mode": "lig_ha",
         "sMD_run_analysis": true,
         "sMD_clust_selection": null
+    },
+    "milestones": {
+        "extract_milestones": true,
+        "milestone_mode": "per_path",
+        "milestone_min_frame_separation": 0,
+        "n_milestones": 3
     }
 }

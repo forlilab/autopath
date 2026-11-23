@@ -634,9 +634,9 @@ class Equilibration:
                                         self.timestep)
         
         pdb = PDBFile(pdb_file)
-        prmtop = f"{os.path.splitext(pdb_file)[0]}.prmtop"
         initial_positions = pdb.positions
-        u = mda.Universe(prmtop)
+        # Selections on the PDB, not the prmtop: MDAnalysis cannot read CHARMM (chamber) prmtops
+        u = mda.Universe(pdb)
 
         simulation = Simulation(self.topology, self.system, integrator, self.platform)
         simulation.context.setPositions(initial_positions)

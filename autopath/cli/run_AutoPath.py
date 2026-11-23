@@ -153,6 +153,11 @@ def main():
             sMD_conv_streak=config.sMD_conv_streak,
             sMD_autostop_estimator=config.sMD_autostop_estimator,
             sMD_alternate_speeds=config.sMD_alternate_speeds,
+            # Milestones
+            extract_milestones=config.extract_milestones,
+            milestone_mode=config.milestone_mode,
+            milestone_min_frame_separation=config.milestone_min_frame_separation,
+            n_milestones=config.n_milestones,
         )
 
         for lig in ligands:

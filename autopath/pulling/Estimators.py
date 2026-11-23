@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.integrate import trapezoid as _trapezoid
 import pandas as pd
 from abc import ABC, abstractmethod
 
@@ -1132,7 +1133,7 @@ class KramersEstimator:
         if x.size < 3:
             raise ValueError("[Kramers] fewer than 3 points between start and barrier "
                              "for the bound-state extension")
-        return float(np.trapz(np.exp(-y), x))
+        return float(_trapezoid(np.exp(-y), x))
 
     @staticmethod
     def plateau_reached(r: np.ndarray, dG: np.ndarray) -> bool:
@@ -1350,7 +1351,7 @@ class KramersEstimator:
             r_int = np.concatenate((r_int, [abs_r]))
             outer_int = np.concatenate((outer_int, [float(np.interp(abs_r, rs, outer))]))
 
-        tau_ps = float(np.trapz(outer_int, r_int))
+        tau_ps = float(_trapezoid(outer_int, r_int))
 
         return {"tau_ps": tau_ps, **diag}
 

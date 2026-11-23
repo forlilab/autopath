@@ -16,7 +16,9 @@ The scripts expect:
 * `{sysname}/equilibration/equilibration_{sysname}_aligned.dcd` — aligned equilibration trajectory
 * `{sysname}/equilibration/equilibration_{sysname}.csv` and `equilibration_protocol.json` — frame times and protocol, used to locate the free window (cw-RMSF)
 
-In practice, you can apply these methods to any unbiased MD trajectory. By default every script looks for systems under `../01_Build_and_Equilibrate`; change it with `--eq_root`.
+In practice, you can apply these methods to any unbiased MD trajectory. Every script looks for systems under `../01_Build_and_Equilibrate` by default; change it with `--eq_root`. The ligand residue name defaults to `UNK`; `--resname` must match the ligand resname used in `01_Build_and_Equilibrate`.
+
+The `3ptb/` folder, when present, is reference output of the shipped example (not needed to run your own systems). The SLURM templates (`mmgbsa_slurm_template.q`, and the one embedded in `orchestrator_LIE.py`) and the bundled MM-GBSA one are cluster-specific: edit the blocks marked `EDIT FOR YOUR CLUSTER` (modules, node exclude list, environment activation). Generated jobs use absolute paths, so the batch scripts can be submitted from any directory.
 
 Note that the frames of a single 5 ns equilibration are strongly correlated: the scores below are ranking descriptors, not converged binding free energies.
 
@@ -94,10 +96,14 @@ For more information on how to set up this calculations you can check the Amber 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `--eq_root` | `../01_Build_and_Equilibrate` | Where the equilibrated systems are |
+| `--resname` | `UNK` | Ligand residue name (AMBER mask `:RES` and MDAnalysis `resname RES`) |
+| `--partition` / `--time` | `forli,...` / `1-0` | SLURM partition(s) and wall-time limit |
+| `--slurm_template` | bundled | SLURM template; use `mmgbsa_slurm_template.q` as a starting point for your cluster |
 | `--gb` | all four | GB models to run |
 | `--persistent_waters` | off | Fraction of frames a water must appear in to be retained |
 | `mpi_threads` | `222` | MPI parallelism (capped by number of trajectory frames) |
-| `slurm_template_fname` | `None` | Custom SLURM template (e.g. `mmgbsa_slurm_template.q`); uses the bundled one if `None` |
+
+Partition and time limit are set with `--partition` and `--time` (default `1-0`); `--ntasks` comes from `mpi_threads` (capped at the number of frames).
 
 ## Output Files
 
@@ -119,13 +125,13 @@ run_mmgbsa_batch.sh                    # Batch submission script
 
 ```bash
 # Step 1: prepare all queue files
-python orchestrator_mmgbsa.py
+python orchestrator_mmgbsa.py --eq_root ../01_Build_and_Equilibrate --resname UNK --slurm_template mmgbsa_slurm_template.q
 
 # Step 2: submit all jobs
 bash run_mmgbsa_batch.sh
 
 # Step 3: explore results (analysis_mmgbsa.ipynb), or paint per-residue energies on the structure
-python paint_mmgbsa.py ../01_Build_and_Equilibrate/3ptb/equilibration --mmgbsa-dir 3ptb/mmgbsa_GBn2
+python paint_mmgbsa.py ../01_Build_and_Equilibrate/3ptb/equilibration   # looks in ./3ptb/mmgbsa*; --mmgbsa-dir overrides
 ```
 
 ---
@@ -153,11 +159,13 @@ LIE (Linear Interaction Energy) estimates the binding energy by computing the va
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `-s / --sys` | *(required)* | System name (e.g. `3ptb`) |
-| `ligand_mda_selection` | `'resname UNK'` | MDAnalysis selection for the ligand |
-| `ligand_amber_selection` | `':UNK'` | AMBER mask for the ligand |
+| `--eq_root` | `../01_Build_and_Equilibrate` | Where the equilibrated systems are |
+| `--resname` | `UNK` | Ligand residue name (MDAnalysis selection and AMBER mask) |
 | `cutoff` | `6.0` Å | Distance cutoff for automatic residue selection |
 | `lie_options` | `'nopbc cutvdw 10.0 cutelec 10.0'` | pytraj LIE options |
 
+
+`orchestrator_LIE.py` takes `--eq_root`, `--resname` (both passed to `run_LIE.py`), `--partition` (default `forli,forli-pro,alphafold,shared`) and `--time` (default `1-0`).
 
 ## Output Files
 
@@ -186,5 +194,5 @@ python orchestrator_LIE.py
 bash run_LIE_batch.sh
 
 # Or run a single system interactively (no SLURM)
-python run_LIE.py -s 3ptb
+python run_LIE.py -s 3ptb --resname UNK
 ```

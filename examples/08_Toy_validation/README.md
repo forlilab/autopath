@@ -36,7 +36,7 @@ sbatch -p shared,highmem --array=1-20 --wrap 'python run_toy.py --scenario Open-
 sbatch -p shared,highmem --wrap "python run_toy.py --scenario Open-HW --steps analysis validate"
 ```
 
-or `sbatch run.q` for the small run.
+or `sbatch run.q` for the small run. Partitions in `run.q` and the `sbatch` commands are cluster-specific; edit them.
 
 # Output Files
 

@@ -6,15 +6,17 @@
 * RMSD of protein and ligand;
 * per-atom ligand RMSF and pocket-contact frequency, and the contact-weighted RMSF (cw-RMSF) over polar (N, O, S), non-polar (C, halogens) and all heavy atoms (see `01_Build_and_Equilibrate/README.md` for the definition).
 
-Settings are at the top of `main()`: `MD_TIME` (ns, default 100), `TIMESTEP` (4 fs, needs HMR), `TEMPERATURE` (300 K), `SAVE_FREQ` (steps; 25000 = 0.1 ns), `RESTART_VELOCITIES`, `RESTRAINED_ATOMS`.
+Production length is set with `--time_ns` (default 100). Other settings are at the top of `main()`: `TIMESTEP` (4 fs, needs HMR), `TEMPERATURE` (300 K), `SAVE_FREQ` (steps; 25000 = 0.1 ns), `RESTART_VELOCITIES`, `RESTRAINED_ATOMS`.
+
+Before superposition, the raw trajectory is checked for periodic-image contacts (see "Periodic images" in `03_Pull-it-out/README.md`); the run warns in the log when any frame comes inside the nonbonded cutoff.
 
 # Usage
 
 ```bash
-python ap_vanillaMD.py --sysname 3ptb --ligname UNK --replica rep1
+python ap_vanillaMD.py --sysname 3ptb --resname UNK --replica rep1 --time_ns 100
 ```
 
-`--eqdir` points to the equilibrated system (default `../01_Build_and_Equilibrate/<sysname>`). Run several `--replica` values for independent replicas from the same equilibrated state (new velocities each time).
+`--sysname` must equal the `--sysname` used in `01_Build_and_Equilibrate` (it names the equilibration files, e.g. `system_equil_<sysname>.xml`). `--eqdir` points to that run (default `../01_Build_and_Equilibrate/<sysname>`). The script stops with the name of the missing file if the contract is not met. `--resname` must match the ligand residue name used in 01; omit it for apo systems. Run several `--replica` values for independent replicas from the same equilibrated state (new velocities each time).
 
 # Output Files
 
@@ -23,6 +25,7 @@ python ap_vanillaMD.py --sysname 3ptb --ligname UNK --replica rep1
 ├── autopath.log
 └── MD/
     ├── MD_{run_id}_aligned.dcd, MD_{run_id}.csv
+    ├── {run_id}_image_distances.csv       # closest approach to periodic images (protein_self, ligand_protein; Å)
     ├── {run_id}_rmsd.csv (+ RMSD plots)
     ├── {run_id}_RMSF.csv                  # per-atom rmsf, contact_freq
     ├── {run_id}_cwRMSF.csv                # cw-RMSF (polar, non-polar, all)
@@ -30,3 +33,7 @@ python ap_vanillaMD.py --sysname 3ptb --ligname UNK --replica rep1
 ```
 
 with `run_id = <sysname>_<replica>`.
+
+# SLURM
+
+`sbatch run_vanillaMD.q` (logs go to the submit directory). The `#SBATCH` lines (partition, GPU type) and the environment activation are cluster-specific: edit the block marked `EDIT FOR YOUR CLUSTER`.
