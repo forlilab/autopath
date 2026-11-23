@@ -19,3 +19,22 @@ def test_pull_summary_labels(reason, label):
 def test_pull_summary_unknown_reason():
     with pytest.raises(KeyError):
         pull_summary("r", "nope", 1, 2, 0.1, 0.1)
+
+
+def test_run_logs_single_summary_and_counts(tmp_path, caplog):
+    import logging
+    from autopath.pulling.steered_md import SteeredMD
+    from tests.test_smd_shared_lambda0 import _two_particle_system
+
+    system, top, pdb = _two_particle_system(tmp_path)
+    smd = SteeredMD(system=system, topology=top, groupA_atoms=[0], groupB_atoms=[1],
+                    restart_velocities=True, timestep=0.002, autostop_nc=None,
+                    out_dir=str(tmp_path / "o"), platform="Reference", dx_per_move=0.001,
+                    max_displacement=0.02, sMD_spring_cte=3765.6, save_freq=5, seed=1)
+    with caplog.at_level(logging.DEBUG, logger="autopath"):
+        smd.run(pulling_speed=0.01, run_id="a", pdb_file=pdb)
+    n = smd.sMD_moves
+    info = [r.getMessage() for r in caplog.records
+            if r.levelno == logging.INFO and "] reached end at move" in r.getMessage()]
+    assert len(info) == 1 and f"reached end at move {n}/{n}," in info[0]
+    assert smd.stop_counts[0.01]["end"] == 1

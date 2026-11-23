@@ -294,7 +294,7 @@ class SteeredMD:
         if direction == "forward" and self.sMD_max_r_offset > 0:
             moves_safe = max(1, int(self.sMD_max_r_offset / dx_nm))
             if n_moves > moves_safe:
-                self.capped_moves[self._requested_speed] = moves_safe
+                self.capped_moves[getattr(self, "_requested_speed", float("nan"))] = moves_safe
                 logger.debug(
                     f"[{run_id}] Capping sMD_moves {n_moves} → {moves_safe}: planned r_end="
                     f"{initial_r0_nm + n_moves * dx_nm:.3f} nm exceeds r0+{self.sMD_max_r_offset:.1f}nm offset "
@@ -452,7 +452,7 @@ class SteeredMD:
                     f.write(''.join(_buf))
                     _buf.clear()
                     _stop = ("pbc_guard", i + 1, n_moves, (i + 1) * dx_nm)
-                    logger.warning(f"[{run_id}] [PBC guard] Stopping at move {i}: {pbc_stop} "
+                    logger.warning(f"[{run_id}] [PBC guard] Stopping at move {i + 1}: {pbc_stop} "
                                    f"(displacement={(i + 1) * dx_nm:.3f} nm).")
                     break
 
@@ -471,7 +471,7 @@ class SteeredMD:
                         _buf.clear()
                         _stop = ("autostop", i + 1, n_moves, current_displacement_nm)
                         logger.debug(
-                            f"[{run_id}] [Autostop/NC] Stopping at move {i}: NC={nc:.2f} "
+                            f"[{run_id}] [Autostop/NC] Stopping at move {i + 1}: NC={nc:.2f} "
                             f"< {self.autostop_nc:.0%} × NC_initial={_nc_initial:.2f} "
                             f"for {self.autostop_nc_window} consecutive samples "
                             f"(displacement={current_displacement_nm:.3f} nm"
