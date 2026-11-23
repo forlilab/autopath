@@ -24,4 +24,4 @@ Systems can be a protein, a protein with one or several ligands or cofactors, a 
 - Something failed: [Troubleshooting](guide/troubleshooting.md) lists errors seen in real runs and their fixes.
 
 !!! note "Enhanced sampling"
-    Metadynamics is being moved out of AutoPath into a separate package and is not covered here.
+    Metadynamics has moved out of AutoPath and is not covered here.
