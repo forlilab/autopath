@@ -25,3 +25,4 @@ Each `equilibration_*` folder holds `system.xml` (with barostat), `system.pdb` a
 starts share one topology (checked at the end of `make_starts.py`).
 
 The metadynamics runs and their analysis live in HADES: `workflows/metad/permeability`.
+`prepare_permeation_system.py --lmz-restraint` was removed with the metadynamics package.
