@@ -285,7 +285,7 @@ class SMDAnalysis:
             traces_feat_df = smd.get_trace_features(features=[])
         else:
             traces_feat_df = smd.get_trace_features(features=trace_feats)
-        logger.info(
+        logger.debug(
             f"Trace features: {trace_feats or '(none — index columns only)'}; "
             f"DataFrame columns: {list(traces_feat_df.columns)}"
         )
@@ -324,7 +324,7 @@ class SMDAnalysis:
             feat_df = dist_feat_df
             _feat_cols = [c for c in feat_df.columns
                           if c not in ('trajname', 'speed', 'step', 'time')]
-            logger.info(f'Clustering on distance features only: {len(_feat_cols)} dist_* columns')
+            logger.debug(f'Clustering on distance features only: {len(_feat_cols)} dist_* columns')
         else:
             all_feat_dfs = [traces_feat_df]
             if dist_feat_df is not None and merge_features:
@@ -336,10 +336,10 @@ class SMDAnalysis:
                 feat_df = SMDData.merge_feature_sets(*all_feat_dfs)
                 _feat_cols = [c for c in feat_df.columns
                               if c not in ('trajname', 'speed', 'step', 'time')]
-                logger.info(f'Clustering features: {_feat_cols}')
+                logger.debug(f'Clustering features: {_feat_cols}')
             else:
                 feat_df = traces_feat_df
-                logger.info('Clustering will be performed using trace features only')
+                logger.debug('Clustering will be performed using trace features only')
 
         # Inline geom features from the _geom.dat sidecars: the named geom_ columns,
         # or all of them if none are named. Not used in distance-only mode.
@@ -365,7 +365,7 @@ class SMDAnalysis:
                 geom_cols_final = [c for c in geom_df.columns if c.startswith("geom_")]
                 if geom_cols_final:
                     feat_df = SMDData.merge_geom_features(feat_df, geom_df, mode=geom_merge)
-                    logger.info(f"Merged inline geom features ({geom_merge}): {geom_cols_final}")
+                    logger.debug(f"Merged inline geom features ({geom_merge}): {geom_cols_final}")
                 else:
                     logger.warning("No usable geom_ columns after selection; skipping geom merge.")
 
@@ -447,7 +447,7 @@ class SMDAnalysis:
 
         if self.reference_pdb is None:
             self.reference_pdb = sMDDdata.reference_pdb
-            logger.warning(f"No reference PDB provided, using from SMDData: {self.reference_pdb}")
+            logger.info(f"No reference PDB provided, using from SMDData: {self.reference_pdb}")
 
         # Force-plateau boundary limits CLUSTERING only (not the estimators) to the
         # bound -> rupture range; an explicit r_range still restricts everything.
@@ -936,7 +936,7 @@ class SMDAnalysis:
                     )
                     if _rts is not None:
                         boundary_cap = min(_rts * (1.0 + boundary_buffer_frac), _r_hi)
-                        logger.info(
+                        logger.debug(
                             f"[convergence] force-plateau boundary r <= {boundary_cap:.2f} nm "
                             f"(rupture {_rts:.2f} nm + {boundary_buffer_frac:.0%} buffer, "
                             f"plateau_frac={plateau_frac})."
@@ -956,7 +956,7 @@ class SMDAnalysis:
                 if len(_restricted) >= 2:
                     feat_df_cl = _restricted
                     fit_r_range = None   # boundary replaces the fraction-trim
-                    logger.info(
+                    logger.debug(
                         f"[convergence] clustering restricted to r <= {boundary_cap:.2f} nm "
                         f"(excludes bulk-solvent tail)."
                     )

@@ -18,7 +18,7 @@ _FG_BAROSTAT    = 30  # barostat (Monte Carlo)
 _FG_RESTRAINTS  = 31  # harmonic positional restraints
 
 def print_current_forces(system: System = None) -> None:
-    """Log all forces currently registered in *system* at INFO level.
+    """Log all forces currently registered in *system* at DEBUG level.
 
     Parameters
     ----------
@@ -26,7 +26,7 @@ def print_current_forces(system: System = None) -> None:
         The system whose force list is inspected.
     """
     for index, fc in enumerate(system.getForces()):
-        logger.info(f"Force Index:{index} | Name: {fc.getName()} | Group: {fc.getForceGroup()}")
+        logger.debug(f"Force Index:{index} | Name: {fc.getName()} | Group: {fc.getForceGroup()}")
     return
 
 def remove_openmm_force(system: System = None, fname: str = None) -> System:

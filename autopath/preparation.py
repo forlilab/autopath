@@ -353,7 +353,7 @@ class SystemPreparation:
 
         logger.info(
             "Building the membrane with 3-site water "
-            f"({', '.join(f'{a} -> {b}' for a, b in swapped)}).."
+            f"({', '.join(f'{a} -> {b}' for a, b in swapped)})"
         )
         forcefield = ForceField(*files)
         for generator in self._template_generators:
@@ -528,9 +528,9 @@ class SystemPreparation:
             rec_name = os.path.splitext(os.path.basename(protein))[0]
             try:
                 protein_pdb = PDBFile(protein)
-                logger.info(f"Loaded {rec_name} PDB..")
+                logger.info(f"Loaded {rec_name} PDB")
             except Exception as e:
-                logger.error(f"Something went wrong loading {rec_name} PDB..\n{e}")
+                logger.error(f"Something went wrong loading {rec_name} PDB\n{e}")
                 raise
 
             modeller = Modeller(protein_pdb.topology, protein_pdb.positions)
@@ -540,7 +540,7 @@ class SystemPreparation:
 
         if ligands is not None:
             if isinstance(ligands, str):
-                logger.info(f"Parametrizing ligand {os.path.basename(ligands)}..")
+                logger.info(f"Parametrizing ligand {os.path.basename(ligands)}")
                 lig = self._ligand_to_mol(ligands)
                 ligand_topology, ligand_positions = self._parametrize_ligand(lig)
                 for res in ligand_topology.residues():
@@ -553,7 +553,7 @@ class SystemPreparation:
                 for lig_name, lig_path, lig_smiles, lig_from_xray in ligands:
                     while chr(chain_id) in used_chains:
                         chain_id += 1
-                    logger.info(f"Parametrizing ligand {lig_name}..")
+                    logger.info(f"Parametrizing ligand {lig_name}")
                     lig = self._ligand_to_mol(lig_path, lig_smiles, lig_from_xray)
                     ligand_topology, ligand_positions = self._parametrize_ligand(lig)
                     for chain in ligand_topology.chains():
@@ -582,7 +582,7 @@ class SystemPreparation:
         # field at all, so on the membrane path the promotion is deferred until after it.
         needs_extra_particles = self.water_model in FOUR_SITE_WATER_MODELS
         if needs_extra_particles and not self.is_membrane:
-            logger.info(f"Adding extra particles for the {self.water_model} water model..")
+            logger.info(f"Adding extra particles for the {self.water_model} water model")
             modeller.addExtraParticles(self.forcefield)
 
         if self.is_membrane:
@@ -607,7 +607,7 @@ class SystemPreparation:
                     )
                     modeller.topology.setPeriodicBoxVectors(None)
 
-            logger.info(f"Adding a {os.path.basename(self.lipid_type)} membrane to the system..")
+            logger.info(f"Adding a {os.path.basename(self.lipid_type)} membrane to the system")
             membrane_forcefield = (
                 self._three_site_forcefield() if needs_extra_particles else self.forcefield
             )
@@ -642,11 +642,11 @@ class SystemPreparation:
                 raise RuntimeError(f"Something went wrong while building the membrane.\n{e}") from e
 
             if needs_extra_particles:
-                logger.info(f"Adding extra particles for the {self.water_model} water model..")
+                logger.info(f"Adding extra particles for the {self.water_model} water model")
                 modeller.addExtraParticles(self.forcefield)
 
         else:
-            logger.info(f"Solvating the system..")
+            logger.info(f"Solvating the system")
             modeller.addSolvent(
                 self.forcefield,
                 model=self.water_model,
@@ -668,7 +668,7 @@ class SystemPreparation:
                              f"{cutoff:.2f} nm nonbonded cutoff; increase padding (now {self.padding.value_in_unit(openmmunit.nanometer):.2f} nm) "
                              f"by at least {(2 * cutoff - width) / 2 + 0.05:.2f} nm.")
 
-        logger.info(f"Creating the OpenMM system..")
+        logger.info(f"Creating the OpenMM system")
         system = self.forcefield.createSystem(
             modeller.topology,
             nonbondedMethod=PME,
@@ -700,6 +700,6 @@ class SystemPreparation:
         save_amber_files(modeller.topology, modeller.positions, openmm_system, self.out_dir)
 
         simulation_time = time.monotonic() - start_time
-        logger.info(f"Finished system preparation in {simulation_time:.2f} seconds.")
+        logger.info(f"Finished system preparation in {simulation_time / 60:.1f} min.")
 
         return system, modeller.topology

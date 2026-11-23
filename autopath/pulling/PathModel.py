@@ -48,7 +48,7 @@ class NullPathModel(PathModel):
 
     def fit_transform(self, feature_df: pd.DataFrame, **kwargs) -> dict:
         trajnames = feature_df['trajname'].unique().tolist()
-        logger.info(
+        logger.debug(
             f"NullPathModel: assigning all {len(trajnames)} trajectories to 'path-0' "
             "(no clustering performed)."
         )

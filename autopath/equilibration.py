@@ -270,7 +270,7 @@ def run_restrained_minimization(
         force_constants_dict = {k: v for k, v in zip(components, force_constants)}
         update_force_constants(simulation, force_constants_dict)
         simulation.minimizeEnergy(maxIterations=0) # default is 0 meaning until convergence
-        logger.info(f"Current system's energy: {simulation.context.getState(getEnergy=True).getPotentialEnergy()}")
+        logger.debug(f"Current system's energy: {simulation.context.getState(getEnergy=True).getPotentialEnergy().value_in_unit(openmmunit.kilojoule_per_mole):.1f} kJ/mol")
     return None
 
 def run_restrained_md(
@@ -313,10 +313,12 @@ def run_restrained_md(
 
     prev_constants = {component: None for component in components}
     npt_prev, stepsize_prev = None, None
-    for step in steps:
+    for i, step in enumerate(steps, 1):
         force_comp_dict = {k: v for k, v in zip(components, step.forces)}
         logger.info(
-            f"Equilibration {step.name}: force_constants={force_comp_dict} | NPT={step.npt_flag} | n_steps={step.nsteps} | timestep={step.stepsize}"
+            f"Stage {i}: {step.nsteps} steps x {step.stepsize} ps, "
+            f"{'NPT' if step.npt_flag else 'NVT'}, restraints "
+            + ", ".join(f"{g} {k:g}" for g, k in force_comp_dict.items())
         )
 
         set_force_constants(
@@ -624,7 +626,7 @@ class Equilibration:
         """
         start_time = time.monotonic()
 
-        logger.debug("Setting up the integrator..")
+        logger.debug("Setting up the integrator")
         # The native OpenMM LangevinMiddleIntegrator is faster but does not
         # expose the splitting string. By default it uses "V V R O R".
         # If using openmmtools integrators downstream, set the splitting
@@ -655,7 +657,7 @@ class Equilibration:
             restrain_idxs = u.select_atoms(selection).indices
             if len(restrain_idxs) > 0:
                 restrain_names = [u.atoms[idx].name for idx in restrain_idxs]
-                logger.info(f"Adding {len(restrain_idxs)} {self.component_specs[name]['type']} restraints to {name}..")
+                logger.debug(f"Adding {len(restrain_idxs)} {self.component_specs[name]['type']} restraints to {name}")
                 logger.debug(f"The following {name} atoms will be restrained: {', '.join(restrain_names)}")
             else:
                 logger.warning(f"Skipping harmonic restraints for {name}: No atoms found for selection '{selection}'")
@@ -672,13 +674,13 @@ class Equilibration:
         
         simulation.context.reinitialize(preserveState=True)
         
-        logger.info(f"Current system's energy: {simulation.context.getState(getEnergy=True).getPotentialEnergy()}")
+        logger.debug(f"Current system's energy: {simulation.context.getState(getEnergy=True).getPotentialEnergy().value_in_unit(openmmunit.kilojoule_per_mole):.1f} kJ/mol")
         if not self.restrained_minimization:
-            logger.info("Running standard minimization..")
+            logger.info("Running standard minimization")
             simulation.minimizeEnergy()
-            logger.info(f"Current system's energy: {simulation.context.getState(getEnergy=True).getPotentialEnergy()}")
+            logger.debug(f"Current system's energy: {simulation.context.getState(getEnergy=True).getPotentialEnergy().value_in_unit(openmmunit.kilojoule_per_mole):.1f} kJ/mol")
         else:
-            logger.info("Running enhanced minimization..")
+            logger.info("Running enhanced minimization")
             run_restrained_minimization(simulation, list(self.components_lookup.keys()), self.minimization_scheme)
         
         minimized_positions = simulation.context.getState(getPositions=True).getPositions()
@@ -701,7 +703,7 @@ class Equilibration:
         # than the original input coordinates. The old forces were removed above.
         for num, (name, selection) in enumerate(self.components_lookup.items()):
             restrain_idxs = u.select_atoms(selection).indices
-            logger.info(f"Re-adding {len(restrain_idxs)} restraints to {name} after minimization.")
+            logger.debug(f"Re-adding {len(restrain_idxs)} restraints to {name} after minimization")
 
             add_component_restraint(
                 self.system,
@@ -735,7 +737,7 @@ class Equilibration:
                 "unrestrained and the first equilibration stage may shock the system."
             )
 
-        logger.info(f"Warming up the system from {self.temp_init} K to {self.temperature} K..")
+        logger.info(f"Warming up the system from {self.temp_init} K to {self.temperature} K")
         warm_up_system(simulation, integrator, 
                        Tstart=self.temp_init, 
                        Tend=self.temperature, 
@@ -744,7 +746,7 @@ class Equilibration:
                        warming_steps=self.warm_up_steps
                        )
         
-        logger.info("Running restrained equilibration protocol..")
+        logger.info("Running restrained equilibration protocol")
         run_restrained_md(
             simulation,
             self.system,

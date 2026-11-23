@@ -283,7 +283,7 @@ class SMDData:
         if count == 0:
             logger.warning("No valid log files found.")
             return None
-        logger.info(f"Loaded {count} log files.")
+        logger.debug(f"Loaded {count} log files")
 
         if not raw_data:
             logger.warning("No data loaded from log files.")
@@ -392,11 +392,11 @@ class SMDData:
             raw_data.loc[group.index, 'work'] = work
 
         if resolved_mode == 'protocol':
-            logger.info(
+            logger.debug(
                 f"Computed cumulative work from protocol increments column '{protocol_work_column}'."
             )
         else:
-            logger.info(
+            logger.debug(
                 f"Computed cumulative work by integrating '{self.force_column}' over '{r_column}'."
             )
 
