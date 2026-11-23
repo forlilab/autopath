@@ -60,8 +60,6 @@ setup(
         "deeptime>=0.4.4",
         "dtaidistance>=2.3",
         "kmedoids>=0.5",
-        "leidenalg>=0.10",
-        "igraph>=0.11",
     ],
     extras_require={
         "test": ["pytest", "MDAnalysisTests"],

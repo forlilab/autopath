@@ -79,10 +79,6 @@ class Config(object):
         sMD_kramers_bound: str = "mirror",  # bound population below pull start: "mirror" | "none"
         cluster_across_speeds: bool = True,
         sMD_min_replicas_per_path: int = 5,
-        extract_milestones: bool = True,
-        milestone_mode: str = "all_medoids",  # "per_path" or "all_medoids"
-        milestone_min_frame_separation: int = 0,
-        n_milestones: int = 5,
     ):
         """Initialise an AutoPath configuration.
 
@@ -300,21 +296,6 @@ class Config(object):
             Minimum number of replicas required in a cluster for it to be kept
             as a distinct path.  Default ``5``.
 
-        Milestone extraction
-        ~~~~~~~~~~~~~~~~~~~~
-        extract_milestones : bool, optional
-            Extract representative frames (milestones) from the sMD path
-            medoid trajectories.  Default ``True``.
-        milestone_mode : str, optional
-            Extraction mode: ``"all_medoids"`` (pool all path medoids) or
-            ``"per_path"`` (cluster each path's medoid independently).
-            Default ``"all_medoids"``.
-        milestone_min_frame_separation : int, optional
-            Minimum number of frames between selected milestones to avoid
-            redundancy.  Default ``0``.
-        n_milestones : int, optional
-            Number of milestones to extract per path (or in total for
-            ``"all_medoids"`` mode).  Default ``5``.
         """
 
         # General
@@ -384,13 +365,6 @@ class Config(object):
         self.sMD_kramers_bound = sMD_kramers_bound
         self.cluster_across_speeds = cluster_across_speeds
         self.sMD_min_replicas_per_path = sMD_min_replicas_per_path
-
-        # Milestones
-        self.extract_milestones = extract_milestones
-        self.milestone_mode = milestone_mode
-        self.milestone_min_frame_separation = milestone_min_frame_separation
-        self.n_milestones = n_milestones
-
 
     @classmethod
     def get_defaults_dict(cls):

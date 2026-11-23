@@ -19,17 +19,14 @@ from openmm.unit import *
 
 # AutoPath imports
 from autopath.utils import *
-from autopath.clustering import Clustering, PairwiseDistances
 from autopath.pdb_preprocessor import PDBPreprocessor
 from autopath.ap_PLIP import plot_atomic_property, calculate_ligand_rmsf, calculate_contact_frequency
 from autopath import (
     SystemPreparation,
     Equilibration,
     SteeredMD,
-    RelaxMD,
 )
 from autopath.pulling import SMDData, SMDAnalysis
-from autopath.pulling.SMDData import resolve_smd_dcd
 from autopath.pulling.Convergence import (tail_converged, validate_autostop_options,
                                           round_robin_order)
 from autopath.pulling.PathModel import DTWPathModel, NullPathModel
@@ -59,16 +56,14 @@ class AutoPath:
        loops.
     4. **Path clustering & PMF estimation** — :class:`~autopath.pulling.SMDAnalysis`
        clusters trajectories with DTW-based path models, estimates the PMF via
-       cumulant and Jarzynski estimators, and identifies medoid trajectories for
-       downstream milestone extraction.
+       cumulant and Jarzynski estimators, and identifies medoid trajectories.
 
     Subcomponents
     -------------
     :class:`~autopath.preparation.SystemPreparation`,
     :class:`~autopath.equilibration.Equilibration`,
     :class:`~autopath.pulling.SteeredMD`,
-    :class:`~autopath.pulling.SMDAnalysis`,
-    :class:`~autopath.relax_md.RelaxMD`
+    :class:`~autopath.pulling.SMDAnalysis`
 
     Parameter groups
     ----------------
@@ -93,9 +88,6 @@ class AutoPath:
         ``sMD_cluster_to_boundary``, ``sMD_boundary_buffer_frac``,
         ``sMD_kramers_abs``, ``sMD_kramers_bound``,
         ``cluster_across_speeds``, ``sMD_min_replicas_per_path``
-    Milestone extraction
-        ``extract_milestones``, ``milestone_mode``,
-        ``milestone_min_frame_separation``, ``n_milestones``
     """
 
     def __init__(
@@ -169,10 +161,6 @@ class AutoPath:
         sMD_kramers_bound: str = "mirror",  # bound population below pull start: 'mirror' | 'none'
         cluster_across_speeds: bool = True,
         sMD_min_replicas_per_path: int = 5,
-        extract_milestones: bool = True,
-        milestone_mode: str = "all_medoids",  # "per_path" or "all_medoids"
-        milestone_min_frame_separation: int = 0,
-        n_milestones: int = 5,
     ):
         # General
         self.pocket_selection = pocket_selection
@@ -253,16 +241,9 @@ class AutoPath:
         self.sMD_kramers_bound = sMD_kramers_bound
         self.cluster_across_speeds = cluster_across_speeds
         self.sMD_min_replicas_per_path = sMD_min_replicas_per_path
-        # Milestones
-        self.extract_milestones = extract_milestones
-        self.milestone_mode = milestone_mode
-        self.milestone_min_frame_separation = milestone_min_frame_separation
-        self.n_milestones = n_milestones
         if sMD_dcd_dry and sMD_align_trajs:
             # wrap/align reads the trajectories with the solvated topology.
             raise ValueError("sMD_dcd_dry=True needs sMD_align_trajs=False")
-        if sMD_dcd_dry and extract_milestones:
-            raise ValueError("sMD_dcd_dry=True does not support extract_milestones (solvated frames)")
         # VS mode
         if VS_mode:
             raise ValueError("VS_mode is not supported.")
@@ -286,7 +267,7 @@ class AutoPath:
         """Execute the full AutoPath pipeline for one ligand.
 
         Stages are run in order: system preparation → equilibration →
-        steered MD → path clustering → milestone extraction.
+        steered MD → path clustering.
         Each stage can be skipped by setting the corresponding ``run_*`` flag
         to ``False`` in the constructor; the stage will read outputs written by
         a previous run instead.
@@ -443,7 +424,6 @@ class AutoPath:
                 pass
 
             # ligand_atoms = u_eq.select_atoms(f'index {" ".join(map(str, ligand_atoms_indices))}')
-            # final_com = calculate_com_distance(u_eq, ligand_atoms, pocket_atoms, wrap=False)[-1] /10 # convert to nm
             # logger.info(f"COM distance after equilibration is: {final_com:.2f} nm")
 
             if self.pocket_selection is not None:
@@ -831,9 +811,6 @@ class AutoPath:
                                     #    r_range=(0, 1.75)
                                        )
 
-            # Store for downstream milestone extraction
-            self._smdanalysis = smdanalysis
-
             # Convergence over all speeds, with the same features as run() above and
             # the same estimator/window as the autostop loop (this is the kept record).
             # Same first comparison rung as the autostop loop (its per-speed `reps`)
@@ -866,153 +843,6 @@ class AutoPath:
                 plot_convergence_traces(smd_conv_traces, outdir=sMD_analysis_outdir)
             smd_conv_metrics = glob(f"{sMD_analysis_outdir}/sMD_conv_vALL_metrics.csv")
             plot_convergence_metrics(smd_conv_metrics, outdir=sMD_analysis_outdir, tolerances=CONVERGENCE_TOLERANCES)
-
-        ##############################################################################################
-        ###################################### Extract Milestones ####################################
-        ##############################################################################################
-
-        milestones_outdir = f"{sys_name}/milestones"
-        
-        if self.extract_milestones:
-            u_sMD = mda.Universe(solvated_system_pdb, sMD_trajs)
-            ligand_atoms_full = u_sMD.select_atoms(_lig_sel_ha)
-            ligand_atoms_full_indices = [atom.index for atom in ligand_atoms_full]
-
-            ligand_sel = _lig_sel_ha
-            pocket_sel = f'index {" ".join(map(str, pocket_atom_indices))}'
-
-        if self.extract_milestones:
-            
-            os.makedirs(milestones_outdir, exist_ok=True)
-
-            logger.info(f"Found {len(sMD_trajs)} sMD trajectories for milestone extraction.")
-
-            if len(sMD_trajs) == 0:
-                raise RuntimeError("No sMD trajectories found. Please check the sMD pulling step.")
-
-            # Load medoid info (from analysis or from saved file); flat path is the legacy layout
-            medoid_info_path = f"{sMD_analysis_outdir}/path_analysis/medoid_info.json"
-            if not os.path.exists(medoid_info_path):
-                medoid_info_path = f"{sMD_analysis_outdir}/medoid_info.json"
-            medoid_to_path = {}
-            medoid_names = []
-
-            if hasattr(self, '_smdanalysis') and hasattr(self._smdanalysis.path_model, 'all_medoid_names'):
-                medoid_names = self._smdanalysis.path_model.all_medoid_names
-                medoid_to_path = self._smdanalysis.path_model.medoid_to_path
-            elif os.path.exists(medoid_info_path):
-                with open(medoid_info_path, "r") as f:
-                    medoid_info = json.load(f)
-                # flatten per-speed "by_speed" maps; top-level "medoid_to_path" is legacy
-                medoid_to_path = dict(medoid_info.get("medoid_to_path", {}))
-                for mapping in medoid_info.get("by_speed", {}).values():
-                    medoid_to_path.update(mapping)
-                medoid_names = list(medoid_to_path)
-                logger.info(f"Loaded medoid info from {medoid_info_path}: {len(medoid_names)} medoids.")
-            else:
-                logger.warning(
-                    "No medoid info found (run sMD analysis first, or provide medoid_info.json). "
-                    "Falling back to using all sMD trajectories."
-                )
-
-            # medoid_info.json predates the path filters and its labels can be stale;
-            # filter and re-label per trajectory from the final analysis output.
-            if medoid_to_path:
-                surviving = read_trajname_to_path(sMD_analysis_outdir)
-                if not surviving:
-                    logger.warning(
-                        "No analysis path table under %s; cannot tell which "
-                        "trajectories survived, so every medoid is used.",
-                        sMD_analysis_outdir)
-                medoid_to_path, dropped, disagree = (
-                    filter_medoids_by_surviving_trajectories(medoid_to_path, surviving))
-                if dropped:
-                    logger.warning(
-                        "Dropping %d medoid(s) whose trajectory did not survive the "
-                        "sMD quality filters: %s.", len(dropped), sorted(dropped))
-                if disagree:
-                    logger.warning(
-                        "medoid_info.json disagrees with the analysis on %d medoid(s); "
-                        "using the analysis label. %s", len(disagree),
-                        {m: f"{a} -> {b}" for m, (a, b) in disagree.items()})
-                medoid_names = [m for m in medoid_names if m in medoid_to_path]
-                if surviving and not medoid_to_path:
-                    raise RuntimeError(
-                        "No medoid trajectory survived the sMD path quality filters, "
-                        "so milestones would come from rejected data. Re-run the sMD "
-                        "analysis or relax its filters.")
-
-            if medoid_names:
-                medoid_dcds = [self._trajname_to_dcd(name) for name in medoid_names]
-                medoid_dcds = [f for f in medoid_dcds if os.path.exists(f)]
-                if not medoid_dcds:
-                    logger.warning("Could not locate medoid DCD files. Falling back to all trajectories.")
-                    medoid_dcds = sMD_trajs
-                    medoid_to_path = {}
-            else:
-                medoid_dcds = sMD_trajs
-                medoid_to_path = {}
-
-            logger.info(f"Using {len(medoid_dcds)} trajectories for milestone extraction (mode={self.milestone_mode}).")
-            
-            u_milestone = mda.Universe(solvated_system_pdb, medoid_dcds)
-
-            if self.milestone_mode == "per_path":
-                # Mode: extract milestones from each path's medoid independently
-                all_milestone_files = []
-                
-                if not medoid_to_path:
-                    logger.warning(
-                        "No path information available for per_path mode. "
-                        "Falling back to all_medoids mode."
-                    )
-                    self.milestone_mode = "all_medoids"
-                else:
-                    # Group medoids by path
-                    path_to_medoids = defaultdict(list)
-                    for mname, pid in medoid_to_path.items():
-                        path_to_medoids[pid].append(mname)
-
-                    for path_id, med_names in sorted(path_to_medoids.items()):
-                        path_dcds = [self._trajname_to_dcd(n) for n in med_names]
-                        path_dcds = [f for f in path_dcds if os.path.exists(f)]
-                        if not path_dcds:
-                            logger.warning(f"No DCD files found for path {path_id}. Skipping.")
-                            continue
-                        
-                        path_outdir = os.path.join(milestones_outdir, str(path_id))
-                        u_path = mda.Universe(solvated_system_pdb, path_dcds)
-                        
-                        logger.info(f"Computing distance features for path {path_id} ({len(path_dcds)} trajs, {len(u_path.trajectory)} frames)...")
-                        clu = Clustering(
-                            PairwiseDistances(ligand_sel, pocket_sel)
-                        ).fit(u_path)
-                        frames = clu.select(self.n_milestones, strategy="centroid",
-                                            min_frame_separation=self.milestone_min_frame_separation)
-                        ms_files = clu.write_states(
-                            u_path, frames, topology, system,
-                            out_dir=path_outdir, prefix=f"milestone_{path_id}",
-                            temperature=self.temperature, ligand_sel=ligand_sel)
-                        clu.plot(path_outdir, f"milestone_{path_id}", frames=frames)
-                        all_milestone_files.extend(ms_files)
-
-                        logger.info(f"Path {path_id}: extracted {len(ms_files)} milestones.")
-
-            if self.milestone_mode == "all_medoids":
-                # Mode: pool all medoid trajectories, cluster together
-                logger.info(f"Computing distance features for all medoids ({len(u_milestone.trajectory)} frames)...")
-                clu = Clustering(
-                    PairwiseDistances(ligand_sel, pocket_sel)
-                ).fit(u_milestone)
-                frames = clu.select(self.n_milestones, strategy="centroid",
-                                    min_frame_separation=self.milestone_min_frame_separation)
-                milestone_files = clu.write_states(
-                    u_milestone, frames, topology, system,
-                    out_dir=milestones_outdir, prefix="milestone",
-                    temperature=self.temperature, ligand_sel=ligand_sel)
-                clu.plot(milestones_outdir, "milestone", frames=frames)
-
-                logger.info(f"Extracted {len(milestone_files)} milestones from {len(medoid_dcds)} medoid trajectories.")
 
         simulation_time = time.monotonic() - start_time
         logger.info(f"Finished AutoPath simulation in {simulation_time/60:.2f} min.")
@@ -1061,46 +891,3 @@ class AutoPath:
         )
         return conv_df, traces_df
 
-    @staticmethod
-    def _replica_idx_from_log(fn):
-        """Extract the integer replica index from an sMD log filename.
-
-        Expected filename pattern:
-        ``sMD_replica-<N>_<speed>_<direction>.dat``
-
-        Parameters
-        ----------
-        fn : str
-            Full or basename path to the sMD ``.dat`` log file.
-
-        Returns
-        -------
-        int
-            Zero-based replica index embedded in the filename.
-        """
-        base = os.path.basename(fn)[:-4]
-        rep = base.split("_")[-3]
-        return int(rep.split("-")[1])
-    
-    
-    def _trajname_to_dcd(self, trajname: str) -> str:
-        """Resolve the aligned DCD path for a medoid trajectory name.
-
-        Medoid names are stored as log-file basenames (without extension) by
-        :class:`~autopath.pulling.PathModel.DTWPathModel`.  This method maps
-        them to the corresponding aligned DCD file under
-        ``<sMD_outdir>/trajectories/``.
-
-        Parameters
-        ----------
-        trajname : str
-            Log-file basename without extension (e.g.
-            ``"sMD_replica-3_v0.001_forward"``).
-
-        Returns
-        -------
-        str
-            Absolute or relative path to ``<sMD_outdir>/trajectories/<name>_aligned.dcd``.
-        """
-        return resolve_smd_dcd(os.path.join(self.sMD_outdir, "trajectories",
-                                            trajname.replace("log", "traj")))

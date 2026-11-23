@@ -78,8 +78,6 @@ def main():
         # Pathway clustering + cumulant / Jarzynski / force (v->0) estimators
         sMD_path_model="dtw",
         cluster_across_speeds=True,
-
-        extract_milestones=False,
     )
 
     # Phase 1: prepare and equilibrate (also writes RMSD, per-atom RMSF and contact frequency)
