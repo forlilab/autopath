@@ -10,7 +10,7 @@ logger = logging.getLogger("autopath")
 
 # Force group assignments (OpenMM supports groups 0–31; must not overlap)
 _FG_CUSTOM_NB   = 14  # custom nonbonded (sterics/electrostatics)
-_FG_FUNNEL      = 15  # funnel metadynamics restraint
+_FG_FUNNEL      = 15  # funnel restraint
 _FG_FLAT_BOTTOM = 19  # flat-bottom position restraints
 _FG_COMPONENTS  = 20  # per-component harmonic restraints, one group each (20-29)
 _FG_COMPONENTS_LAST = 29
