@@ -177,7 +177,7 @@ class DTWPathModel(PathModel):
         
         # NaN values occasionally appear (e.g. PBC artifacts, undefined geometry);
         # drop them to avoid DTW distance computation failures.
-        logger.info(f'Features used for clustering: {feature_cols}')
+        logger.debug(f'Features used for clustering: {feature_cols}')
         if feature_df[feature_cols].isnull().any().any():
             logger.warning(
             "NaN values detected in features. "
@@ -299,7 +299,7 @@ class DTWPathModel(PathModel):
                 ]
             if geom_idx and self.n_geom_pcs is not None:
                 n_components = min(self.n_geom_pcs, len(geom_idx))
-                logger.info(
+                logger.debug(
                     f"Applying PCA to {len(geom_idx)} geometric features "
                     f"(prefix='{self.geom_feature_prefix}') → {n_components} components."
                 )
@@ -313,7 +313,7 @@ class DTWPathModel(PathModel):
                     ])
                     for arr in vectors_stacked_scaled
                 ]
-                logger.info(
+                logger.debug(
                     f"Geometric PCA explained variance: "
                     f"{pca_geom.explained_variance_ratio_.sum()*100:.1f}%"
                 )
@@ -348,7 +348,7 @@ class DTWPathModel(PathModel):
                         scores[k] = -c.loss
 
                 K = max(scores, key=scores.get)
-                logger.info(
+                logger.debug(
                     f"{'Global' if speed_key is None else f'Speed {speed_key}'}: "
                     f"Found {K} paths with score {scores[K]:.2f}"
                 )

@@ -906,7 +906,7 @@ class SMDAnalysis:
 
             # Chronological: the filename ID is HHMMSS without a date.
             speed_logs = sorted(speed_logs, key=SMDData._replica_start_datetime)
-            logger.info(f"Checking convergence for speed={speed} with {len(speed_logs)} replicas")
+            logger.debug(f"Checking convergence for speed={speed} with {len(speed_logs)} replicas")
 
             smd = SMDData(
                 speed_logs,
