@@ -1,5 +1,6 @@
 #!/usr/bin/env python
-"""Equilibrated starts for ``run_permeation.py --start-dirs``, from ``prepare_permeation_system.py --both-sides``.
+"""Equilibrated starts for HADES ``workflows/metad/permeability/run_permeation.py --start-dirs``,
+from ``prepare_permeation_system.py --both-sides``.
 
 Per side (+: system.pdb, -: system_minus.pdb), on one GPU:
   1. equilibrate the build (equilibrate_ligand_membrane.json, 310 K)          -> equilibration_+-OUTER/
@@ -51,7 +52,7 @@ def pull_to(eq_dir, sdf, target_z, smd_dir):
     import numpy as np
     from openmm import XmlSerializer, unit
     from openmm.app import PDBFile
-    from autopath.metadynamics import end_to_end_atoms
+    from autopath.pulling.permeation_starts import end_to_end_atoms
     from autopath.pulling.steered_md import SteeredMD
     from autopath.utils import save_pdb
 
@@ -101,7 +102,7 @@ def main(argv=None):
                     help="which side to run (plus and minus can run as parallel jobs)")
     a = ap.parse_args(argv)
 
-    from autopath.metadynamics.permeation import check_same_topology
+    from autopath.pulling.permeation_starts import check_same_topology
     build = os.path.abspath(a.build)
     out = os.path.abspath(a.out or os.path.dirname(build))
     sdf = os.path.join(build, "UNK.sdf")

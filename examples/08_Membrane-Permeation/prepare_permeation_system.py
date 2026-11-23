@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Build a ligand + membrane system for run_permeation.py (a thin driver over SystemPreparation).
+"""Build a ligand + membrane system for metadynamics permeation runs (a thin driver over SystemPreparation).
 
 Ligand from SMILES (3D by molscrub; acid/base, tautomers and rings left as given) or an SDF,
 centred in x/y with its nearest atom |z| nm from the membrane centre, on the side of the sign
@@ -81,13 +81,11 @@ def main(argv=None):
     opt = ap.add_argument_group("opt-in restraints")
     opt.add_argument("--z-wall", action="store_true",
                      help="flat-bottom wall on |z| of the ligand centroid at 95%% of half the box height")
-    opt.add_argument("--lmz-restraint", type=float, metavar="LMZ0",
-                     help="harmonic restraint (k = 50 kJ/mol) of the ligand LMZ to LMZ0")
     a = ap.parse_args(argv)
     if a.both_sides and a.z <= 0:
         ap.error("--both-sides builds at +z and rotates to -z: give z > 0")
 
-    from openmm import CustomCentroidBondForce, CustomCVForce, unit
+    from openmm import CustomCentroidBondForce, unit
     from openmm.app import PME, Modeller, PDBFile
     from rdkit import Chem
     from autopath.customForces import add_cylindrical_restraints, add_membrane_center_atom
@@ -134,14 +132,6 @@ def main(argv=None):
         wall.setForceGroup(12)                    # 14-31 are reserved (customForces._FG_*)
         system.addForce(wall)
 
-    if a.lmz_restraint is not None:
-        from autopath.metadynamics import crippen_contributions, lipophilicity_z_cv
-        spec = lipophilicity_z_cv(solute, crippen_contributions(mol))
-        lmz = CustomCVForce("0.5 * k_lmz * (lm_z - lmz0)^2")
-        lmz.addGlobalParameter("k_lmz", 50.0)
-        lmz.addGlobalParameter("lmz0", a.lmz_restraint)
-        lmz.addCollectiveVariable("lm_z", spec.resolve(None, system.getNumParticles(), modeller.topology).cv)
-        system.addForce(lmz)
 
     save_system(system, os.path.join(a.out, "system.xml"))
     save_pdb(modeller.topology, modeller.positions, os.path.join(a.out, "system.pdb"))
