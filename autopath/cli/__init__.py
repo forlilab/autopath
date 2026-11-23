@@ -2,8 +2,8 @@
 
 This package contains the ``run_AutoPath`` script, which reads a JSON
 configuration file and one or more ligand SDF files and runs the full AutoPath
-MD simulation pipeline (preparation, equilibration, steered MD, milestone
-extraction, and metadynamics).
+MD simulation pipeline (preparation, equilibration, and steered MD with
+path clustering).
 
 The script is installed directly (see ``setup.py``) and can be invoked as::
 

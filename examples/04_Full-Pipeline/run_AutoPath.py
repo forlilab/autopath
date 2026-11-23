@@ -79,12 +79,7 @@ def main():
         sMD_path_model="dtw",
         cluster_across_speeds=True,
 
-        # Metadynamics seeded from pulling milestones is experimental and not part
-        # of the paper protocol; to try it set extract_milestones/run_metadynamics=True:
-        # n_milestones=3, mMD_use_funnel_potential=True, mMD_milestone_seeding=True,
-        # mMD_time=10, mMD_bias_frequency=2, mMD_hill_width=0.05, mMD_hill_height=1.2, mMD_bias_factor=12
         extract_milestones=False,
-        run_metadynamics=False,
     )
 
     # Phase 1: prepare and equilibrate (also writes RMSD, per-atom RMSF and contact frequency)

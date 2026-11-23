@@ -1,0 +1,99 @@
+{
+  "_comment": "Ligand in a pre-equilibrated membrane patch, 310 K. Only the ligand heavy atoms are restrained (kcal/mol/A^2): minimization 10 -> 5 -> 0, warm-up 100 -> 310 K in NVT (warm-up restraint: the Equilibration default), then 5 -> 1 over 1.4 ns, NVT first and NPT from stage 2. From the 2025 Ligand_Bilayer_MD equlib.json. LONG VARIANT (v2/equilibrate_long.json): adds Stage7, 20 ns NPT with a weak 0.1 kcal/mol/A^2 ligand restraint, so the membrane barostat can relax box height as well as area (a stiff absolute-z ligand restraint blocks box-height moves).",
+  "components_lookup": {
+    "ligand": "resname UNK and not name H*"
+  },
+  "minimization": [
+    {
+      "name": "Minimization Stage1",
+      "forces": [
+        10.0
+      ]
+    },
+    {
+      "name": "Minimization Stage2",
+      "forces": [
+        5.0
+      ]
+    },
+    {
+      "name": "Minimization Stage3",
+      "forces": [
+        0.0
+      ]
+    }
+  ],
+  "warmup": {
+    "T_initial": 100.0,
+    "T_final": 310.0,
+    "T_step": 5.0,
+    "npt_flag": false,
+    "nsteps": 100000,
+    "stepsize": 0.001
+  },
+  "equilibration": [
+    {
+      "name": "Equilibration Stage1",
+      "forces": [
+        5.0
+      ],
+      "npt_flag": false,
+      "nsteps": 100000,
+      "stepsize": 0.002
+    },
+    {
+      "name": "Equilibration Stage2",
+      "forces": [
+        5.0
+      ],
+      "npt_flag": true,
+      "nsteps": 50000,
+      "stepsize": 0.004
+    },
+    {
+      "name": "Equilibration Stage3",
+      "forces": [
+        4.0
+      ],
+      "npt_flag": true,
+      "nsteps": 50000,
+      "stepsize": 0.004
+    },
+    {
+      "name": "Equilibration Stage4",
+      "forces": [
+        3.0
+      ],
+      "npt_flag": true,
+      "nsteps": 50000,
+      "stepsize": 0.004
+    },
+    {
+      "name": "Equilibration Stage5",
+      "forces": [
+        2.0
+      ],
+      "npt_flag": true,
+      "nsteps": 50000,
+      "stepsize": 0.004
+    },
+    {
+      "name": "Equilibration Stage6",
+      "forces": [
+        1.0
+      ],
+      "npt_flag": true,
+      "nsteps": 50000,
+      "stepsize": 0.004
+    },
+    {
+      "name": "Equilibration Stage7",
+      "forces": [
+        0.1
+      ],
+      "npt_flag": true,
+      "nsteps": 5000000,
+      "stepsize": 0.004
+    }
+  ]
+}

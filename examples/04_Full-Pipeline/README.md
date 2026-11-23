@@ -10,8 +10,6 @@
 
 Steps 1–3 and 4–5 run as two `AutoPath` calls so the filter can sit between them; the second call reuses the files of the first.
 
-Metadynamics seeded from pulling milestones is available in the class but is experimental and not part of the paper protocol; it is off here (see the commented options in the script).
-
 # Usage
 
 ```bash

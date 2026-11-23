@@ -6,8 +6,6 @@
 
 * Steered MD (sMD)
 
-* Metadynamics (WTMetaD)
-
 
 # Workflow Summary
 

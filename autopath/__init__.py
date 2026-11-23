@@ -39,17 +39,13 @@ def __getattr__(name):
         "Equilibration":        ".equilibration",
         "SystemPreparation":    ".preparation",
         "SteeredMD":            ".pulling",
-        "MetadynamicsMD":       ".metadynamics",
-        "MetadynamicsAnalysis": ".metadynamics",
         "RelaxMD":              ".relax_md",
         "VanillaMD":            ".vanilla_md",
-        "CVSpec":               ".metadynamics",
         "pulling":              ".pulling",
-        "metadynamics":         ".metadynamics",
     }
     if name in _lazy_imports:
         module = _importlib.import_module(_lazy_imports[name], __name__)
-        if name in ("pulling", "metadynamics"):
+        if name == "pulling":
             return module
         return getattr(module, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
@@ -61,10 +57,6 @@ __all__ = [
     "SystemPreparation",
     "SteeredMD",
     "pulling",
-    "metadynamics",
-    "MetadynamicsMD",
-    "MetadynamicsAnalysis",
     "RelaxMD",
     "VanillaMD",
-    "CVSpec",
 ]

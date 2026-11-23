@@ -163,6 +163,19 @@ class SystemPreparation:
         re-expansion increments. Stock OpenMM minimises only once for 30 iterations,
         which is not enough for a large membrane protein and lets the lipids blow up
         (see :func:`relaxed_membrane_packing`). Set to 0 for stock behaviour.
+    membrane_ligand_z : float or None, optional
+        Ligand-only membrane systems: z (nm) of the ligand centroid from the membrane
+        centre (default 3.0, in the water above the upper leaflet). ``None`` keeps the
+        coordinates of the ligand file.
+    nonbondedCutoff : float, optional
+        Nonbonded cutoff in nm. None picks 1.2 nm for CHARMM force fields (any
+        ``forcefield`` file name containing ``"charmm"``) and 1.0 nm otherwise.
+    switchDistance : float, optional
+        Lennard-Jones switching distance in nm. None picks 1.0 nm for CHARMM
+        force fields and 0.9 nm otherwise. Must be below ``nonbondedCutoff``,
+        so the old CHARMM build (1.0 / 0.9 nm, used before these options
+        existed) needs both arguments. CHARMM boxes must be at least 2.4 nm
+        across their narrowest reduced axis.
     out_dir : str, optional
         Directory where all output files are written.
     """
@@ -187,6 +200,9 @@ class SystemPreparation:
         is_membrane: bool = False,
         lipid_type: str = 'POPC',
         membrane_relax_iterations: int = 0, #200
+        membrane_ligand_z: float = 3.0,
+        nonbondedCutoff: float = None,  # nm; None = force-field default
+        switchDistance: float = None,  # nm; None = force-field default
         out_dir: str = "system",
     ) -> None:
 
@@ -224,6 +240,7 @@ class SystemPreparation:
         self.lipid_type = lipid_type
         # 0 disables the relaxation and restores stock addMembrane behaviour
         self.membrane_relax_iterations = membrane_relax_iterations
+        self.membrane_ligand_z = membrane_ligand_z
         self._available_lipids = [
             "POPC",
             "POPE",
@@ -246,9 +263,17 @@ class SystemPreparation:
         elif is_membrane and self.lipid_type is None:
             raise ValueError("For building a membrane system a lipid type must be specified.")
 
-        # Non-bonded parameters — probably don't want to change these defaults.
-        self.nb_cutoff = 1.0 * openmmunit.nanometers
-        self.switchDistance = 0.9 * openmmunit.nanometers
+        # CHARMM36 is parametrized with a 1.2 nm cutoff and a 1.0-1.2 nm LJ switch
+        is_charmm = any("charmm" in f.lower() for f in self.forcefield_files)
+        default_cutoff, default_switch = (1.2, 1.0) if is_charmm else (1.0, 0.9)
+        cutoff = default_cutoff if nonbondedCutoff is None else nonbondedCutoff
+        switch = default_switch if switchDistance is None else switchDistance
+        if not 0 < switch < cutoff:
+            raise ValueError(f"switchDistance ({switch} nm) must be positive and below "
+                             f"nonbondedCutoff ({cutoff} nm).")
+        self.nb_cutoff = cutoff * openmmunit.nanometers
+        self.switchDistance = switch * openmmunit.nanometers
+        logger.info(f"Nonbonded cutoff {cutoff:.2f} nm, LJ switch from {switch:.2f} nm.")
 
     @staticmethod
     def _parse_lig_ff(lig_ff: str) -> tuple[str, str]:
@@ -467,7 +492,7 @@ class SystemPreparation:
         ----------
         protein : str, optional
             Path to the prepared protein PDB file. None builds a ligand-only box
-            (requires ``ligands``; not supported with a membrane).
+            (requires ``ligands``; a single ligand file with a membrane).
         variants : dict, optional
             Residue variant map passed to ``add_variants()`` (e.g. to
             specify HIS protonation states or CYS oxidation).
@@ -493,8 +518,8 @@ class SystemPreparation:
 
         if protein is None and ligands is None:
             raise ValueError("pass a protein PDB, ligands, or both.")
-        if protein is None and self.is_membrane:
-            raise ValueError("ligand-only systems are not supported with a membrane.")
+        if protein is None and self.is_membrane and not isinstance(ligands, str):
+            raise ValueError("A ligand-only membrane system takes one ligand file: ligands='ligand.sdf'.")
         start_time = time.monotonic()
 
         if protein is None:
@@ -539,6 +564,16 @@ class SystemPreparation:
                     used_chains.add(chr(chain_id))
                     chain_id += 1
 
+        # CASE: Ligand and membrane only (no protein); the ligand block above parametrized it
+        max_length = 0.0 * openmmunit.nanometers
+        if protein is None and self.is_membrane:
+            xyz = np.array(ligand_positions.value_in_unit(openmmunit.nanometers))
+            max_length = np.max(np.linalg.norm(xyz[:, None] - xyz, axis=2)) * openmmunit.nanometers
+            if self.membrane_ligand_z is not None:
+                # centroid at the origin in x/y and at membrane_ligand_z in z
+                xyz += np.array([0.0, 0.0, self.membrane_ligand_z]) - xyz.mean(axis=0)
+
+            modeller = Modeller(ligand_topology, xyz * openmmunit.nanometers)
 
         # A 4-site water model needs its virtual site on EVERY water, including the
         # crystallographic ones carried in from the input. On the solvation path that has to
@@ -600,7 +635,7 @@ class SystemPreparation:
                         ionicStrength=self.ionicStrength,
                         positiveIon=self.ions[0],
                         negativeIon=self.ions[1],
-                        minimumPadding=self.padding,
+                        minimumPadding=self.padding + max_length,
                     )
 
             except OpenMMException as e:

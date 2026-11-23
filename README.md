@@ -26,7 +26,7 @@ Binding is a dual problem: **thermodynamics** (how strongly a ligand binds) and 
 | MM-GBSA / MM-PBSA with AMBER `MMPBSA.py` | `ProteinLigandAnalyzer` | [MM-GBSA](https://forlilab.github.io/autopath/guide/mmgbsa/) |
 | Everything above from one config file | `AutoPath` | [Pipeline](https://forlilab.github.io/autopath/guide/pipeline/) |
 
-Enhanced sampling (metadynamics) is being moved to a separate package; its options are documented in the `Config` docstring (`autopath/config.py`).
+Metadynamics has moved out of AutoPath.
 
 ## 📦 Installation
 
@@ -73,7 +73,6 @@ Runnable scripts in [`examples/`](examples/), each with its own README, using th
 | `04_Full-Pipeline` | The `AutoPath` class end to end, with a cw-RMSF filter before pulling |
 | `05_VanillaMD` | Conventional MD replicas with the standard analysis |
 | `06_Docking_PrEP` | Receptor and ligand preparation for docking |
-| `07_WTmetaD_COM` | Well-tempered metadynamics on a COM collective variable |
 | `08_Toy_validation` | The pull analysis checked on a toy model with exact answers |
 
 ## 📄 License
