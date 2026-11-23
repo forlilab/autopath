@@ -41,24 +41,46 @@ from rdkit.Chem.Draw import SimilarityMaps
 from rdkit.Chem.Scaffolds import MurckoScaffold
 
 
+class _WarningCounter(logging.Handler):
+    """Silent handler counting WARNING and above records."""
+
+    def __init__(self):
+        super().__init__(level=logging.WARNING)
+        self.count = 0
+
+    def emit(self, record):
+        self.count += 1
+
+
+def warning_count(logname: str = "autopath") -> int:
+    """Number of WARNING+ records since the last `setup_logging` call."""
+    for h in logging.getLogger(logname).handlers:
+        if isinstance(h, _WarningCounter):
+            return h.count
+    return 0
+
+
 def setup_logging(logfile: str = 'autopath.log',
                   logname: str = "autopath",
-                  log_level: str = "INFO", 
+                  log_level: str = "INFO",
                   ) -> logging.Logger:
-    """Set up logging for the application at the entry point, i.e. cli scripts."""
+    """Set up logging at the entry point; repeated calls reconfigure it."""
+    from autopath import __version__  # lazy: avoid circular import
 
     allowed_log_levels = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
     if log_level.upper() not in allowed_log_levels:
         raise ValueError(f"Invalid log level: {log_level}. It should be one of {allowed_log_levels}")
-    
-    os.makedirs(os.path.dirname(logfile), exist_ok=True)
+
+    if os.path.dirname(logfile):
+        os.makedirs(os.path.dirname(logfile), exist_ok=True)
 
     logger = logging.getLogger(logname)
     logger.setLevel(log_level.upper())
 
-    # Prevent duplicate handlers if setup_logging is called multiple times
-    if logger.handlers:
-        return logger  
+    # Drop old handlers so a second call switches files without duplicates.
+    for h in list(logger.handlers):
+        logger.removeHandler(h)
+        h.close()
 
     formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
@@ -69,7 +91,11 @@ def setup_logging(logfile: str = 'autopath.log',
 
     logger.addHandler(stream_handler)
     logger.addHandler(file_handler)
+    logger.addHandler(_WarningCounter())
     logger.propagate = False
+
+    logger.info("=" * 60)
+    logger.info(f"AutoPath {__version__} | cwd {os.getcwd()} | log level {log_level.upper()}")
 
     return logger
 
