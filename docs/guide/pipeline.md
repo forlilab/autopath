@@ -43,7 +43,7 @@ AutoPath(pdb_path="receptor.pdb", do_fix_pdb=True,
          run_sMDpulling=True, sMD_run_analysis=True, **settings).run(ligand_file="ligand.sdf")
 ```
 
-Each stage has a `run_*` flag. A stage that is switched off reads the outputs a previous run wrote, so the pipeline can be split into calls, for example to filter on cw-RMSF between equilibration and pulls (see example [`04_Full-Pipeline`](https://github.com/forlilab/autopath/tree/develop/examples/04_Full-Pipeline)).
+Each stage has a `run_*` flag. A stage that is switched off reads the outputs a previous run wrote, so the pipeline can be split into calls, for example to filter on cw-RMSF between equilibration and pulls (see example [`04_Full-Pipeline`](https://github.com/forlilab/autopath/tree/main/examples/04_Full-Pipeline)).
 
 ## Differences from the stage-by-stage route
 

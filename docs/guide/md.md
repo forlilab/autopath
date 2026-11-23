@@ -42,4 +42,4 @@ md.run(state_file=f"{eq}/checkpoint_equil_{sys_name}.xml",    # portable state X
 | Positional restraints | `restrained_atoms=` atom indices |
 | Enough frames for RMSF | Choose `save_freq` so the run gives at least 100 frames |
 
-The example [`05_VanillaMD`](https://github.com/forlilab/autopath/tree/develop/examples/05_VanillaMD) wraps this with the standard analysis.
+The example [`05_VanillaMD`](https://github.com/forlilab/autopath/tree/main/examples/05_VanillaMD) wraps this with the standard analysis.

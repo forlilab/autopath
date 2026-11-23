@@ -3,7 +3,7 @@ site_description: Protein-ligand system building, MD, steered-MD unbinding and e
 site_url: https://forlilab.github.io/autopath/
 repo_url: https://github.com/forlilab/autopath
 repo_name: forlilab/autopath
-edit_uri: edit/develop/docs/
+edit_uri: edit/main/docs/
 copyright: Copyright &copy; 2026 Forli Lab, Scripps Research
 
 theme:
