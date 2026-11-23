@@ -34,7 +34,7 @@ from autopath.pulling.Estimators import validate_path_combination
 from autopath.pulling.Diagnostics import plot_convergence_traces, plot_convergence_metrics
 
 import logging
-logger = logging.getLogger('autopath.core')
+logger = logging.getLogger(__name__)
 
 
 class AutoPath:

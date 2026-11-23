@@ -11,7 +11,7 @@ from scipy.ndimage import gaussian_filter1d
 from autopath.pulling.SMDData import SMDData
 
 import logging
-logger = logging.getLogger("autopath.pulling.Estimators")
+logger = logging.getLogger(__name__)
 
 
 class BaseEstimator(ABC):

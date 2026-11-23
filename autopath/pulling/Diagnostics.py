@@ -26,7 +26,7 @@ from scipy.ndimage import gaussian_filter
 
 import re
 import logging
-logger = logging.getLogger("autopath.pulling.Diagnostics")
+logger = logging.getLogger(__name__)
 
 def plot_work_profiles(
     results: pd.DataFrame,

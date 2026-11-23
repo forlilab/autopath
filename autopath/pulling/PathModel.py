@@ -18,7 +18,7 @@ from .Diagnostics import make_unbinding_paths_visualization
 from abc import ABC, abstractmethod
 
 import logging
-logger = logging.getLogger("autopath.PathModel")
+logger = logging.getLogger(__name__)
 
 # Trace features whose magnitude scales with the pulling speed. Reported when
 # clustering across speeds, where that offset would otherwise swamp the pathway

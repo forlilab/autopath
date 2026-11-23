@@ -20,7 +20,7 @@ import openmm.unit as openmmunit
 
 import cvpack
 import logging
-logger = logging.getLogger("autopath")
+logger = logging.getLogger(__name__)
 
 
 
@@ -468,11 +468,11 @@ class SteeredMD:
 
                 # ── Progress reporting ─────────────────────────────────────
                 if i % print_interval == 0:
-                    lag_nm = r_target_nm - r_after_nm  # diagnostic only; not logged
-                    if nc is not None and self.verbose > 0:
-                        print(f"Move {i+1}/{n_moves}: r={r_after_nm:.3f} nm  lag={lag_nm:.4f} nm  NC={nc:.2f}")
-                    else:
-                        print(f"Move {i+1}/{n_moves}: r={r_after_nm:.3f} nm  lag={lag_nm:.4f} nm")
+                    lag_nm = r_target_nm - r_after_nm
+                    logger.debug(
+                        f"[{run_id}] move {i+1}/{n_moves}: r={r_after_nm:.3f} nm, lag={lag_nm:.4f} nm"
+                        + (f", NC={nc:.2f}" if nc is not None else "")
+                    )
 
                 _buf.append(_row)
                 if len(_buf) >= self.save_freq:

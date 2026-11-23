@@ -6,7 +6,7 @@ import openmm.unit as openmmunit
 import numpy as np
 
 import logging
-logger = logging.getLogger("autopath")
+logger = logging.getLogger(__name__)
 
 # Force group assignments (OpenMM supports groups 0–31; must not overlap)
 _FG_CUSTOM_NB   = 14  # custom nonbonded (sterics/electrostatics)

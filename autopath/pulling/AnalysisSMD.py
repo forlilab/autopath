@@ -43,7 +43,7 @@ from autopath.pulling.LigandFeatures import (
 )
 from autopath.pulling.support import SupportPolicy
 
-logger = logging.getLogger("autopath.pulling")
+logger = logging.getLogger(__name__)
 
 # Trace features available on SMDData.raw_data ('NC' excluded: forward-pull only).
 TRACE_FEATURE_POOL = frozenset({

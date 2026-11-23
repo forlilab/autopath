@@ -16,7 +16,7 @@ from autopath.customForces import _FG_COMPONENTS, _FG_COMPONENTS_LAST
 import datetime
 
 import logging
-logger = logging.getLogger("autopath.equilibration")
+logger = logging.getLogger(__name__)
 
 @dataclass
 class EquilibrationStep:

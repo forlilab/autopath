@@ -4,7 +4,7 @@ import logging
 import tempfile
 import warnings
 
-logger = logging.getLogger("autopath")
+logger = logging.getLogger(__name__)
 import numpy as np
 import pandas as pd
 from sys import stdout, exit
@@ -172,7 +172,7 @@ def wrap_align_save_traj(traj_files, topology, remove_original=True, is_membrane
                     traj = traj.superpose(ref_traj, frame=0, atom_indices=sel,
                                           ref_atom_indices=ref_sel)
             except Exception as e:
-                logging.warning(f"Superposition failed for {traj_file}: {e}. Proceeding without superposition.")
+                logger.warning(f"Superposition failed for {traj_file}: {e}. Proceeding without superposition.")
         base = os.path.basename(traj_file) if out_dir is not None else traj_file
         out_path = os.path.join(out_dir, base) if out_dir is not None else base
         out_path = out_path.replace(".dcd", "_aligned.dcd")
@@ -397,7 +397,7 @@ def select_platform(platform_name: str = None, device_index: str = "0") -> Platf
     if platform_name is None or platform_name == "FASTEST":
         platform_name = get_fastest_platform().getName().upper()
 
-    logging.info(f"Using {platform_name} platform.")
+    logger.info(f"Using {platform_name} platform.")
 
     if platform_name == "OPENCL":
         platform = Platform.getPlatformByName('OpenCL')
@@ -428,7 +428,7 @@ def add_reporters(
     """Attach DCD trajectory and CSV state-data reporters to a simulation.
 
     Replaces any existing reporters on the simulation object. A progress
-    reporter is always written to stdout. A DCD file is always written.
+    reporter is written to stdout when ``verbose > 0``. A DCD file is always written.
     A CSV with thermodynamic state data is written when ``verbose > 0``;
     full energies, temperature, volume, and density are included when
     ``verbose > 1``.
@@ -453,22 +453,23 @@ def add_reporters(
         Atom indices written to the DCD (None = all atoms).
     """
 
-    logging.debug(f"Adding reporters to the simulation")
+    logger.debug(f"Adding reporters to the simulation")
     simulation.reporters = []  # Delete all current reporters
     
-    simulation.reporters.append(
-        StateDataReporter(
-            stdout,
-            logperiod,
-            step=True,
-            time=True,
-            progress=True,
-            remainingTime=True,
-            speed=True,
-            totalSteps=total_steps,
-            separator="\t",
+    if verbose > 0:
+        simulation.reporters.append(
+            StateDataReporter(
+                stdout,
+                logperiod,
+                step=True,
+                time=True,
+                progress=True,
+                remainingTime=True,
+                speed=True,
+                totalSteps=total_steps,
+                separator="\t",
+            )
         )
-    )
 
     simulation.reporters.append(
         DCDReporter(
@@ -524,7 +525,7 @@ def add_barostat(system: System = None, temp: float = 300, is_membrane: bool = F
     """
 
     if is_membrane:
-        logging.debug(f"Adding a Membrane Montecarlo Barostat to the system")
+        logger.debug(f"Adding a Membrane Montecarlo Barostat to the system")
         barostat = MonteCarloMembraneBarostat(
             1 * openmmunit.atmosphere,
             0 * openmmunit.bar * openmmunit.nanometers,
@@ -534,7 +535,7 @@ def add_barostat(system: System = None, temp: float = 300, is_membrane: bool = F
             15,
         )
     else:
-        logging.debug(f"Adding a Montecarlo Barostat to the system")
+        logger.debug(f"Adding a Montecarlo Barostat to the system")
         barostat = MonteCarloBarostat(1 * openmmunit.atmosphere, temp)
 
     system.addForce(barostat)
@@ -586,8 +587,6 @@ def build_residue_mapping(original_pdb: str, system_pdb: str, chain: str = None)
     Warns when counts differ (PDBFixer modelled in missing residues) or resnames disagree
     (non-standard residue replacement).
     """
-    import logging
-    _log = logging.getLogger('autopath.utils')
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -603,7 +602,7 @@ def build_residue_mapping(original_pdb: str, system_pdb: str, chain: str = None)
     sys_cas  = u_sys.select_atoms('protein and name CA')
 
     if len(orig_cas) != len(sys_cas):
-        _log.warning(
+        logger.warning(
             f"CA count mismatch: original PDB has {len(orig_cas)} residues, "
             f"system.pdb has {len(sys_cas)}. PDBFixer may have modelled in missing residues. "
             "Mapping by sequence position up to the shorter chain — verify residue_mapping.json."
@@ -619,7 +618,7 @@ def build_residue_mapping(original_pdb: str, system_pdb: str, chain: str = None)
         mapping[int(o.resid)] = int(s.resid)
 
     if renamed:
-        _log.warning(
+        logger.warning(
             f"Residue name mismatches (non-standard→standard replacement?): "
             + ", ".join(renamed)
         )
@@ -709,7 +708,7 @@ def reduce_to_murcko_scaffold(u, lig_selection: str, img_name: str = None):
         return reduced_ligand, murcko_match, mol
 
     except Exception as e:
-        logging.warning(f"Could not extract Murcko scaffold: {e}")
+        logger.warning(f"Could not extract Murcko scaffold: {e}")
         return u.select_atoms(f'({lig_selection}) and not name H*'), [], mol
 
 def _count_pocket_contacts(u, ligand, pocket, frames: int, cutoff: float = 3.5) -> np.ndarray:
@@ -818,7 +817,7 @@ def get_ligand_anchor_atoms(
 
     # Murcko is only valid for single-residue small molecules
     if mode == "murcko" and is_multi_residue:
-        logging.warning(
+        logger.warning(
             f"Murcko scaffold mode is not supported for multi-residue ligand "
             f"('{lig_selection}' spans {ligand_full.n_residues} residues). "
             "Falling back to 'lig_ha'."
@@ -937,7 +936,7 @@ def get_ligand_anchor_atoms(
             )
             img.save(img_name)
         except Exception as e:
-            logging.warning(f"Could not generate 2D image with highlights: {e}")
+            logger.warning(f"Could not generate 2D image with highlights: {e}")
         
     
     return anchor
@@ -974,7 +973,7 @@ def get_center(positions, atoms, group, weighByMass):
     if weighByMass:
         masses = np.array([atom.element.mass.value_in_unit(openmmunit.dalton) for atom in (atoms[i] for i in group)])
         if sum(masses) == 0:
-            logging.warning("All atoms in the group have zero mass. Using simple mean instead.")
+            logger.warning("All atoms in the group have zero mass. Using simple mean instead.")
             masses = None
         center = np.average(group_positions, axis=0, weights=masses)
     else:
@@ -1339,7 +1338,7 @@ def periodic_image_report(u: mda.Universe, system, ligand_sel: Optional[str] = N
         n = int((df[col] < cutoff).sum())
         msg = f"{col}: closest periodic image {df[col].min():.2f} A (cutoff {cutoff:.2f} A)"
         if n:
-            logging.getLogger("autopath").warning(f"{msg}; {n}/{len(df)} frames inside the cutoff")
+            logger.warning(f"{msg}; {n}/{len(df)} frames inside the cutoff")
         else:
-            logging.getLogger("autopath").info(msg)
+            logger.info(msg)
     return df

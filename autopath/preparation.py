@@ -30,7 +30,7 @@ from rdkit import Chem
 from autopath.utils import assign_bondOrders, add_variants, save_pdb, save_system, save_amber_files
 
 import logging
-logger = logging.getLogger("autopath.preparation")
+logger = logging.getLogger(__name__)
 
 # Water models whose residue carries an extra site beyond O/H/H.
 FOUR_SITE_WATER_MODELS = ("tip4pew", "tip5p", "swm4ndp")

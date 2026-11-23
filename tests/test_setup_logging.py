@@ -8,13 +8,17 @@ from autopath.utils import setup_logging, warning_count
 
 @pytest.fixture(autouse=True)
 def _restore_logger():
+    def _clean():
+        lg = logging.getLogger("autopath")
+        for h in list(lg.handlers):
+            lg.removeHandler(h)
+            h.close()
+        lg.propagate = True
+        lg.setLevel(logging.NOTSET)
+
+    _clean()
     yield
-    lg = logging.getLogger("autopath")
-    for h in list(lg.handlers):
-        lg.removeHandler(h)
-        h.close()
-    lg.propagate = True
-    lg.setLevel(logging.NOTSET)
+    _clean()
 
 
 def test_relative_logfile_without_dir(tmp_path, monkeypatch):
@@ -71,3 +75,19 @@ def test_level_applies_on_second_call(tmp_path):
     setup_logging(str(f), log_level="DEBUG")
     logging.getLogger("autopath.x").debug("dbg")
     assert "dbg" in f.read_text()
+
+
+def test_module_loggers_reach_file(tmp_path):
+    import autopath.config as c
+    import autopath.utils as u
+
+    f = tmp_path / "a.log"
+    setup_logging(str(f))
+    c.logger.warning("cfg-probe")
+    u.logger.warning("utils-probe")
+    for h in logging.getLogger("autopath").handlers:
+        h.flush()
+    text = f.read_text()
+    assert "cfg-probe" in text and "utils-probe" in text
+    assert c.logger.name.startswith("autopath.")
+    assert u.logger.name.startswith("autopath.")

@@ -11,7 +11,7 @@ from MDAnalysis.lib.distances import distance_array
 import tqdm
 
 import logging
-logger = logging.getLogger("autopath.pulling.SMDData")
+logger = logging.getLogger(__name__)
 from collections import defaultdict
 
 
@@ -645,7 +645,7 @@ class SMDData:
             atoms_A = u.select_atoms(group_A)
             atoms_B = u.select_atoms(group_B)
             if atoms_A.n_atoms == 0 or atoms_B.n_atoms == 0:
-                print(f"Warning: No atoms found for selection in trajectory {traj}. Skipping.")
+                logger.warning(f"No atoms found for selection in {traj}; skipping.")
                 continue
 
             traj_name = self._traj_to_log_name(traj)
