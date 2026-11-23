@@ -28,3 +28,16 @@ def test_large_barrier_aggregated(caplog):
     msgs = [r.getMessage() for r in caplog.records if "Large barrier" in r.getMessage()]
     assert len(msgs) == 1
     assert "3 path(s)" in msgs[0] and "estimator=cumulant" in msgs[0] and "speed=0.01" in msgs[0]
+
+
+def test_clipped_gamma_aggregated(caplog):
+    paths = ("path-0", "path-1", "path-2")
+    df = _results(list(paths), 0.01, 20.0)
+    df["Wdiss"] = -5.0 * df["r_coord"] * 0.01 * 1e3  # negative friction, floored
+    weights = {"cumulant": {0.01: {p: 1 / 3 for p in paths}}}
+    with caplog.at_level(logging.WARNING, logger="autopath"):
+        out = KramersEstimator(barrier_warn_kjmol=1e9).compute_per_path(df, weights)
+    msgs = [r.getMessage() for r in caplog.records if "clipped" in r.getMessage()]
+    assert len(msgs) == 1
+    assert "3 path(s)" in msgs[0] and "estimator=cumulant" in msgs[0] and "speed=0.01" in msgs[0]
+    assert (out[out["source"] == "per_path"]["n_gamma_clipped"] > 0).all()

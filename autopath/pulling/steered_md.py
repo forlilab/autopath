@@ -619,21 +619,20 @@ class SteeredMD:
         self._requested_speed = pulling_speed
         self._realized_speed = realized_speed
 
-        if steps_per_move_float < 1.5:
-            logger.warning(
-                f"steps_per_move clipped to 1 (requested {steps_per_move_float:.3f}). "
-                f"Speed {pulling_speed:g} nm/ps is too fast for dx_per_move={dx_nm:g} nm "
-                f"and dt={dt_ps:g} ps; realized speed will be {realized_speed:g} nm/ps."
-            )
-        elif abs(realized_speed - pulling_speed) / pulling_speed > 0.05:
-            logger.warning(
-                f"Realized speed {realized_speed:.5g} nm/ps differs from "
-                f"requested {pulling_speed:.5g} nm/ps by >5% due to rounding of "
-                f"steps_per_move ({steps_per_move_float:.3f} -> {self.steps_per_move})."
-            )
-
         ########################################################################################
         if pulling_speed not in self._params_logged_speeds:
+            if steps_per_move_float < 1.5:
+                logger.warning(
+                    f"steps_per_move clipped to 1 (requested {steps_per_move_float:.3f}). "
+                    f"Speed {pulling_speed:g} nm/ps is too fast for dx_per_move={dx_nm:g} nm "
+                    f"and dt={dt_ps:g} ps; realized speed will be {realized_speed:g} nm/ps."
+                )
+            elif abs(realized_speed - pulling_speed) / pulling_speed > 0.05:
+                logger.warning(
+                    f"Realized speed {realized_speed:.5g} nm/ps differs from "
+                    f"requested {pulling_speed:.5g} nm/ps by >5% due to rounding of "
+                    f"steps_per_move ({steps_per_move_float:.3f} -> {self.steps_per_move})."
+                )
             logger.info(
                 f"sMD v={pulling_speed:g} nm/ps: realized {realized_speed:.5g} nm/ps, "
                 f"{self.steps_per_move} steps/move ({self.steps_per_move * dt_ps:.3f} ps), "

@@ -302,6 +302,7 @@ class AutoPath:
             All results are written to disk under the system-name subdirectory.
         """
         start_time = time.monotonic()
+        w0 = warning_count()
 
         if ligand_file is not None:
             sys_name = os.path.splitext(os.path.basename(ligand_file))[0]
@@ -613,14 +614,14 @@ class AutoPath:
                         if tail_converged(conv_df, k_consec=self.sMD_conv_streak):
                             n_conv = float(conv_df["n_replicas"].max())
                             if self.sMD_autostop_estimator == "force":
-                                logger.warning(
+                                logger.info(
                                     f"sMD pulling CONVERGED (force ladder, all speeds; "
                                     f"trailing streak of {self.sMD_conv_streak} through rung "
                                     f"{n_conv:.0f}, window {self.sMD_conv_window})."
                                 )
                                 live = {s: False for s in live}
                             else:
-                                logger.warning(
+                                logger.info(
                                     f"sMD pulling for speed {speed} nm/ps CONVERGED after "
                                     f"{len(log_files) + 1} replicas (trailing streak of "
                                     f"{self.sMD_conv_streak} through rung {n_conv:.0f}, "
@@ -683,7 +684,7 @@ class AutoPath:
                                         f"speed {speed} nm/ps; need {self.sMD_conv_streak}."
                                     )
                                 if CONVERGED:
-                                    logger.warning(
+                                    logger.info(
                                         f"sMD pulling for speed {speed} nm/ps CONVERGED after "
                                         f"{current_replica} replicas (trailing streak of "
                                         f"{self.sMD_conv_streak} through rung {n_conv:.0f}, "
@@ -859,8 +860,9 @@ class AutoPath:
             plot_convergence_metrics(smd_conv_metrics, outdir=sMD_analysis_outdir, tolerances=CONVERGENCE_TOLERANCES)
 
         simulation_time = time.monotonic() - start_time
+        # builtins.sum: the openmm.unit star import shadows sum
         n_pulls = builtins.sum(c.total() for c in sMD.stop_counts.values()) if sMD is not None else None
-        logger.info(end_summary(n_pulls, warning_count(), simulation_time / 60))
+        logger.info(end_summary(n_pulls, warning_count() - w0, simulation_time / 60))
 
         return
 

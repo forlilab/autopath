@@ -5,6 +5,7 @@ import argparse
 from glob import glob
 from autopath.config import Config
 from autopath.autopath_core import AutoPath
+from autopath.utils import setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +157,9 @@ def main():
         )
 
         for lig in ligands:
+            sys_name = os.path.splitext(os.path.basename(lig))[0]
+            os.makedirs(sys_name, exist_ok=True)
+            setup_logging(f"{sys_name}/autopath.log", log_level="INFO")
             autopath_simulation.run(lig)
 
     except (FileNotFoundError, ValueError) as e:

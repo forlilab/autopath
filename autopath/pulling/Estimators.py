@@ -1153,6 +1153,7 @@ class KramersEstimator:
         kBT: float,
         gamma_floor: float,
         bound_extension: str = "none",
+        warn_clipped: bool = True,
     ) -> dict:
         """Compute the mean first-passage time (MFPT) via the Pontryagin/Kramers double integral.
 
@@ -1269,7 +1270,7 @@ class KramersEstimator:
 
         n_points = int(mask.sum())
         n_neg = int((G[mask] < gamma_floor).sum())
-        if n_neg:
+        if n_neg and warn_clipped:
             logger.warning(
                 f"[Kramers] clipped {n_neg}/{n_points} Γ values in [start_r, abs_r] "
                 f"to floor={gamma_floor}"
@@ -1633,6 +1634,7 @@ class KramersEstimator:
         fric_path = fric_path[np.isfinite(fric_path["Gamma"].astype(float))]
 
         large_barriers: dict[tuple, list[float]] = {}
+        clipped: dict[tuple, list[int]] = {}
         for (est_name, speed, path), grp in res_ok.groupby(
             ["estimator", "speed", "path"]
         ):
@@ -1671,7 +1673,7 @@ class KramersEstimator:
                 res = KramersEstimator.kramers_mfpt(
                     profile, start_r, abs_r,
                     reflect_r=None, kBT=self.kBT, gamma_floor=self.gamma_floor,
-                    bound_extension=bound_extension,
+                    bound_extension=bound_extension, warn_clipped=False,
                 )
             except Exception as exc:
                 logger.warning(
@@ -1680,6 +1682,9 @@ class KramersEstimator:
                 )
                 continue
 
+            if res["n_gamma_clipped"]:
+                c = clipped.setdefault((est_name, speed), [0, 0, 0])
+                c[0] += int(res["n_gamma_clipped"]); c[1] += int(res["n_gamma_points"]); c[2] += 1
             if float(res["barrier_kjmol"]) > self.barrier_warn_kjmol:
                 large_barriers.setdefault((est_name, speed), []).append(
                     float(res["barrier_kjmol"])
@@ -1708,6 +1713,11 @@ class KramersEstimator:
                 "n_gamma_points":  int(res["n_gamma_points"]),
             })
 
+        for (est_name, speed), (n_c, n_p, n_paths) in clipped.items():
+            logger.warning(
+                f"[Kramers/per-path] clipped {n_c}/{n_p} Γ values to floor={self.gamma_floor} "
+                f"in {n_paths} path(s) (estimator={est_name}, speed={speed})"
+            )
         for (est_name, speed), bars in large_barriers.items():
             logger.warning(
                 f"[Kramers/per-path] Large barrier: max {max(bars):.1f} kJ/mol, "
