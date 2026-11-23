@@ -40,7 +40,7 @@ SystemPreparation(
 | Several ligands or cofactors | fixed PDB | one tuple per molecule, distinct resnames | Each gets its own chain. |
 | Protein–protein | one PDB with all chains | `None` or tuples | Check the interface after fixing. |
 | Membrane protein | fixed, pre-oriented PDB (e.g. from OPM) | optional | `is_membrane=True, lipid_type="POPC"`. Also POPE, DLPC, DLPE, DMPC, DOPC, DPPC, or a lipid-patch PDB path. |
-| Small molecule in water | `None` | tuple(s) | Use `padding >= 1.5` nm. Not supported with a membrane. |
+| Small molecule in water | `None` | tuple(s) | Use `padding >= 1.5` nm. With a membrane (`is_membrane=True`) pass one ligand file path (`ligands="ligand.sdf"`); it is placed at `membrane_ligand_z` nm (default 3.0) above the bilayer centre. |
 
 ## Inputs
 

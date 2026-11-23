@@ -16,4 +16,4 @@ Each of these has broken a real run.
 | `system` is `None` after MD | `VanillaMD.run()` returns `None` | Keep the system from `load_system` |
 | Pulls stop with `[PBC guard] Stopping at move ...` | The ligand approached a periodic image of the protein | Rebuild with more padding |
 | Two pulls overwrite each other | Default pull ids are `HHMMSS`; parallel jobs at the same speed collided | Split jobs by speed, or pass unique integer `run_id`s |
-| `ValueError: ligand-only systems are not supported with a membrane` | `protein=None` with `is_membrane=True` | Not supported |
+| `ValueError: A ligand-only membrane system takes one ligand file: ligands='ligand.sdf'.` | `protein=None` with `is_membrane=True` and several ligands or a tuple | Pass a single ligand file; set `membrane_ligand_z` to position it |
