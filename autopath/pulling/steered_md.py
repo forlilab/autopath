@@ -355,6 +355,7 @@ class SteeredMD:
         # read_csv(comment='#') skips them; SMDData.parse_log_metadata reads them
         # so downstream estimators can use the logged k and realized speed
         # instead of re-deriving them.
+        _t_enter = time.monotonic()
         _k_spring_val = self.sMD_spring_cte.value_in_unit(
             openmmunit.kilojoules_per_mole / openmmunit.nanometer**2)
         # Write to .part and rename at the end: a crashed pull leaves no .dat to count as a replica
@@ -367,6 +368,7 @@ class SteeredMD:
             f.write(f"# force_n_samples={n_sub}\n")
             f.write(f"# lambda0_nm={initial_r0_nm:.10g}\n")
             f.write(f"# r_start_nm={r_start_nm:.10g}\n")
+            f.write(f"# start_time={datetime.now().isoformat(timespec='seconds')}\n")
             f.write("step,time,r_target,r_before,r_after,force,force_sem,U_cvpack,dW_protocol\n")
 
             # Loop over the number of moves
@@ -496,8 +498,12 @@ class SteeredMD:
 
             if _buf:
                 f.write(''.join(_buf))
+            self._last_stop = _stop or ("end", n_moves, n_moves, n_moves * dx_nm)
+            _reason, _final, _total, _disp = self._last_stop
+            f.write(f"# stop_reason={_reason}\n# final_move={_final}\n# n_moves={_total}\n"
+                    f"# final_displacement_nm={_disp:.6g}\n"
+                    f"# wall_minutes={(time.monotonic() - _t_enter) / 60:.4g}\n")
         os.replace(dat_path + ".part", dat_path)
-        self._last_stop = _stop or ("end", n_moves, n_moves, n_moves * dx_nm)
 
         if geom_fh is not None:
             if geom_buf:
