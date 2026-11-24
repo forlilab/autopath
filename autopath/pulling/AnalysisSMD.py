@@ -42,7 +42,8 @@ from autopath.pulling.LigandFeatures import (
     SUPPORTED_FEATURES as LIGAND_FEATURE_POOL,
 )
 from autopath.pulling.support import SupportPolicy
-from autopath.pulling.outputs import pull_table, write_traces
+from autopath.pulling.outputs import pull_table, write_summary, write_traces
+from autopath.utils import warning_count
 
 logger = logging.getLogger(__name__)
 
@@ -429,6 +430,23 @@ class SMDAnalysis:
         out = feat_df.merge(rc, on=['trajname', 'step'], how='left')
         return out[out['r_coord'] <= cap].drop(columns='r_coord')
 
+    def _summary_meta(self, smd: SMDData, n_warnings: int) -> dict:
+        import autopath
+        heavy = None
+        try:
+            import MDAnalysis as mda
+            heavy = len(mda.Universe(self.reference_pdb).select_atoms(
+                f"({self.ligand_select}) and not name H*"))
+        except Exception:
+            pass
+        return dict(
+            autopath_version=autopath.__version__, system=self.sysname,
+            ligand=dict(resname=self._ligand_resname_from_select(self.ligand_select),
+                        heavy_atoms=heavy),
+            temperature_K=self.temperature, spring_k_kJ_mol_nm2=smd.spring_constant,
+            path_model=type(self.path_model).__name__.removesuffix("PathModel").lower(),
+            n_paths=int(smd.raw_data["path"].nunique()), analysis_warnings=n_warnings)
+
     def run(self,
             sMDDdata: SMDData,
             r_range: tuple[float, float] | None = None,
@@ -475,6 +493,7 @@ class SMDAnalysis:
             Bound-state population below the pull start
             (:meth:`KramersEstimator.kramers_mfpt`); ``"none"`` reflects at the start.
         """
+        w0 = warning_count()
         if kramers_abs not in ("end", "force_plateau"):
             raise ValueError(f"kramers_abs must be 'end' or 'force_plateau', got {kramers_abs!r}")
         if kramers_bound not in ("mirror", "none"):
@@ -866,6 +885,7 @@ class SMDAnalysis:
         write_traces(sMDDdata.raw_data, pull_table(sMDDdata, sMDDdata.raw_data),
                      self.outdir, legacy=self.legacy_outputs)
 
+        write_summary(self.outdir, self._summary_meta(sMDDdata, warning_count() - w0))
         return sMDDdata
         
     def check_convergence(self,

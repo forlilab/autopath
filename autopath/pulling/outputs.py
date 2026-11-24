@@ -1,4 +1,5 @@
 """Per-pull table and per-step traces written by the sMD analysis."""
+import json
 import logging
 import os
 
@@ -104,3 +105,144 @@ def load_traces(outdir: str, columns: list[str] | None = None) -> pd.DataFrame:
     else:
         raise FileNotFoundError(f"no traces.csv.gz or sMD_processed_data.csv in {outdir}")
     return df if columns is None else df[columns]
+
+
+KB_KJ = 0.008314462618
+_META_KEYS = ["autopath_version", "system", "ligand", "temperature_K", "spring_k_kJ_mol_nm2",
+              "path_model", "n_paths", "analysis_warnings"]
+
+
+def jarzynski_convergence(traces: pd.DataFrame, pulls: pd.DataFrame, temperature: float) -> pd.DataFrame:
+    """Jarzynski estimator health versus pull count, at the full-set best step.
+
+    Parameters
+    ----------
+    traces : pandas.DataFrame
+        Per-step ``trajname``, ``speed``, ``step``, ``work``, ``r_coord``.
+    pulls : pandas.DataFrame
+        ``trajname`` and ``pull_index`` (acquisition order).
+    temperature : float
+        Kelvin.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per (speed, n >= 2): ``top_pull_weight``, ``ess_over_n``,
+        ``tail_position``, ``beta_sigma_W`` and ``r_nm`` (the step used).
+    """
+    from scipy.special import logsumexp
+
+    kT = KB_KJ * temperature
+    idx = pulls.set_index("trajname")["pull_index"]
+    rows = []
+    for sp, g in traces.groupby("speed"):
+        W = g.pivot_table(index="step", columns="trajname", values="work").dropna()
+        N = W.shape[1]
+        if N < 2 or W.empty:
+            continue
+        W = W[sorted(W.columns, key=lambda t: idx[t])]
+        r = g.groupby("step")["r_coord"].median().reindex(W.index).to_numpy()
+        w = W.to_numpy()
+        i = int(np.argmax(-kT * (logsumexp(-w / kT, axis=1) - np.log(N))))
+        for n in range(2, N + 1):
+            x = w[i, :n]
+            lw = -x / kT
+            p = np.exp(lw - logsumexp(lw))
+            dG = -kT * (logsumexp(lw) - np.log(n))
+            rows.append(dict(speed=sp, n=n, r_nm=r[i], top_pull_weight=p.max(),
+                             ess_over_n=1 / (p ** 2).sum() / n,
+                             tail_position=(dG - x.min()) / (kT * np.log(n)),
+                             beta_sigma_W=x.std(ddof=1) / kT))
+    return pd.DataFrame(rows, columns=["speed", "n", "r_nm", "top_pull_weight", "ess_over_n",
+                                       "tail_position", "beta_sigma_W"])
+
+
+def _num(x, nd):
+    try:
+        x = float(x)
+    except (TypeError, ValueError):
+        return None
+    return round(x, nd) if np.isfinite(x) else None
+
+
+def _read(outdir: str, name: str):
+    f = f"{outdir}/{name}"
+    return pd.read_csv(f) if os.path.isfile(f) else None
+
+
+def write_summary(outdir: str, meta: dict | None = None) -> dict:
+    """Write ``summary.json`` and return it.
+
+    Parameters
+    ----------
+    outdir : str
+        Analysis directory.
+    meta : dict, optional
+        Run-level keys (version, system, ligand, temperature, spring constant,
+        path model, path count, warnings). ``None`` reloads them from an
+        existing ``summary.json`` and refreshes only the disk-derived keys.
+    """
+    from autopath.pulling.readouts import profile_readouts
+
+    path = f"{outdir}/summary.json"
+    if meta is None:
+        try:
+            with open(path) as fh:
+                meta = json.load(fh)
+        except (OSError, ValueError):
+            meta = {}
+    out = {k: meta.get(k) for k in _META_KEYS}
+    T = out["temperature_K"] or 300.0
+    kT = KB_KJ * T
+    pulls, vall = _read(outdir, "pulls.csv"), _read(outdir, "sMD_conv_vALL_metrics.csv")
+    pq, kr, pmfs = (_read(outdir, f) for f in ("path_quality.csv", "koff_kramers.csv", "mixture_pmfs.csv"))
+
+    speeds = {}
+    if pulls is not None:
+        for sp, g in pulls.groupby("speed"):
+            conv = None
+            if vall is not None and {"speed", "n_replicas", "converged"} <= set(vall.columns):
+                c = vall[np.isclose(vall["speed"], sp)]
+                if len(c):
+                    v = c.loc[c["n_replicas"].idxmax(), "converged"]
+                    conv = None if pd.isna(v) else bool(v)
+            pw = {}
+            if pq is not None and {"estimator", "speed", "path", "weight"} <= set(pq.columns):
+                c = pq[np.isclose(pq["speed"], sp)]
+                if len(c):
+                    c = c[c["estimator"] == c["estimator"].iloc[0]]
+                    pw = {str(k): _num(v, 3) for k, v in zip(c["path"], c["weight"])}
+            speeds[f"{sp:g}"] = dict(pulls=int(len(g)), stop=g["stop_reason"].value_counts().to_dict(),
+                                     converged=conv, path_weights=pw)
+    out["speeds"] = speeds
+
+    ro = {}
+    if pmfs is not None and len(pmfs):
+        for r in profile_readouts(pmfs, kBT=kT).itertuples():
+            ro[(r.estimator, float(r.speed))] = dict(dG_kJ_mol=r.dG_profile)
+    if kr is not None:
+        for r in kr.itertuples():
+            d = ro.setdefault((r.estimator, float(r.speed_nm_per_ps)), {})
+            d["pkoff"] = -np.log10(r.k_off_per_s) if r.k_off_per_s > 0 else None
+            d["barrier_kJ_mol"] = r.barrier_kjmol
+    out["readouts"] = [dict(estimator=e, speed=sp, dG_kJ_mol=_num(d.get("dG_kJ_mol"), 1),
+                            pkoff=_num(d.get("pkoff"), 2), barrier_kJ_mol=_num(d.get("barrier_kJ_mol"), 1))
+                       for (e, sp), d in sorted(ro.items())]
+
+    if pulls is not None:
+        try:
+            jc = jarzynski_convergence(load_traces(outdir, ["trajname", "speed", "step", "work", "r_coord"]),
+                                       pulls, T)
+        except (FileNotFoundError, KeyError):
+            jc = pd.DataFrame()
+        if len(jc):
+            last = jc.sort_values("n").groupby("speed").tail(1)
+            out["jarzynski_diagnostics"] = {
+                f"{r.speed:g}": {k: _num(getattr(r, k), 3) for k in
+                                 ("r_nm", "top_pull_weight", "ess_over_n", "beta_sigma_W")}
+                for r in last.itertuples()}
+    for k, nd in (("temperature_K", 1), ("spring_k_kJ_mol_nm2", 1)):
+        out[k] = _num(out[k], nd)
+    with open(path, "w") as fh:
+        json.dump(out, fh, indent=2, allow_nan=False)
+    return out

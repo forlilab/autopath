@@ -34,6 +34,7 @@ from autopath.pulling.Convergence import (tail_converged, validate_autostop_opti
 from autopath.pulling.PathModel import DTWPathModel, NullPathModel
 from autopath.pulling.Estimators import validate_path_combination
 from autopath.pulling.Diagnostics import plot_convergence_traces, plot_convergence_metrics
+from autopath.pulling.outputs import write_summary
 
 import logging
 logger = logging.getLogger(__name__)
@@ -844,6 +845,7 @@ class AutoPath:
                 boundary_buffer_frac=self.sMD_boundary_buffer_frac,
             )
             conv_df.to_csv(f"{sMD_analysis_outdir}/sMD_conv_vALL_metrics.csv", index=False)
+            write_summary(sMD_analysis_outdir)
             if not traces_df.empty:
                 traces_df.to_csv(f"{sMD_analysis_outdir}/sMD_conv_vALL_traces.csv", index=False)
 
