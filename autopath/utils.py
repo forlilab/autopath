@@ -1099,7 +1099,7 @@ def write_pocket_pymol(
     protein_color: str = "slate",
     com_color: str = "red",
     com_sphere_radius: float = 0.5,
-    output_format: str = "pse",
+    output_format: str = "pml",
 ) -> None:
     """Visualize protein, ligand, pocket, and pocket COM in PyMOL.
 

@@ -93,3 +93,22 @@ def test_path_friction_single_path_matches_whole_set(null_dir):
     c_fr = fr[(fr.estimator == "cumulant") & (fr.method == "derivative")].sort_values(["speed", "r_coord"])
     assert len(c_pf) == len(c_fr) > 0
     np.testing.assert_allclose(c_pf.Gamma.values, c_fr.Gamma.values, rtol=1e-9)
+
+
+def test_per_path_failure_does_not_abort_run(tmp_path, monkeypatch, caplog):
+    import logging
+    from autopath.pulling.Estimators import FrictionEstimator
+    orig = FrictionEstimator.gamma_from_force_regression
+    out = tmp_path / "out"
+
+    def flaky(self, *a, **kw):
+        if (out / "friction.csv").exists():   # only the per-path calls
+            raise RuntimeError("sparse regression")
+        return orig(self, *a, **kw)
+
+    monkeypatch.setattr(FrictionEstimator, "gamma_from_force_regression", flaky)
+    with caplog.at_level(logging.WARNING):
+        d = analysed_dir(tmp_path, path_model="null", n_paths=None)
+    assert (d / "friction.csv").exists() and (d / "mixture_pmfs.csv").exists()
+    assert any("Per-path curves" in r.message and r.levelno == logging.WARNING
+               for r in caplog.records)

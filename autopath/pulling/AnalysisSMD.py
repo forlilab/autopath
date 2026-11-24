@@ -677,29 +677,32 @@ class SMDAnalysis:
         friction_df.to_csv(os.path.join(self.outdir, 'friction.csv'), index=False)
 
         # Per-path curves for figures; new files only.
-        _res = sMDDdata.results
-        _pm_cols = [c for c in ('estimator', 'speed', 'path', 'step', 'r_coord',
-                                'dG', 'Wdiss', 'Wmean') if c in _res.columns]
-        _res[_pm_cols].to_csv(os.path.join(self.outdir, 'path_pmfs.csv'), index=False)
-        _pf = []
-        if 'cumulant' in set(_res['estimator']):
-            _pf.append(friction_est.gamma_from_wdiss_derivative(
-                _res[_res['estimator'] == 'cumulant'], estimator='cumulant'))
-        _force = _res[_res['estimator'] == 'force']
-        for _p, _g in _force.groupby('path'):
-            _sp = sorted(_g['speed'].unique())
-            if len(_sp) < 2:
-                continue
-            _r = friction_est.gamma_from_force_regression(_g, {s: {_p: 1.0} for s in _sp})
-            if not _r.empty:
-                _pf.append(_r.assign(path=_p))
-        _pf = [d for d in _pf if d is not None and not d.empty]
-        if _pf:
-            _pfc = ['estimator', 'method', 'speed', 'path', 'step', 'r_coord',
-                    'Gamma', 'Gamma_integrated']
-            _pfd = pd.concat(_pf, ignore_index=True)
-            _pfd[[c for c in _pfc if c in _pfd.columns]].to_csv(
-                os.path.join(self.outdir, 'path_friction.csv'), index=False)
+        try:
+            _res = sMDDdata.results
+            _pm_cols = [c for c in ('estimator', 'speed', 'path', 'step', 'r_coord',
+                                    'dG', 'Wdiss', 'Wmean') if c in _res.columns]
+            _res[_pm_cols].to_csv(os.path.join(self.outdir, 'path_pmfs.csv'), index=False)
+            _pf = []
+            if 'cumulant' in set(_res['estimator']):
+                _pf.append(friction_est.gamma_from_wdiss_derivative(
+                    _res[_res['estimator'] == 'cumulant'], estimator='cumulant'))
+            _force = _res[_res['estimator'] == 'force']
+            for _p, _g in _force.groupby('path'):
+                _sp = sorted(_g['speed'].unique())
+                if len(_sp) < 2:
+                    continue
+                _r = friction_est.gamma_from_force_regression(_g, {s: {_p: 1.0} for s in _sp})
+                if not _r.empty:
+                    _pf.append(_r.assign(path=_p))
+            _pf = [d for d in _pf if d is not None and not d.empty]
+            if _pf:
+                _pfc = ['estimator', 'method', 'speed', 'path', 'step', 'r_coord',
+                        'Gamma', 'Gamma_integrated']
+                _pfd = pd.concat(_pf, ignore_index=True)
+                _pfd[[c for c in _pfc if c in _pfd.columns]].to_csv(
+                    os.path.join(self.outdir, 'path_friction.csv'), index=False)
+        except Exception as _exc:
+            logger.warning(f"Per-path curves (path_pmfs/path_friction) skipped: {_exc}")
 
         # --- Mean-force TI PMF on the deconvolved coordinate z = lambda - Feq/k (force only) ---
         if any(e.name == 'force' for e in active_estimators) and \
@@ -806,7 +809,7 @@ class SMDAnalysis:
                     )
                     logger.info("Unbinding paths visualization written.")
             except Exception as _exc:
-                logger.warning(f"Could not regenerate friction-coloured PSE: {_exc}")
+                logger.warning(f"Could not write unbinding paths visualization: {_exc}")
 
         if self.do_plots:
             # Markers: TS (mean|force| peak) and Kramers absorbing boundary (force plateau).

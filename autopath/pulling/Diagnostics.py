@@ -838,7 +838,7 @@ def make_unbinding_paths_visualization(
     pocket_select: str = None,
     n_lig_conformations: int = 5,
     stick_transparency_ladder: Optional[Tuple[float, float]] = None,
-    output_format: str = "pse",
+    output_format: str = "pml",
     color_by_friction: bool = False,
     friction_csv: str = None,
     friction_estimator: str = "cumulant",

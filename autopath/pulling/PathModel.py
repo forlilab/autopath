@@ -85,8 +85,8 @@ class DTWPathModel(PathModel):
         # features pass through raw.
         self.pca_all_features = pca_all_features
         # Unbinding-paths figure settings, forwarded to
-        # make_unbinding_paths_visualization. Defaults reproduce the legacy
-        # session (self-contained .pse, 5 snapshots, uniform stick alpha).
+        # make_unbinding_paths_visualization. Defaults: .pml
+        # script, 5 snapshots, uniform stick alpha.
         self.viz_output_format = viz_output_format
         self.viz_n_lig_conformations = viz_n_lig_conformations
         self.viz_stick_transparency_ladder = viz_stick_transparency_ladder
