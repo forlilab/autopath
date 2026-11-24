@@ -55,6 +55,7 @@ def kramers_warning(est, mix_df, path_df, thr, floor):
     pp = None
     if path_df is not None and not path_df.empty:
         pp = path_df[(path_df["estimator"] == est) & (path_df["source"] == "per_path")]
+        pp = pp if not pp.empty else None
     frames = [f for f in (m, pp) if f is not None and not f.empty]
     if not frames:
         return None
@@ -64,7 +65,9 @@ def kramers_warning(est, mix_df, path_df, thr, floor):
     fr = (allr["n_gamma_clipped"] / allr["n_gamma_points"])[allr["n_gamma_clipped"] > 0]
     if not (big or pbig or len(fr)):
         return None
-    msg = f"[Kramers] {est}: barrier {allr['barrier_kjmol'].min():.1f}-{allr['barrier_kjmol'].max():.1f} kJ/mol"
+    lo, hi = allr["barrier_kjmol"].min(), allr["barrier_kjmol"].max()
+    rng = f"{lo:.1f}" if round(lo, 1) == round(hi, 1) else f"{lo:.1f}-{hi:.1f}"
+    msg = f"[Kramers] {est}: barrier {rng} kJ/mol"
     if m is not None:
         msg += f", {big}/{len(m)} rows"
     if pp is not None:

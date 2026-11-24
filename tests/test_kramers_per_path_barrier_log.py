@@ -69,3 +69,13 @@ def test_kramers_warning_helper():
                    "(likely sampling-limited); Γ clipped to floor=1.0 at 10%-20% of points")
     assert kramers_warning("b", mix, paths, 80.0, 1.0) is None
     assert "paths" not in kramers_warning("a", mix, None, 80.0, 1.0)
+
+
+def test_kramers_warning_single_row_no_paths():
+    from autopath.pulling.AnalysisSMD import kramers_warning
+    mix = pd.DataFrame({"estimator": ["f"], "barrier_kjmol": [277.1],
+                        "n_gamma_clipped": [0], "n_gamma_points": [50]})
+    paths = pd.DataFrame({"estimator": ["a"], "source": ["per_path"], "barrier_kjmol": [1.0],
+                          "n_gamma_clipped": [0], "n_gamma_points": [50]})
+    assert kramers_warning("f", mix, paths, 80.0, 1.0) == (
+        "[Kramers] f: barrier 277.1 kJ/mol, 1/1 rows above 80 kJ/mol (likely sampling-limited)")
