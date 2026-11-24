@@ -2,7 +2,7 @@
 import os
 import time
 import logging
-logger = logging.getLogger("autopath")
+logger = logging.getLogger(__name__)
 
 # OpenMM imports
 from openmm import *

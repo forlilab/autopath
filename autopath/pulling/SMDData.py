@@ -11,7 +11,7 @@ from MDAnalysis.lib.distances import distance_array
 import tqdm
 
 import logging
-logger = logging.getLogger("autopath.pulling.SMDData")
+logger = logging.getLogger(__name__)
 from collections import defaultdict
 
 
@@ -283,7 +283,7 @@ class SMDData:
         if count == 0:
             logger.warning("No valid log files found.")
             return None
-        logger.info(f"Loaded {count} log files.")
+        logger.debug(f"Loaded {count} log files")
 
         if not raw_data:
             logger.warning("No data loaded from log files.")
@@ -392,11 +392,11 @@ class SMDData:
             raw_data.loc[group.index, 'work'] = work
 
         if resolved_mode == 'protocol':
-            logger.info(
+            logger.debug(
                 f"Computed cumulative work from protocol increments column '{protocol_work_column}'."
             )
         else:
-            logger.info(
+            logger.debug(
                 f"Computed cumulative work by integrating '{self.force_column}' over '{r_column}'."
             )
 
@@ -645,7 +645,7 @@ class SMDData:
             atoms_A = u.select_atoms(group_A)
             atoms_B = u.select_atoms(group_B)
             if atoms_A.n_atoms == 0 or atoms_B.n_atoms == 0:
-                print(f"Warning: No atoms found for selection in trajectory {traj}. Skipping.")
+                logger.warning(f"No atoms found for selection in {traj}; skipping.")
                 continue
 
             traj_name = self._traj_to_log_name(traj)
@@ -947,7 +947,7 @@ class SMDData:
 
         p_neq_dic = {}
         for speed, g in grouping_iter:
-            logger.info(f"Speed {speed} nm/ps has {g['path'].nunique()} unique paths.")
+            logger.debug(f"Speed {speed} nm/ps has {g['path'].nunique()} unique paths.")
             path_traj_counts = g.groupby('path')['trajname'].nunique().to_dict()
             speed_key = speed if byspeed else "all_speeds"
             p_neq_dic[speed_key] = SMDData._compute_p_neq(path_traj_counts)

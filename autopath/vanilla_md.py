@@ -10,7 +10,7 @@ from autopath.utils import *
 from autopath.customForces import add_harmonic_restraints
 
 import logging
-logger = logging.getLogger("autopath")
+logger = logging.getLogger(__name__)
 
 class VanillaMD:
     """Unbiased (plain) MD runner for AutoPath production simulations.

@@ -11,7 +11,7 @@ from scipy.ndimage import gaussian_filter1d
 from autopath.pulling.SMDData import SMDData
 
 import logging
-logger = logging.getLogger("autopath.pulling.Estimators")
+logger = logging.getLogger(__name__)
 
 
 class BaseEstimator(ABC):
@@ -807,7 +807,7 @@ class KramersEstimator:
 
         dropped = max(len(pmf_df), len(fric_df)) - len(merged)
         if dropped > 3 and len(merged) > 0:
-            logger.warning(
+            logger.debug(
                 f"[Kramers] merge key='{key_label}': PMF rows={len(pmf_df)}, "
                 f"friction rows={len(fric_df)}, merged rows={len(merged)} "
                 f"({dropped} dropped)"
@@ -869,7 +869,7 @@ class KramersEstimator:
         fric_deriv, common_speeds, fsrc = KramersEstimator._per_speed_candidates(
             pmf_sub, fric_sub, estimator_name, friction_source_work
         )
-        logger.info(f"[Kramers] {estimator_name}: per-speed friction source = {fsrc}")
+        logger.debug(f"[Kramers] {estimator_name}: per-speed friction source = {fsrc}")
         if not common_speeds:
             raise RuntimeError(
                 f"[Kramers] No common (speed, estimator='{estimator_name}') "
@@ -880,7 +880,7 @@ class KramersEstimator:
             chosen = min(common_speeds, key=lambda s: abs(s - speed_override))
         else:
             chosen = min(common_speeds)
-            logger.info(f"[Kramers] Using slowest speed: {chosen} nm/ps")
+            logger.debug(f"[Kramers] Using slowest speed: {chosen} nm/ps")
 
         merged = KramersEstimator._merge_pmf_friction(
             pmf_sub[pmf_sub["speed"] == chosen],
@@ -908,7 +908,7 @@ class KramersEstimator:
         n_speeds = pmf_sub.loc[pmf_sub["speed"] > 0, "speed"].nunique()
         if source == "auto":
             source = "force" if n_speeds >= 2 else "derivative"
-        logger.info(f"[Kramers] {estimator_name}: friction source = {source}")
+        logger.debug(f"[Kramers] {estimator_name}: friction source = {source}")
         if source != "force":
             return fric_df[fric_df["estimator"] == estimator_name], source
         rows = fric_df[(fric_df["estimator"] == "force")
@@ -1000,7 +1000,7 @@ class KramersEstimator:
         fric_deriv, common_speeds, fsrc = KramersEstimator._per_speed_candidates(
             pmf_sub, fric_sub, estimator_name, friction_source_work
         )
-        logger.info(f"[Kramers] {estimator_name}: per-speed friction source = {fsrc}")
+        logger.debug(f"[Kramers] {estimator_name}: per-speed friction source = {fsrc}")
         for speed in common_speeds:
             merged = KramersEstimator._merge_pmf_friction(
                 pmf_sub[pmf_sub["speed"] == speed],
@@ -1153,6 +1153,7 @@ class KramersEstimator:
         kBT: float,
         gamma_floor: float,
         bound_extension: str = "none",
+        warn_clipped: bool = True,
     ) -> dict:
         """Compute the mean first-passage time (MFPT) via the Pontryagin/Kramers double integral.
 
@@ -1269,7 +1270,7 @@ class KramersEstimator:
 
         n_points = int(mask.sum())
         n_neg = int((G[mask] < gamma_floor).sum())
-        if n_neg:
+        if n_neg and warn_clipped:
             logger.warning(
                 f"[Kramers] clipped {n_neg}/{n_points} Γ values in [start_r, abs_r] "
                 f"to floor={gamma_floor}"
@@ -1285,7 +1286,7 @@ class KramersEstimator:
         # τ depends on ΔF only through exp(±βΔF) inside the window, i.e. on its span
         max_bdg = float((np.max(dF[win]) - min_dF) / kBT)
         if max_bdg > 100.0:
-            logger.warning(
+            logger.debug(
                 f"[Kramers] β·ΔF span in [reflect_r, abs_r] = {max_bdg:.1f} — τ is "
                 "exponentially sensitive to ΔF errors (δlnτ = β·δΔF)."
             )
@@ -1375,6 +1376,7 @@ class KramersEstimator:
         plateau_frac: float = 0.3,
         bound_extension: str = "none",
         friction_source_work: str = "auto",
+        warn: bool = True,
     ) -> pd.DataFrame:
         """Run Kramers MFPT for every dG estimator present in *mixture_pmfs*.
 
@@ -1492,7 +1494,7 @@ class KramersEstimator:
                         force_df, speed, _start_r, float(r_arr.max()), plateau_frac
                     )
                     if _abs_r is not None:
-                        logger.info(
+                        logger.debug(
                             f"[Kramers] Force-plateau boundary abs_r={_abs_r:.4f} nm "
                             f"(estimator={est_name}, speed={speed}, frac={plateau_frac})."
                         )
@@ -1509,13 +1511,13 @@ class KramersEstimator:
                 else:
                     r_ts = self.detect_ts(r_arr, dG_arr, self.kBT)
                     if r_ts is not None:
-                        logger.info(
+                        logger.debug(
                             f"[Kramers] Detected TS at r_ts={r_ts:.4f} nm "
                             f"(estimator={est_name}, speed={speed}); using as abs_r."
                         )
                         _abs_r = r_ts
                     else:
-                        logger.info(
+                        logger.warning(
                             f"[Kramers] No PMF peak found for estimator='{est_name}', "
                             f"speed={speed}; using r_coord.max() as abs_r."
                         )
@@ -1524,7 +1526,7 @@ class KramersEstimator:
                 try:
                     res = self.kramers_mfpt(
                         profile, _start_r, _abs_r, reflect_r, self.kBT, self.gamma_floor,
-                        bound_extension=bound_extension,
+                        bound_extension=bound_extension, warn_clipped=warn,
                     )
                 except (RuntimeError, ValueError) as exc:
                     logger.warning(
@@ -1533,7 +1535,7 @@ class KramersEstimator:
                     )
                     continue
 
-                if res["barrier_kjmol"] > self.barrier_warn_kjmol:
+                if warn and res["barrier_kjmol"] > self.barrier_warn_kjmol:
                     logger.warning(
                         f"[Kramers] Large barrier detected: {res['barrier_kjmol']:.1f} kJ/mol "
                         f"(estimator={est_name}, source={source}, speed={speed}). "
@@ -1599,6 +1601,7 @@ class KramersEstimator:
         realized_speed_map: dict | None = None,
         boundary_method: str = "pmf_peak",
         bound_extension: str = "none",
+        warn: bool = True,
     ) -> pd.DataFrame:
         """Compute Kramers k_off for each (estimator, speed, path) independently.
 
@@ -1632,6 +1635,8 @@ class KramersEstimator:
             return pd.DataFrame()
         fric_path = fric_path[np.isfinite(fric_path["Gamma"].astype(float))]
 
+        large_barriers: dict[tuple, list[float]] = {}
+        clipped: dict[tuple, list[int]] = {}
         for (est_name, speed, path), grp in res_ok.groupby(
             ["estimator", "speed", "path"]
         ):
@@ -1670,7 +1675,7 @@ class KramersEstimator:
                 res = KramersEstimator.kramers_mfpt(
                     profile, start_r, abs_r,
                     reflect_r=None, kBT=self.kBT, gamma_floor=self.gamma_floor,
-                    bound_extension=bound_extension,
+                    bound_extension=bound_extension, warn_clipped=False,
                 )
             except Exception as exc:
                 logger.warning(
@@ -1679,11 +1684,12 @@ class KramersEstimator:
                 )
                 continue
 
+            if res["n_gamma_clipped"]:
+                c = clipped.setdefault((est_name, speed), [0, 0, 0])
+                c[0] += int(res["n_gamma_clipped"]); c[1] += int(res["n_gamma_points"]); c[2] += 1
             if float(res["barrier_kjmol"]) > self.barrier_warn_kjmol:
-                logger.warning(
-                    f"[Kramers/per-path] Large barrier: {float(res['barrier_kjmol']):.1f} kJ/mol "
-                    f"(estimator={est_name}, speed={speed}, path={path}). "
-                    f"Likely a sampling artifact (threshold: {self.barrier_warn_kjmol:.0f} kJ/mol)."
+                large_barriers.setdefault((est_name, speed), []).append(
+                    float(res["barrier_kjmol"])
                 )
 
             weight = weights_by_estimator.get(est_name, {}).get(speed, {}).get(path, float("nan"))
@@ -1708,6 +1714,18 @@ class KramersEstimator:
                 "n_gamma_clipped": int(res["n_gamma_clipped"]),
                 "n_gamma_points":  int(res["n_gamma_points"]),
             })
+
+        for (est_name, speed), (n_c, n_p, n_paths) in (clipped.items() if warn else ()):
+            logger.warning(
+                f"[Kramers/per-path] clipped {n_c}/{n_p} Γ values to floor={self.gamma_floor} "
+                f"in {n_paths} path(s) (estimator={est_name}, speed={speed})"
+            )
+        for (est_name, speed), bars in (large_barriers.items() if warn else ()):
+            logger.warning(
+                f"[Kramers/per-path] Large barrier: max {max(bars):.1f} kJ/mol, "
+                f"{len(bars)} path(s) above {self.barrier_warn_kjmol:.0f} kJ/mol "
+                f"(estimator={est_name}, speed={speed}). Likely a sampling artifact."
+            )
 
         if not rows:
             return pd.DataFrame()

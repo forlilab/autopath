@@ -26,7 +26,7 @@ plt.rcParams["axes.facecolor"] = 'white'
 # plt.rcParams["axes.edgecolor"] = 'black'
 
 import logging
-logger = logging.getLogger("autopath")
+logger = logging.getLogger(__name__)
 
 #: Bulk environment removed from the LIE surroundings by default: ions, water and lipids.
 #: What is left is the biomolecular binding partner, which is what a single-trajectory

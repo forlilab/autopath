@@ -1,5 +1,6 @@
 # General imports
 import os
+import builtins
 import json
 import time
 import numpy as np
@@ -10,7 +11,7 @@ from sys import exit
 from glob import glob
 import MDAnalysis as mda
 import mdtraj as md
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 # OpenMM imports
 from openmm import *
@@ -19,6 +20,7 @@ from openmm.unit import *
 
 # AutoPath imports
 from autopath.utils import *
+from autopath.pulling.steered_md import STOP_LABELS
 from autopath.pdb_preprocessor import PDBPreprocessor
 from autopath.ap_PLIP import plot_atomic_property, calculate_ligand_rmsf, calculate_contact_frequency
 from autopath import (
@@ -34,7 +36,19 @@ from autopath.pulling.Estimators import validate_path_combination
 from autopath.pulling.Diagnostics import plot_convergence_traces, plot_convergence_metrics
 
 import logging
-logger = logging.getLogger('autopath.core')
+logger = logging.getLogger(__name__)
+
+
+def smd_speed_summary(speed: float, counts: Counter, capped: int | None) -> str:
+    n = counts.total()
+    parts = ", ".join(f"{counts[k]} {STOP_LABELS[k]}" for k in STOP_LABELS if counts[k])
+    tail = f", moves capped to {capped}" if capped else ""
+    return f"sMD v={speed:g} nm/ps: {n} pulls ({parts}){tail}"
+
+
+def end_summary(n_pulls: int | None, n_warnings: int, minutes: float) -> str:
+    pulls = "" if n_pulls is None else f"{n_pulls} sMD pulls, "
+    return f"== done: {pulls}{n_warnings} warnings, {minutes:.1f} min =="
 
 
 class AutoPath:
@@ -288,6 +302,7 @@ class AutoPath:
             All results are written to disk under the system-name subdirectory.
         """
         start_time = time.monotonic()
+        w0 = warning_count()
 
         if ligand_file is not None:
             sys_name = os.path.splitext(os.path.basename(ligand_file))[0]
@@ -298,16 +313,15 @@ class AutoPath:
 
         os.makedirs(sys_name, exist_ok=True)
         
-        logger.info(f"Processing system {sys_name}")
+        logger.info(f"System {sys_name}")
 
-        ##############################################################################################
-        ####################################### System preparation ###################################
-        ##############################################################################################
+        # System preparation
 
         prmtop_file = f"{sys_name}/system.prmtop"
         solvated_system_pdb = f"{sys_name}/system.pdb"
 
         if self.run_preparation:
+            logger.info("== Preparation ==")
             prepare_system = SystemPreparation(
                 out_dir=sys_name,
                 forcefield=self.forcefield,
@@ -331,11 +345,11 @@ class AutoPath:
                 mapping = build_residue_mapping(self.original_pdb_path, solvated_system_pdb)
                 with open(mapping_path, "w") as _f:
                     json.dump({str(k): v for k, v in mapping.items()}, _f, indent=2)
-                logger.info(f"Residue mapping written to {mapping_path}")
+                logger.debug(f"Residue mapping written to {mapping_path}")
             else:
                 with open(mapping_path) as _f:
                     mapping = {int(k): v for k, v in json.load(_f).items()}
-                logger.info(f"Loaded existing residue mapping from {mapping_path}")
+                logger.debug(f"Loaded existing residue mapping from {mapping_path}")
 
             translated, missing = [], []
             for r in self.pocket_selection:
@@ -346,7 +360,7 @@ class AutoPath:
                     f"Pocket residues absent from original PDB (crystallographic gaps?): {missing}"
                 )
             self.pocket_selection = f'resid {" ".join(map(str, [mapping[r] for r in translated]))} and name CA'
-            logger.info(f"pocket_selection (system numbering): {self.pocket_selection}")
+            logger.debug(f"pocket_selection (system numbering): {self.pocket_selection}")
 
         # prmtop_file = f"{sys_name}/system.pdb" 
         # try:
@@ -354,9 +368,7 @@ class AutoPath:
         # except Exception as e:
         #     logger.error(f"Error loading topology from {prmtop_file}: {e}")
 
-        ##############################################################################################
-        ##################################### System equilibration ###################################
-        ##############################################################################################
+        # System equilibration
 
         equilibrated_traj = f"{sys_name}/equilibration/equilibration_{sys_name}.dcd"
         equilibrated_chk = f"{sys_name}/equilibration/checkpoint_equil_{sys_name}.chk"
@@ -365,6 +377,7 @@ class AutoPath:
         equilibrated_system = f"{sys_name}/equilibration/system_equil_{sys_name}.xml"
 
         if self.run_equilibration:
+            logger.info("== Equilibration ==")
             equilibration = Equilibration(
                                 topology=topology,
                                 system=system,
@@ -380,9 +393,7 @@ class AutoPath:
             #Wrap, align and save the clean trajectory
             wrap_align_save_traj(equilibrated_traj, solvated_system_pdb, is_membrane=self.is_membrane)
 
-        ##############################################################################################
-        ############################# Post-equilibration Analysis ####################################
-        ##############################################################################################
+        # Post-equilibration analysis
         
         _lig_sel_ha = f"({ligand_selection}) and not name H*"
 
@@ -391,6 +402,7 @@ class AutoPath:
             raise FileNotFoundError(
                 f"{equilibrated_traj} is missing; rerun equilibration (run_equilibration=True).")
         if os.path.exists(equilibrated_traj):
+            logger.info("== Post-equilibration analysis ==")
             u_eq = mda.Universe(equilibrated_pdb, equilibrated_traj, in_memory=True)
             is_peptide = u_eq.select_atoms(ligand_selection).n_residues > 1
             lig_mol = None
@@ -432,7 +444,7 @@ class AutoPath:
                 pocket_atom_indices = get_pocket_atoms_idxs(u_eq, ligand_selection=_lig_sel_ha)
             pocket_atoms = u_eq.select_atoms(f'index {" ".join(map(str, pocket_atom_indices))}')
             pocket_residues = [f"{atom.resname}_{atom.resid}" for atom in pocket_atoms]
-            logger.info(f"Pocket residues are: {', '.join(set(pocket_residues))}")
+            logger.debug(f"Pocket residues are: {', '.join(set(pocket_residues))}")
 
             ligand_total_hatoms = [a.index for a in u_eq.select_atoms(_lig_sel_ha)]
             ligand_atoms_indices = get_ligand_anchor_atoms(u_eq, ligand_selection,
@@ -440,7 +452,7 @@ class AutoPath:
                                                         n_atoms=5,
                                                         out_dir=sys_name,
                                                         ref_mol=lig_mol)
-            logger.info(f"Ligand anchor atom indices are: {', '.join(map(str, ligand_atoms_indices))}")
+            logger.debug(f"Ligand anchor atom indices are: {', '.join(map(str, ligand_atoms_indices))}")
             # write out the protein/ligand/pocket PDBs and PyMOL session.
             if self.pocket_selection is not None:
                 pocket_view_selection = self.pocket_selection
@@ -461,9 +473,7 @@ class AutoPath:
                 logger.error(f"Error writing pocket/ligand/protein pdbs: {e}")
                 pass
 
-        ##############################################################################################
-        ##################################### Steered MD simulations #################################
-        ##############################################################################################
+        # Steered MD simulations
         MERGE_CLUSTERING_FEATURES = False
         # Autostop and the kept vALL record must cluster exactly like the final analysis
         self._cluster_kwargs = dict(
@@ -486,19 +496,21 @@ class AutoPath:
         
         sMD_analysis_outdir = f"{self.sMD_outdir}/analysis_traces"
         if self.sMD_clust_selection is not None:
-            logger.info(f"sMD clustering selection: {self.sMD_clust_selection}")
+            logger.debug(f"sMD clustering selection: {self.sMD_clust_selection}")
             if MERGE_CLUSTERING_FEATURES:
-                logger.info("Merging clustering features for sMD analysis.")
+                logger.debug("Merging clustering features for sMD analysis.")
                 sMD_analysis_outdir = f"{self.sMD_outdir}/analysis_merged"
             else:
                 sMD_analysis_outdir = f"{self.sMD_outdir}/analysis_features"
         
+        sMD = None
         if self.run_sMDpulling:
+            logger.info("== sMD pulling ==")
             equilibrated_system = load_system(f"{sys_name}/equilibration/system_equil_{sys_name}.xml")
 
             if self.sMD_spring_cte is None:
                 sMD_spring_cte = sMD_spring_cte_per_atom * len(ligand_total_hatoms)  # Normalize by ligand size
-                logger.info(f"Spring constant set to {sMD_spring_cte} KJ/mol/nm2 for {len(ligand_total_hatoms)} atoms.")
+                logger.info(f"Spring k={sMD_spring_cte:.1f} kJ/mol/nm^2 on {len(ligand_total_hatoms)} ligand heavy atoms")
             else:
                 sMD_spring_cte = self.sMD_spring_cte
 
@@ -602,14 +614,14 @@ class AutoPath:
                         if tail_converged(conv_df, k_consec=self.sMD_conv_streak):
                             n_conv = float(conv_df["n_replicas"].max())
                             if self.sMD_autostop_estimator == "force":
-                                logger.warning(
+                                logger.info(
                                     f"sMD pulling CONVERGED (force ladder, all speeds; "
                                     f"trailing streak of {self.sMD_conv_streak} through rung "
                                     f"{n_conv:.0f}, window {self.sMD_conv_window})."
                                 )
                                 live = {s: False for s in live}
                             else:
-                                logger.warning(
+                                logger.info(
                                     f"sMD pulling for speed {speed} nm/ps CONVERGED after "
                                     f"{len(log_files) + 1} replicas (trailing streak of "
                                     f"{self.sMD_conv_streak} through rung {n_conv:.0f}, "
@@ -627,7 +639,7 @@ class AutoPath:
                     while not CONVERGED:
                         log_files = glob(f"{sMD_traj_outdir}/sMD_*_v{speed}_{self.sMD_pulling_dir}.dat")
                         current_replica = len(log_files) + 1
-                        logger.info(f"Starting replica {current_replica} for speed {speed} nm/ps.")
+                        logger.debug(f"Starting replica {current_replica} for speed {speed} nm/ps.")
 
                         # cap the number of replicas to avoid infinite loops
                         if len(log_files) >= self.sMD_max_replicas:
@@ -672,7 +684,7 @@ class AutoPath:
                                         f"speed {speed} nm/ps; need {self.sMD_conv_streak}."
                                     )
                                 if CONVERGED:
-                                    logger.warning(
+                                    logger.info(
                                         f"sMD pulling for speed {speed} nm/ps CONVERGED after "
                                         f"{current_replica} replicas (trailing streak of "
                                         f"{self.sMD_conv_streak} through rung {n_conv:.0f}, "
@@ -732,6 +744,10 @@ class AutoPath:
                                              f"{consecutive_failures} consecutive failures.")
                                 break
 
+        if sMD is not None:
+            for speed, counts in sMD.stop_counts.items():
+                logger.info(smd_speed_summary(speed, counts, sMD.capped_moves.get(speed)))
+
         # Load and align sMD trajectories
         sMD_trajs = glob(f"{sMD_traj_outdir}/sMD_replica-*_*_*.dcd")
         sMD_trajs = [f for f in sMD_trajs if "aligned" not in f]  # only process unaligned trajectories
@@ -741,16 +757,15 @@ class AutoPath:
         else:
             logger.info(f"sMD_align_trajs=False: keeping {len(sMD_trajs)} raw sMD trajectories (<stem>.dcd).")
                                 
-        ##############################################################################################
-        ######################################### sMD Analysis #######################################
-        ##############################################################################################        
+        # sMD analysis
         
         sMD_trajs = glob(f"{sMD_traj_outdir}/sMD_replica-*_*_*_aligned.dcd")
         if not self.sMD_align_trajs:
             sMD_trajs = [f for f in glob(f"{sMD_traj_outdir}/sMD_replica-*_*_*.dcd") if "aligned" not in f]
 
         if self.sMD_run_analysis:
-            
+            logger.info("== sMD analysis ==")
+
             if self.sMD_clust_selection is not None:
                 # check that the selection is valid
                 u_clust = mda.Universe(equilibrated_pdb, equilibrated_pdb)
@@ -845,7 +860,9 @@ class AutoPath:
             plot_convergence_metrics(smd_conv_metrics, outdir=sMD_analysis_outdir, tolerances=CONVERGENCE_TOLERANCES)
 
         simulation_time = time.monotonic() - start_time
-        logger.info(f"Finished AutoPath simulation in {simulation_time/60:.2f} min.")
+        # builtins.sum: the openmm.unit star import shadows sum
+        n_pulls = builtins.sum(c.total() for c in sMD.stop_counts.values()) if sMD is not None else None
+        logger.info(end_summary(n_pulls, warning_count() - w0, simulation_time / 60))
 
         return
 

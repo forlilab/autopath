@@ -8,7 +8,7 @@ import MDAnalysis as mda
 
 from .SMDData import SMDData, frame_log_index, smd_topology
 
-logger = logging.getLogger("autopath.pulling.LigandFeatures")
+logger = logging.getLogger(__name__)
 
 
 def _rdkit_feature_fns() -> dict[str, Callable]:
