@@ -160,7 +160,7 @@ class AutoPath:
         sMD_align_trajs: bool = True,  # False: keep raw sMD DCDs (<stem>.dcd), skip wrap/align
         sMD_clust_selection:str = None,
         sMD_path_model: str = 'dtw',   # 'dtw' | 'null' ('null' = no clustering: one path)
-        sMD_paths_viz: str = 'pse',    # unbinding-paths figure: 'pse' | 'pml' | 'none'
+        sMD_paths_viz: str = 'pml',    # unbinding-paths figure: 'pse' | 'pml' | 'none'
         sMD_n_paths: int | None = None,  # fixed number of paths; None = silhouette-selected
         sMD_max_frac_neg_dG_first_half: float = 0.25,  # pass-3 binding-well filter; <=0 disables
         sMD_friction_model: str = 'mixed',  # 'mixed' | 'ols' force friction slope regression

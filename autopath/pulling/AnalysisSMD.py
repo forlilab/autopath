@@ -676,6 +676,31 @@ class SMDAnalysis:
         friction_df = pd.concat(friction_deriv_results + friction_regress_results, ignore_index=True)
         friction_df.to_csv(os.path.join(self.outdir, 'friction.csv'), index=False)
 
+        # Per-path curves for figures; new files only.
+        _res = sMDDdata.results
+        _pm_cols = [c for c in ('estimator', 'speed', 'path', 'step', 'r_coord',
+                                'dG', 'Wdiss', 'Wmean') if c in _res.columns]
+        _res[_pm_cols].to_csv(os.path.join(self.outdir, 'path_pmfs.csv'), index=False)
+        _pf = []
+        if 'cumulant' in set(_res['estimator']):
+            _pf.append(friction_est.gamma_from_wdiss_derivative(
+                _res[_res['estimator'] == 'cumulant'], estimator='cumulant'))
+        _force = _res[_res['estimator'] == 'force']
+        for _p, _g in _force.groupby('path'):
+            _sp = sorted(_g['speed'].unique())
+            if len(_sp) < 2:
+                continue
+            _r = friction_est.gamma_from_force_regression(_g, {s: {_p: 1.0} for s in _sp})
+            if not _r.empty:
+                _pf.append(_r.assign(path=_p))
+        _pf = [d for d in _pf if d is not None and not d.empty]
+        if _pf:
+            _pfc = ['estimator', 'method', 'speed', 'path', 'step', 'r_coord',
+                    'Gamma', 'Gamma_integrated']
+            _pfd = pd.concat(_pf, ignore_index=True)
+            _pfd[[c for c in _pfc if c in _pfd.columns]].to_csv(
+                os.path.join(self.outdir, 'path_friction.csv'), index=False)
+
         # --- Mean-force TI PMF on the deconvolved coordinate z = lambda - Feq/k (force only) ---
         if any(e.name == 'force' for e in active_estimators) and \
            sMDDdata.raw_data['speed'].nunique() >= 2:
@@ -753,7 +778,7 @@ class SMDAnalysis:
             if _msg:
                 logger.warning(_msg)
 
-        # Rebuild the unbinding-paths PSE now that friction.csv exists.
+        # Unbinding-paths visualization, built once now that friction.csv exists.
         if hasattr(self.path_model, 'medoid_to_path') and self.path_model.medoid_to_path:
             try:
                 friction_csv_path = os.path.join(self.outdir, 'friction.csv')
@@ -773,13 +798,13 @@ class SMDAnalysis:
                         friction_csv=friction_csv_path,
                         pocket_select=group_B if group_B is not None else self.pocket_select,
                         # keep the path model's figure settings
-                        output_format=getattr(self.path_model, 'viz_output_format', 'pse'),
+                        output_format=getattr(self.path_model, 'viz_output_format', 'pml'),
                         n_lig_conformations=getattr(
                             self.path_model, 'viz_n_lig_conformations', 5),
                         stick_transparency_ladder=getattr(
                             self.path_model, 'viz_stick_transparency_ladder', None),
                     )
-                    logger.info("Friction-coloured unbinding paths PSE regenerated.")
+                    logger.info("Unbinding paths visualization written.")
             except Exception as _exc:
                 logger.warning(f"Could not regenerate friction-coloured PSE: {_exc}")
 
