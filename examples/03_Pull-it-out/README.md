@@ -38,7 +38,7 @@ Two label-free readouts are written per system, estimator and speed, as in the A
 
 Cumulant and Jarzynski are reported per pulling speed; force only at v→0 (its per-speed profile is not a free energy). `n_pulls` gives the pulls behind each value. In the paper, the cumulant and Jarzynski readouts came from per-speed pathway clustering; `analyze_sMD.py` clusters across speeds, so those two can differ from the paper's numbers (force v→0 is the same).
 
-Before ranking, check that each ligand's profile is converged (`sMD_conv_vALL_metrics.csv`) and that the pathways are well populated (`path_quality.csv`). The functions are in `autopath.pulling.readouts` (`profile_readouts`, `rupture_displacement`, `rupture_readouts`) for use on any set of `mixture_pmfs.csv` / `sMD_processed_data.csv`.
+Before ranking, check that each ligand's profile is converged (`sMD_conv_vALL_metrics.csv`) and that the pathways are well populated (`path_quality.csv`). The functions are in `autopath.pulling.readouts` (`profile_readouts`, `rupture_displacement`, `rupture_readouts`) for use on any set of `mixture_pmfs.csv` / `traces.csv.gz`.
 
 # Periodic images
 
@@ -96,5 +96,5 @@ The `#SBATCH` lines (partition, GPU type, memory) and the environment activation
     │   ├── sMD_replica-<id>_v<speed>_forward.dat       # per-move log: restraint position, CV, force, work
     │   ├── sMD_replica-<id>_v<speed>_forward_geom.dat  # per-frame geometry features
     │   └── sMD_replica-<id>_v<speed>_forward_aligned.dcd
-    └── analysis_traces/                    # mixture_pmfs.csv + sMD_processed_data.csv feed collect_readouts.py                    # pathways, PMFs, friction, koff, convergence
+    └── analysis_traces/                    # mixture_pmfs.csv + traces.csv.gz feed collect_readouts.py                    # pathways, PMFs, friction, koff, convergence
 ```

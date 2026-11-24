@@ -42,6 +42,7 @@ from autopath.pulling.LigandFeatures import (
     SUPPORTED_FEATURES as LIGAND_FEATURE_POOL,
 )
 from autopath.pulling.support import SupportPolicy
+from autopath.pulling.outputs import pull_table, write_traces
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +170,7 @@ class SMDAnalysis:
         path_combination: str = 'eq21',
         friction_model: str = 'mixed',
         friction_source_work: str = 'auto',
+        legacy_outputs: bool = False,
     ):
         self.sysname = sysname
         self.n_paths = n_paths
@@ -190,6 +192,7 @@ class SMDAnalysis:
         self.path_combination = validate_path_combination(path_combination)
         self.friction_model = friction_model
         self.friction_source_work = friction_source_work
+        self.legacy_outputs = legacy_outputs
         self.support_policy = SupportPolicy(
             min_samples_per_step=self.min_samples_per_step,
             min_trajs_per_path=self.min_replicas_per_path,
@@ -832,7 +835,8 @@ class SMDAnalysis:
                 )
                 logger.info(f"Trajectory features written to CSV: {new_cols}")
 
-        sMDDdata.raw_data.to_csv(f'{self.outdir}/sMD_processed_data.csv', index=False)
+        write_traces(sMDDdata.raw_data, pull_table(sMDDdata, sMDDdata.raw_data),
+                     self.outdir, legacy=self.legacy_outputs)
 
         return sMDDdata
         

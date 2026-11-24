@@ -29,7 +29,7 @@ Every file name downstream embeds the system name `<sys>`: the `run_id` passed t
     equilibration_protocol.json            protocol actually used
 <sys>/MD/MD_<run_id>.dcd / .csv, MD_<run_id>_checkpoint.xml, MD_<run_id>.pdb
 <sys>/sMD/trajectories/sMD_replica-<id>_v<speed>_forward.{dat,_geom.dat,dcd}
-<sys>/sMD/analysis_traces/                 mixture_pmfs.csv, sMD_processed_data.csv, friction, koff
+<sys>/sMD/analysis_traces/                 mixture_pmfs.csv, pulls.csv, traces.csv.gz, friction, koff
 ```
 
 ## Rules that apply to every stage

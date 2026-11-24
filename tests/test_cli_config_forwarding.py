@@ -9,6 +9,7 @@ NON_DEFAULT = {
     "sMD_conv_streak": 4,
     "sMD_autostop_estimator": "jarzynski",
     "sMD_alternate_speeds": True,
+    "sMD_legacy_outputs": True,
 }
 
 
