@@ -18,6 +18,7 @@ from glob import glob
 from autopath.utils import setup_logging
 from autopath.pulling import SMDData, SMDAnalysis
 from autopath.pulling.PathModel import DTWPathModel
+from autopath.pulling.Diagnostics import plot_analysis
 from autopath.pulling.outputs import write_summary
 
 
@@ -72,6 +73,7 @@ def main():
         boundary_buffer_frac=0.1, recompute_distances=False)
     conv_df.to_csv(f"{outdir}/sMD_conv_vALL_metrics.csv", index=False)
     write_summary(outdir)
+    plot_analysis(outdir)
     if not traces_df.empty:
         traces_df.to_csv(f"{outdir}/sMD_conv_vALL_traces.csv", index=False)
     logger.info(f"Analysis written to {outdir}")

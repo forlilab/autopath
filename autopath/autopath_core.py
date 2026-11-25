@@ -33,7 +33,7 @@ from autopath.pulling.Convergence import (tail_converged, validate_autostop_opti
                                           round_robin_order)
 from autopath.pulling.PathModel import DTWPathModel, NullPathModel
 from autopath.pulling.Estimators import validate_path_combination
-from autopath.pulling.Diagnostics import plot_convergence_traces, plot_convergence_metrics
+from autopath.pulling.Diagnostics import plot_convergence_traces, plot_convergence_metrics, plot_analysis
 from autopath.pulling.outputs import write_summary
 
 import logging
@@ -861,8 +861,7 @@ class AutoPath:
             if not traces_df.empty:
                 smd_conv_traces = glob(f"{sMD_analysis_outdir}/sMD_conv_vALL_traces.csv")
                 plot_convergence_traces(smd_conv_traces, outdir=sMD_analysis_outdir)
-            smd_conv_metrics = glob(f"{sMD_analysis_outdir}/sMD_conv_vALL_metrics.csv")
-            plot_convergence_metrics(smd_conv_metrics, outdir=sMD_analysis_outdir, tolerances=CONVERGENCE_TOLERANCES)
+            plot_analysis(sMD_analysis_outdir, tolerances=CONVERGENCE_TOLERANCES)
 
         simulation_time = time.monotonic() - start_time
         # builtins.sum: the openmm.unit star import shadows sum

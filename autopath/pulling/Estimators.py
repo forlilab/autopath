@@ -2365,7 +2365,7 @@ def extrapolate_to_v0(
         ``speed`` (= 0.0).
 
         This output is directly compatible with
-        :func:`Diagnostics.plot_extrapolated_param`.
+        :func:`Diagnostics.plot_free_energy`.
 
     Note
     ----

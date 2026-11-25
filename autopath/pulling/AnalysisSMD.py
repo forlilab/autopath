@@ -31,11 +31,8 @@ from autopath.pulling.Estimators import (
 )
 from autopath.pulling.Convergence import window_mean_pmf, window_reference_scalar
 from autopath.pulling.Diagnostics import (
-    plot_work_profiles,
-    plot_profile,
-    plot_friction,
-    plot_extrapolated_param,
     make_unbinding_paths_visualization,
+    plot_analysis,
 )
 from autopath.pulling.LigandFeatures import (
     LigandTrajectoryFeatures,
@@ -830,41 +827,6 @@ class SMDAnalysis:
             except Exception as _exc:
                 logger.warning(f"Could not write unbinding paths visualization: {_exc}")
 
-        if self.do_plots:
-            # Markers: TS (mean|force| peak) and Kramers absorbing boundary (force plateau).
-            ts_r = abs_r = None
-            _rd = sMDDdata.raw_data
-            if {'r_coord', 'force', 'speed'}.issubset(_rd.columns):
-                _lo, _hi = float(_rd['r_coord'].min()), float(_rd['r_coord'].max())
-                ts_r = KramersEstimator.force_peak_r(_rd, 0.0, _lo, _hi)
-                # the "end" boundary is per profile (koff_kramers.csv abs_r_nm)
-                if kramers_abs == "force_plateau":
-                    abs_r = KramersEstimator.force_plateau_boundary(
-                        _rd, 0.0, _lo, _hi, plateau_frac)
-
-            for estimator in active_estimators:
-                plot_work_profiles(sMDDdata.results, estimator=estimator.name, outdir=self.outdir)
-            for vcol in ['Wdiss', 'dG']:
-                plot_profile(
-                    self.mixture_pmfs,
-                    value_col=vcol,
-                    hue='estimator',
-                    ylabel='Energy (kJ/mol)',
-                    outdir=self.outdir,
-                    ts_line=ts_r,
-                    abs_line=abs_r,
-                )
-            if friction_df is not None and not friction_df.empty:
-                plot_friction(friction_df, outdir=self.outdir, ts_line=ts_r, abs_line=abs_r)
-            for pcol, v0_df in weighted_pmf_v0.items():
-                plot_extrapolated_param(
-                    v0_df,
-                    param=pcol,
-                    outfname=os.path.join(self.outdir, f'{pcol}_extrapolated.svg'),
-                    ts_line=ts_r,
-                    abs_line=abs_r,
-                )
-
         # Merge trajectory-derived features into raw_data so they appear in the CSV.
         _BASE_COLS = {
             "step", "time", "r_target", "r_before", "r_after", "NC",
@@ -884,6 +846,9 @@ class SMDAnalysis:
 
         write_traces(sMDDdata.raw_data, pull_table(sMDDdata, sMDDdata.raw_data),
                      self.outdir, legacy=self.legacy_outputs)
+
+        if self.do_plots:
+            plot_analysis(self.outdir, temperature=self.temperature)
 
         write_summary(self.outdir, self._summary_meta(sMDDdata, warning_count() - w0))
         return sMDDdata

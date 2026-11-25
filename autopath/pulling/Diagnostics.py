@@ -23,329 +23,11 @@ import shutil
 import MDAnalysis as mda
 from MDAnalysis.analysis import align, density
 from scipy.ndimage import gaussian_filter
+from scipy.signal import savgol_filter
 
 import re
 import logging
 logger = logging.getLogger(__name__)
-
-def plot_work_profiles(
-    results: pd.DataFrame,
-    r_coord: str = 'r_coord',
-    cols_to_plot: list = ['Wmean', 'dG', 'Wdiss'],
-    estimator: str = 'cumulant',
-    outdir: str = 'analysis',
-    mask_negative_dG: bool = False,
-):
-    """Plot multi-panel work energy profiles faceted by pulling speed.
-
-    Produces one subplot per pulling speed, showing the requested energy
-    quantities (e.g. Wmean, dG, Wdiss) as a function of reaction coordinate.
-    Line colour encodes the metric; line style encodes the path.  A
-    figure-level legend for metrics is placed below the panels; per-subplot
-    path legends strip the speed suffix from labels to reduce clutter.
-
-    Parameters
-    ----------
-    results : pd.DataFrame
-        SMD results table.  Must contain columns ``r_coord``, ``speed``,
-        ``path``, ``estimator``, and all columns listed in *cols_to_plot*.
-    r_coord : str
-        Reaction-coordinate column name (default ``'r_coord'``).
-    cols_to_plot : list of str
-        Energy quantities to overlay (default ``['Wmean', 'dG', 'Wdiss']``).
-    estimator : str
-        Estimator row to select from the ``'estimator'`` column
-        (e.g. ``'cumulant'`` or ``'jarzynski'``).
-    outdir : str
-        Directory where the figure is written.  Created if absent.
-    mask_negative_dG : bool
-        If True, set negative dG values to NaN before plotting.
-
-    Notes
-    -----
-    Output figure: ``{outdir}/work_profiles_{estimator}.svg``.
-    """
-    os.makedirs(outdir, exist_ok=True)
-    outfile = os.path.join(outdir, f"work_profiles_{estimator}.svg")
-
-    results = results[results['estimator'] == estimator]
-    if mask_negative_dG and 'dG' in results.columns:
-        results = results.copy()
-        results.loc[results['dG'] < 0, 'dG'] = np.nan
-    style_order = results['path'].unique().tolist()
-    speeds = sorted(results['speed'].unique())
-
-    with plt.style.context(_STYLE), plt.rc_context(_RC_OVERRIDES):
-        fig, ax = plt.subplots(
-            figsize=(11, 3),
-            ncols=len(speeds),
-            nrows=1,
-            sharey=True,
-            sharex=True
-        )
-        axes = ax.flatten() if len(speeds) > 1 else [ax]
-
-        hue_legend_handles, hue_legend_labels = None, None
-
-        for i, speed in enumerate(speeds):
-            speed_df = results.loc[results['speed'] == speed, [r_coord, 'path', 'speed'] + cols_to_plot]
-
-            # Style order scoped to paths in this speed only
-            speed_style_order = [p for p in style_order if p in speed_df['path'].unique()]
-
-            # Long format: metric is {Wmean, dG, Wdiss}, value = corresponding y
-            long_df = speed_df.melt(
-                id_vars=[r_coord, 'path', 'speed'],
-                value_vars=cols_to_plot,
-                var_name=estimator,
-                value_name='value'
-            )
-
-            sns.lineplot(
-                data=long_df,
-                x=r_coord, y='value',
-                hue=estimator, style='path', style_order=speed_style_order,
-                estimator=None, errorbar=None,  # don't aggregate across paths
-                ax=axes[i]
-            )
-            axes[i].grid(True)
-            axes[i].set_title(f'Speed={speed} nm/ps', fontsize=14)
-            axes[i].set_xlabel(f'{r_coord} (nm)', fontsize=12)
-            if i == 0:
-                axes[i].set_ylabel('Energy (kJ/mol)', fontsize=12)
-            else:
-                axes[i].set_ylabel('')
-
-            # Separate legend into hue (metrics) and style (paths)
-            handles, labels = axes[i].get_legend_handles_labels()
-            style_handles, style_labels = [], []
-            hue_handles, hue_labels = [], []
-            for h, l in zip(handles, labels):
-                if l in cols_to_plot:
-                    hue_handles.append(h)
-                    hue_labels.append(l)
-                elif l in speed_style_order:
-                    style_handles.append(h)
-                    style_labels.append(l)
-
-            axes[i].legend_.remove()
-
-            # Path legend (line style) inside each subplot — black lines, strip speed from labels
-            if style_handles:
-                clean_handles = []
-                seen_labels = set()
-                clean_labels = []
-                for h, l in zip(style_handles, style_labels):
-                    # Strip speed suffix (e.g. path-0_v0.005 → path-0)
-                    display = l.rsplit('_v', 1)[0] if '_v' in l else l
-                    if display in seen_labels:
-                        continue
-                    seen_labels.add(display)
-                    clean_labels.append(display)
-                    clean_handles.append(
-                        Line2D([0], [0], color='black', linestyle=h.get_linestyle(), lw=2)
-                    )
-                axes[i].legend(
-                    clean_handles, clean_labels,
-                    title='Path', fontsize=8, title_fontsize=9,
-                    loc='best', framealpha=0.8,
-                )
-
-            # Capture hue (metric) handles once for figure-level legend — solid colored lines
-            if hue_legend_handles is None and hue_handles:
-                hue_legend_handles = [
-                    Line2D([0], [0], color=h.get_color(), linestyle='-', lw=2)
-                    for h in hue_handles
-                ]
-                hue_legend_labels = hue_labels
-
-        # Figure-level legend for metrics (color) at the bottom
-        if hue_legend_handles:
-            fig.legend(
-                hue_legend_handles, hue_legend_labels,
-                title='',
-                loc='lower center',
-                bbox_to_anchor=(0.5, -0.05),
-                ncol=min(len(hue_legend_handles), 4),
-                borderaxespad=0.0,
-            )
-
-        # plt.title(f'Work Profiles {title_suffix}', fontsize=16)
-        plt.tight_layout()
-        plt.savefig(outfile, bbox_inches='tight', dpi=300)
-        # plt.show()
-        plt.close()
-        return
-
-def plot_profile(df: pd.DataFrame,
-                 value_col: str = 'dG',
-                 hue: str | None = None,
-                 style: str | None = None,
-                 row: str | None = None,
-                 col: str = 'speed',
-                 col_order: list | None = None,
-                 show_error_bands: bool = False,
-                 ylabel: str | None = None,
-                 outdir: str = 'analysis',
-                 prefix: str = '',
-                 outfname: str | None = None,
-                 mask_negative_dG: bool = False,
-                 sharey: bool = True,
-                 ts_line: float | None = None,
-                 abs_line: float | None = None,
-                 ):
-    """Plot a single quantity vs reaction coordinate, faceted by speed.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Table with at least ``r_coord``, *col*, and *value_col* columns.
-    value_col : str
-        Column to plot on the y-axis (e.g. ``'dG'``, ``'Wdiss'``).
-    hue : str or None
-        Column for colour encoding. Auto-detected from ``'estimator'`` if None.
-    style : str or None
-        Column for line-style encoding (e.g. ``'estimator'``).
-    row : str or None
-        Optional row facet variable (e.g. ``'path'``).
-    col : str
-        Column facet variable (default ``'speed'``).
-    col_order : list or None
-        Explicit ordering of column panels.
-    show_error_bands : bool
-        If True and a column named ``{value_col}_se`` exists,
-        draw ±1 SE shading around each line.
-    ylabel : str or None
-        Shared y-axis label.  Defaults to *value_col*.
-    outdir : str
-        Directory for saved figures.
-    prefix : str
-        Optional filename suffix added before the extension.
-    outfname : str or None
-        Full output path override; if given, ``outdir`` and ``prefix``
-        are ignored for the filename.
-    """
-    os.makedirs(outdir, exist_ok=True)
-
-    if mask_negative_dG and value_col == 'dG' and value_col in df.columns:
-        df = df.copy()
-        df.loc[df[value_col] < 0, value_col] = np.nan
-
-    # Auto-detect hue
-    if hue is None:
-        if 'estimator' in df.columns and df['estimator'].nunique() > 1:
-            hue = 'estimator'
-
-    if outfname is None:
-        outfname = os.path.join(outdir, f"{value_col}{prefix}.svg")
-    se_col = f"{value_col}_se"
-    has_se = show_error_bands and se_col in df.columns
-
-    with plt.style.context(_STYLE), plt.rc_context(_RC_OVERRIDES):
-        # hue and style are handled by lineplot (not FacetGrid) so the legend
-        # automatically includes entries for both colour and line-style.
-        g = sns.FacetGrid(
-            df, col=col, col_order=col_order, row=row,
-            sharey=sharey, sharex=True,
-            height=4.0, aspect=1,
-            margin_titles=True,
-        )
-        g.map_dataframe(sns.lineplot, x='r_coord', y=value_col,
-                        hue=hue, style=style, sort=True, errorbar=None)
-
-        # Optional error bands
-        if has_se:
-            def _fill_band(data, x, y, se, **kwargs):
-                data = data.sort_values(x)
-                color = kwargs.get('color', 'C0')
-                plt.fill_between(
-                    data[x], data[y] - data[se], data[y] + data[se],
-                    color=color, alpha=0.2,
-                )
-            g.map_dataframe(_fill_band, x='r_coord', y=value_col, se=se_col)
-
-        col_template = f"{col.replace('_', ' ').title()} = {{col_name}}"
-        if col == 'speed':
-            col_template = "Speed = {col_name} nm/ps"
-        g.set_titles(col_template=col_template, row_template="{row_name}")
-
-        y_label = ylabel if ylabel else value_col
-        g.set_axis_labels('r_coord (nm)', y_label)
-
-        # Mark the transition state (force peak) and the Kramers absorbing
-        # boundary (force-plateau decay point) as dashed vertical lines.
-        for _x, _lab, _c in [(ts_line, "TS", "0.25"),
-                             (abs_line, "abs", "firebrick")]:
-            if _x is not None:
-                g.refline(x=_x, color=_c, linestyle="--", linewidth=1.2)
-                for ax in g.axes.flat:
-                    ax.text(_x, 0.98, _lab, transform=ax.get_xaxis_transform(),
-                            va="top", ha="right", rotation=90, fontsize=8, color=_c)
-
-        if hue or style:
-            g.add_legend(bbox_to_anchor=(1.01, 0.8), loc='upper left')
-
-        plt.tight_layout()
-        plt.savefig(outfname, dpi=300, bbox_inches='tight')
-        # plt.show()
-        plt.close()
-
-        return
-
-
-def plot_friction(df: pd.DataFrame,
-                  outdir: str = 'analysis',
-                  ts_line: float | None = None,
-                  abs_line: float | None = None,
-                  ):
-    """Plot friction profiles from FrictionEstimator output.
-
-    Produces two figures, each faceted by speed (actual speeds descending,
-    then v=0 extrapolation last) and coloured by method:
-      - Gamma_local.svg      : local friction Γ(r)
-      - Gamma_cumulative.svg : cumulative ∫Γ dr
-    """
-    if df is None or df.empty:
-        logger.warning("No friction data to plot.")
-        return
-
-    with plt.style.context(_STYLE), plt.rc_context(_RC_OVERRIDES):
-        # Speed ordering: actual speeds fastest→slowest, then 0.0 (extrapolated) last
-        all_speeds = sorted(df['speed'].unique())
-        speed_order = sorted([s for s in all_speeds if s > 0], reverse=True) + \
-                      [s for s in all_speeds if s == 0]
-
-        # Plot 1: local Γ — both methods combined
-        plot_profile(
-            df,
-            value_col='Gamma',
-            hue='estimator',
-            col_order=speed_order,
-            show_error_bands=False,
-            ylabel='Γ (kJ·ps/mol/nm²)',
-            outdir=outdir,
-            outfname=os.path.join(outdir, 'Gamma_local.svg'),
-            sharey=False,
-            ts_line=ts_line,
-            abs_line=abs_line,
-        )
-
-        # Plot 2: cumulative Γ — both methods combined (where available)
-        if 'Gamma_integrated' in df.columns and df['Gamma_integrated'].notna().any():
-            plot_profile(
-                df,
-                value_col='Gamma_integrated',
-                hue='estimator',
-                col_order=speed_order,
-                show_error_bands=False,
-                ylabel='∫Γ dr (kJ·ps/mol/nm)',
-                outdir=outdir,
-                outfname=os.path.join(outdir, 'Gamma_cumulative.svg'),
-                sharey=False,
-                ts_line=ts_line,
-                abs_line=abs_line,
-            )
-        return
 
 def plot_convergence_traces(smd_conv_traces: list[str], outdir: str):
     """Plot PMF convergence traces as replica count increases sequentially.
@@ -453,245 +135,313 @@ def plot_convergence_traces(smd_conv_traces: list[str], outdir: str):
 
         return
 
+_EST_ORDER = ["cumulant", "jarzynski", "force"]
+_PATH_FALLBACK = "#8b8b8b"
+_CONV_METRICS = {
+    "dG_weighted-rmsd": ("ΔG RMSD", "ΔG RMSD vs previous (kJ/mol)"),
+    "barrier_delta": ("Barrier change", "Barrier change (kJ/mol)"),
+    "r_ts_delta": ("TS shift", "TS shift (nm)"),
+    "barrier_height": ("Barrier height", "Barrier height (kJ/mol)"),
+    "r_ts": ("TS position", "TS position (nm)"),
+    "n_paths": ("Number of paths", "Number of paths"),
+}
+_CONV_SKIP = {"speed", "path", "n_replicas", "converged", "decision_quantity",
+              "n_common_points", "reason", "estimator"}
+
+
+def _cycle_colors() -> list[str]:
+    with plt.style.context(_STYLE):
+        return [c["color"] for c in plt.rcParams["axes.prop_cycle"]]
+
+
+def _speed_order(speeds) -> list[float]:
+    """Finite speeds fastest first, then v -> 0 (speed 0)."""
+    s = sorted({float(x) for x in speeds})
+    return [x for x in s if x > 0][::-1] + [x for x in s if x == 0]
+
+
+def _speed_title(v: float) -> str:
+    return "v → 0" if v == 0 else f"{v:g} nm/ps"
+
+
+def _estimator_colors(names) -> dict:
+    """Fixed cycle colours for the standard estimators, next free ones otherwise."""
+    cyc = _cycle_colors()
+    out = {e: cyc[i] for i, e in enumerate(_EST_ORDER)}
+    free = len(_EST_ORDER)
+    for n in names:
+        if n not in out:
+            out[n] = cyc[free % len(cyc)]
+            free += 1
+    return {n: out[n] for n in names}
+
+
+def _path_color(label: str) -> str:
+    """Cycle colour k for a label starting ``path-k``; grey otherwise."""
+    m = re.match(r"path-(\d+)", str(label))
+    if not m:
+        return _PATH_FALLBACK
+    cyc = _cycle_colors()
+    return cyc[int(m.group(1)) % len(cyc)]
+
+
+def _display_smooth(r: np.ndarray, y: np.ndarray, width_nm: float = 0.05,
+                    polyorder: int = 3) -> np.ndarray:
+    """Savitzky-Golay smooth over ``width_nm`` of r; display only."""
+    r = np.asarray(r, dtype=float)
+    y = np.asarray(y, dtype=float)
+    dr = np.diff(r)
+    if len(y) < 2 or dr.size == 0 or not np.median(dr) > 0:
+        return y
+    n = int(round(width_nm / np.median(dr)))
+    n += n % 2 == 0
+    n = min(n, len(y) - (len(y) % 2 == 0))
+    if n <= polyorder:
+        return y
+    return savgol_filter(y, n, polyorder, mode="interp")
+
+
+def _ordered_estimators(df: pd.DataFrame) -> list[str]:
+    present = set(df["estimator"])
+    return [e for e in _EST_ORDER if e in present] + sorted(present - set(_EST_ORDER))
+
+
+def _save(outfname: str) -> None:
+    plt.tight_layout()
+    plt.savefig(outfname, dpi=150, bbox_inches="tight")
+    plt.close()
+
+
 def plot_convergence_metrics(smd_conv_metrics: list[str], outdir: str, tolerances: dict = None):
-    """Plot aggregated convergence metrics vs. replica count.
+    """Plot convergence metrics vs. replica count, one panel per metric.
 
-    Where :func:`plot_convergence_traces` shows full PMF profiles at each
-    replica count, this function summarises convergence with scalar metrics
-    (e.g. RMSD between successive estimates, max deviation).  Values are
-    averaged across paths for each (speed, n_replicas) pair, yielding one
-    trend line per pulling speed.
-
-    An optional tolerance threshold is drawn as a dashed horizontal line
-    for each metric that appears in *tolerances*, making it easy to read
-    off the replica count at which the estimate is considered converged.
+    Values are averaged across paths per (speed, n_replicas); one line per
+    speed and one shared legend.
 
     Parameters
     ----------
     smd_conv_metrics : list of str
-        Paths to CSV files produced by the sMD convergence analysis.
-        Each file must contain columns ``speed``, ``path``, ``n_replicas``,
-        plus one column per metric.
+        CSV files with columns ``speed``, ``n_replicas`` and metric columns.
     outdir : str
-        Directory where the combined figure is written:
-        ``{outdir}/sMD_convergence_metrics.svg``.
+        Writes ``{outdir}/sMD_convergence_metrics.svg``.
     tolerances : dict or None
-        Mapping of ``{metric_name: threshold_value}``.  For each metric
-        present as a key, a dashed grey line at *threshold_value* is added
-        to the corresponding subplot.
+        ``{metric_name: threshold}``; drawn as a dashed grey line on the
+        matching panel.
     """
     if len(smd_conv_metrics) == 0:
         logger.warning("No data files provided for convergence metrics plotting.")
         return
-    
-    # load all data
+
     all_data = []
     for f in smd_conv_metrics:
         try:
-            df = pd.read_csv(f)
+            all_data.append(pd.read_csv(f))
         except pd.errors.EmptyDataError:
             logger.warning(f"Skipping empty metrics file: {f}")
-            continue
-        all_data.append(df)
-
     if not all_data:
         logger.warning("No convergence metrics data available for plotting.")
         return
 
-    metrics_df = pd.concat(all_data, ignore_index=True)
-
-    if metrics_df.empty:
+    df = pd.concat(all_data, ignore_index=True)
+    if df.empty:
         logger.warning("No data available for convergence metrics plotting.")
         return
-    
-    os.makedirs(outdir, exist_ok=True)
 
-    # metrics to plot
-    metrics = [
-        c for c in metrics_df.columns
-        if c not in ['speed', 'path', 'n_replicas', 'converged', 'decision_quantity', 'n_common_points', 'reason', 'estimator']
-    ]
-
-    if len(metrics) == 0:
+    metrics = [m for m in _CONV_METRICS if m in df.columns]
+    metrics += [c for c in df.columns
+                if c not in _CONV_SKIP and c not in _CONV_METRICS
+                and pd.api.types.is_numeric_dtype(df[c])]
+    if not metrics:
         logger.warning("No numeric convergence metrics found to plot.")
         return
 
-    speeds = sorted(metrics_df['speed'].unique())
+    os.makedirs(outdir, exist_ok=True)
+    speeds = sorted(df["speed"].unique())
+    ncols = 3
+    nrows = max(2, int(np.ceil(len(metrics) / ncols)))
 
     with plt.style.context(_STYLE), plt.rc_context(_RC_OVERRIDES):
-        # use the fivethirtyeight color cycle (applied via style context)
-        color_list = [c['color'] for c in plt.rcParams['axes.prop_cycle']]
-        speed_colors = {s: color_list[i % len(color_list)] for i, s in enumerate(speeds)}
-
-        fig, axes = plt.subplots(
-            1, len(metrics),
-            figsize=(5 * len(metrics), 4),
-            sharex=False,
-            sharey=False
-        )
-
-        if len(metrics) == 1:
-            axes = [axes]
-
+        cyc = [c["color"] for c in plt.rcParams["axes.prop_cycle"]]
+        sc = {s: cyc[i % len(cyc)] for i, s in enumerate(speeds)}
+        fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4 * nrows))
+        axes = np.atleast_1d(axes).ravel()
         for ax, metric in zip(axes, metrics):
-            metric_df = metrics_df[['speed', 'n_replicas', metric]].dropna()
-
-            if metric_df.empty:
-                ax.set_title(metric)
-                ax.set_xlabel("Number of replicas")
-                ax.set_ylabel(metric)
-                ax.grid(True)
-                continue
-
-            # aggregate across paths to produce one trend per speed
-            agg_df = (
-                metric_df
-                .groupby(['speed', 'n_replicas'], as_index=False)[metric]
-                .mean()
-                .sort_values(['speed', 'n_replicas'])
-            )
-
-            for speed in speeds:
-                subset = agg_df[agg_df['speed'] == speed]
-                if subset.empty:
-                    continue
-
-                ax.plot(
-                    subset['n_replicas'],
-                    subset[metric],
-                    color=speed_colors[speed],
-                    marker='o',
-                    linewidth=2.0,
-                    alpha=0.95,
-                    label=f"speed {speed} nm/ps",
-                )
-
-            legend_handles = [
-                Line2D([0], [0], color=speed_colors[s], marker='o', lw=2, label=f"speed {s}")
-                for s in speeds
-            ]
+            agg = (df[["speed", "n_replicas", metric]].dropna()
+                   .groupby(["speed", "n_replicas"], as_index=False)[metric].mean()
+                   .sort_values(["speed", "n_replicas"]))
+            for s in speeds:
+                sub = agg[agg["speed"] == s]
+                if len(sub):
+                    ax.plot(sub["n_replicas"], sub[metric], color=sc[s], marker="o",
+                            linewidth=2.0, alpha=0.95)
             if tolerances and metric in tolerances:
-                tol_val = tolerances[metric]
-                ax.axhline(tol_val, color='gray', linestyle='--', linewidth=1.5, alpha=0.8)
-                legend_handles.append(
-                    Line2D([0], [0], color='gray', linestyle='--', lw=1.5, label=f"tol = {tol_val}")
-                )
-            ax.legend(handles=legend_handles, loc="best")
-            ax.set_title(metric, fontsize=16)
-            ax.set_xlabel("Number of replicas")
-            ax.set_ylabel(metric)
+                ax.axhline(tolerances[metric], color="gray", linestyle="--", linewidth=1.5, alpha=0.8)
+            title, ylabel = _CONV_METRICS.get(metric, (metric, metric))
+            if metric == "n_paths":
+                ax.yaxis.set_major_locator(plt.MaxNLocator(integer=True))
+            ax.set_title(title, fontsize=16)
+            ax.set_xlabel("Replicas")
+            ax.set_ylabel(ylabel)
             ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
             ax.grid(True)
+        for ax in axes[len(metrics):]:
+            ax.set_visible(False)
 
-        plt.tight_layout()#rect=[0, 0, 1, 0.95])
-        plt.savefig(f"{outdir}/sMD_convergence_metrics.svg", dpi=300, bbox_inches='tight')
-        plt.close()
-        return
-   
-def plot_extrapolated_param(df: pd.DataFrame = None,
-                            param: str = 'dG',
-                            outfname: str = None,
-                            mask_negative_dG: bool = False,
-                            ts_line: float | None = None,
-                            abs_line: float | None = None,
-                            ):
-    """Plot the v→0 extrapolated parameter vs r_coord with R² color mapping and error bands.
-    
-    Works with the output of :func:`Estimators.extrapolate_to_v0`, which
-    produces columns ``{param}``, ``{param}_se``, and ``R2``.
-    
-    Creates one subplot column per estimator (values in ``'estimator'``).
-    """
-    if outfname is None:
-        outfname = f'{param}_extrapolated.svg'
-        
-    color_col = 'R2'
-    se_col = f'{param}_se'
+        handles = [Line2D([0], [0], color=sc[s], marker="o", lw=2, label=f"{s:g} nm/ps")
+                   for s in speeds]
+        if tolerances and any(m in tolerances for m in metrics):
+            handles.append(Line2D([0], [0], color="gray", ls="--", lw=1.5, label="tolerance"))
+        fig.legend(handles=handles, loc="center left", bbox_to_anchor=(1.0, 0.5), frameon=False)
+        _save(os.path.join(outdir, "sMD_convergence_metrics.svg"))
 
-    if df is None or df.empty:
-        return
 
-    if mask_negative_dG and param == 'dG' and param in df.columns:
-        df = df.copy()
-        df.loc[df[param] < 0, param] = np.nan
-
-    # Determine estimators
-    if 'estimator' in df.columns:
-        estimators = sorted(df['estimator'].unique())
-    else:
-        estimators = [None]
-
-    n_panels = len(estimators)
-
-    # Normalize R2 for colormap across all data
-    vmin = max(df[color_col].min(), 0.0)
-    vmax = min(df[color_col].max(), 1.0)
-    if vmin >= vmax:
-        vmin, vmax = 0.0, 1.0
-    norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
-    cmap = cm.get_cmap('coolwarm')
-
+def plot_free_energy(mixture: pd.DataFrame, outfname: str) -> None:
+    """One facet per speed (fastest first, v -> 0 last), one line per estimator."""
+    so = _speed_order(mixture["speed"])
+    ests = _ordered_estimators(mixture)
     with plt.style.context(_STYLE), plt.rc_context(_RC_OVERRIDES):
-        fig, axes = plt.subplots(
-            1, n_panels,
-            figsize=(6 * n_panels, 4),
-            sharex=False,
-            sharey=True,
-            squeeze=False,
-        )
-        axes = axes.flatten()
+        col = _estimator_colors(ests)
+        fig, axes = plt.subplots(1, len(so), figsize=(4 * len(so), 4), sharey=True, squeeze=False)
+        axes = axes[0]
+        for ax, s in zip(axes, so):
+            for e in ests:
+                d = mixture[(mixture["speed"] == s) & (mixture["estimator"] == e)].sort_values("r_coord")
+                if len(d):
+                    ax.plot(d["r_coord"], d["dG"], color=col[e],
+                            ls="--" if (e == "force" and s > 0) else "-")
+            ax.set_title(_speed_title(s))
+            ax.set_xlabel("r (nm)")
+            ax.xaxis.set_major_locator(plt.MaxNLocator(4))
+        axes[0].set_ylabel("ΔG (kJ/mol)")
+        hs = [Line2D([0], [0], color=col[e], label=e) for e in ests]
+        if ((mixture["estimator"] == "force") & (mixture["speed"] > 0)).any():
+            hs.append(Line2D([0], [0], color=col["force"], ls="--", label="force (finite v)"))
+        fig.legend(handles=hs, loc="center left", bbox_to_anchor=(1.0, 0.5), frameon=False)
+        _save(outfname)
 
-        for ax, est_val in zip(axes, estimators):
-            if est_val is not None:
-                df_e = df[df['estimator'] == est_val].copy()
-            else:
-                df_e = df.copy()
 
-            # Sort by r_coord so segments connect in order
-            df_e = df_e.sort_values('r_coord').reset_index(drop=True)
+def plot_gamma_local(friction: pd.DataFrame, outfname: str) -> None:
+    """Γ(r) grid, one row per estimator and one column per speed.
 
-            x = df_e['r_coord'].values
-            y = df_e[param].values
-            yerr = df_e[se_col].values if se_col in df_e.columns else None
-            r2 = df_e[color_col].values
+    Raw curve faint, display-smoothed curve solid; y is shared along a row.
+    In the force row finite speeds share one y and v -> 0 keeps its own.
+    """
+    so = _speed_order(friction["speed"])
+    ests = _ordered_estimators(friction)
+    with plt.style.context(_STYLE), plt.rc_context(_RC_OVERRIDES):
+        col = _estimator_colors(ests)
+        fig, axes = plt.subplots(len(ests), len(so), figsize=(4 * len(so), 3 * len(ests)),
+                                 sharex=True, squeeze=False)
+        for i, e in enumerate(ests):
+            for j, s in enumerate(so):
+                ax = axes[i, j]
+                d = friction[(friction["speed"] == s) & (friction["estimator"] == e)]
+                d = d.sort_values(["method", "r_coord"])
+                fin_f = e == "force" and s > 0
+                for _, g in d.groupby("method"):
+                    r, y = g["r_coord"].to_numpy(), g["Gamma"].to_numpy()
+                    ax.plot(r, y, color=col[e], alpha=0.15 if fin_f else 0.3)
+                    ax.plot(r, _display_smooth(r, y), color=col[e], alpha=0.5 if fin_f else 1.0)
+                if i == 0:
+                    ax.set_title(_speed_title(s))
+                if i == len(ests) - 1:
+                    ax.set_xlabel("r (nm)")
+                ax.xaxis.set_major_locator(plt.MaxNLocator(4))
+            grp = [axes[i, j] for j, s in enumerate(so) if s > 0] if e == "force" else list(axes[i])
+            if grp:
+                lo = min(a.get_ylim()[0] for a in grp)
+                hi = max(a.get_ylim()[1] for a in grp)
+                for a in grp[1:]:
+                    a.sharey(grp[0])
+                    a.tick_params(labelleft=False)
+                grp[0].set_ylim(lo, hi)
+            axes[i, 0].set_ylabel(f"{e}\nΓ (kJ·ps/mol/nm²)")
+            if e == "force" and 0 in so:
+                axes[i, -1].set_ylabel("")
+        _save(outfname)
 
-            # Draw R²-colored segments with optional error bands
-            for i in range(len(df_e) - 1):
-                xi = x[i:i+2]
-                yi = y[i:i+2]
-                color = cmap(norm(np.clip(r2[i], vmin, vmax)))
 
-                ax.plot(xi, yi, color=color, lw=3)
+def plot_gamma_cumulative(friction: pd.DataFrame, outfname: str) -> None:
+    """Cumulative friction per speed; force only at v -> 0."""
+    df = friction[~((friction["estimator"] == "force") & (friction["speed"] > 0))]
+    so = _speed_order(df["speed"])
+    ests = _ordered_estimators(df)
+    with plt.style.context(_STYLE), plt.rc_context(_RC_OVERRIDES):
+        col = _estimator_colors(ests)
+        fig, axes = plt.subplots(1, len(so), figsize=(4 * len(so), 4), squeeze=False)
+        axes = axes[0]
+        for ax, s in zip(axes, so):
+            for e in ests:
+                d = df[(df["speed"] == s) & (df["estimator"] == e)].sort_values(["method", "r_coord"])
+                for _, g in d.groupby("method"):
+                    ax.plot(g["r_coord"], g["Gamma_integrated"], color=col[e])
+            ax.set_title(_speed_title(s))
+            ax.set_xlabel("r (nm)")
+            ax.xaxis.set_major_locator(plt.MaxNLocator(4))
+        axes[0].set_ylabel("∫Γ dr (kJ·ps/mol/nm)")
+        fig.legend(handles=[Line2D([0], [0], color=col[e], label=e) for e in ests],
+                   loc="center left", bbox_to_anchor=(1.0, 0.5), frameon=False)
+        _save(outfname)
 
-                if yerr is not None:
-                    yerri = yerr[i:i+2]
-                    ax.fill_between(xi, yi - yerri, yi + yerri, color=color, alpha=0.25)
 
-            for _x, _lab, _c in [(ts_line, "TS", "0.25"),
-                                 (abs_line, "abs", "firebrick")]:
-                if _x is not None:
-                    ax.axvline(_x, color=_c, linestyle="--", linewidth=1.2)
-                    ax.text(_x, 0.98, _lab, transform=ax.get_xaxis_transform(),
-                            va="top", ha="right", rotation=90, fontsize=8, color=_c)
+def plot_analysis(outdir: str, temperature: float | None = None, tolerances: dict | None = None,
+                  n_top_loadings: int = 25) -> list[str]:
+    """Render the sMD analysis figures from the files in ``outdir``.
 
-            ax.set_xlabel('r_coord (nm)')
-            # ax.set_ylabel(f'{param.split("_")[0]} (kJ/mol)')
-            title = est_val if est_val is not None else 'combined'
-            ax.set_title(f'{title}  (v→0 extrapolation)')
-            ax.grid(True)
+    Missing inputs skip the figure (INFO); a failing figure logs a WARNING
+    and the rest continue.
 
-        # Single colorbar outside the subplot area (bottom)
-        sm = cm.ScalarMappable(cmap=cmap, norm=norm)
-        sm.set_array([])
-        fig.tight_layout(rect=[0.0, 0.0, 0.88, 1.0])
-        cbar_ax = fig.add_axes([0.90, 0.15, 0.02, 0.70])
-        fig.colorbar(sm, cax=cbar_ax, orientation='vertical', label='$R^2$')
+    Returns
+    -------
+    list of str
+        Paths of the figures written.
+    """
+    import json
 
-        plt.savefig(outfname, dpi=300, bbox_inches='tight')
-        # plt.show()
-        plt.close()
+    if temperature is None:
+        try:
+            with open(os.path.join(outdir, "summary.json")) as fh:
+                temperature = json.load(fh).get("temperature_K")
+        except (OSError, ValueError):
+            temperature = None
+        if temperature is None:
+            temperature = 300.0
+            logger.info("temperature not found, using 300 K")
 
-        return
+    written: list[str] = []
+
+    def _try(name, fn, *args):
+        try:
+            fn(*args)
+        except Exception as exc:
+            logger.warning(f"{name} not written: {exc}")
+
+    def _need(figure, fname):
+        path = os.path.join(outdir, fname)
+        if os.path.exists(path):
+            return path
+        logger.info(f"{figure} skipped: no {fname}")
+        return None
+
+    def _figure(name, fname, csv, fn):
+        src = _need(name, csv)
+        if src is None:
+            return
+        out = os.path.join(outdir, fname)
+        _try(name, lambda: fn(pd.read_csv(src), out))
+        if os.path.exists(out):
+            written.append(out)
+
+    src = _need("sMD_convergence_metrics", "sMD_conv_vALL_metrics.csv")
+    if src is not None:
+        out = os.path.join(outdir, "sMD_convergence_metrics.svg")
+        _try("sMD_convergence_metrics", plot_convergence_metrics, [src], outdir, tolerances)
+        if os.path.exists(out):
+            written.append(out)
+    _figure("free_energy", "free_energy.svg", "mixture_pmfs.csv", plot_free_energy)
+    _figure("Gamma_local", "Gamma_local.svg", "friction.csv", plot_gamma_local)
+    _figure("Gamma_cumulative", "Gamma_cumulative.svg", "friction.csv", plot_gamma_cumulative)
+    return written
 
 def _parse_speed_from_path(path_name: str) -> float | None:
     """Extract pulling speed (nm/ps) from a path name such as ``'path-0_v0.001'``.
