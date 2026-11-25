@@ -21,7 +21,7 @@ def find_files(directory):
 
 setup(
     name="AutoPath",
-    version='0.1.0',
+    version='1.0.0',
     author="Manuel A. Llanos",
     author_email="mllanos@scripps.edu",
     url="https://github.com/forlilab/autopath",
