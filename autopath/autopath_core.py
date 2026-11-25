@@ -674,7 +674,10 @@ class AutoPath:
                                 ]
 
                                 plot_convergence_traces(conv_traces, outdir=sMD_analysis_outdir)
-                                plot_convergence_metrics(conv_metrics, outdir=sMD_analysis_outdir, tolerances=CONVERGENCE_TOLERANCES)
+                                try:
+                                    plot_convergence_metrics(conv_metrics, outdir=sMD_analysis_outdir, tolerances=CONVERGENCE_TOLERANCES)
+                                except Exception as exc:
+                                    logger.warning(f"sMD_convergence_metrics not written: {exc}")
 
                                 # Converged = the last sMD_conv_streak rungs all pass.
                                 # Must be the tail streak: conv_df is rebuilt each call.

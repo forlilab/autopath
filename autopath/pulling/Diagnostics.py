@@ -26,6 +26,7 @@ from scipy.ndimage import gaussian_filter
 from scipy.signal import savgol_filter
 
 import re
+import functools
 import logging
 logger = logging.getLogger(__name__)
 
@@ -209,9 +210,22 @@ def _ordered_estimators(df: pd.DataFrame) -> list[str]:
 def _save(outfname: str) -> None:
     plt.tight_layout()
     plt.savefig(outfname, dpi=150, bbox_inches="tight")
-    plt.close()
 
 
+def _closes_figures(fn):
+    """Close the figures ``fn`` opened, also when it raises."""
+    @functools.wraps(fn)
+    def wrapper(*a, **k):
+        before = set(plt.get_fignums())
+        try:
+            return fn(*a, **k)
+        finally:
+            for n in set(plt.get_fignums()) - before:
+                plt.close(n)
+    return wrapper
+
+
+@_closes_figures
 def plot_convergence_metrics(smd_conv_metrics: list[str], outdir: str, tolerances: dict = None):
     """Plot convergence metrics vs. replica count, one panel per metric.
 
@@ -295,6 +309,7 @@ def plot_convergence_metrics(smd_conv_metrics: list[str], outdir: str, tolerance
         _save(os.path.join(outdir, "sMD_convergence_metrics.svg"))
 
 
+@_closes_figures
 def plot_free_energy(mixture: pd.DataFrame, outfname: str) -> None:
     """One facet per speed (fastest first, v -> 0 last), one line per estimator."""
     so = _speed_order(mixture["speed"])
@@ -320,6 +335,7 @@ def plot_free_energy(mixture: pd.DataFrame, outfname: str) -> None:
         _save(outfname)
 
 
+@_closes_figures
 def plot_gamma_local(friction: pd.DataFrame, outfname: str) -> None:
     """Γ(r) grid, one row per estimator and one column per speed.
 
@@ -361,6 +377,7 @@ def plot_gamma_local(friction: pd.DataFrame, outfname: str) -> None:
         _save(outfname)
 
 
+@_closes_figures
 def plot_gamma_cumulative(friction: pd.DataFrame, outfname: str) -> None:
     """Cumulative friction per speed; force only at v -> 0."""
     df = friction[~((friction["estimator"] == "force") & (friction["speed"] > 0))]
@@ -381,6 +398,242 @@ def plot_gamma_cumulative(friction: pd.DataFrame, outfname: str) -> None:
         axes[0].set_ylabel("∫Γ dr (kJ·ps/mol/nm)")
         fig.legend(handles=[Line2D([0], [0], color=col[e], label=e) for e in ests],
                    loc="center left", bbox_to_anchor=(1.0, 0.5), frameon=False)
+        _save(outfname)
+
+
+def _path_key(label) -> str:
+    """Label without its per-speed suffix (``path-0_v0.01`` -> ``path-0``)."""
+    return str(label).split("_")[0]
+
+
+def _path_sort(labels) -> list:
+    def k(x):
+        m = re.match(r"path-(\d+)", str(x))
+        return (0, int(m.group(1)), str(x)) if m else (1, 0, str(x))
+    return sorted(set(labels), key=k)
+
+
+@_closes_figures
+def plot_paths(path_dir: str, group: str, outfname: str, final_labels: dict | None = None,
+               n_top_loadings: int = 25) -> None:
+    """DTW matrix, silhouette, PCA space and top feature loadings of one path model.
+
+    Parameters
+    ----------
+    path_dir : str
+        The ``path_analysis`` directory.
+    group : str
+        Speed group suffix of the ``*_v{group}.*`` files (``"Global"`` or a speed).
+    outfname : str
+        Output image.
+    final_labels : dict or None
+        ``{trajname: path}`` overriding the as-clustered labels (post-merge).
+    n_top_loadings : int
+        Features shown, ranked by sqrt(PC1^2 + PC2^2).
+    """
+    import json
+
+    f = lambda stem, ext: os.path.join(path_dir, f"{stem}_v{group}.{ext}")
+    dist = np.load(f("dtw_distance", "npy"))
+    lab = pd.read_csv(f("dtw_labels", "csv"))
+    scores = pd.read_csv(f("pca_scores", "csv"))
+    load = pd.read_csv(f("pca_loadings", "csv"))
+    with open(f("path_model", "json")) as fh:
+        model = json.load(fh)
+    fl = final_labels or {}
+    labels = np.array([fl.get(t, p) for t, p in zip(lab["trajname"], lab["path"])], dtype=str)
+    evr = model.get("explained_variance_ratio", [np.nan, np.nan])
+    sil = {int(k): v for k, v in model.get("silhouette", {}).items()}
+
+    with plt.style.context(_STYLE), plt.rc_context(_RC_OVERRIDES):
+        fig, axes = plt.subplots(2, 2, figsize=(13, 11))
+        ax = axes.ravel()
+        order = np.argsort(labels, kind="stable")
+        sns.heatmap(dist[np.ix_(order, order)], cmap="viridis", ax=ax[0],
+                    xticklabels=False, yticklabels=False)
+        sl = labels[order]
+        for b in np.where(sl[1:] != sl[:-1])[0] + 1:
+            ax[0].axhline(b, color="white", lw=0.8)
+            ax[0].axvline(b, color="white", lw=0.8)
+        ax[0].set(title="DTW distance", xlabel="Trajectories", ylabel="Trajectories")
+        ax[0].grid(False)
+
+        if sil:
+            ax[1].plot(list(sil), list(sil.values()), marker="o")
+            ax[1].set_xticks(list(sil))
+        ax[1].axvline(model["K"], color="red", linestyle="--", label=f"K = {model['K']}")
+        ax[1].set(title="Silhouette score", xlabel="Number of paths", ylabel="Silhouette score")
+
+        ax[2].scatter(scores["PC1"], scores["PC2"], alpha=0.75, color="lightgray", s=50, linewidth=0)
+        pl = scores["trajname"].map(lambda t: fl.get(t)).fillna(scores["path"])
+        med = scores[scores["is_medoid"].astype(bool)].assign(_p=pl)
+        for p in _path_sort(med["_p"]):
+            d = med[med["_p"] == p]
+            ax[2].scatter(d["PC1"], d["PC2"], s=20, alpha=0.9, color=_path_color(p),
+                          label=_path_key(p))
+        if len(med):
+            handles, names = ax[2].get_legend_handles_labels()
+            seen = dict(zip(names, handles))
+            ax[2].legend(seen.values(), seen.keys(), frameon=False)
+        ax[2].set(title="PCA space", xlabel=f"PC1 ({evr[0] * 100:.1f}%)",
+                  ylabel=f"PC2 ({evr[1] * 100:.1f}%)")
+
+        contrib = np.hypot(load["PC1"], load["PC2"]).to_numpy()
+        idx = np.argsort(contrib)[::-1][:n_top_loadings][::-1]
+        y = np.arange(len(idx))
+        w = 0.35
+        ax[3].barh(y + w / 2, load["PC1"].to_numpy()[idx], w, color="#6d904f",
+                   label=f"PC1 ({evr[0] * 100:.1f}%)")
+        ax[3].barh(y - w / 2, load["PC2"].to_numpy()[idx], w, color="#810f7c",
+                   label=f"PC2 ({evr[1] * 100:.1f}%)")
+        ax[3].set_yticks(y)
+        ax[3].set_yticklabels(load["feature"].to_numpy()[idx])
+        ax[3].axvline(0, color="black", lw=0.8)
+        ax[3].set(xlabel="Loadings", title="Feature contributions")
+        ax[3].legend(frameon=False)
+        _save(outfname)
+
+
+def _sigma_ratio(traces: pd.DataFrame, speed: float):
+    """r and sigma_W within-path / pooled for one speed."""
+    g = traces[traces["speed"] == speed]
+    W = g.pivot_table(index="step", columns="trajname", values="work")
+    r = g.groupby("step")["r_target"].mean().reindex(W.index).to_numpy()
+    path = g.drop_duplicates("trajname").set_index("trajname")["path"].reindex(W.columns)
+    w = W.to_numpy()
+    ss = np.zeros(len(w))
+    dof = np.zeros(len(w))
+    for p in path.dropna().unique():
+        x = w[:, (path == p).to_numpy()]
+        ss += np.nansum((x - np.nanmean(x, axis=1, keepdims=True)) ** 2, axis=1)
+        dof += np.sum(~np.isnan(x), axis=1) - 1
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return r, np.sqrt(ss / dof) / np.nanstd(w, axis=1, ddof=1)
+
+
+@_closes_figures
+def plot_path_decomposition(outdir: str, outfname: str) -> None:
+    """Per-path dG, friction and weights against the mixture, per speed.
+
+    Parameters
+    ----------
+    outdir : str
+        Analysis directory holding ``path_pmfs.csv``, ``path_friction.csv``,
+        ``path_quality.csv``, ``mixture_pmfs.csv``, ``friction.csv`` and the traces.
+    outfname : str
+        Output image.
+    """
+    from autopath.pulling.outputs import load_traces
+
+    rd = lambda n: pd.read_csv(os.path.join(outdir, n))
+    pp = rd("path_pmfs.csv")
+    pp = pp[pp["estimator"] == "cumulant"]
+    pf = rd("path_friction.csv") if os.path.exists(os.path.join(outdir, "path_friction.csv")) else None
+    mix, fr, pq = rd("mixture_pmfs.csv"), rd("friction.csv"), rd("path_quality.csv")
+    speeds = [s for s in _speed_order(pp["speed"]) if s > 0]
+    ncols = max(3, len(speeds))
+    paths = _path_sort(pp["path"])
+    keys = _path_sort(_path_key(p) for p in paths)
+    key_col = {k: _path_color(k) for k in keys}
+    pq = pq[pq["estimator"] == pq["estimator"].iloc[0]]
+
+    with plt.style.context(_STYLE), plt.rc_context(_RC_OVERRIDES):
+        fig, axes = plt.subplots(3, ncols, figsize=(4 * ncols, 9.5), squeeze=False)
+        for ax in axes.ravel():
+            ax.set_visible(False)
+
+        def on(ax):
+            ax.set_visible(True)
+            ax.xaxis.set_major_locator(plt.MaxNLocator(4))
+            return ax
+
+        mx = mix[(mix["estimator"] == "cumulant")]
+        fx = fr[(fr["estimator"] == "cumulant") & (fr["method"] == "derivative")]
+        pfc = pf[(pf["estimator"] == "cumulant")] if pf is not None else None
+        for j, s in enumerate(speeds):
+            ax = on(axes[0, j])
+            for p, g in pp[pp["speed"] == s].groupby("path"):
+                g = g.sort_values("r_coord")
+                ax.plot(g["r_coord"], g["dG"], color=_path_color(p))
+            g = mx[mx["speed"] == s].sort_values("r_coord")
+            ax.plot(g["r_coord"], g["dG"], color="k")
+            ax.set_title(_speed_title(s))
+            ax = on(axes[1, j])
+            if pfc is not None:
+                for p, g in pfc[(pfc["speed"] == s) & (pfc["method"] == "derivative")].groupby("path"):
+                    g = g.sort_values("r_coord")
+                    ax.plot(g["r_coord"], g["Gamma_integrated"], color=_path_color(p))
+            g = fx[fx["speed"] == s].sort_values("r_coord")
+            ax.plot(g["r_coord"], g["Gamma_integrated"], color="k")
+            ax.set_xlabel("r (nm)")
+            if j:
+                for i in (0, 1):
+                    axes[i, j].sharey(axes[i, 0])
+                    axes[i, j].tick_params(labelleft=False)
+        axes[0, 0].set_ylabel("cumulant\nΔG (kJ/mol)")
+        axes[1, 0].set_ylabel("cumulant\n∫Γ dr (kJ·ps/mol/nm)")
+        axes[1, 0].legend(handles=[Line2D([0], [0], color=key_col[k], label=k) for k in keys]
+                          + [Line2D([0], [0], color="k", label="mixture")],
+                          loc="upper left", frameon=False)
+
+        fv = pf[(pf["estimator"] == "force") & (pf["speed"] == 0)] if pf is not None else None
+        fa = fr[(fr["estimator"] == "force") & (fr["method"] == "regression") & (fr["speed"] == 0)]
+        if fv is not None and len(fv) and len(fa):
+            ax = on(axes[2, 0])
+            for p, g in fv.groupby("path"):
+                g = g.sort_values("r_coord")
+                ax.plot(g["r_coord"], g["Gamma"], color=_path_color(p))
+            g = fa.sort_values("r_coord")
+            ax.plot(g["r_coord"], g["Gamma"], color="k")
+            ax.set(xlabel="r (nm)", ylabel="force, v → 0\nΓ (kJ·ps/mol/nm²)")
+
+        ax = on(axes[2, 1])
+        bot = np.zeros(len(speeds))
+        for k in keys:
+            wv = np.array([pq[(pq["speed"] == s) & (pq["path"].map(_path_key) == k)]["weight"].sum()
+                           for s in speeds])
+            ax.bar(range(len(speeds)), wv, bottom=bot, color=key_col[k])
+            bot += wv
+        ax.set_xticks(range(len(speeds)))
+        ax.set_xticklabels([f"{s:g}" for s in speeds])
+        ax.set(xlabel="Speed (nm/ps)", ylabel="Path weight")
+
+        ax = on(axes[2, 2])
+        cl = ["#6d904f", "#810f7c", "#8b8b8b"]
+        tr = load_traces(outdir, ["trajname", "speed", "step", "work", "r_target", "path"])
+        for k, s in enumerate(speeds):
+            r, rat = _sigma_ratio(tr, s)
+            ax.plot(r, rat, color=cl[k % len(cl)], label=f"{s:g} nm/ps")
+        ax.axhline(1, color="k", ls="--", lw=1)
+        ax.set(xlabel="r (nm)", ylabel="σ$_W$ within-path / pooled")
+        ax.legend(frameon=False, loc="upper left")
+        _save(outfname)
+
+
+@_closes_figures
+def plot_jarzynski_convergence(diag: pd.DataFrame, outfname: str) -> None:
+    """Jarzynski estimator health against pull count, one line per speed.
+
+    Parameters
+    ----------
+    diag : pandas.DataFrame
+        Output of :func:`autopath.pulling.outputs.jarzynski_convergence`.
+    outfname : str
+        Output image.
+    """
+    cols = ["top_pull_weight", "ess_over_n", "tail_position", "beta_sigma_W"]
+    lab = ["Top-pull weight", "Kish ESS / n", "(ΔG$_J$ − W$_{min}$) / (kT ln n)", "βσ$_W$"]
+    with plt.style.context(_STYLE), plt.rc_context(_RC_OVERRIDES):
+        cyc = _cycle_colors()
+        fig, axes = plt.subplots(2, 2, figsize=(10, 7))
+        axes = axes.ravel()
+        for k, (s, g) in enumerate(diag.groupby("speed")):
+            g = g.sort_values("n")
+            for ax, c in zip(axes, cols):
+                ax.plot(g["n"], g[c], color=cyc[k % len(cyc)], label=f"{s:g} nm/ps")
+        for ax, y in zip(axes, lab):
+            ax.set(xlabel="Pulls", ylabel=y)
+        axes[1].legend(frameon=False)
         _save(outfname)
 
 
@@ -412,9 +665,10 @@ def plot_analysis(outdir: str, temperature: float | None = None, tolerances: dic
 
     def _try(name, fn, *args):
         try:
-            fn(*args)
+            return fn(*args) is not False
         except Exception as exc:
             logger.warning(f"{name} not written: {exc}")
+            return False
 
     def _need(figure, fname):
         path = os.path.join(outdir, fname)
@@ -423,24 +677,69 @@ def plot_analysis(outdir: str, temperature: float | None = None, tolerances: dic
         logger.info(f"{figure} skipped: no {fname}")
         return None
 
+    def _done(ok, out):
+        if ok:
+            written.append(out)
+
     def _figure(name, fname, csv, fn):
         src = _need(name, csv)
         if src is None:
             return
         out = os.path.join(outdir, fname)
-        _try(name, lambda: fn(pd.read_csv(src), out))
-        if os.path.exists(out):
-            written.append(out)
+        _done(_try(name, lambda: fn(pd.read_csv(src), out)), out)
 
     src = _need("sMD_convergence_metrics", "sMD_conv_vALL_metrics.csv")
     if src is not None:
         out = os.path.join(outdir, "sMD_convergence_metrics.svg")
-        _try("sMD_convergence_metrics", plot_convergence_metrics, [src], outdir, tolerances)
-        if os.path.exists(out):
-            written.append(out)
+        _done(_try("sMD_convergence_metrics", plot_convergence_metrics, [src], outdir, tolerances), out)
     _figure("free_energy", "free_energy.svg", "mixture_pmfs.csv", plot_free_energy)
     _figure("Gamma_local", "Gamma_local.svg", "friction.csv", plot_gamma_local)
     _figure("Gamma_cumulative", "Gamma_cumulative.svg", "friction.csv", plot_gamma_cumulative)
+
+    import glob
+    pulls_csv = os.path.join(outdir, "pulls.csv")
+    pulls = pd.read_csv(pulls_csv) if os.path.exists(pulls_csv) else None
+    pdir = os.path.join(outdir, "path_analysis")
+    models = sorted(glob.glob(os.path.join(pdir, "path_model_v*.json")))
+    if not models:
+        logger.info("paths skipped: no path_analysis/path_model_v*.json")
+    final = dict(zip(pulls["trajname"], pulls["path"])) if pulls is not None and "path" in pulls else None
+    for m in models:
+        g = os.path.basename(m)[len("path_model_v"):-len(".json")]
+        try:
+            with open(m) as fh:
+                K = json.load(fh).get("K", 0)
+        except (OSError, ValueError):
+            K = 0
+        if K <= 1:
+            continue
+        out = os.path.join(outdir, "paths.png" if g == "Global" else f"paths_v{g}.png")
+        _done(_try(f"paths_v{g}", plot_paths, pdir, g, out, final, n_top_loadings), out)
+
+    src = _need("path_decomposition", "path_pmfs.csv")
+    if src is not None:
+        out = os.path.join(outdir, "path_decomposition.png")
+        try:
+            multi = pd.read_csv(src)["path"].map(_path_key).nunique() > 1
+        except Exception:
+            multi = False
+        if multi:
+            _done(_try("path_decomposition", plot_path_decomposition, outdir, out), out)
+        else:
+            logger.info("path_decomposition skipped: one path")
+
+    if _need("jarzynski_convergence", "pulls.csv") is not None:
+        from autopath.pulling.outputs import jarzynski_convergence, load_traces
+        out = os.path.join(outdir, "jarzynski_convergence.svg")
+
+        def _jc():
+            diag = jarzynski_convergence(load_traces(outdir), pulls, temperature)
+            if diag.empty:
+                logger.info("jarzynski_convergence skipped: fewer than 2 pulls per speed")
+                return False
+            plot_jarzynski_convergence(diag, out)
+
+        _done(_try("jarzynski_convergence", _jc), out)
     return written
 
 def _parse_speed_from_path(path_name: str) -> float | None:
@@ -619,7 +918,7 @@ def make_unbinding_paths_visualization(
             isosurfaces are coloured by local friction Γ(r) as a blue (low) →
             white → red (high) gradient.  Default ``False``: each path is
             instead coloured with a distinct colour from the ``fivethirtyeight``
-            palette (the same cycle used by :func:`plot_work_profiles`), applied
+            palette (the same cycle used by :func:`plot_path_decomposition`), applied
             to both the density isosurface and the ligand sticks.
         friction_csv: Path to ``friction.csv`` produced by
             :class:`~autopath.pulling.Estimators.FrictionEstimator`.
@@ -761,7 +1060,7 @@ def make_unbinding_paths_visualization(
             )
 
     # Colour each path with the fivethirtyeight palette — the same colour cycle
-    # used by plot_work_profiles — so path identity is consistent across figures.
+    # used by plot_path_decomposition — so path identity is consistent across figures.
     # Colours are stored as RGB (0–1) and registered as custom PyMOL colours
     # (indexed names sidestep path-name characters PyMOL dislikes).
     with plt.style.context(_STYLE):
