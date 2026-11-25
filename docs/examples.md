@@ -9,7 +9,6 @@ The [`examples/`](https://github.com/forlilab/autopath/tree/main/examples) folde
 | `03_Pull-it-out` | Steered MD pulls, then the pull analysis (`analyze_sMD.py`) and one ΔG per ligand (`collect_readouts.py`) |
 | `04_Full-Pipeline` | The `AutoPath` class end to end, with an optional cw-RMSF filter before pulling |
 | `05_VanillaMD` | Conventional MD replicas from an equilibrated system, with the standard analysis |
-| `06_Docking_PrEP` | Receptor and ligand preparation for docking: fetch from the PDB, fix, restrained minimization |
 | `08_Toy_validation` | Validates the pull analysis on a two-channel toy model with exact free energy, friction and unbinding time |
 
 ## Name contract

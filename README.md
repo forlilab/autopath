@@ -72,7 +72,6 @@ Runnable scripts in [`examples/`](examples/), each with its own README, using th
 | `03_Pull-it-out` | Steered-MD pulls, their analysis, and one ΔG per ligand |
 | `04_Full-Pipeline` | The `AutoPath` class end to end, with a cw-RMSF filter before pulling |
 | `05_VanillaMD` | Conventional MD replicas with the standard analysis |
-| `06_Docking_PrEP` | Receptor and ligand preparation for docking |
 | `08_Toy_validation` | The pull analysis checked on a toy model with exact answers |
 
 ## 📄 License
