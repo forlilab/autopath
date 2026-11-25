@@ -1,6 +1,7 @@
 """Regression tests for milestone extraction."""
 import os
 import numpy as np
+import pandas as pd
 import pytest
 import MDAnalysis as mda
 
@@ -273,3 +274,11 @@ def test_alignment_applies_only_a_rigid_transform(tmp_path):
     assert worst < 1e-3, (
         f"alignment moved atoms by {worst*10:.2f} A beyond any rigid transform; "
         "imaging must happen before superposition, never after")
+
+
+def test_path_readers_use_pulls_csv(tmp_path):
+    from autopath.utils import read_surviving_paths, read_trajname_to_path
+    pd.DataFrame({"trajname": ["a", "b", "c"], "path": ["path-0", "path-1", "path-1"],
+                  "path_ok": [True, True, False]}).to_csv(tmp_path / "pulls.csv", index=False)
+    assert read_trajname_to_path(str(tmp_path)) == {"a": "path-0", "b": "path-1"}
+    assert read_surviving_paths(str(tmp_path)) == {"path-0", "path-1"}

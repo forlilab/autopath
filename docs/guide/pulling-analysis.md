@@ -45,11 +45,19 @@ conv.to_csv(f"{out}/sMD_conv_vALL_metrics.csv", index=False)
 | File | Content |
 |---|---|
 | `mixture_pmfs.csv` | Pathway-recombined ΔG(r) per estimator and speed (speed 0 = v→0) |
-| `sMD_processed_data.csv` | Per-step force, work and r for every pull, with its pathway |
+| `traces.csv.gz` | Per-step force, work and r for every pull |
+| `pulls.csv` | One row per pull: speed, replica, pull order, stop reason, wall time, pathway |
+| `sMD_processed_data.csv` | Both of the above in one file; written only with `legacy_outputs=True` (`sMD_legacy_outputs` in the config) |
 | `friction.csv`, `koff_kramers.csv`, `koff_per_path.csv` | Friction and k<sub>off</sub> |
-| `path_quality.csv`, `path_merges.csv`, `path_analysis/` | Pathway clusters and a PyMOL session of the paths |
+| `path_quality.csv`, `path_merges.csv` | Pathway weights and merges |
+| `path_pmfs.csv`, `path_friction.csv` | Per-path ΔG(r) and friction |
+| `path_analysis/` | Data files (`dtw_distance`, `dtw_labels`, `pca_scores`, `pca_loadings`, `path_model_v*`) and an `unbinding_paths` `.pml` script (`.pse` optional) |
+| `summary.json` | Run metadata, per-speed pull counts and convergence, readouts, Jarzynski diagnostics |
+| `legacy_outputs` | See `sMD_processed_data.csv` above |
 | `sMD_conv_vALL_metrics.csv` | Profile convergence as replicas accumulate |
-| `dG*.svg`, `Wdiss*.svg`, `Gamma_*.svg`, `work_profiles_*.svg` | Plots |
+| `sMD_convergence_metrics.svg`, `free_energy.svg`, `Gamma_local.svg`, `Gamma_cumulative.svg`, `paths.png`, `path_decomposition.png`, `jarzynski_convergence.svg` | Figures |
+
+`converged` in `summary.json` and the convergence figure are filled after `check_convergence`, by `write_summary(outdir)` and `plot_analysis(outdir)`.
 
 ## One ΔG per ligand
 

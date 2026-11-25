@@ -13,7 +13,7 @@ from MDAnalysis.analysis.rms import rmsd as _mda_rmsd
 import openmm as mm
 from openmm import app, unit as ommunit
 
-logger = logging.getLogger("autopath")
+logger = logging.getLogger(__name__)
 
 
 class Featurizer(ABC):

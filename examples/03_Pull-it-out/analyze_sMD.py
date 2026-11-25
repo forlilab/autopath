@@ -18,6 +18,8 @@ from glob import glob
 from autopath.utils import setup_logging
 from autopath.pulling import SMDData, SMDAnalysis
 from autopath.pulling.PathModel import DTWPathModel
+from autopath.pulling.Diagnostics import plot_analysis
+from autopath.pulling.outputs import write_summary
 
 
 def main():
@@ -70,6 +72,11 @@ def main():
         plateau_frac=0.4, cluster_to_boundary=True, restrict_rmsd_to_boundary=True,
         boundary_buffer_frac=0.1, recompute_distances=False)
     conv_df.to_csv(f"{outdir}/sMD_conv_vALL_metrics.csv", index=False)
+    try:
+        write_summary(outdir)
+    except Exception as exc:
+        logger.warning(f"summary.json not written: {exc}")
+    plot_analysis(outdir)
     if not traces_df.empty:
         traces_df.to_csv(f"{outdir}/sMD_conv_vALL_traces.csv", index=False)
     logger.info(f"Analysis written to {outdir}")

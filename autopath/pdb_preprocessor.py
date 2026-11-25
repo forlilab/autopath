@@ -871,7 +871,7 @@ def assign_bondOrders(mol: Chem.Mol = None, template_smiles: str = None):
     new_mol = Chem.AddHs(new_mol, addCoords=True)
 
     if new_mol is None:
-        logging.error(f"Could not assign bond orders from template {template_smiles}")
+        logger.error(f"Could not assign bond orders from template {template_smiles}")
         return mol
 
     return new_mol

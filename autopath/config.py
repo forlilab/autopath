@@ -3,6 +3,8 @@ import json
 import logging
 from inspect import signature
 
+logger = logging.getLogger(__name__)
+
 
 class Config(object):
     """Configuration container for an AutoPath simulation.
@@ -75,6 +77,7 @@ class Config(object):
         sMD_plateau_frac: float = 0.4,  # force-plateau TS boundary: fraction of peak |force|
         sMD_cluster_to_boundary: bool = True,  # cluster + RMSD-converge only up to the force-plateau boundary
         sMD_boundary_buffer_frac: float = 0.1,  # extend the boundary cap by this fraction of r_ts
+        sMD_legacy_outputs: bool = False,  # also write sMD_processed_data.csv
         sMD_kramers_abs: str = "end",  # Kramers absorbing boundary: "end" (pulled range) | "force_plateau" (legacy)
         sMD_kramers_bound: str = "mirror",  # bound population below pull start: "mirror" | "none"
         cluster_across_speeds: bool = True,
@@ -285,6 +288,8 @@ class Config(object):
             Extend the force-plateau boundary cap by this fraction of the
             transition-state distance, as a buffer past rupture.  Default
             ``0.1``.
+        sMD_legacy_outputs : bool, optional
+            Also write the single-file ``sMD_processed_data.csv``. Default ``False``.
         sMD_kramers_abs : str, optional
             Kramers absorbing boundary: ``"end"`` (end of the pulled range,
             default) or ``"force_plateau"`` (mean |force| at ``sMD_plateau_frac``
@@ -381,6 +386,7 @@ class Config(object):
         self.sMD_cluster_to_boundary = sMD_cluster_to_boundary
         self.sMD_boundary_buffer_frac = sMD_boundary_buffer_frac
         self.sMD_kramers_abs = sMD_kramers_abs
+        self.sMD_legacy_outputs = sMD_legacy_outputs
         self.sMD_kramers_bound = sMD_kramers_bound
         self.cluster_across_speeds = cluster_across_speeds
         self.sMD_min_replicas_per_path = sMD_min_replicas_per_path
@@ -436,16 +442,16 @@ class Config(object):
             If the file contains keys that are not recognised constructor
             parameters.
         """
-        logging.info("Loading settings from JSON file.")
+        logger.debug("Loading settings from JSON file.")
 
         try:
             with open(config) as f:
                 config_data = json.load(f)
         except FileNotFoundError:
-            logging.error(f"Config file {config} not found.")
+            logger.error(f"Config file {config} not found.")
             raise
         except json.JSONDecodeError:
-            logging.error(f"Config file {config} is not valid JSON.")
+            logger.error(f"Config file {config} is not valid JSON.")
             raise
 
         expected_keys = cls.get_defaults_dict().keys()
@@ -467,14 +473,14 @@ class Config(object):
         for old_key, new_key in legacy_map.items():
             if old_key in flattened_config and new_key not in flattened_config:
                 flattened_config[new_key] = flattened_config.pop(old_key)
-                logging.warning(
+                logger.warning(
                     f"Deprecated config key '{old_key}' detected. Please use '{new_key}'."
                 )
 
         if "sMD_replicas" in flattened_config and "sMD_pulling_speeds" not in flattened_config:
             reps = flattened_config.pop("sMD_replicas")
             flattened_config["sMD_pulling_speeds"] = {0.001: reps}
-            logging.warning(
+            logger.warning(
                 "Deprecated config key 'sMD_replicas' detected. "
                 "Mapped to 'sMD_pulling_speeds' as {0.001: sMD_replicas}."
             )
@@ -494,7 +500,7 @@ class Config(object):
             err_msg = "Unexpected keys in Config.from_config():" + os.linesep
             for key in bad_keys:
                 err_msg += f"  - {key}" + os.linesep
-            logging.error("Failed to load settings from JSON file.")
+            logger.error("Failed to load settings from JSON file.")
             raise ValueError(err_msg)
 
         p = cls(**flattened_config)

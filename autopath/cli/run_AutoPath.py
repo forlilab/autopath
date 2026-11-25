@@ -5,6 +5,7 @@ import argparse
 from glob import glob
 from autopath.config import Config
 from autopath.autopath_core import AutoPath
+from autopath.utils import setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +147,7 @@ def main():
             sMD_cluster_to_boundary=config.sMD_cluster_to_boundary,
             sMD_boundary_buffer_frac=config.sMD_boundary_buffer_frac,
             sMD_kramers_abs=config.sMD_kramers_abs,
+            sMD_legacy_outputs=config.sMD_legacy_outputs,
             sMD_kramers_bound=config.sMD_kramers_bound,
             cluster_across_speeds=config.cluster_across_speeds,
             sMD_min_replicas_per_path=config.sMD_min_replicas_per_path,
@@ -161,6 +163,9 @@ def main():
         )
 
         for lig in ligands:
+            sys_name = os.path.splitext(os.path.basename(lig))[0]
+            os.makedirs(sys_name, exist_ok=True)
+            setup_logging(f"{sys_name}/autopath.log", log_level="INFO")
             autopath_simulation.run(lig)
 
     except (FileNotFoundError, ValueError) as e:
