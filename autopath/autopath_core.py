@@ -33,7 +33,8 @@ from autopath.pulling.Convergence import (tail_converged, validate_autostop_opti
                                           round_robin_order)
 from autopath.pulling.PathModel import DTWPathModel, NullPathModel
 from autopath.pulling.Estimators import validate_path_combination
-from autopath.pulling.Diagnostics import plot_convergence_traces, plot_convergence_metrics
+from autopath.pulling.Diagnostics import plot_convergence_traces, plot_convergence_metrics, plot_analysis
+from autopath.pulling.outputs import write_summary
 
 import logging
 logger = logging.getLogger(__name__)
@@ -160,7 +161,7 @@ class AutoPath:
         sMD_align_trajs: bool = True,  # False: keep raw sMD DCDs (<stem>.dcd), skip wrap/align
         sMD_clust_selection:str = None,
         sMD_path_model: str = 'dtw',   # 'dtw' | 'null' ('null' = no clustering: one path)
-        sMD_paths_viz: str = 'pse',    # unbinding-paths figure: 'pse' | 'pml' | 'none'
+        sMD_paths_viz: str = 'pml',    # unbinding-paths figure: 'pse' | 'pml' | 'none'
         sMD_n_paths: int | None = None,  # fixed number of paths; None = silhouette-selected
         sMD_max_frac_neg_dG_first_half: float = 0.25,  # pass-3 binding-well filter; <=0 disables
         sMD_friction_model: str = 'mixed',  # 'mixed' | 'ols' force friction slope regression
@@ -171,6 +172,7 @@ class AutoPath:
         sMD_plateau_frac: float = 0.4,  # force-plateau TS boundary as a fraction of peak |force|
         sMD_cluster_to_boundary: bool = True,  # cluster/converge only up to the force-plateau boundary
         sMD_boundary_buffer_frac: float = 0.1,  # boundary buffer as a fraction of r_ts
+        sMD_legacy_outputs: bool = False,  # also write sMD_processed_data.csv
         sMD_kramers_abs: str = "end",  # Kramers absorbing boundary: 'end' (pulled range) | 'force_plateau' (legacy)
         sMD_kramers_bound: str = "mirror",  # bound population below pull start: 'mirror' | 'none'
         cluster_across_speeds: bool = True,
@@ -252,6 +254,7 @@ class AutoPath:
         self.sMD_cluster_to_boundary = sMD_cluster_to_boundary
         self.sMD_boundary_buffer_frac = sMD_boundary_buffer_frac
         self.sMD_kramers_abs = sMD_kramers_abs
+        self.sMD_legacy_outputs = sMD_legacy_outputs
         self.sMD_kramers_bound = sMD_kramers_bound
         self.cluster_across_speeds = cluster_across_speeds
         self.sMD_min_replicas_per_path = sMD_min_replicas_per_path
@@ -671,7 +674,10 @@ class AutoPath:
                                 ]
 
                                 plot_convergence_traces(conv_traces, outdir=sMD_analysis_outdir)
-                                plot_convergence_metrics(conv_metrics, outdir=sMD_analysis_outdir, tolerances=CONVERGENCE_TOLERANCES)
+                                try:
+                                    plot_convergence_metrics(conv_metrics, outdir=sMD_analysis_outdir, tolerances=CONVERGENCE_TOLERANCES)
+                                except Exception as exc:
+                                    logger.warning(f"sMD_convergence_metrics not written: {exc}")
 
                                 # Converged = the last sMD_conv_streak rungs all pass.
                                 # Must be the tail streak: conv_df is rebuilt each call.
@@ -807,6 +813,7 @@ class AutoPath:
                                     path_combination=self.sMD_path_combination,
                                     friction_model=self.sMD_friction_model,
                                     friction_source_work=self.sMD_friction_source_work,
+                                    legacy_outputs=self.sMD_legacy_outputs,
                                     )
 
             smd_data = smdanalysis.run(smd_data,
@@ -841,6 +848,10 @@ class AutoPath:
                 boundary_buffer_frac=self.sMD_boundary_buffer_frac,
             )
             conv_df.to_csv(f"{sMD_analysis_outdir}/sMD_conv_vALL_metrics.csv", index=False)
+            try:
+                write_summary(sMD_analysis_outdir)
+            except Exception as exc:
+                logger.warning(f"summary.json not written: {exc}")
             if not traces_df.empty:
                 traces_df.to_csv(f"{sMD_analysis_outdir}/sMD_conv_vALL_traces.csv", index=False)
 
@@ -856,8 +867,7 @@ class AutoPath:
             if not traces_df.empty:
                 smd_conv_traces = glob(f"{sMD_analysis_outdir}/sMD_conv_vALL_traces.csv")
                 plot_convergence_traces(smd_conv_traces, outdir=sMD_analysis_outdir)
-            smd_conv_metrics = glob(f"{sMD_analysis_outdir}/sMD_conv_vALL_metrics.csv")
-            plot_convergence_metrics(smd_conv_metrics, outdir=sMD_analysis_outdir, tolerances=CONVERGENCE_TOLERANCES)
+            plot_analysis(sMD_analysis_outdir, tolerances=CONVERGENCE_TOLERANCES)
 
         simulation_time = time.monotonic() - start_time
         # builtins.sum: the openmm.unit star import shadows sum

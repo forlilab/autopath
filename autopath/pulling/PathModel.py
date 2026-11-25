@@ -3,8 +3,6 @@ import json
 import numpy as np
 import pandas as pd
 
-import matplotlib.pyplot as plt
-import seaborn as sns
 
 import kmedoids
 from dtaidistance import dtw_ndim
@@ -14,7 +12,6 @@ from sklearn.metrics import silhouette_score
 from sklearn.decomposition import PCA
 
 from .SMDData import SMDData
-from .Diagnostics import make_unbinding_paths_visualization
 from abc import ABC, abstractmethod
 
 import logging
@@ -69,7 +66,7 @@ class DTWPathModel(PathModel):
                  n_geom_pcs: int | None = 3,
                  geom_feature_prefix: str | tuple[str, ...] = ('dist_', 'geom_'),
                  pca_all_features: bool = True,
-                 viz_output_format: str = "pse",
+                 viz_output_format: str = "pml",
                  viz_n_lig_conformations: int = 5,
                  viz_stick_transparency_ladder: tuple[float, float] | None = None,
                  ):
@@ -88,8 +85,8 @@ class DTWPathModel(PathModel):
         # features pass through raw.
         self.pca_all_features = pca_all_features
         # Unbinding-paths figure settings, forwarded to
-        # make_unbinding_paths_visualization. Defaults reproduce the legacy
-        # session (self-contained .pse, 5 snapshots, uniform stick alpha).
+        # make_unbinding_paths_visualization. Defaults: .pml
+        # script, 5 snapshots, uniform stick alpha.
         self.viz_output_format = viz_output_format
         self.viz_n_lig_conformations = viz_n_lig_conformations
         self.viz_stick_transparency_ladder = viz_stick_transparency_ladder
@@ -393,88 +390,64 @@ class DTWPathModel(PathModel):
             # union (medoid names as keys) is derived from this on demand.
             medoids_by_speed[str(speed_key) if speed_key is not None else "all"] = speed_medoid_to_path
 
-            # Set per-speed attribute used by plot_clusters_PCA below
+            # Per-group state read by the data-writing hooks below
             self.medoid_names = speed_medoid_names
-            
-            # Optional plots (per clustering run)
-            if self.do_plots:
-                self.speed_name = speed_key if speed_key is not None else 'Global'
-                self.plot_distance_matrix(distmatrix)
-                self.plot_elbow(scores, K)
+            self._trajnames = list(trajnames)
+            self._path_mapping_dic = path_mapping_dic
 
-                # Build plot-space feature names — geom features are PCA-reduced
-                # so their names become geom_PC1, geom_PC2, …
-                if geom_idx and self.n_geom_pcs is not None:
-                    n_pcs = min(self.n_geom_pcs, len(geom_idx))
-                    plot_feature_names = (
-                        [f"geom_PC{k+1}" for k in range(n_pcs)]
-                        + [feature_cols[i] for i in other_idx]
-                    )
-                else:
-                    plot_feature_names = feature_cols
-
-                if cluster_fraction is not None:
-                    # Rebuild scaled vectors over the full trajectories for plotting
-                    vectors_full = [
-                        speed_df_full[speed_df_full['trajname'] == name]
-                        .sort_values('step')[feature_cols].to_numpy()
-                        for name in trajnames
-                    ]
-                    vectors_plot = [_scale(name, arr)
-                                    for name, arr in zip(trajnames, vectors_full)]
-                    if geom_idx and self.n_geom_pcs is not None:
-                        vectors_plot = [
-                            np.hstack([
-                                pca_geom.transform(arr[:, geom_idx]),
-                                arr[:, other_idx],
-                            ])
-                            for arr in vectors_plot
-                        ]
-                    speed_df_for_plot = speed_df_full[speed_df_full['trajname'].isin(trajnames)].copy()
-                else:
-                    vectors_plot = vectors_stacked_scaled
-                    speed_df_for_plot = speed_df_full
-
-                # When the geom PCA already reduced the whole vector (pca_all),
-                # the plot must NOT PCA again — pass the fitted PCA so the scatter
-                # uses its scores directly and loadings map the ORIGINAL features.
-                _plot_pca = (pca_geom if (self.pca_all_features and geom_idx
-                                          and self.n_geom_pcs is not None) else None)
-                self.plot_clusters_PCA(
-                    feature_df=speed_df_for_plot,
-                    path_mapping_dic=path_mapping_dic,
-                    vectors_stacked_scaled=vectors_plot,
-                    feature_names=plot_feature_names,
-                    pca_model=_plot_pca,
-                    pca_feature_names=feature_cols,
-                )
-
-        # Unbinding paths visualization: one representative (medoid) per path.
-        if self.do_plots and trajectory_files is not None and reference_pdb is not None and ligand_select is not None:
-            paths_dict = {}
-            for trajname, path_id in all_path_mappings.items():
-                if trajname not in all_medoid_names:
-                    continue
-                if path_id not in paths_dict:
-                    paths_dict[path_id] = []
-                if trajname in trajectory_files:
-                    paths_dict[path_id].append(trajectory_files[trajname])
-            
-            if paths_dict:
+            # Hooks: subclasses may override them to capture these inputs.
+            if persist_medoids:
                 try:
-                    make_unbinding_paths_visualization(
-                        paths=paths_dict,
-                        reference_pdb=reference_pdb,
-                        ligand_select=ligand_select,
-                        outdir=os.path.join(self.outdir, "path_analysis"),
-                        pocket_select=pocket_select,
-                        output_format=self.viz_output_format,
-                        n_lig_conformations=self.viz_n_lig_conformations,
-                        stick_transparency_ladder=self.viz_stick_transparency_ladder,
+                    self.speed_name = speed_key if speed_key is not None else 'Global'
+                    self.plot_distance_matrix(distmatrix)
+                    self.plot_elbow(scores, K)
+
+                    # PCA-space feature names: geom features are PCA-reduced
+                    if geom_idx and self.n_geom_pcs is not None:
+                        n_pcs = min(self.n_geom_pcs, len(geom_idx))
+                        plot_feature_names = (
+                            [f"geom_PC{k+1}" for k in range(n_pcs)]
+                            + [feature_cols[i] for i in other_idx]
+                        )
+                    else:
+                        plot_feature_names = feature_cols
+
+                    if cluster_fraction is not None:
+                        # Rebuild scaled vectors over the full trajectories
+                        vectors_full = [
+                            speed_df_full[speed_df_full['trajname'] == name]
+                            .sort_values('step')[feature_cols].to_numpy()
+                            for name in trajnames
+                        ]
+                        vectors_plot = [_scale(name, arr)
+                                        for name, arr in zip(trajnames, vectors_full)]
+                        if geom_idx and self.n_geom_pcs is not None:
+                            vectors_plot = [
+                                np.hstack([
+                                    pca_geom.transform(arr[:, geom_idx]),
+                                    arr[:, other_idx],
+                                ])
+                                for arr in vectors_plot
+                            ]
+                        speed_df_for_plot = speed_df_full[speed_df_full['trajname'].isin(trajnames)].copy()
+                    else:
+                        vectors_plot = vectors_stacked_scaled
+                        speed_df_for_plot = speed_df_full
+
+                    # With pca_all the vectors are already PCA scores: pass the fitted
+                    # PCA so scores are reused and loadings map the original features.
+                    _plot_pca = (pca_geom if (self.pca_all_features and geom_idx
+                                              and self.n_geom_pcs is not None) else None)
+                    self.plot_clusters_PCA(
+                        feature_df=speed_df_for_plot,
+                        path_mapping_dic=path_mapping_dic,
+                        vectors_stacked_scaled=vectors_plot,
+                        feature_names=plot_feature_names,
+                        pca_model=_plot_pca,
+                        pca_feature_names=feature_cols,
                     )
-                    logger.info(f"Unbinding paths visualization generated in {self.outdir}")
-                except Exception as e:
-                    logger.warning(f"Could not generate unbinding paths visualization: {e}")
+                except Exception as exc:
+                    logger.warning(f"path-model data/plots not written: {exc}")
 
         # Per-speed calls accumulate their speeds; a cross-speed ("all") call
         # covers every speed, so the two layouts never coexist in the file.
@@ -586,45 +559,103 @@ class DTWPathModel(PathModel):
                         )
         return out, merges
 
+    def _path_analysis_dir(self) -> str:
+        d = os.path.join(self.outdir, "path_analysis")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def _model_json(self, update: dict) -> None:
+        """Merge ``update`` into ``path_model_v{speed_name}.json``."""
+        f = os.path.join(self._path_analysis_dir(), f"path_model_v{self.speed_name}.json")
+        data = {}
+        if os.path.exists(f):
+            with open(f) as fh:
+                data = json.load(fh)
+        data.update(update)
+        with open(f, "w") as fh:
+            json.dump(data, fh)
+
     def plot_distance_matrix(self, distmatrix: np.ndarray = None):
-        """Plot and save the pairwise DTW distance matrix as a heatmap.
+        """Save the DTW distance matrix and the as-clustered path labels.
+
+        Subclasses may override this to capture the inputs.
 
         Parameters
         ----------
         distmatrix : np.ndarray
-            Square (N_traj × N_traj) DTW distance matrix.
+            Square (N_traj x N_traj) DTW distance matrix, in ``self._trajnames`` order.
         """
-        plt.figure(figsize=(8,6))
-        sns.heatmap(distmatrix, cmap='viridis')
-        plt.title('DTW Distance Matrix');         plt.xlabel('Trajectories')
-        plt.ylabel('Trajectories')
-        plt.savefig(os.path.join(self.outdir, "path_analysis", f'cluster_dtw_heatmap_v{self.speed_name}.png'))
-        plt.tight_layout()
-        plt.close()
+        d = self._path_analysis_dir()
+        np.save(os.path.join(d, f"dtw_distance_v{self.speed_name}.npy"), np.asarray(distmatrix))
+        pd.DataFrame({
+            "trajname": self._trajnames,
+            "path": [self._path_mapping_dic[t] for t in self._trajnames],
+            "is_medoid": [t in self.medoid_names for t in self._trajnames],
+        }).to_csv(os.path.join(d, f"dtw_labels_v{self.speed_name}.csv"), index=False)
 
     def plot_elbow(self, scores: dict, K: int):
-        """Plot and save the elbow/silhouette curve used to select the number of clusters.
+        """Save the selected K and the per-k scores to ``path_model_v*.json``.
+
+        Subclasses may override this to capture the inputs.
 
         Parameters
         ----------
         scores : dict
-            Mapping of k (number of clusters) → silhouette score (or negative
-            loss when silhouette is disabled).
+            Mapping of k to silhouette score; empty when K is fixed.
         K : int
-            The selected optimal k, marked with a vertical red dashed line.
+            Selected number of paths.
         """
-        plt.figure(figsize=(6, 5))
-        K_values = [int(k) for k in scores.keys()]
-        sns.lineplot(x=K_values, y=[scores[k] for k in K_values])
-        plt.title(f"Optimal number of paths: {K}")
-        plt.axvline(x=K, color='red', linestyle='--', label=f'Optimal K={K}')
-        plt.xlabel("Number of clusters")
-        plt.ylabel("Silhouette score" if self._use_silhouette else "Score")
-        plt.xticks(K_values)
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.outdir, "path_analysis", f"cluster_elbowplot_v{self.speed_name}.png"))
-        plt.close()
+        self._model_json({"K": int(K),
+                          "silhouette": {str(int(k)): float(v) for k, v in scores.items()}})
 
+    @staticmethod
+    def _pca_frames(feature_df, path_mapping_dic, vectors_stacked_scaled, medoid_names,
+                    feature_names=None, pca_model=None, pca_feature_names=None):
+        """Return PCA scores, loadings and explained-variance ratios.
+
+        Trajectories are truncated to the shortest. With ``pca_model`` the
+        first two clustering components are reused, with loadings over the
+        original features; otherwise PCA(2) is fitted on the stacked vectors.
+
+        Returns
+        -------
+        scores : pd.DataFrame
+            Columns trajname, path, frame, PC1, PC2, is_medoid.
+        loadings : pd.DataFrame
+            Columns feature, PC1, PC2.
+        evr : list of float
+            Explained-variance ratios of PC1 and PC2.
+        """
+        min_len = min(arr.shape[0] for arr in vectors_stacked_scaled)
+        X = np.vstack([arr[:min_len, :] for arr in vectors_stacked_scaled])
+        traj_order = [name for name, _ in feature_df.groupby('trajname')]
+        if len(traj_order) != len(vectors_stacked_scaled):
+            raise ValueError(
+                f"Trajectory order ({len(traj_order)}) and feature vectors "
+                f"({len(vectors_stacked_scaled)}) are misaligned — check that all "
+                f"trajectories in feature_df are present in vectors_stacked_scaled."
+            )
+        if pca_model is not None and X.shape[1] >= 2:
+            X2 = X[:, :2]
+            pca = pca_model
+            names = pca_feature_names if pca_feature_names is not None else feature_names
+        else:
+            pca = PCA(n_components=2)
+            X2 = pca.fit_transform(X)
+            names = feature_names
+        comps = pca.components_[:2]
+        if names is None:
+            names = [f"x{i}" for i in range(comps.shape[1])]
+        scores = pd.DataFrame({
+            "trajname": np.repeat(traj_order, min_len),
+            "path": np.repeat([path_mapping_dic[t] for t in traj_order], min_len),
+            "frame": np.tile(np.arange(min_len), len(traj_order)),
+            "PC1": X2[:, 0], "PC2": X2[:, 1],
+            "is_medoid": np.repeat([t in medoid_names for t in traj_order], min_len),
+        })
+        loadings = pd.DataFrame({"feature": list(names),
+                                 "PC1": comps[0][:len(names)], "PC2": comps[1][:len(names)]})
+        return scores, loadings, [float(x) for x in pca.explained_variance_ratio_[:2]]
 
     def plot_clusters_PCA(self,
                           feature_df: pd.DataFrame = None,
@@ -634,98 +665,29 @@ class DTWPathModel(PathModel):
                           pca_model=None,
                           pca_feature_names: list = None,
                           ):
-        """Project scaled trajectory features onto 2-D PCA and colour by cluster.
+        """Save the 2-D PCA scores and loadings of the scaled trajectory features.
 
-        Only medoid trajectories are coloured; all others are shown in light
-        gray. Trajectory vectors are truncated to the minimum trajectory length
-        before stacking, so the PCA is well-defined even when trajectories differ
-        in length. A feature-loadings bar chart is added as a second panel when
-        ``feature_names`` is provided.
+        Subclasses may override this to capture the inputs.
 
         Parameters
         ----------
         feature_df : pd.DataFrame
-            Full (untruncated) feature DataFrame for the current speed group.
+            Feature DataFrame for the current group (defines trajectory order).
         path_mapping_dic : dict
-            Mapping of trajectory name → path label.
+            Mapping of trajectory name to path label.
         vectors_stacked_scaled : list of np.ndarray
             Scaled (and optionally PCA-reduced) feature arrays, one per trajectory.
         feature_names : list of str, optional
-            Column names used for the loadings panel; if ``None``, the loadings
-            panel is omitted.
+            Names of the columns of ``vectors_stacked_scaled``.
+        pca_model : sklearn.decomposition.PCA, optional
+            Fitted PCA whose scores the vectors already are.
+        pca_feature_names : list of str, optional
+            Original feature names for ``pca_model`` loadings.
         """
-        feature_df['path'] = feature_df['trajname'].map(path_mapping_dic)
-
-        min_len = min(arr.shape[0] for arr in vectors_stacked_scaled)
-        vectors_trimmed = [arr[:min_len, :] for arr in vectors_stacked_scaled]
-        X = np.vstack(vectors_trimmed)   # (N_traj * min_len, d)
-
-        traj_order = [name for name, _ in feature_df.groupby('trajname')]
-        if len(traj_order) != len(vectors_trimmed):
-            raise ValueError(
-                f"Trajectory order ({len(traj_order)}) and feature vectors "
-                f"({len(vectors_trimmed)}) are misaligned — check that all "
-                f"trajectories in feature_df are present in vectors_stacked_scaled."
-            )
-
-        # Avoid a PCA-of-PCA: when the clustering vectors are already PCA scores
-        # (pca_model provided), plot the first two components directly and take the
-        # loadings from that PCA over the ORIGINAL features. Otherwise reduce here.
-        if pca_model is not None and X.shape[1] >= 2:
-            X2 = X[:, :2]
-            evr = pca_model.explained_variance_ratio_
-            load1, load2 = pca_model.components_[0], pca_model.components_[1]
-            load_names = pca_feature_names if pca_feature_names is not None else feature_names
-        else:
-            _pca = PCA(n_components=2)
-            X2 = _pca.fit_transform(X)
-            evr = _pca.explained_variance_ratio_
-            load1, load2 = _pca.components_[0], _pca.components_[1]
-            load_names = feature_names
-
-        has_loadings = load_names is not None
-        fig, axes = plt.subplots(1, 2 if has_loadings else 1,
-                                 figsize=(12, 5) if has_loadings else (6, 5))
-        ax_scatter = axes[0] if has_loadings else axes
-
-        ax_scatter.scatter(X2[:, 0], X2[:, 1],
-                           alpha=0.75, color='lightgray', s=50, linewidth=0)
-
-        used_labels = set()
-        for i, trajname in enumerate(traj_order):
-            if trajname not in self.medoid_names:
-                continue
-            start = i * min_len
-            end   = start + min_len
-            path_label = path_mapping_dic[trajname]
-            label = f'{str(path_label).split("_")[0]}' if path_label not in used_labels else None
-            used_labels.add(path_label)
-            ax_scatter.scatter(X2[start:end, 0], X2[start:end, 1],
-                               s=20, alpha=0.9, label=label)
-
-        if used_labels:
-            ax_scatter.legend(frameon=False)
-        ax_scatter.set_xlabel(f"PC1 ({evr[0]*100:.1f}%)")
-        ax_scatter.set_ylabel(f"PC2 ({evr[1]*100:.1f}%)")
-        ax_scatter.set_title(f"PCA space - speed={self.speed_name} nm/ps")
-
-        # ── Feature loadings panel ─────────────────────────────────────────
-        if has_loadings:
-            ax_load = axes[1]
-            n_feats = len(load_names)
-            y = np.arange(n_feats)
-            w = 0.35
-            ax_load.barh(y + w / 2, load1[:n_feats], w,
-                         label=f"PC1 ({evr[0]*100:.1f}%)")
-            ax_load.barh(y - w / 2, load2[:n_feats], w,
-                         label=f"PC2 ({evr[1]*100:.1f}%)")
-            ax_load.set_yticks(y)
-            ax_load.set_yticklabels(load_names)
-            ax_load.axvline(0, color='black', lw=0.8)
-            ax_load.set_xlabel("Loadings")
-            ax_load.set_title("Feature contributions to PCs")
-            ax_load.legend(frameon=False)
-
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.outdir, "path_analysis", f"cluster_pca_v{self.speed_name}.png"), dpi=150)
-        plt.close()
+        scores, loadings, evr = self._pca_frames(
+            feature_df, path_mapping_dic, vectors_stacked_scaled, self.medoid_names,
+            feature_names, pca_model, pca_feature_names)
+        d = self._path_analysis_dir()
+        scores.to_csv(os.path.join(d, f"pca_scores_v{self.speed_name}.csv"), index=False)
+        loadings.to_csv(os.path.join(d, f"pca_loadings_v{self.speed_name}.csv"), index=False)
+        self._model_json({"explained_variance_ratio": evr})

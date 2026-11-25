@@ -20,6 +20,7 @@ from glob import glob
 
 import pandas as pd
 
+from autopath.pulling.outputs import load_traces
 from autopath.pulling.readouts import profile_readouts, rupture_displacement, rupture_readouts
 
 
@@ -30,7 +31,7 @@ def main():
     args = ap.parse_args()
 
     dirs = sorted(d for d in glob(f"{args.root}/*/sMD/analysis_traces")
-                  if os.path.isfile(f"{d}/mixture_pmfs.csv") and os.path.isfile(f"{d}/sMD_processed_data.csv"))
+                  if os.path.isfile(f"{d}/mixture_pmfs.csv") and (os.path.isfile(f"{d}/traces.csv.gz") or os.path.isfile(f"{d}/sMD_processed_data.csv")))
     if not dirs:
         raise SystemExit(f"no <sysname>/sMD/analysis_traces with mixture_pmfs.csv under {args.root}")
     print(f"Found {len(dirs)} analysed systems.")
@@ -39,7 +40,7 @@ def main():
     for d in dirs:
         sysname = d.split(os.sep)[-3]
         pmfs[sysname] = pd.read_csv(f"{d}/mixture_pmfs.csv")
-        proc = pd.read_csv(f"{d}/sMD_processed_data.csv", usecols=["trajname", "speed", "step", "r_coord", "force"])
+        proc = load_traces(d, ["trajname", "speed", "step", "r_coord", "force"])
         ruptures[sysname] = rupture_displacement(proc)
         prof.append(profile_readouts(pmfs[sysname]).assign(system=sysname))
         npulls.append(proc.groupby("speed").trajname.nunique().rename("n_pulls").reset_index().assign(system=sysname))

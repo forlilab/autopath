@@ -421,6 +421,34 @@ class SMDData:
 
 
     @staticmethod
+    def parse_log_trailer(fn: str) -> dict:
+        """Parse trailing ``# key=value`` lines (stop bookkeeping) of an sMD .dat file.
+
+        Reads only the file tail. Values are coerced to float where possible.
+        Returns an empty dict for logs without a trailer.
+        """
+        try:
+            with open(fn, 'rb') as fh:
+                fh.seek(0, 2)
+                fh.seek(max(0, fh.tell() - 2048))
+                lines = fh.read().decode(errors='replace').splitlines()
+        except OSError:
+            return {}
+        out = {}
+        for line in reversed(lines):
+            if not line.startswith('#'):
+                break
+            key, sep, val = line[1:].partition('=')
+            if not sep:
+                continue
+            key, val = key.strip(), val.strip()
+            try:
+                out[key] = float(val)
+            except ValueError:
+                out[key] = val
+        return out
+
+    @staticmethod
     def parse_log_metadata(fn) -> dict:
         """Parse leading ``# key=value`` comment lines from an sMD .dat file.
 

@@ -31,17 +31,16 @@ from autopath.pulling.Estimators import (
 )
 from autopath.pulling.Convergence import window_mean_pmf, window_reference_scalar
 from autopath.pulling.Diagnostics import (
-    plot_work_profiles,
-    plot_profile,
-    plot_friction,
-    plot_extrapolated_param,
     make_unbinding_paths_visualization,
+    plot_analysis,
 )
 from autopath.pulling.LigandFeatures import (
     LigandTrajectoryFeatures,
     SUPPORTED_FEATURES as LIGAND_FEATURE_POOL,
 )
 from autopath.pulling.support import SupportPolicy
+from autopath.pulling.outputs import pull_table, write_summary, write_traces
+from autopath.utils import warning_count
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +168,7 @@ class SMDAnalysis:
         path_combination: str = 'eq21',
         friction_model: str = 'mixed',
         friction_source_work: str = 'auto',
+        legacy_outputs: bool = False,
     ):
         self.sysname = sysname
         self.n_paths = n_paths
@@ -190,6 +190,7 @@ class SMDAnalysis:
         self.path_combination = validate_path_combination(path_combination)
         self.friction_model = friction_model
         self.friction_source_work = friction_source_work
+        self.legacy_outputs = legacy_outputs
         self.support_policy = SupportPolicy(
             min_samples_per_step=self.min_samples_per_step,
             min_trajs_per_path=self.min_replicas_per_path,
@@ -426,6 +427,23 @@ class SMDAnalysis:
         out = feat_df.merge(rc, on=['trajname', 'step'], how='left')
         return out[out['r_coord'] <= cap].drop(columns='r_coord')
 
+    def _summary_meta(self, smd: SMDData, n_warnings: int) -> dict:
+        import autopath
+        heavy = None
+        try:
+            import MDAnalysis as mda
+            heavy = len(mda.Universe(self.reference_pdb).select_atoms(
+                f"({self.ligand_select}) and not name H*"))
+        except Exception:
+            pass
+        return dict(
+            autopath_version=autopath.__version__, system=self.sysname,
+            ligand=dict(resname=self._ligand_resname_from_select(self.ligand_select),
+                        heavy_atoms=heavy),
+            temperature_K=self.temperature, spring_k_kJ_mol_nm2=smd.spring_constant,
+            path_model=type(self.path_model).__name__.removesuffix("PathModel").lower(),
+            n_paths=int(smd.raw_data["path"].astype(str).str.split("_v").str[0].nunique()), analysis_warnings=n_warnings)
+
     def run(self,
             sMDDdata: SMDData,
             r_range: tuple[float, float] | None = None,
@@ -472,6 +490,7 @@ class SMDAnalysis:
             Bound-state population below the pull start
             (:meth:`KramersEstimator.kramers_mfpt`); ``"none"`` reflects at the start.
         """
+        w0 = warning_count()
         if kramers_abs not in ("end", "force_plateau"):
             raise ValueError(f"kramers_abs must be 'end' or 'force_plateau', got {kramers_abs!r}")
         if kramers_bound not in ("mirror", "none"):
@@ -673,6 +692,34 @@ class SMDAnalysis:
         friction_df = pd.concat(friction_deriv_results + friction_regress_results, ignore_index=True)
         friction_df.to_csv(os.path.join(self.outdir, 'friction.csv'), index=False)
 
+        # Per-path curves for figures; new files only.
+        try:
+            _res = sMDDdata.results
+            _pm_cols = [c for c in ('estimator', 'speed', 'path', 'step', 'r_coord',
+                                    'dG', 'Wdiss', 'Wmean') if c in _res.columns]
+            _res[_pm_cols].to_csv(os.path.join(self.outdir, 'path_pmfs.csv'), index=False)
+            _pf = []
+            if 'cumulant' in set(_res['estimator']):
+                _pf.append(friction_est.gamma_from_wdiss_derivative(
+                    _res[_res['estimator'] == 'cumulant'], estimator='cumulant'))
+            _force = _res[_res['estimator'] == 'force']
+            for _p, _g in _force.groupby('path'):
+                _sp = sorted(_g['speed'].unique())
+                if len(_sp) < 2:
+                    continue
+                _r = friction_est.gamma_from_force_regression(_g, {s: {_p: 1.0} for s in _sp})
+                if not _r.empty:
+                    _pf.append(_r.assign(path=_p))
+            _pf = [d for d in _pf if d is not None and not d.empty]
+            if _pf:
+                _pfc = ['estimator', 'method', 'speed', 'path', 'step', 'r_coord',
+                        'Gamma', 'Gamma_integrated']
+                _pfd = pd.concat(_pf, ignore_index=True)
+                _pfd[[c for c in _pfc if c in _pfd.columns]].to_csv(
+                    os.path.join(self.outdir, 'path_friction.csv'), index=False)
+        except Exception as _exc:
+            logger.warning(f"Per-path curves (path_pmfs/path_friction) skipped: {_exc}")
+
         # --- Mean-force TI PMF on the deconvolved coordinate z = lambda - Feq/k (force only) ---
         if any(e.name == 'force' for e in active_estimators) and \
            sMDDdata.raw_data['speed'].nunique() >= 2:
@@ -750,7 +797,7 @@ class SMDAnalysis:
             if _msg:
                 logger.warning(_msg)
 
-        # Rebuild the unbinding-paths PSE now that friction.csv exists.
+        # Unbinding-paths visualization, built once now that friction.csv exists.
         if hasattr(self.path_model, 'medoid_to_path') and self.path_model.medoid_to_path:
             try:
                 friction_csv_path = os.path.join(self.outdir, 'friction.csv')
@@ -770,50 +817,15 @@ class SMDAnalysis:
                         friction_csv=friction_csv_path,
                         pocket_select=group_B if group_B is not None else self.pocket_select,
                         # keep the path model's figure settings
-                        output_format=getattr(self.path_model, 'viz_output_format', 'pse'),
+                        output_format=getattr(self.path_model, 'viz_output_format', 'pml'),
                         n_lig_conformations=getattr(
                             self.path_model, 'viz_n_lig_conformations', 5),
                         stick_transparency_ladder=getattr(
                             self.path_model, 'viz_stick_transparency_ladder', None),
                     )
-                    logger.info("Friction-coloured unbinding paths PSE regenerated.")
+                    logger.info("Unbinding paths visualization written.")
             except Exception as _exc:
-                logger.warning(f"Could not regenerate friction-coloured PSE: {_exc}")
-
-        if self.do_plots:
-            # Markers: TS (mean|force| peak) and Kramers absorbing boundary (force plateau).
-            ts_r = abs_r = None
-            _rd = sMDDdata.raw_data
-            if {'r_coord', 'force', 'speed'}.issubset(_rd.columns):
-                _lo, _hi = float(_rd['r_coord'].min()), float(_rd['r_coord'].max())
-                ts_r = KramersEstimator.force_peak_r(_rd, 0.0, _lo, _hi)
-                # the "end" boundary is per profile (koff_kramers.csv abs_r_nm)
-                if kramers_abs == "force_plateau":
-                    abs_r = KramersEstimator.force_plateau_boundary(
-                        _rd, 0.0, _lo, _hi, plateau_frac)
-
-            for estimator in active_estimators:
-                plot_work_profiles(sMDDdata.results, estimator=estimator.name, outdir=self.outdir)
-            for vcol in ['Wdiss', 'dG']:
-                plot_profile(
-                    self.mixture_pmfs,
-                    value_col=vcol,
-                    hue='estimator',
-                    ylabel='Energy (kJ/mol)',
-                    outdir=self.outdir,
-                    ts_line=ts_r,
-                    abs_line=abs_r,
-                )
-            if friction_df is not None and not friction_df.empty:
-                plot_friction(friction_df, outdir=self.outdir, ts_line=ts_r, abs_line=abs_r)
-            for pcol, v0_df in weighted_pmf_v0.items():
-                plot_extrapolated_param(
-                    v0_df,
-                    param=pcol,
-                    outfname=os.path.join(self.outdir, f'{pcol}_extrapolated.svg'),
-                    ts_line=ts_r,
-                    abs_line=abs_r,
-                )
+                logger.warning(f"Could not write unbinding paths visualization: {_exc}")
 
         # Merge trajectory-derived features into raw_data so they appear in the CSV.
         _BASE_COLS = {
@@ -832,8 +844,16 @@ class SMDAnalysis:
                 )
                 logger.info(f"Trajectory features written to CSV: {new_cols}")
 
-        sMDDdata.raw_data.to_csv(f'{self.outdir}/sMD_processed_data.csv', index=False)
+        write_traces(sMDDdata.raw_data, pull_table(sMDDdata, sMDDdata.raw_data),
+                     self.outdir, legacy=self.legacy_outputs)
 
+        if self.do_plots:
+            plot_analysis(self.outdir, temperature=self.temperature)
+
+        try:
+            write_summary(self.outdir, self._summary_meta(sMDDdata, warning_count() - w0))
+        except Exception as exc:
+            logger.warning(f"summary.json not written: {exc}")
         return sMDDdata
         
     def check_convergence(self,

@@ -58,7 +58,7 @@ def profile_readouts(pmfs: pd.DataFrame, kBT: float = KBT) -> pd.DataFrame:
 
 
 def rupture_displacement(processed: pd.DataFrame, smooth: int = RUPTURE_SMOOTH) -> dict:
-    """{speed: force-peak displacement (nm)} from one system's ``sMD_processed_data.csv``.
+    """{speed: force-peak displacement (nm)} from one system's traces (``autopath.pulling.outputs.load_traces``).
 
     Steps not reached by every pull are dropped, so the profile ends with the shortest pull.
     """
