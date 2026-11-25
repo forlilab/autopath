@@ -1,6 +1,7 @@
 from autopath.pulling.SMDData import SMDData
 import pandas as pd
 import os
+import warnings
 import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -503,11 +504,13 @@ def _sigma_ratio(traces: pd.DataFrame, speed: float):
     w = W.to_numpy()
     ss = np.zeros(len(w))
     dof = np.zeros(len(w))
-    for p in path.dropna().unique():
-        x = w[:, (path == p).to_numpy()]
-        ss += np.nansum((x - np.nanmean(x, axis=1, keepdims=True)) ** 2, axis=1)
-        dof += np.sum(~np.isnan(x), axis=1) - 1
-    with np.errstate(divide="ignore", invalid="ignore"):
+    # steps past a path's last pull are all-NaN; their ratio is NaN by design
+    with warnings.catch_warnings(), np.errstate(divide="ignore", invalid="ignore"):
+        warnings.simplefilter("ignore", RuntimeWarning)
+        for p in path.dropna().unique():
+            x = w[:, (path == p).to_numpy()]
+            ss += np.nansum((x - np.nanmean(x, axis=1, keepdims=True)) ** 2, axis=1)
+            dof += np.sum(~np.isnan(x), axis=1) - 1
         return r, np.sqrt(ss / dof) / np.nanstd(w, axis=1, ddof=1)
 
 
