@@ -72,7 +72,10 @@ def main():
         plateau_frac=0.4, cluster_to_boundary=True, restrict_rmsd_to_boundary=True,
         boundary_buffer_frac=0.1, recompute_distances=False)
     conv_df.to_csv(f"{outdir}/sMD_conv_vALL_metrics.csv", index=False)
-    write_summary(outdir)
+    try:
+        write_summary(outdir)
+    except Exception as exc:
+        logger.warning(f"summary.json not written: {exc}")
     plot_analysis(outdir)
     if not traces_df.empty:
         traces_df.to_csv(f"{outdir}/sMD_conv_vALL_traces.csv", index=False)

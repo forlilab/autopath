@@ -442,7 +442,7 @@ class SMDAnalysis:
                         heavy_atoms=heavy),
             temperature_K=self.temperature, spring_k_kJ_mol_nm2=smd.spring_constant,
             path_model=type(self.path_model).__name__.removesuffix("PathModel").lower(),
-            n_paths=int(smd.raw_data["path"].nunique()), analysis_warnings=n_warnings)
+            n_paths=int(smd.raw_data["path"].astype(str).str.split("_v").str[0].nunique()), analysis_warnings=n_warnings)
 
     def run(self,
             sMDDdata: SMDData,
@@ -850,7 +850,10 @@ class SMDAnalysis:
         if self.do_plots:
             plot_analysis(self.outdir, temperature=self.temperature)
 
-        write_summary(self.outdir, self._summary_meta(sMDDdata, warning_count() - w0))
+        try:
+            write_summary(self.outdir, self._summary_meta(sMDDdata, warning_count() - w0))
+        except Exception as exc:
+            logger.warning(f"summary.json not written: {exc}")
         return sMDDdata
         
     def check_convergence(self,

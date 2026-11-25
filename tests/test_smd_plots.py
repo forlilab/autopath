@@ -227,3 +227,13 @@ def test_plot_analysis_written_excludes_failed(toy, monkeypatch):
     monkeypatch.setattr(D, "plot_paths", boom)
     names = {p.rsplit("/", 1)[1] for p in D.plot_analysis(str(toy))}
     assert "paths.png" not in names and "path_decomposition.png" in names
+
+
+def test_path_decomposition_no_cumulant(toy, tmp_path, caplog):
+    dst = tmp_path / "d"
+    shutil.copytree(toy, dst)
+    pp = pd.read_csv(dst / "path_pmfs.csv")
+    pp[pp["estimator"] != "cumulant"].to_csv(dst / "path_pmfs.csv", index=False)
+    with caplog.at_level(logging.INFO):
+        assert D.plot_path_decomposition(str(dst), str(dst / "x.png")) is False
+    assert not (dst / "x.png").exists() and "no cumulant" in caplog.text

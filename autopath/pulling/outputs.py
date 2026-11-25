@@ -192,6 +192,8 @@ def write_summary(outdir: str, meta: dict | None = None) -> dict:
         except (OSError, ValueError):
             meta = {}
     out = {k: meta.get(k) for k in _META_KEYS}
+    if not out["temperature_K"]:
+        logger.info("summary: no temperature in metadata, using 300 K")
     T = out["temperature_K"] or 300.0
     kT = KB_KJ * T
     pulls, vall = _read(outdir, "pulls.csv"), _read(outdir, "sMD_conv_vALL_metrics.csv")
@@ -220,6 +222,10 @@ def write_summary(outdir: str, meta: dict | None = None) -> dict:
     if pmfs is not None and len(pmfs):
         for r in profile_readouts(pmfs, kBT=kT).itertuples():
             ro[(r.estimator, float(r.speed))] = dict(dG_kJ_mol=r.dG_profile)
+    kcols = {"estimator", "speed_nm_per_ps", "k_off_per_s", "barrier_kjmol"}
+    if kr is not None and not kcols <= set(kr.columns):
+        logger.info("summary: koff_kramers.csv lacks columns, koff readouts skipped")
+        kr = None
     if kr is not None:
         for r in kr.itertuples():
             d = ro.setdefault((r.estimator, float(r.speed_nm_per_ps)), {})
@@ -233,7 +239,8 @@ def write_summary(outdir: str, meta: dict | None = None) -> dict:
         try:
             jc = jarzynski_convergence(load_traces(outdir, ["trajname", "speed", "step", "work", "r_coord"]),
                                        pulls, T)
-        except (FileNotFoundError, KeyError):
+        except (FileNotFoundError, KeyError) as exc:
+            logger.info(f"summary: jarzynski diagnostics skipped: {exc!r}")
             jc = pd.DataFrame()
         if len(jc):
             last = jc.sort_values("n").groupby("speed").tail(1)

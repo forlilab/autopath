@@ -397,54 +397,57 @@ class DTWPathModel(PathModel):
 
             # Hooks: subclasses may override them to capture these inputs.
             if persist_medoids:
-                self.speed_name = speed_key if speed_key is not None else 'Global'
-                self.plot_distance_matrix(distmatrix)
-                self.plot_elbow(scores, K)
+                try:
+                    self.speed_name = speed_key if speed_key is not None else 'Global'
+                    self.plot_distance_matrix(distmatrix)
+                    self.plot_elbow(scores, K)
 
-                # PCA-space feature names: geom features are PCA-reduced
-                if geom_idx and self.n_geom_pcs is not None:
-                    n_pcs = min(self.n_geom_pcs, len(geom_idx))
-                    plot_feature_names = (
-                        [f"geom_PC{k+1}" for k in range(n_pcs)]
-                        + [feature_cols[i] for i in other_idx]
-                    )
-                else:
-                    plot_feature_names = feature_cols
-
-                if cluster_fraction is not None:
-                    # Rebuild scaled vectors over the full trajectories
-                    vectors_full = [
-                        speed_df_full[speed_df_full['trajname'] == name]
-                        .sort_values('step')[feature_cols].to_numpy()
-                        for name in trajnames
-                    ]
-                    vectors_plot = [_scale(name, arr)
-                                    for name, arr in zip(trajnames, vectors_full)]
+                    # PCA-space feature names: geom features are PCA-reduced
                     if geom_idx and self.n_geom_pcs is not None:
-                        vectors_plot = [
-                            np.hstack([
-                                pca_geom.transform(arr[:, geom_idx]),
-                                arr[:, other_idx],
-                            ])
-                            for arr in vectors_plot
-                        ]
-                    speed_df_for_plot = speed_df_full[speed_df_full['trajname'].isin(trajnames)].copy()
-                else:
-                    vectors_plot = vectors_stacked_scaled
-                    speed_df_for_plot = speed_df_full
+                        n_pcs = min(self.n_geom_pcs, len(geom_idx))
+                        plot_feature_names = (
+                            [f"geom_PC{k+1}" for k in range(n_pcs)]
+                            + [feature_cols[i] for i in other_idx]
+                        )
+                    else:
+                        plot_feature_names = feature_cols
 
-                # With pca_all the vectors are already PCA scores: pass the fitted
-                # PCA so scores are reused and loadings map the original features.
-                _plot_pca = (pca_geom if (self.pca_all_features and geom_idx
-                                          and self.n_geom_pcs is not None) else None)
-                self.plot_clusters_PCA(
-                    feature_df=speed_df_for_plot,
-                    path_mapping_dic=path_mapping_dic,
-                    vectors_stacked_scaled=vectors_plot,
-                    feature_names=plot_feature_names,
-                    pca_model=_plot_pca,
-                    pca_feature_names=feature_cols,
-                )
+                    if cluster_fraction is not None:
+                        # Rebuild scaled vectors over the full trajectories
+                        vectors_full = [
+                            speed_df_full[speed_df_full['trajname'] == name]
+                            .sort_values('step')[feature_cols].to_numpy()
+                            for name in trajnames
+                        ]
+                        vectors_plot = [_scale(name, arr)
+                                        for name, arr in zip(trajnames, vectors_full)]
+                        if geom_idx and self.n_geom_pcs is not None:
+                            vectors_plot = [
+                                np.hstack([
+                                    pca_geom.transform(arr[:, geom_idx]),
+                                    arr[:, other_idx],
+                                ])
+                                for arr in vectors_plot
+                            ]
+                        speed_df_for_plot = speed_df_full[speed_df_full['trajname'].isin(trajnames)].copy()
+                    else:
+                        vectors_plot = vectors_stacked_scaled
+                        speed_df_for_plot = speed_df_full
+
+                    # With pca_all the vectors are already PCA scores: pass the fitted
+                    # PCA so scores are reused and loadings map the original features.
+                    _plot_pca = (pca_geom if (self.pca_all_features and geom_idx
+                                              and self.n_geom_pcs is not None) else None)
+                    self.plot_clusters_PCA(
+                        feature_df=speed_df_for_plot,
+                        path_mapping_dic=path_mapping_dic,
+                        vectors_stacked_scaled=vectors_plot,
+                        feature_names=plot_feature_names,
+                        pca_model=_plot_pca,
+                        pca_feature_names=feature_cols,
+                    )
+                except Exception as exc:
+                    logger.warning(f"path-model data/plots not written: {exc}")
 
         # Per-speed calls accumulate their speeds; a cross-speed ("all") call
         # covers every speed, so the two layouts never coexist in the file.

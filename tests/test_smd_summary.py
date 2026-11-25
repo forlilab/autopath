@@ -106,3 +106,14 @@ def test_summary_single_speed(tmp_path):
     s = write_summary(str(out), META)
     assert "force" not in {r["estimator"] for r in s["readouts"]}
     assert list(s["jarzynski_diagnostics"]) == ["0.01"]
+
+
+def test_summary_old_koff_columns(toy, tmp_path):
+    import shutil
+    d = tmp_path / "old"
+    shutil.copytree(toy, d)
+    pd.DataFrame(dict(estimator=["force"], speed_nm_per_ps=[0.0], k_off=[1.0])).to_csv(
+        d / "koff_kramers.csv", index=False)
+    s = write_summary(str(d), META)
+    assert (d / "summary.json").exists() and s["readouts"]
+    assert all(r["pkoff"] is None for r in s["readouts"])

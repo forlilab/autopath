@@ -292,7 +292,7 @@ def plot_convergence_metrics(smd_conv_metrics: list[str], outdir: str, tolerance
                 ax.axhline(tolerances[metric], color="gray", linestyle="--", linewidth=1.5, alpha=0.8)
             title, ylabel = _CONV_METRICS.get(metric, (metric, metric))
             if metric == "n_paths":
-                ax.yaxis.set_major_locator(plt.MaxNLocator(integer=True))
+                ax.yaxis.set_major_locator(plt.MaxNLocator(integer=True, min_n_ticks=1))
             ax.set_title(title, fontsize=16)
             ax.set_xlabel("Replicas")
             ax.set_ylabel(ylabel)
@@ -512,7 +512,7 @@ def _sigma_ratio(traces: pd.DataFrame, speed: float):
 
 
 @_closes_figures
-def plot_path_decomposition(outdir: str, outfname: str) -> None:
+def plot_path_decomposition(outdir: str, outfname: str) -> bool | None:
     """Per-path dG, friction and weights against the mixture, per speed.
 
     Parameters
@@ -528,6 +528,9 @@ def plot_path_decomposition(outdir: str, outfname: str) -> None:
     rd = lambda n: pd.read_csv(os.path.join(outdir, n))
     pp = rd("path_pmfs.csv")
     pp = pp[pp["estimator"] == "cumulant"]
+    if pp.empty:
+        logger.info("path_decomposition skipped: no cumulant")
+        return False
     pf = rd("path_friction.csv") if os.path.exists(os.path.join(outdir, "path_friction.csv")) else None
     mix, fr, pq = rd("mixture_pmfs.csv"), rd("friction.csv"), rd("path_quality.csv")
     speeds = [s for s in _speed_order(pp["speed"]) if s > 0]
@@ -606,6 +609,7 @@ def plot_path_decomposition(outdir: str, outfname: str) -> None:
             ax.plot(r, rat, color=cl[k % len(cl)], label=f"{s:g} nm/ps")
         ax.axhline(1, color="k", ls="--", lw=1)
         ax.set(xlabel="r (nm)", ylabel="σ$_W$ within-path / pooled")
+        ax.set_ylim(top=max(ax.get_ylim()[1], 1.15))
         ax.legend(frameon=False, loc="upper left")
         _save(outfname)
 
@@ -698,7 +702,11 @@ def plot_analysis(outdir: str, temperature: float | None = None, tolerances: dic
 
     import glob
     pulls_csv = os.path.join(outdir, "pulls.csv")
-    pulls = pd.read_csv(pulls_csv) if os.path.exists(pulls_csv) else None
+    try:
+        pulls = pd.read_csv(pulls_csv) if os.path.exists(pulls_csv) else None
+    except Exception as exc:
+        logger.warning(f"pulls.csv unreadable: {exc}")
+        pulls = None
     pdir = os.path.join(outdir, "path_analysis")
     models = sorted(glob.glob(os.path.join(pdir, "path_model_v*.json")))
     if not models:
@@ -708,9 +716,12 @@ def plot_analysis(outdir: str, temperature: float | None = None, tolerances: dic
         g = os.path.basename(m)[len("path_model_v"):-len(".json")]
         try:
             with open(m) as fh:
-                K = json.load(fh).get("K", 0)
+                K = json.load(fh).get("K")
         except (OSError, ValueError):
-            K = 0
+            K = None
+        if K is None:
+            logger.info(f"paths_v{g} skipped: no K in {os.path.basename(m)}")
+            continue
         if K <= 1:
             continue
         out = os.path.join(outdir, "paths.png" if g == "Global" else f"paths_v{g}.png")

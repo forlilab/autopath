@@ -112,3 +112,32 @@ def test_per_path_failure_does_not_abort_run(tmp_path, monkeypatch, caplog):
     assert (d / "friction.csv").exists() and (d / "mixture_pmfs.csv").exists()
     assert any("Per-path curves" in r.message and r.levelno == logging.WARNING
                for r in caplog.records)
+
+
+def test_hook_failure_does_not_abort_clustering(tmp_path, caplog):
+    import logging
+    from autopath.pulling.PathModel import DTWPathModel
+
+    class Bad(DTWPathModel):
+        def plot_clusters_PCA(self, *a, **kw):
+            raise RuntimeError("misaligned")
+
+    (tmp_path / "path_analysis").mkdir()
+    with caplog.at_level(logging.WARNING):
+        m = Bad(do_plots=False, outdir=str(tmp_path)).fit_transform(_toy_feat_df(n_traj=4), n_paths=2)
+    assert len(m) == 4
+    assert any("not written" in r.message and r.levelno == logging.WARNING for r in caplog.records)
+
+
+def test_run_survives_summary_failure(tmp_path, monkeypatch, caplog):
+    import logging
+    from autopath.pulling import AnalysisSMD as A
+
+    def boom(*a, **kw):
+        raise RuntimeError("disk")
+
+    monkeypatch.setattr(A, "write_summary", boom)
+    with caplog.at_level(logging.WARNING):
+        d = analysed_dir(tmp_path, path_model="null", n_paths=None)
+    assert (d / "mixture_pmfs.csv").exists() and not (d / "summary.json").exists()
+    assert any("summary.json not written" in r.message for r in caplog.records)

@@ -848,7 +848,10 @@ class AutoPath:
                 boundary_buffer_frac=self.sMD_boundary_buffer_frac,
             )
             conv_df.to_csv(f"{sMD_analysis_outdir}/sMD_conv_vALL_metrics.csv", index=False)
-            write_summary(sMD_analysis_outdir)
+            try:
+                write_summary(sMD_analysis_outdir)
+            except Exception as exc:
+                logger.warning(f"summary.json not written: {exc}")
             if not traces_df.empty:
                 traces_df.to_csv(f"{sMD_analysis_outdir}/sMD_conv_vALL_traces.csv", index=False)
 
